@@ -47,13 +47,6 @@ class _SelectionPolicy:
 
 
 @dataclass(frozen=True)
-class _DependencyCohort:
-    story_ids: list[int]
-    rows: list[dict[str, Any]]
-    story_points: int
-
-
-@dataclass(frozen=True)
 class _ResultDependencyMetadata:
     edges: list[dict[str, int]] = field(default_factory=list)
     promoted_story_ids: list[int] = field(default_factory=list)
@@ -81,20 +74,19 @@ def select_sprint_story_rows(
     max_story_points: int | None,
     selected_story_ids: list[int],
 ) -> SprintSelectionResult:
-    """Select the locked Sprint cohort before the LLM runs."""
+    """Validate the exact human-selected Sprint cohort before model work."""
     policy = _SelectionPolicy(
         max_story_points=max_story_points,
     )
-
-    if selected_story_ids:
-        return _select_manual(
-            rows=rows,
-            selected_story_ids=selected_story_ids,
-            policy=policy,
+    if not selected_story_ids:
+        raise SprintSelectionError(
+            code="SPRINT_SELECTION_EMPTY",
+            message="Sprint selection requires the exact durable candidate scope.",
+            details={},
         )
-
-    return _select_auto(
+    return _select_manual(
         rows=rows,
+        selected_story_ids=selected_story_ids,
         policy=policy,
     )
 
@@ -210,100 +202,6 @@ def _select_manual(
     )
 
 
-def _select_auto(
-    *,
-    rows: list[dict[str, Any]],
-    policy: _SelectionPolicy,
-) -> SprintSelectionResult:
-    by_id = _rows_by_story_id(rows)
-    edges = _candidate_dependency_edges(rows)
-    priority_index = _priority_index(rows)
-    selected_rows: list[dict[str, Any]] = []
-    selected_id_set: set[int] = set()
-    promoted_ids: list[int] = []
-    used_points = 0
-
-    for row in sorted(rows, key=lambda item: priority_index[int(item["story_id"])]):
-        story_id = int(row["story_id"])
-        if story_id in selected_id_set:
-            continue
-
-        cohort = _dependency_cohort(
-            story_id,
-            selected_id_set=selected_id_set,
-            by_id=by_id,
-            edges=edges,
-            priority_index=priority_index,
-        )
-
-        if (
-            policy.max_story_points is not None
-            and used_points + cohort.story_points > policy.max_story_points
-        ):
-            if not selected_rows:
-                _raise_capacity_blocked(
-                    story_id=story_id,
-                    required_story_ids=cohort.story_ids,
-                    story_points=cohort.story_points,
-                    policy=policy,
-                )
-            break
-
-        for cohort_id, cohort_row in zip(cohort.story_ids, cohort.rows, strict=True):
-            selected_rows.append(cohort_row)
-            selected_id_set.add(cohort_id)
-            if cohort_id != story_id:
-                promoted_ids.append(cohort_id)
-        used_points += cohort.story_points
-
-    if not selected_rows:
-        raise SprintSelectionError(
-            code="SPRINT_SELECTION_EMPTY",
-            message="Sprint selection produced no stories.",
-            details={},
-        )
-
-    return _result(
-        mode="auto",
-        selected_rows=selected_rows,
-        all_rows=rows,
-        policy=policy,
-        dependency_metadata=_ResultDependencyMetadata(
-            edges=_edge_payloads(
-                edges,
-                [int(row["story_id"]) for row in selected_rows],
-            ),
-            promoted_story_ids=promoted_ids,
-        ),
-    )
-
-
-def _dependency_cohort(
-    story_id: int,
-    *,
-    selected_id_set: set[int],
-    by_id: dict[int, dict[str, Any]],
-    edges: dict[int, set[int]],
-    priority_index: dict[int, tuple[int, int]],
-) -> _DependencyCohort:
-    closure = _dependency_closure(story_id, edges=edges)
-    cohort_ids = [
-        candidate_story_id
-        for candidate_story_id in _topological_story_order(
-            closure,
-            edges=edges,
-            priority_index=priority_index,
-        )
-        if candidate_story_id not in selected_id_set
-    ]
-    cohort_rows = [by_id[candidate_story_id] for candidate_story_id in cohort_ids]
-    return _DependencyCohort(
-        story_ids=cohort_ids,
-        rows=cohort_rows,
-        story_points=_cohort_story_points(cohort_rows),
-    )
-
-
 def _cohort_story_points(rows: list[dict[str, Any]]) -> int:
     story_points = 0
     for row in rows:
@@ -379,37 +277,6 @@ def _parse_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _priority_index(rows: list[dict[str, Any]]) -> dict[int, tuple[int, int]]:
-    return {
-        int(row["story_id"]): (int(row.get("priority") or 0), index)
-        for index, row in enumerate(rows)
-        if isinstance(row, dict) and row.get("story_id") is not None
-    }
-
-
-def _dependency_closure(story_id: int, *, edges: dict[int, set[int]]) -> set[int]:
-    closure: set[int] = set()
-    visiting: set[int] = set()
-
-    def visit(current_story_id: int) -> None:
-        if current_story_id in visiting:
-            raise SprintSelectionError(
-                code="SPRINT_SELECTION_DEPENDENCY_CYCLE",
-                message="Sprint selection dependency graph contains a cycle.",
-                details={"story_id": current_story_id},
-            )
-        if current_story_id in closure:
-            return
-        visiting.add(current_story_id)
-        for prerequisite_id in edges.get(current_story_id, set()):
-            visit(prerequisite_id)
-        visiting.remove(current_story_id)
-        closure.add(current_story_id)
-
-    visit(story_id)
-    return closure
 
 
 def _topological_story_order(

@@ -419,6 +419,7 @@ class SprintStartFact(FrozenModel):
     dependency_source_fingerprint: str
     dependency_fingerprint: str
     dependency_rows_fingerprint: str
+    dependency_rows_snapshot: tuple[StoryDependencyFact, ...]
     decision_fingerprint: str
     audit_event_id: int
     audit_event_fingerprint: str

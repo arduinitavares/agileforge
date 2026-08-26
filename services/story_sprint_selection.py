@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Self, cast
 
@@ -31,7 +30,7 @@ from services.specs.story_validation_service import (
     require_current_story_validation_evidence,
     require_story_ready_for_sprint,
 )
-from workflow.contracts import FrozenModel
+from workflow.contracts import FrozenModel, JsonObject
 from workflow.fingerprints import canonical_hash, canonical_json
 
 type SprintSelectionState = Literal["unselected", "selected", "deferred"]
@@ -160,6 +159,76 @@ class StorySprintSelectionFact(FrozenModel):
     state_fingerprint: str
     event_id: int | None = None
     event_fingerprint: str | None = None
+
+
+class StorySprintSelectionReceiptData(FrozenModel):
+    """Immutable transition data allowed in one successful selection receipt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    project_id: Annotated[int, Field(gt=0)]
+    story_id: Annotated[int, Field(gt=0)]
+    selection_state: SprintSelectionState
+    state_fingerprint: Sha256Fingerprint
+    selection_event_id: Annotated[int, Field(gt=0)] | None
+    selection_event_fingerprint: Sha256Fingerprint | None
+
+    @model_validator(mode="after")
+    def require_complete_event_identity(self) -> Self:
+        """Keep an absent event identity paired and a present identity complete."""
+        if (self.selection_event_id is None) != (
+            self.selection_event_fingerprint is None
+        ):
+            message = "Selection receipt event identity must be complete."
+            raise ValueError(message)
+        return self
+
+
+class StorySprintSelectionReceiptResult(FrozenModel):
+    """Closed successful receipt result safe to persist and replay."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    ok: Literal[True]
+    data: StorySprintSelectionReceiptData
+    errors: tuple[()]
+
+
+def story_sprint_selection_receipt_response(
+    request: StorySprintSelectionRequest,
+    fact: StorySprintSelectionFact,
+) -> JsonObject:
+    """Build the sole successful selection receipt result contract."""
+    result = StorySprintSelectionReceiptResult(
+        ok=True,
+        data=StorySprintSelectionReceiptData(
+            project_id=request.project_id,
+            story_id=request.story_id,
+            selection_state=fact.selection_state,
+            state_fingerprint=fact.state_fingerprint,
+            selection_event_id=fact.event_id,
+            selection_event_fingerprint=fact.event_fingerprint,
+        ),
+        errors=(),
+    )
+    return cast("JsonObject", result.model_dump(mode="json"))
+
+
+def parse_story_sprint_selection_receipt_result(raw_result: str) -> JsonObject:
+    """Parse only the exact canonical successful selection receipt contract."""
+    try:
+        result = StorySprintSelectionReceiptResult.model_validate_json(
+            raw_result,
+            strict=True,
+        )
+    except ValidationError as error:
+        message = "Story selection receipt result is malformed."
+        raise StorySprintSelectionIntegrityError(message) from error
+    payload = cast("JsonObject", result.model_dump(mode="json"))
+    if canonical_json(payload) != raw_result:
+        message = "Story selection receipt result is not canonical."
+        raise StorySprintSelectionIntegrityError(message)
+    return payload
 
 
 def story_sprint_selection_request_payload(
@@ -300,22 +369,8 @@ def _require_selection_receipt_anchor(
     ):
         message = "Story selection receipt request does not match the event."
         raise StorySprintSelectionIntegrityError(message)
-    try:
-        result = json.loads(receipt.result_json)
-    except json.JSONDecodeError as error:
-        message = "Story selection receipt result is malformed."
-        raise StorySprintSelectionIntegrityError(message) from error
-    if not isinstance(result, dict) or canonical_json(result) != receipt.result_json:
-        message = "Story selection receipt result is not canonical."
-        raise StorySprintSelectionIntegrityError(message)
-    data = result.get("data")
-    if not (
-        result.get("ok") is True
-        and result.get("errors") == []
-        and isinstance(data, dict)
-    ):
-        message = "Story selection receipt result is invalid."
-        raise StorySprintSelectionIntegrityError(message)
+    result = parse_story_sprint_selection_receipt_result(receipt.result_json)
+    data = cast("JsonObject", result["data"])
     event_id = event.event_id
     expected_result = {
         "project_id": story.project_id,
@@ -330,7 +385,7 @@ def _require_selection_receipt_anchor(
         "selection_event_id": event_id,
         "selection_event_fingerprint": event_fingerprint,
     }
-    if any(data.get(key) != value for key, value in expected_result.items()):
+    if data != expected_result:
         message = "Story selection receipt result does not match the event."
         raise StorySprintSelectionIntegrityError(message)
 
@@ -388,6 +443,65 @@ def _parse_event(
         event_fingerprint=event_fingerprint,
     )
     return story, metadata, event_fingerprint
+
+
+def require_story_sprint_selection_receipt_result_in_session(
+    session: Session,
+    *,
+    request: StorySprintSelectionRequest,
+    receipt: WorkflowTransitionReceipt,
+) -> JsonObject:
+    """Validate one successful replay against its exact request and transition."""
+    if receipt.result_json is None or receipt.completed_at is None:
+        message = "Story selection receipt result is incomplete."
+        raise StorySprintSelectionIntegrityError(message)
+    stored_request = _selection_receipt_request(receipt)
+    if stored_request != request:
+        message = "Story selection receipt request does not match replay input."
+        raise StorySprintSelectionIntegrityError(message)
+    result = parse_story_sprint_selection_receipt_result(receipt.result_json)
+    data = StorySprintSelectionReceiptData.model_validate(result["data"], strict=True)
+    story = session.get(UserStory, request.story_id)
+    if story is None or story.project_id != request.project_id:
+        message = "Story selection receipt targets a missing Story."
+        raise StorySprintSelectionIntegrityError(message)
+    expected_state = _INTENT_STATE[request.intent]
+    if (
+        data.project_id != request.project_id
+        or data.story_id != request.story_id
+        or data.selection_state != expected_state
+    ):
+        message = "Story selection receipt result does not match replay input."
+        raise StorySprintSelectionIntegrityError(message)
+
+    if data.state_fingerprint == request.expected_state_fingerprint:
+        expected_fingerprint = _state_fingerprint(
+            story,
+            selection_state=data.selection_state,
+            event_id=data.selection_event_id,
+            event_fingerprint=data.selection_event_fingerprint,
+        )
+        if expected_fingerprint != data.state_fingerprint:
+            message = "Story selection no-op receipt result is invalid."
+            raise StorySprintSelectionIntegrityError(message)
+        return result
+
+    event_id = data.selection_event_id
+    if event_id is None:
+        message = "Story selection transition receipt has no event identity."
+        raise StorySprintSelectionIntegrityError(message)
+    event = session.get(WorkflowEvent, event_id)
+    if event is None:
+        message = "Story selection transition receipt event is missing."
+        raise StorySprintSelectionIntegrityError(message)
+    _story, metadata, _event_fingerprint = _parse_event(session, event)
+    if (
+        metadata.workflow_transition_receipt_id
+        != receipt.workflow_transition_receipt_id
+    ):
+        message = "Story selection event does not match its replay receipt."
+        raise StorySprintSelectionIntegrityError(message)
+    return result
 
 
 def _selection_facts(
@@ -633,9 +747,8 @@ def apply_story_sprint_selection_with_receipt_in_session(
 ) -> StorySprintSelectionFact:
     """Write a test-owned selection transition with a real completed receipt.
 
-    Production callers use the application boundary so the receipt result can
-    include the canonical post-write ``StoryFact``. This narrow caller-session
-    helper exists for fixture setup that needs the same durable event anchor.
+    This narrow caller-session helper exists for fixture setup that needs the
+    same durable event anchor as the production application boundary.
     """
     started_at = datetime.now(tz=UTC)
     receipt = WorkflowTransitionReceipt(
@@ -649,18 +762,7 @@ def apply_story_sprint_selection_with_receipt_in_session(
     session.flush()
     fact = apply_story_sprint_selection_in_session(session, request, receipt=receipt)
     receipt.result_json = canonical_json(
-        {
-            "ok": True,
-            "data": {
-                "project_id": request.project_id,
-                "story_id": request.story_id,
-                "selection_state": fact.selection_state,
-                "state_fingerprint": fact.state_fingerprint,
-                "selection_event_id": fact.event_id,
-                "selection_event_fingerprint": fact.event_fingerprint,
-            },
-            "errors": [],
-        }
+        story_sprint_selection_receipt_response(request, fact)
     )
     receipt.completed_at = datetime.now(tz=UTC)
     session.add(receipt)
@@ -675,11 +777,16 @@ __all__ = [
     "StorySprintSelectionIntegrityError",
     "StorySprintSelectionIntent",
     "StorySprintSelectionMutationError",
+    "StorySprintSelectionReceiptData",
+    "StorySprintSelectionReceiptResult",
     "StorySprintSelectionRequest",
     "apply_story_sprint_selection_in_session",
     "apply_story_sprint_selection_with_receipt_in_session",
+    "parse_story_sprint_selection_receipt_result",
+    "require_story_sprint_selection_receipt_result_in_session",
     "story_sprint_selection_fact_in_session",
     "story_sprint_selection_facts_in_session",
+    "story_sprint_selection_receipt_response",
     "story_sprint_selection_request_fingerprint",
     "story_sprint_selection_request_payload",
     "story_structural_eligibility",

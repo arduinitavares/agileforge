@@ -398,6 +398,16 @@ def _execution_lineage(
             dependency_source_fingerprint=dependency_source,
             dependency_fingerprint=dependency_fingerprint,
             dependency_rows_fingerprint=dependency_rows_fingerprint,
+            dependency_rows_snapshot=tuple(
+                sorted(
+                    dependencies,
+                    key=lambda edge: (
+                        edge.dependent_story_id,
+                        edge.prerequisite_story_id,
+                        edge.dependency_id,
+                    ),
+                )
+            ),
             decision_fingerprint="sha256:start-decision",
             audit_event_id=audit_event_id,
             audit_event_fingerprint="sha256:start-audit",
@@ -877,18 +887,34 @@ def test_completion_integrity_binds_complete_execution_contract(
             }
         )
     elif tamper == "dependency_identity":
+        start = completed.sprint_starts[0]
         tampered = completed.model_copy(
             update={
-                "story_dependencies": (
-                    dependency.model_copy(update={"dependency_id": 999}),
+                "sprint_starts": (
+                    start.model_copy(
+                        update={
+                            "dependency_rows_snapshot": (
+                                dependency.model_copy(update={"dependency_id": 999}),
+                            )
+                        }
+                    ),
                 )
             }
         )
     elif tamper == "edge":
+        start = completed.sprint_starts[0]
         tampered = completed.model_copy(
             update={
-                "story_dependencies": (
-                    dependency.model_copy(update={"reason": "Changed edge semantics."}),
+                "sprint_starts": (
+                    start.model_copy(
+                        update={
+                            "dependency_rows_snapshot": (
+                                dependency.model_copy(
+                                    update={"reason": "Changed edge semantics."}
+                                ),
+                            )
+                        }
+                    ),
                 )
             }
         )

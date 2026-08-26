@@ -220,6 +220,7 @@ class StoryDependenciesApplyApiRequest(MutationApiRequest):
     """Strict operator-reviewed Story dependency semantics."""
 
     selected_story_ids: list[PositiveStoryId] = Field(min_length=1)
+    selected_scope_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     reviewed_edges: list[StoryDependencyEdgeRequest]
 
     @field_validator("selected_story_ids")
@@ -1355,6 +1356,7 @@ def apply_project_story_dependencies(
             StoryDependenciesApplyRequest(
                 project_id=project_id,
                 selected_story_ids=tuple(req.selected_story_ids),
+                selected_scope_fingerprint=req.selected_scope_fingerprint,
                 reviewed_edges=tuple(req.reviewed_edges),
                 **_metadata(req),
             )

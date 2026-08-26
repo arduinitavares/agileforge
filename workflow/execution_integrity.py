@@ -68,6 +68,7 @@ class SprintStartAudit:
     dependency_source_fingerprint: str
     dependency_fingerprint: str
     dependency_rows_fingerprint: str
+    dependency_rows_snapshot: tuple[StoryDependencyFact, ...]
     decision_fingerprint: str
     started_by: str
 
@@ -79,6 +80,7 @@ class SelectedStoryDependencySnapshot:
     story_ids: tuple[int, ...]
     stories: tuple[StoryFact, ...]
     dependencies: tuple[StoryDependencyFact, ...]
+    rows: tuple[StoryDependencyFact, ...]
     reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...]
     source_fingerprint: str
     dependency_fingerprint: str
@@ -167,6 +169,43 @@ def dependency_rows_fingerprint(
     )
 
 
+def canonical_dependency_rows_snapshot(
+    dependencies: tuple[StoryDependencyFact, ...],
+    *,
+    project_story_ids: frozenset[int],
+) -> tuple[StoryDependencyFact, ...]:
+    """Validate and return one canonical Project-owned dependency-row snapshot."""
+    canonical = tuple(
+        sorted(
+            dependencies,
+            key=lambda edge: (
+                edge.dependent_story_id,
+                edge.prerequisite_story_id,
+                edge.dependency_id,
+            ),
+        )
+    )
+    identities = tuple(item.dependency_id for item in canonical)
+    endpoints = tuple(
+        (item.dependent_story_id, item.prerequisite_story_id) for item in canonical
+    )
+    if (
+        any(identity <= 0 for identity in identities)
+        or len(identities) != len(set(identities))
+    ):
+        _fail("Sprint dependency row snapshot has invalid or duplicate identities.")
+    if len(endpoints) != len(set(endpoints)) or any(
+        dependent == prerequisite for dependent, prerequisite in endpoints
+    ):
+        _fail("Sprint dependency row snapshot has duplicate or self endpoints.")
+    if any(
+        dependent not in project_story_ids or prerequisite not in project_story_ids
+        for dependent, prerequisite in endpoints
+    ):
+        _fail("Sprint dependency row snapshot crosses Project ownership.")
+    return canonical
+
+
 def selected_story_dependency_snapshot(
     snapshot: WorkflowFactSnapshot,
     selected_story_ids: tuple[int, ...],
@@ -220,13 +259,20 @@ def selected_story_dependency_snapshot(
         source_fingerprint = next(
             item for item in source_fingerprints if item is not None
         )
-    historical_rows = tuple(
-        {item.dependency_id: item for item in (*persisted_rows, *dependencies)}.values()
+    historical_rows = canonical_dependency_rows_snapshot(
+        tuple(
+            {
+                item.dependency_id: item
+                for item in (*persisted_rows, *dependencies)
+            }.values()
+        ),
+        project_story_ids=frozenset(stories_by_id),
     )
     return SelectedStoryDependencySnapshot(
         story_ids=canonical_story_ids,
         stories=stories,
         dependencies=dependencies,
+        rows=historical_rows,
         reviewed_edges=reviewed_edges,
         source_fingerprint=source_fingerprint,
         dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
@@ -323,6 +369,9 @@ def sprint_start_audit_metadata(audit: SprintStartAudit) -> JsonObject:
         "dependency_source_fingerprint": audit.dependency_source_fingerprint,
         "dependency_fingerprint": audit.dependency_fingerprint,
         "dependency_rows_fingerprint": audit.dependency_rows_fingerprint,
+        "dependency_rows_snapshot": [
+            item.model_dump(mode="json") for item in audit.dependency_rows_snapshot
+        ],
         "decision_fingerprint": audit.decision_fingerprint,
         "started_by": audit.started_by,
     }
@@ -465,8 +514,15 @@ def _contract_dependencies(
     start: SprintStartFact,
     dependency_review: StoryDependencyReviewFact,
 ) -> tuple[StoryDependencyFact, ...]:
+    historical_rows = canonical_dependency_rows_snapshot(
+        start.dependency_rows_snapshot,
+        project_story_ids=frozenset(item.story_id for item in snapshot.stories),
+    )
+    historical_snapshot = snapshot.model_copy(
+        update={"story_dependencies": historical_rows}
+    )
     selected = selected_story_dependency_snapshot(
-        snapshot,
+        historical_snapshot,
         start.selected_story_ids,
         source_fingerprint=dependency_review.source_fingerprint,
     )
@@ -478,6 +534,7 @@ def _contract_dependencies(
         or start.dependency_source_fingerprint != selected.source_fingerprint
         or start.dependency_fingerprint != selected.dependency_fingerprint
         or start.dependency_rows_fingerprint != selected.rows_fingerprint
+        or start.dependency_rows_snapshot != selected.rows
     ):
         _fail("Sprint dependency review or dependency rows changed.")
     return selected.dependencies
@@ -729,6 +786,7 @@ __all__ = [
     "StoryClosurePayload",
     "TaskEvidencePayload",
     "accepted_story_source_fingerprint",
+    "canonical_dependency_rows_snapshot",
     "current_dependency_review",
     "dependency_rows_fingerprint",
     "execution_contract",

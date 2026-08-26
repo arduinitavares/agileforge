@@ -261,10 +261,12 @@ async function postStoryDependencyMutation(
     projectId,
     scopeIds,
     scopeEdges,
+    scopeFingerprint,
     mutationPayload = null,
 ) {
     const payload = mutationPayload ?? semanticMutationPayload({
         selected_story_ids: scopeIds,
+        selected_scope_fingerprint: scopeFingerprint,
         reviewed_edges: scopeEdges.map(({ dependent_story_id, prerequisite_story_id, reason }) => ({
             dependent_story_id,
             prerequisite_story_id,
@@ -1848,15 +1850,20 @@ function validateCandidateProjection(candidates) {
     };
 }
 
-function canGenerateSprintPlan(context = {}) {
+function sprintGenerationCandidateIds(context = {}) {
     const candidates = validateCandidateProjection(context?.sprintCandidates?.items);
     const dependencies = selectedScopeDependencies(
         context?.storyDependencies?.stories,
         context?.storyDependencies,
     );
-    return candidates.isValid
+    const isCurrent = candidates.isValid
         && dependencies.isWellFormed
         && candidates.scopeFingerprint === dependencies.scopeFingerprint;
+    return isCurrent ? [...candidates.candidateIds] : null;
+}
+
+function canGenerateSprintPlan(context = {}) {
+    return sprintGenerationCandidateIds(context) !== null;
 }
 
 function selectedScopeDependencies(stories, dependencies) {
@@ -2717,6 +2724,15 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             }
             deliveryBinding = binding;
             const deliveryFields = { ...fields };
+            if (requestKind === 'record_sprint_plan') {
+                const candidateIds = sprintGenerationCandidateIds(lifecycleState);
+                if (candidateIds === null) {
+                    throw new Error(
+                        'Sprint candidate projection changed. Reload and choose the current candidates.',
+                    );
+                }
+                deliveryFields.selected_story_ids = candidateIds;
+            }
             if (binding.instance_key !== null && binding.instance_key !== undefined) {
                 deliveryFields.instance_key = binding.instance_key;
             }
@@ -3231,7 +3247,12 @@ function installInteractions() {
             let mutationCompleted = false;
             let refreshed = false;
             setProjectError('');
-            const { scopeIds, scopeEdges, isWellFormed } = selectedScopeDependencies(
+            const {
+                scopeIds,
+                scopeEdges,
+                scopeFingerprint,
+                isWellFormed,
+            } = selectedScopeDependencies(
                 lifecycleState.storyDependencies?.stories,
                 lifecycleState.storyDependencies,
             );
@@ -3241,6 +3262,7 @@ function installInteractions() {
             }
             const payload = semanticMutationPayload({
                 selected_story_ids: scopeIds,
+                selected_scope_fingerprint: scopeFingerprint,
                 reviewed_edges: scopeEdges.map(({
                     dependent_story_id,
                     prerequisite_story_id,
@@ -3272,6 +3294,7 @@ function installInteractions() {
                     selectedProjectId,
                     scopeIds,
                     scopeEdges,
+                    scopeFingerprint,
                     payload,
                 );
                 mutationCompleted = true;

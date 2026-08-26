@@ -1053,10 +1053,10 @@ def test_cross_project_story_binding_in_selection_event_fails_closed(
         WorkflowFactRepository(session).load(project_id)
 
 
-def test_selection_response_uses_the_canonical_post_event_story_fact(
+def test_selection_response_exposes_only_immutable_transition_receipt_data(
     engine: Engine,
 ) -> None:
-    """A selection write must not locally infer dependency safety or candidacy."""
+    """A selection write leaves mutable readiness truth to the reloaded projection."""
     story_id = _accepted_story(engine)
     with Session(engine) as session:
         story = session.get_one(UserStory, story_id)
@@ -1094,17 +1094,19 @@ def test_selection_response_uses_the_canonical_post_event_story_fact(
         snapshot = WorkflowFactRepository(session).load(project_id)
     fact = next(item for item in snapshot.stories if item.story_id == story_id)
 
-    for response in (selected_data, _result_data(no_op)):
-        assert response["structurally_eligible"] == fact.structurally_eligible
-        assert (
-            response["structural_eligibility_status"]
-            == fact.structural_eligibility_status
-        )
-        assert response["selected_scope_fingerprint"] == fact.selected_scope_fingerprint
-        assert response["dependency_safe"] is False
-        assert response["sprint_candidate"] is False
-        assert response["dependency_safe"] == fact.dependency_safe
-        assert response["sprint_candidate"] == fact.sprint_candidate
+    expected = {
+        "project_id": project_id,
+        "story_id": story_id,
+        "selection_state": fact.sprint_selection_state,
+        "state_fingerprint": fact.sprint_selection_state_fingerprint,
+        "selection_event_id": fact.sprint_selection_event_id,
+        "selection_event_fingerprint": fact.sprint_selection_event_fingerprint,
+    }
+    assert selected_data == expected
+    assert _result_data(no_op) == expected
+    assert fact.structurally_eligible is True
+    assert fact.dependency_safe is False
+    assert fact.sprint_candidate is False
 
 
 def test_direct_story_api_and_cli_show_exact_unselected_story_fact(
@@ -1290,10 +1292,12 @@ def test_selection_receipt_persists_only_immutable_transition_result(
         assert set(persisted["data"]) == expected_result_keys
 
 
-def test_selection_receipt_replay_rejects_extra_projection_semantics(
+@pytest.mark.parametrize("tamper", ["extra_projection", "transition_field"])
+def test_selection_receipt_replay_rejects_tampered_success_semantics(
     engine: Engine,
+    tamper: str,
 ) -> None:
-    """A receipt replays immutable selection facts, never mutable candidacy truth."""
+    """Replay validates both the closed shape and exact immutable transition."""
     story_id = _accepted_story(engine)
     with Session(engine) as session:
         story = session.get_one(UserStory, story_id)
@@ -1332,18 +1336,15 @@ def test_selection_receipt_replay_rejects_extra_projection_semantics(
         ).one()
         assert receipt.result_json is not None
         persisted = json.loads(receipt.result_json)
+        tampered_data = {
+            key: persisted["data"][key] for key in immutable_keys
+        }
+        if tamper == "extra_projection":
+            tampered_data["sprint_candidate"] = True
+        else:
+            tampered_data["selection_state"] = "deferred"
         receipt.result_json = canonical_json(
-            {
-                "ok": True,
-                "data": {
-                    **{
-                        key: persisted["data"][key]
-                        for key in immutable_keys
-                    },
-                    "sprint_candidate": True,
-                },
-                "errors": [],
-            }
+            {"ok": True, "data": tampered_data, "errors": []}
         )
         session.add(receipt)
         session.commit()

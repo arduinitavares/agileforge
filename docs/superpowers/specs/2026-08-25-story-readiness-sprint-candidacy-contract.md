@@ -64,6 +64,11 @@ the canonical request JSON and fingerprint, Project/Story/actor/intent,
 rationale and correlation ID where present, prior state fingerprint, exact
 event identity/fingerprint/result state, and event lineage. Missing, malformed,
 or mismatched anchors fail closed; there is no unanchored legacy reader.
+Successful receipts contain only immutable transition identity: Project, Story,
+resulting selection state and state fingerprint, plus the selection event ID and
+fingerprint when a real event was added. Mutable eligibility, dependency, and
+candidacy truth is never replayed from a receipt; clients reload the current
+projection after the mutation.
 
 | Intent | Allowed current state | Result |
 | --- | --- | --- |
@@ -107,6 +112,10 @@ current evidence fingerprints, and selection state/event fingerprints. A
 selection or evidence change changes that fingerprint. The review owns the exact
 persisted dependency rows for selected dependents; external prerequisites remain
 visible and must be safe, but unselected dependents do not become scope members.
+The mutation request must echo both the IDs and fingerprint observed in the
+dependency projection. The application compares both before dispatch and the
+transactional handler rechecks the fingerprint; it never substitutes a newer
+server-side fingerprint for stale operator input.
 
 The only candidacy equation is:
 
@@ -119,16 +128,25 @@ use that exact scope and its dependency evidence. Request Story IDs are exact
 guards only; they cannot add a Story, bypass stale confirmation, or become
 selection authority.
 
+Sprint-plan generation always submits the exact projected candidate IDs. An
+empty ID list is rejected; there is no automatic Story selector or dependency
+promotion path. The requested IDs remain guards against the durable candidate
+projection, not a second selection authority.
+
 ## Historical Sprint integrity
 
 Completed execution history is independent from later current-scope changes.
-Historical dependency verification uses the persisted Sprint start/dependency
-review source fingerprint and exact persisted reviewed dependency rows, never
-the current project-global selected scope. Sprint review and close fingerprints
-hash the immutable accepted-Story payload plus their terminal task and completion
-facts, not mutable full `StoryFact` projections. Tampered persisted review or
-dependency rows fail closed. This fingerprint definition is part of the #223
-fresh-profile hard break; no legacy hash interpretation is provided.
+The Sprint-start audit event stores a canonical immutable snapshot containing
+every direct row owned by the selected dependents, regardless of status, plus
+the active reachable external-prerequisite closure. Historical dependency
+verification uses that snapshot together with the persisted dependency-review
+source fingerprint; later edits to current project dependency rows cannot
+rewrite earlier Sprint history. Snapshot order, row identity, endpoints,
+Project ownership, and fingerprint are checked strictly and fail closed. Sprint
+review and close fingerprints hash the immutable accepted-Story payload plus
+their terminal task and completion facts, not mutable full `StoryFact`
+projections. This event shape and fingerprint definition are part of the #223
+fresh-profile hard break; no legacy interpretation is provided.
 
 ## API, CLI, and UI reconciliation rule
 
@@ -147,3 +165,9 @@ selected-scope fingerprint, dependency safety, candidacy, blockers, and the
 same structural evidence proof/non-proof lists. They do not expose legacy
 `ready_for_sprint` or conflated validation-status fields. A structurally
 eligible but unselected Story is not a candidate.
+
+The browser also submits the exact canonical candidate IDs with Sprint-plan
+generation and blocks transport when the candidate and dependency projections
+do not share one scope fingerprint. API and CLI dependency mutations require
+the observed selected-scope fingerprint explicitly; omission is not a request
+for the server to choose the latest scope.

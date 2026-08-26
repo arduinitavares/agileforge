@@ -749,16 +749,17 @@ class _PlanningActionSelection:
         project_id: int,
         decision: NodeDecision,
         selected_story_ids: tuple[int, ...],
+        selected_scope_fingerprint: str,
     ) -> str:
         self.prepare_calls.append(
             (
                 "apply_story_dependencies",
                 project_id,
                 decision.decision_fingerprint,
-                selected_story_ids,
+                (selected_story_ids, selected_scope_fingerprint),
             )
         )
-        return "dependency-source-current"
+        return selected_scope_fingerprint
 
     def prepare_story_readiness(
         self,
@@ -1047,7 +1048,7 @@ def _planning_review_headers(path: str) -> dict[str, str]:
                         "reason": "Story 9 requires Story 7.",
                     }
                 ],
-                "source_fingerprint": "dependency-source-current",
+                "source_fingerprint": "sha256:" + ("a" * 64),
             },
             {
                 "selected_story_ids": [7, 9],
@@ -1156,7 +1157,11 @@ def test_planning_action_application_derives_internal_guards(
             "apply_story_dependencies",
             "StoryDependenciesApplyRequest",
             "apply_story_dependencies",
-            {"selected_story_ids": (7,), "reviewed_edges": ()},
+            {
+                "selected_story_ids": (7,),
+                "selected_scope_fingerprint": "sha256:" + ("a" * 64),
+                "reviewed_edges": (),
+            },
         ),
         (
             "repair_story_readiness",
@@ -1898,10 +1903,16 @@ def test_planning_selection_derives_dependency_and_readiness_guards(
         if item.node_id == "planning.story_dependencies"
     )
 
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    observed_scope_fingerprint = story_dependency_source_fingerprint(
+        selected_scope_stories(snapshot)
+    )
     source_fingerprint = service.prepare_story_dependencies(
         project_id=project_id,
         decision=dependency_decision,
         selected_story_ids=(story_id,),
+        selected_scope_fingerprint=observed_scope_fingerprint,
     )
 
     assert isinstance(source_fingerprint, str)
@@ -3273,6 +3284,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
         project_id=project_id,
         decision=decision,
         selected_story_ids=(future_story_id,),
+        selected_scope_fingerprint=story_dependency_source_fingerprint(current_scope),
     )
     assert source_fingerprint == story_dependency_source_fingerprint(current_scope)
     assert (
@@ -3280,6 +3292,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
             project_id=project_id,
             decision=decision,
             selected_story_ids=(completed_story_id, future_story_id),
+            selected_scope_fingerprint=story_dependency_source_fingerprint(current_scope),
         )
         is None
     )
@@ -3294,6 +3307,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
             f"/api/projects/{project_id}/story/dependencies/apply",
             json={
                 "selected_story_ids": [future_story_id],
+                "selected_scope_fingerprint": source_fingerprint,
                 "reviewed_edges": [],
                 "idempotency_key": "next-scope-authority-apply",
                 "actor": "operator@example.com",
@@ -3870,6 +3884,7 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
     assert not hasattr(request, "fact_fingerprint")
     assert not hasattr(request, "decision_fingerprint")
     if request_type_name == "StoryDependenciesApplyRequest":
+        assert isinstance(request, application_module.StoryDependenciesApplyRequest)
         assert request.selected_scope_fingerprint == "sha256:" + ("a" * 64)
 
 

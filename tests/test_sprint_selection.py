@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +16,7 @@ from models.core import Project, UserStory
 from models.product_definition import SpecificationCandidate, SpecificationDecision
 from models.workflow import StoryArtifact, StoryArtifactDecision
 from repositories.workflow import WorkflowFactRepository
-from services import application, sprint_selection
+from services import application
 from services.contracts.backlog import BacklogItem, BacklogOutput
 from services.contracts.story import (
     CanonicalStoryItem,
@@ -119,12 +118,8 @@ def _invest_assessment() -> StoryInvestAssessment:
 
 EXPECTED_PARENT_GROUP = 10
 EXPECTED_GROUP_SLOT = 2
-EXPECTED_CAPACITY_POINTS_USED = 4
 EXPECTED_MANUAL_POINTS_USED = 3
-EXPECTED_DEPENDENCY_POINTS_USED = 4
 DEPENDENT_STORY_ID = 85
-RANK_PRIORITY_BASE = 100
-STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT = 9
 GOLD_PATH = (
     Path(__file__).parent
     / "fixtures"
@@ -211,85 +206,19 @@ def test_derive_priority_group_metadata_from_rank_priority() -> None:
     assert derive_group_slot(1002) == EXPECTED_GROUP_SLOT
 
 
-def test_auto_selection_uses_priority_prefix_and_capacity() -> None:
-    """Verify auto mode selects the priority prefix within explicit capacity."""
-    rows = [_row(66, 101, 1), _row(85, 102, 3), _row(67, 201, 3)]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=4,
-        selected_story_ids=[],
-    )
-
-    assert [row["story_id"] for row in result.selected_rows] == [66, 85]
-    assert result.mode == "auto"
-    assert result.story_points_used == EXPECTED_CAPACITY_POINTS_USED
-    assert result.excluded_story_ids == [67]
-
-
-def test_auto_selection_exceeds_legacy_story_limit_when_capacity_allows() -> None:
-    """Verify auto mode uses story points capacity instead of story count limits."""
-    rows = [
-        _row(story_id, RANK_PRIORITY_BASE + story_id, 1)
-        for story_id in range(1, STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT + 1)
-    ]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=20,
-        selected_story_ids=[],
-    )
-
-    assert result.selected_story_ids == list(
-        range(1, STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT + 1)
-    )
-    assert result.story_points_used == STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT
-    assert result.excluded_story_ids == []
-
-
-def test_sprint_selection_exposes_no_story_limit_contract() -> None:
-    """Verify the removed velocity story-limit path stays absent."""
-    rows = [_row(1, 101, 1)]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=1,
-        selected_story_ids=[],
-    )
-
-    assert "story_limit" not in result.__dataclass_fields__
-    assert "SPRINT_SELECTION_STORY_LIMIT_BLOCKED" not in inspect.getsource(
-        sprint_selection
-    )
-
-
-def test_auto_selection_stops_instead_of_skipping_over_capacity_story() -> None:
-    """Verify auto mode stops at an over-capacity story after selecting a prefix."""
-    rows = [_row(1, 101, 2), _row(2, 102, 5), _row(3, 103, 1)]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=3,
-        selected_story_ids=[],
-    )
-
-    assert [row["story_id"] for row in result.selected_rows] == [1]
-    assert result.excluded_story_ids == [2, 3]
-
-
-def test_auto_selection_blocks_when_first_story_exceeds_explicit_capacity() -> None:
-    """Verify auto mode hard-blocks when the first story exceeds capacity."""
+def test_sprint_selection_rejects_empty_human_scope() -> None:
+    """Never invent a Sprint cohort when no durable candidate IDs were supplied."""
     rows = [_row(1, 101, 5), _row(2, 102, 1)]
 
     with pytest.raises(SprintSelectionError) as exc_info:
         select_sprint_story_rows(
             rows,
-            max_story_points=3,
+            max_story_points=10,
             selected_story_ids=[],
         )
 
-    assert exc_info.value.code == "SPRINT_SELECTION_CAPACITY_BLOCKED"
-    assert exc_info.value.details["blocking_story_id"] == 1
+    assert exc_info.value.code == "SPRINT_SELECTION_EMPTY"
+    assert "exact durable candidate scope" in str(exc_info.value)
 
 
 def test_manual_selection_preserves_explicit_story_order() -> None:
@@ -370,61 +299,6 @@ def _dep_row(
         "prerequisite_story_ids": blocked_by or [],
         "dependency_status": "blocked" if blocked_by else "ready",
     }
-
-
-def test_auto_selection_promotes_prerequisite_before_dependent() -> None:
-    """Verify auto mode promotes candidate prerequisites ahead of dependents."""
-    rows = [
-        _dep_row(85, 101, 3, blocked_by=[66]),
-        _dep_row(66, 201, 1),
-        _dep_row(79, 301, 2),
-    ]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=4,
-        selected_story_ids=[],
-    )
-
-    assert result.selected_story_ids == [66, 85]
-    assert result.story_points_used == EXPECTED_DEPENDENCY_POINTS_USED
-    assert result.dependency_promoted_story_ids == [66]
-    assert result.dependency_closed is True
-
-
-def test_auto_selection_promotes_transitive_prerequisites() -> None:
-    """Verify auto mode promotes the full transitive prerequisite chain."""
-    rows = [
-        _dep_row(30, 101, 2, blocked_by=[20]),
-        _dep_row(20, 201, 2, blocked_by=[10]),
-        _dep_row(10, 301, 1),
-    ]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=5,
-        selected_story_ids=[],
-    )
-
-    assert result.selected_story_ids == [10, 20, 30]
-    assert result.dependency_promoted_story_ids == [10, 20]
-
-
-def test_auto_selection_ignores_unparseable_candidate_prerequisite_ids() -> None:
-    """Verify malformed prerequisite IDs are ignored instead of crashing."""
-    rows = [
-        _dep_row(85, 101, 3, blocked_by=["not-an-id", None, 66]),
-        _dep_row(66, 201, 1),
-    ]
-
-    result = select_sprint_story_rows(
-        rows,
-        max_story_points=4,
-        selected_story_ids=[],
-    )
-
-    assert result.selected_story_ids == [66, 85]
-    assert result.dependency_promoted_story_ids == [66]
 
 
 def test_manual_selection_blocks_missing_prerequisite() -> None:

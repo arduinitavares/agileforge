@@ -318,6 +318,7 @@ def _sprint_start_fact(
         task_content_fingerprint=task_fingerprint,
         dependency_source_fingerprint="sha256:dependency-source",
         dependency_fingerprint="sha256:dependencies",
+        dependency_rows_snapshot=(),
         dependency_rows_fingerprint="sha256:dependency-rows",
         decision_fingerprint="sha256:decision",
         audit_event_id=plan.artifact_id + 3,

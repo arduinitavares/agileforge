@@ -536,6 +536,10 @@ def _install_planning_action_mutations(
         type=_parse_story_dependency,
         default=None,
     )
+    dependency_apply.add_argument(
+        "--selected-scope-fingerprint",
+        required=True,
+    )
     readiness_repair = _semantic_leaf(
         branches[("story", "readiness")],
         "repair",
@@ -1791,6 +1795,7 @@ def _story_dependencies_apply(
             StoryDependenciesApplyRequest(
                 project_id=args.project_id,
                 selected_story_ids=tuple(args.selected_story_ids),
+                selected_scope_fingerprint=args.selected_scope_fingerprint,
                 reviewed_edges=tuple(args.reviewed_edges or ()),
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,

@@ -777,6 +777,7 @@ def test_planning_action_commands_use_task_specific_semantics(
     assert not hasattr(request, "fact_fingerprint")
     assert not hasattr(request, "request_file")
     if request_type_name == "StoryDependenciesApplyRequest":
+        assert isinstance(request, cli_main.StoryDependenciesApplyRequest)
         assert request.selected_scope_fingerprint == f"sha256:{'a' * 64}"
     assert '"ok": true' in capsys.readouterr().out
 
@@ -836,6 +837,7 @@ def test_story_readiness_cli_rejects_invalid_repairs(
     "command",
     [
         "story dependencies apply --project-id 41 --story-id 7 "
+        f"--selected-scope-fingerprint sha256:{'a' * 64} "
         "--request-file request.json --idempotency-key dependencies-41 "
         "--actor operator",
         "story readiness repair --project-id 41 --repair 7:3:101 "

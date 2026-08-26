@@ -942,6 +942,7 @@ def start_sprint_in_session(session: Session, inputs: SprintStartInput) -> Sprin
             dependency_source_fingerprint=dependency.source_fingerprint,
             dependency_fingerprint=dependency.dependency_fingerprint,
             dependency_rows_fingerprint=dependency.rows_fingerprint,
+            dependency_rows_snapshot=dependency.rows,
             decision_fingerprint=command.decision_fingerprint,
             started_by=command.started_by,
         )

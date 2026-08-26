@@ -111,6 +111,8 @@ from workflow.execution_integrity import (
     SprintStartAudit,
     StoryClosurePayload,
     TaskEvidencePayload,
+    canonical_dependency_rows_snapshot,
+    dependency_rows_fingerprint,
     sprint_start_audit_metadata,
     story_completion_fingerprint,
     task_evidence_fingerprint,
@@ -179,6 +181,7 @@ _JSON_OBJECT_LIST = TypeAdapter(list[dict[str, JsonValue]])
 _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
 _DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
+_DEPENDENCY_ROW_LIST = TypeAdapter(list[StoryDependencyFact])
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _ReviewArtifactType = Literal[
     "vision",
@@ -429,6 +432,7 @@ class WorkflowFactRepository:
         sprint_starts = self._sprint_starts(
             project_id,
             sprints,
+            stories,
             planning_load.facts,
             story_dependency_reviews,
         )
@@ -2872,6 +2876,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         sprints: tuple[SprintFact, ...],
+        stories: tuple[StoryFact, ...],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
         dependency_reviews: tuple[StoryDependencyReviewFact, ...],
     ) -> tuple[SprintStartFact, ...]:
@@ -2967,6 +2972,28 @@ class WorkflowFactRepository:
             ):
                 message = "Sprint start accepted-plan or audit lineage changed."
                 raise self._error(message)
+            try:
+                metadata = _JSON_OBJECT.validate_json(event.event_metadata)
+                parsed_dependency_rows = tuple(
+                    _DEPENDENCY_ROW_LIST.validate_python(
+                        metadata.get("dependency_rows_snapshot"),
+                        strict=True,
+                    )
+                )
+                dependency_rows_snapshot = canonical_dependency_rows_snapshot(
+                    parsed_dependency_rows,
+                    project_story_ids=frozenset(item.story_id for item in stories),
+                )
+            except (ExecutionIntegrityError, ValidationError) as exc:
+                message = "Sprint start dependency row snapshot is invalid."
+                raise self._error(message) from exc
+            if (
+                parsed_dependency_rows != dependency_rows_snapshot
+                or dependency_rows_fingerprint(dependency_rows_snapshot)
+                != row.dependency_rows_fingerprint
+            ):
+                message = "Sprint start dependency row snapshot changed."
+                raise self._error(message)
             expected_metadata = sprint_start_audit_metadata(
                 SprintStartAudit(
                     sprint_id=row.sprint_id,
@@ -2983,6 +3010,7 @@ class WorkflowFactRepository:
                     dependency_source_fingerprint=(row.dependency_source_fingerprint),
                     dependency_fingerprint=row.dependency_fingerprint,
                     dependency_rows_fingerprint=row.dependency_rows_fingerprint,
+                    dependency_rows_snapshot=dependency_rows_snapshot,
                     decision_fingerprint=row.decision_fingerprint,
                     started_by=row.started_by,
                 )
@@ -3008,6 +3036,7 @@ class WorkflowFactRepository:
                     dependency_source_fingerprint=(row.dependency_source_fingerprint),
                     dependency_fingerprint=row.dependency_fingerprint,
                     dependency_rows_fingerprint=row.dependency_rows_fingerprint,
+                    dependency_rows_snapshot=dependency_rows_snapshot,
                     decision_fingerprint=row.decision_fingerprint,
                     audit_event_id=row.audit_event_id,
                     audit_event_fingerprint=canonical_hash(expected_metadata),

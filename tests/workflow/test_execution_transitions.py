@@ -1115,10 +1115,10 @@ def test_closed_sprint_ignores_unselected_story_moved_to_later_sprint(
     assert recovered.fact_references == baseline.fact_references
 
 
-def test_closed_sprint_rejects_selected_scope_dependency_tamper(
+def test_closed_sprint_ignores_later_live_selected_scope_dependency_change(
     engine: Engine,
 ) -> None:
-    """Reject tampering with even rejected rows owned by Sprint A's selected scope."""
+    """Keep Sprint A history isolated from later mutable dependency rows."""
     (
         domain,
         project_id,
@@ -1136,8 +1136,10 @@ def test_closed_sprint_rejects_selected_scope_dependency_tamper(
         session.add(dependency)
         session.commit()
 
-    with pytest.raises(WorkflowFactLoadError):
-        domain.position(project_id)
+    position = domain.position(project_id)
+    assert any(
+        item.node_id == "execution.post_sprint_triage" for item in position.decisions
+    )
 
 
 def test_sprint_start_dependency_snapshot_is_exact_and_tamper_evident(
@@ -1189,6 +1191,72 @@ def test_sprint_start_dependency_snapshot_is_exact_and_tamper_evident(
         )
         event.event_metadata = canonical_json(metadata)
         session.add(event)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        _domain(engine).position(project_id)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["reversed", "duplicate_identity", "duplicate_endpoint", "unknown_endpoint"],
+)
+def test_sprint_start_dependency_snapshot_rejects_structural_corruption(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """Reject coordinated row/hash rewrites that still violate snapshot shape."""
+    (
+        project_id,
+        _sprint_id,
+        story_a_id,
+        story_b_id,
+        story_c_id,
+        _task_id,
+        _dependency_ab_id,
+        _dependency_bc_id,
+    ) = seed_started_execution_with_transitive_dependency(engine)
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                WorkflowEvent.project_id == project_id,
+                WorkflowEvent.event_type == WorkflowEventType.SPRINT_STARTED,
+            )
+        ).one()
+        start = session.exec(select(SprintStart)).one()
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        rows = metadata["dependency_rows_snapshot"]
+        assert isinstance(rows, list)
+        if corruption == "reversed":
+            rows.reverse()
+        elif corruption == "duplicate_identity":
+            duplicate = dict(rows[0])
+            duplicate["dependent_story_id"] = story_b_id
+            duplicate["prerequisite_story_id"] = story_a_id
+            rows.append(duplicate)
+        elif corruption == "duplicate_endpoint":
+            duplicate = dict(rows[0])
+            duplicate["dependency_id"] = max(
+                int(item["dependency_id"]) for item in rows
+            ) + 1
+            rows.append(duplicate)
+        else:
+            rows[1]["prerequisite_story_id"] = story_c_id + 10_000
+        canonical_rows = sorted(
+            rows,
+            key=lambda item: (
+                int(item["dependent_story_id"]),
+                int(item["prerequisite_story_id"]),
+                int(item["dependency_id"]),
+            ),
+        )
+        changed_fingerprint = canonical_hash(canonical_rows)
+        metadata["dependency_rows_fingerprint"] = changed_fingerprint
+        event.event_metadata = canonical_json(metadata)
+        start.dependency_rows_fingerprint = changed_fingerprint
+        session.add(event)
+        session.add(start)
         session.commit()
 
     with pytest.raises(WorkflowFactLoadError):

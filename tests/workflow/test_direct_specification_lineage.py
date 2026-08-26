@@ -480,6 +480,7 @@ def _active_old_lineage_snapshot(
                 dependency_source_fingerprint="sha256:dependency-source",
                 dependency_fingerprint="sha256:dependencies",
                 dependency_rows_fingerprint="sha256:dependency-rows",
+                dependency_rows_snapshot=(),
                 decision_fingerprint="sha256:decision",
                 audit_event_id=84,
                 audit_event_fingerprint="sha256:audit",

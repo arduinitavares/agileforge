@@ -106,11 +106,12 @@ from services.story_evidence_scope import structural_evidence_scope_payload
 from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
 from services.story_sprint_selection import (
-    StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
     StorySprintSelectionMutationError,
     StorySprintSelectionRequest,
     apply_story_sprint_selection_in_session,
+    require_story_sprint_selection_receipt_result_in_session,
+    story_sprint_selection_receipt_response,
     story_sprint_selection_request_fingerprint,
     story_sprint_selection_request_payload,
 )
@@ -353,6 +354,7 @@ class _PlanningActionSelectionPort(SemanticTransitionReplayPort, Protocol):
         project_id: int,
         decision: NodeDecision,
         selected_story_ids: tuple[int, ...],
+        selected_scope_fingerprint: str,
     ) -> str | None: ...
 
     def prepare_story_readiness(
@@ -499,6 +501,7 @@ class PlanningActionSelectionService:
         project_id: int,
         decision: NodeDecision,
         selected_story_ids: tuple[int, ...],
+        selected_scope_fingerprint: str,
     ) -> str | None:
         """Derive the source fingerprint for the exact selected Story set."""
         snapshot = self._snapshot(project_id)
@@ -512,6 +515,7 @@ class PlanningActionSelectionService:
         reference = _single_fact_reference(decision, "story_dependency_source")
         if (
             selected_story_ids != expected_ids
+            or selected_scope_fingerprint != source_fingerprint
             or reference is None
             or reference.fact_id != str(project_id)
             or reference.fingerprint != source_fingerprint
@@ -1355,6 +1359,10 @@ class StoryDependenciesApplyRequest(_PlanningMutationRequest):
     """Exact operator-reviewed Story selection and dependency semantics."""
 
     selected_story_ids: tuple[PositiveStoryId, ...] = Field(min_length=1)
+    selected_scope_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    ]
     reviewed_edges: tuple[StoryDependencyEdgeRequest, ...]
 
     @model_validator(mode="after")
@@ -1445,6 +1453,37 @@ def _selection_integrity_error_response(message: str) -> JsonObject:
     return _story_eligibility_error(code="WORKFLOW_FACT_CONFLICT", message=message)
 
 
+def _selection_receipt_replay_response(
+    session: Session,
+    *,
+    request: StorySprintSelectionRequest,
+    receipt: WorkflowTransitionReceipt,
+) -> JsonObject:
+    """Replay a canonical failure or the closed successful receipt contract."""
+    result_json = receipt.result_json
+    if result_json is None:
+        message = "Story selection receipt result is incomplete."
+        raise StorySprintSelectionIntegrityError(message)
+    try:
+        stored = _JSON_OBJECT.validate_json(result_json)
+    except ValidationError as error:
+        message = "Story selection receipt result is malformed."
+        raise StorySprintSelectionIntegrityError(message) from error
+    if canonical_json(stored) != result_json:
+        message = "Story selection receipt result is not canonical."
+        raise StorySprintSelectionIntegrityError(message)
+    if stored.get("ok") is True:
+        return require_story_sprint_selection_receipt_result_in_session(
+            session,
+            request=request,
+            receipt=receipt,
+        )
+    if stored.get("ok") is False:
+        return stored
+    message = "Story selection receipt result is malformed."
+    raise StorySprintSelectionIntegrityError(message)
+
+
 def _story_eligibility_item(
     story_id: int,
     evidence: ValidationEvidence,
@@ -1459,51 +1498,6 @@ def _story_eligibility_item(
         "validated_at": evidence.validated_at.isoformat(),
         "evidence_fingerprint": canonical_hash(evidence.model_dump(mode="json")),
         "input_fingerprint": evidence.story_validation_input_fingerprint,
-    }
-
-
-def _selection_receipt_anchor_response(
-    request: StorySprintSelectionRequest,
-    fact: StorySprintSelectionFact,
-) -> JsonObject:
-    """Persist the minimum result required to validate a new selection event."""
-    return {
-        "ok": True,
-        "data": {
-            "project_id": request.project_id,
-            "story_id": request.story_id,
-            "selection_state": fact.selection_state,
-            "state_fingerprint": fact.state_fingerprint,
-            "selection_event_id": fact.event_id,
-            "selection_event_fingerprint": fact.event_fingerprint,
-        },
-        "errors": [],
-    }
-
-
-def _selection_story_fact_response(
-    request: StorySprintSelectionRequest,
-    fact: StoryFact,
-) -> JsonObject:
-    """Return only the authoritative post-write StoryFact selection projection."""
-    return {
-        "ok": True,
-        "data": {
-            "project_id": request.project_id,
-            "story_id": fact.story_id,
-            "selection_state": fact.sprint_selection_state,
-            "state_fingerprint": fact.sprint_selection_state_fingerprint,
-            "selection_event_id": fact.sprint_selection_event_id,
-            "selection_event_fingerprint": fact.sprint_selection_event_fingerprint,
-            "structurally_eligible": fact.structurally_eligible,
-            "structural_eligibility_status": fact.structural_eligibility_status,
-            "structural_failures": list(fact.validation_failures),
-            "selected_scope_fingerprint": fact.selected_scope_fingerprint,
-            "dependency_safe": fact.dependency_safe,
-            "sprint_candidate": fact.sprint_candidate,
-            "readiness_blockers": list(fact.readiness_blockers),
-        },
-        "errors": [],
     }
 
 
@@ -2452,6 +2446,7 @@ class AgileForgeApplication:
             request=request,
             operator_input={
                 "selected_story_ids": list(selected_story_ids),
+                "selected_scope_fingerprint": request.selected_scope_fingerprint,
                 "reviewed_edges": [
                     item.model_dump(mode="json") for item in reviewed_edges
                 ],
@@ -2471,10 +2466,23 @@ class AgileForgeApplication:
                 project_id=request.project_id,
                 decision=decision,
                 selected_story_ids=selected_story_ids,
+                selected_scope_fingerprint=request.selected_scope_fingerprint,
             )
         )
-        if decision is None or source_fingerprint is None:
+        if decision is None:
             return _transition_not_available(position, "planning.story_dependencies")
+        if source_fingerprint is None:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+                    message=(
+                        "The selected Story dependency scope changed after it was "
+                        "observed. Reload and review the current scope."
+                    ),
+                ),
+            )
         return self.transition(
             ApplyStoryDependencies(
                 project_id=request.project_id,
@@ -2487,7 +2495,7 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
                 selected_story_ids=selected_story_ids,
                 reviewed_edges=reviewed_edges,
-                source_fingerprint=source_fingerprint,
+                source_fingerprint=request.selected_scope_fingerprint,
             )
         )
 
@@ -2736,7 +2744,11 @@ class AgileForgeApplication:
                             ],
                         }
                     if existing.result_json is not None:
-                        return _JSON_OBJECT.validate_json(existing.result_json)
+                        return _selection_receipt_replay_response(
+                            session,
+                            request=request,
+                            receipt=existing,
+                        )
                     return _selection_integrity_error_response(
                         "Story selection receipt is incomplete."
                     )
@@ -2765,9 +2777,8 @@ class AgileForgeApplication:
                     }
                 else:
                     completed_at = datetime.now(tz=UTC)
-                    receipt.result_json = canonical_json(
-                        _selection_receipt_anchor_response(request, fact)
-                    )
+                    response = story_sprint_selection_receipt_response(request, fact)
+                    receipt.result_json = canonical_json(response)
                     receipt.completed_at = completed_at
                     session.add(receipt)
                     session.flush()
@@ -2785,7 +2796,6 @@ class AgileForgeApplication:
                             "Selected Story disappeared from its canonical projection."
                         )
                         raise StorySprintSelectionIntegrityError(message)
-                    response = _selection_story_fact_response(request, current)
 
                 receipt.result_json = canonical_json(response)
                 receipt.completed_at = datetime.now(tz=UTC)

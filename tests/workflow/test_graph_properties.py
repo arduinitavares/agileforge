@@ -384,6 +384,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 dependency_source_fingerprint="sha256:" + "b" * 64,
                 dependency_fingerprint="sha256:dependencies",
                 dependency_rows_fingerprint="sha256:dependency-rows",
+                dependency_rows_snapshot=(),
                 decision_fingerprint="sha256:start-decision",
                 audit_event_id=17,
                 audit_event_fingerprint="sha256:start-audit",
