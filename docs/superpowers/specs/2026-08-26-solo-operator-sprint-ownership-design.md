@@ -27,8 +27,12 @@ or sticky preferred Team.
   generation attempt predates owner-kind evidence.
 - `owner_label`: the exact value retained in the existing
   `SprintPlanEnvelope.team_name` field.
-- `owner_key`: a deterministic non-person identity used in projections and
-  rendered evidence.
+- `owner_key`: a deterministic non-person identity used in projections,
+  collision checks, canonical packet source fingerprints, and audit evidence.
+  Sprint replay remains bound to `owner_kind` plus the durable `owner_label`
+  and re-derives this key. Human-facing text does not render it.
+- `display_label`: a validated projection-only value for human-facing
+  browser, CLI, review, and packet text. It is not persisted or fingerprinted.
 
 Agents, request actors, OS users, email addresses, Profile names, and product
 personas are never Sprint owners.
@@ -120,6 +124,12 @@ creation:
 
 The canonical resolved `owner_label` remains the normalized `team_name` inside
 the existing planner host payload.
+
+At read and rendering boundaries, the shared ownership projection revalidates
+the exact `owner_kind`, `owner_key`, and `owner_label` before deriving
+`display_label`. A missing, malformed, or contradictory projection fails
+closed. This projection does not change the planner payload, v1 envelope,
+historical bytes, fingerprints, or replay identity.
 
 ## Durable Owner-Kind Evidence
 
@@ -226,6 +236,7 @@ The provider-free Sprint-candidate projection adds:
     "kind": "solo_project",
     "key": "agileforge:sprint-owner:solo-project:v1:project:42",
     "label": "[agileforge:sprint-owner:solo-project:v1:project:42] Solo operator for AgileForge",
+    "display_label": "Solo operator for AgileForge",
     "named_team_override_allowed": true
   }
 }
@@ -244,8 +255,22 @@ task_packet.v3 -> task_packet.v4
 ```
 
 Legacy artifacts project `legacy_named_team`. New named-Team artifacts project
-`named_team`. Renderers use `Sprint owner`, never infer kind from the label,
-and preserve the exact historical value.
+`named_team`. The ownership projection validates kind, key, and durable label
+before deriving the human display:
+
+- `solo_project` removes the exact validated `[{owner_key}] ` prefix and shows
+  `Solo operator for {project_name_snapshot}`;
+- `named_team` and `legacy_named_team` use the exact durable label as
+  `display_label`.
+
+Human-facing browser, CLI, review, and packet renderers use `Sprint owner` with
+`display_label`; they do not render `owner_key` or fall back to the durable
+solo label. Missing or contradictory display evidence fails closed. Canonical
+packet contexts and their source fingerprints retain the exact historical
+`owner_key` and durable `owner_label`. Machine-facing agent packet text uses
+`owner_kind` plus the durable label rather than `display_label`; it does not
+serialize `owner_key` separately. Sprint replay remains bound to
+`owner_kind` plus the durable label and re-derives the key during validation.
 
 ## Errors and Transport Mapping
 
