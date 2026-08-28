@@ -372,6 +372,29 @@ def validate_sprint_owner_identity(
         _raise_owner_evidence_error("Sprint owner key does not match its identity.")
 
 
+def sprint_owner_projection(
+    owner: ResolvedSprintOwner | SprintOwnerEvidence,
+    *,
+    project_id: int,
+) -> JsonObject:
+    """Separate durable owner identity from its validated human display label."""
+    evidence = SprintOwnerEvidence(
+        kind=owner.kind,
+        key=owner.key,
+        label=owner.label,
+    )
+    validate_sprint_owner_identity(evidence, project_id=project_id)
+    display_label = evidence.label
+    if evidence.kind == "solo_project":
+        display_label = evidence.label.removeprefix(f"[{evidence.key}] ")
+    return {
+        "kind": evidence.kind,
+        "key": evidence.key,
+        "label": evidence.label,
+        "display_label": display_label,
+    }
+
+
 def _canonical_object(raw_value: str | None, subject: str) -> JsonObject:
     if raw_value is None:
         _raise_owner_evidence_error(f"{subject} is missing.")

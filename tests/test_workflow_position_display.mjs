@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -24,7 +25,7 @@ function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}
     const context = vm.createContext({
         AbortController,
         console,
-        crypto: { randomUUID: () => 'uuid-1' },
+        crypto: { randomUUID: () => 'uuid-1', subtle: webcrypto.subtle },
         document: {
             createElement,
             getElementById() { return null; },
@@ -33,6 +34,7 @@ function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}
         },
         fetch: fetchImpl,
         URLSearchParams,
+        TextEncoder,
         window: { addEventListener() {}, location: { href: '' } },
     });
     vm.runInContext(source, context, { filename: sourcePath });
@@ -406,14 +408,21 @@ function sprintOwnerProjection(overrides = {}) {
         kind: 'solo_project',
         key: 'agileforge:sprint-owner:solo-project:v1:project:7',
         label: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
+        display_label: 'Solo operator for Exact Project',
         named_team_override_allowed: true,
         ...overrides,
     };
 }
 
-test('Sprint generation displays the resolved solo owner and makes named Teams optional', () => {
+async function validatedSprintOwner(context, owner = sprintOwnerProjection(), projectId = 7) {
+    assert.strictEqual(await context.validateSprintOwnerProjection(owner, projectId), owner);
+    return owner;
+}
+
+test('Sprint generation displays the resolved solo owner and makes named Teams optional', async () => {
     const context = loadFrontend();
     const candidate = sprintCandidateStory();
+    const sprintOwner = await validatedSprintOwner(context);
     const markup = context.deliveryPanelMarkup(
         { decisions: [] },
         {},
@@ -425,7 +434,7 @@ test('Sprint generation displays the resolved solo owner and makes named Teams o
         }],
         {
             storyDependencies: dependencyProjection([candidate]),
-            sprintCandidates: { items: [candidate], sprint_owner: sprintOwnerProjection() },
+            sprintCandidates: { project_id: 7, items: [candidate], sprint_owner: sprintOwner },
         },
     );
 
@@ -433,6 +442,9 @@ test('Sprint generation displays the resolved solo owner and makes named Teams o
     assert.ok(markup.includes('name="team_name"'));
     assert.ok(markup.includes('Sprint owner'));
     assert.ok(markup.includes('Solo operator for Exact Project'));
+    assert.ok(markup.includes('Generate the Sprint plan from the selected Sprint candidates.'));
+    assert.ok(!markup.includes('approved Stories'));
+    assert.ok(!markup.includes('agileforge:sprint-owner:'));
     assert.ok(markup.includes('Named team override'));
     assert.ok(!markup.includes('name="team_name" type="text" required'));
 });
@@ -452,6 +464,66 @@ test('Sprint generation blocks when provider-free owner evidence is unavailable'
 
     assert.ok(markup.includes('data-sprint-owner-projection-error="true"'));
     assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+});
+
+test('Sprint generation fails closed on missing or malformed owner display projections', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const owners = [
+        sprintOwnerProjection({ display_label: undefined }),
+        sprintOwnerProjection({ display_label: null }),
+        sprintOwnerProjection({ display_label: '' }),
+        sprintOwnerProjection({
+            display_label: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
+        }),
+    ];
+
+    for (const sprintOwner of owners) {
+        assert.equal(await context.validateSprintOwnerProjection(sprintOwner, 7), null);
+        const markup = context.deliveryPanelMarkup(
+            { decisions: [] }, {}, [{
+                node_id: 'planning.sprint.plan', instance_key: null,
+                request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+            }], {
+                storyDependencies: dependencyProjection([candidate]),
+                sprintCandidates: { project_id: 7, items: [candidate], sprint_owner: sprintOwner },
+            },
+        );
+        assert.ok(markup.includes('data-sprint-owner-projection-error="true"'));
+        assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+    }
+});
+
+test('Sprint owner validation rejects torn keys and the reserved named-owner namespace', async () => {
+    const context = loadFrontend();
+    const tornOwners = [
+        sprintOwnerProjection({
+            key: 'agileforge:sprint-owner:solo-project:v1:project:8',
+        }),
+        {
+            kind: 'named_team',
+            key: 'agileforge:sprint-owner:solo-project:v1:project:7',
+            label: 'Delivery Team',
+            display_label: 'Delivery Team',
+        },
+        {
+            kind: 'named_team',
+            key: `agileforge:sprint-owner:named-team:v1:sha256:${'a'.repeat(64)}`,
+            label: 'Delivery Team',
+            display_label: 'Delivery Team',
+        },
+        {
+            kind: 'named_team',
+            key: 'agileforge:sprint-owner:named-team:v1:sha256:1744fc03c3bde777cf0bac8bf221b924666acba7a870d76c2448104c6d06d4b7',
+            label: '[agileforge:sprint-owner:spoof]',
+            display_label: '[agileforge:sprint-owner:spoof]',
+        },
+    ];
+
+    for (const owner of tornOwners) {
+        assert.equal(await context.validateSprintOwnerProjection(owner, 7), null);
+        assert.equal(context.sprintOwnerDisplayProjection(owner, 7), null);
+    }
 });
 
 test('story generation controls render exact PBI IDs and requirement summaries, not array ordinals', () => {
@@ -1369,8 +1441,12 @@ test('Sprint generation submits the exact projected candidate IDs', async () => 
         position: {},
         planningReviews: {},
         storyDependencies: dependencyProjection([first, second]),
-        sprintCandidates: { items: [second, first], sprint_owner: sprintOwnerProjection() },
+        sprintCandidates: { project_id: 7, items: [second, first], sprint_owner: sprintOwnerProjection() },
     })}; loadDashboard = async () => true;`, context);
+    await vm.runInContext(
+        'validateSprintOwnerProjection(lifecycleState.sprintCandidates.sprint_owner, 7)',
+        context,
+    );
 
     await context.runDirectAction(
         'record_sprint_plan',
@@ -1400,16 +1476,45 @@ test('Sprint generation trims a named Team override and never transports a reser
     );
 });
 
-test('Sprint review renders durable owner kind and exact label', () => {
+test('Sprint review renders human owner display without the durable key', async () => {
     const context = loadFrontend();
+    const sprintOwner = await validatedSprintOwner(context);
     const markup = context.sprintReviewMarkup({
         team_name: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
-        sprint_owner: sprintOwnerProjection(),
+        sprint_owner: sprintOwner,
         sprint_goal: 'Ship the browser boundary.', selected_stories: [],
-    });
+    }, 7);
     assert.ok(markup.includes('Sprint owner'));
     assert.ok(markup.includes('Solo project'));
     assert.ok(markup.includes('Solo operator for Exact Project'));
+    assert.ok(!markup.includes('agileforge:sprint-owner:'));
+});
+
+test('Sprint review preserves an exact named-Team display and rejects a missing display projection', async () => {
+    const context = loadFrontend();
+    const namedOwner = {
+        kind: 'named_team',
+        key: 'agileforge:sprint-owner:named-team:v1:sha256:34ce3555a07be9b64db28c994cb50b21cc90a36aa513c97c24683a88abe12c97',
+        label: 'Delivery Team',
+        display_label: 'Delivery Team',
+    };
+    await validatedSprintOwner(context, namedOwner);
+    const namedMarkup = context.sprintReviewMarkup({
+        team_name: 'Delivery Team',
+        sprint_owner: namedOwner,
+        sprint_goal: 'Ship the browser boundary.', selected_stories: [],
+    }, 7);
+    assert.ok(namedMarkup.includes('Named team'));
+    assert.ok(namedMarkup.includes('Delivery Team'));
+    assert.equal(context.sprintReviewMarkup({
+        team_name: 'Delivery Team',
+        sprint_owner: {
+            kind: 'named_team',
+            key: 'agileforge:sprint-owner:named-team:v1:sha256:34ce3555a07be9b64db28c994cb50b21cc90a36aa513c97c24683a88abe12c97',
+            label: 'Delivery Team',
+        },
+        sprint_goal: 'Ship the browser boundary.', selected_stories: [],
+    }, 7), '');
 });
 
 test('scope parser rejects a conflicting fingerprint on an unselected Story', () => {

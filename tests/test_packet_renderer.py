@@ -12,6 +12,7 @@ from services.packet_renderer import PacketRenderError, render_packet
 from services.packets.canonical import build_story_packet, build_task_packet
 from services.read_projections import DurableReadProjectionService
 from tests.workflow.execution_fixtures import seed_started_execution
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -48,6 +49,23 @@ def _packets(engine: Engine) -> tuple[JsonObject, JsonObject]:
         )
 
 
+def _with_solo_owner(packet: JsonObject) -> JsonObject:
+    projected = copy.deepcopy(packet)
+    context = _object(projected["context"])
+    project = _object(context["project"])
+    sprint = _object(context["sprint"])
+    owner_key = (
+        f"agileforge:sprint-owner:solo-project:v1:project:{project['project_id']}"
+    )
+    sprint["owner_kind"] = "solo_project"
+    sprint["owner_key"] = owner_key
+    sprint["team_name"] = f"[{owner_key}] Solo operator for String Calculator Lab"
+    _object(projected["metadata"])["source_fingerprint"] = canonical_hash(
+        {key: projected[key] for key in ("lineage", "context", "evidence", "work")}
+    )
+    return projected
+
+
 def test_human_renderer_shows_exact_language_without_machine_identity(
     engine: Engine,
 ) -> None:
@@ -81,6 +99,29 @@ def test_human_renderer_shows_exact_language_without_machine_identity(
     ):
         assert forbidden not in story_text
         assert forbidden not in task_text
+
+
+def test_human_story_and_task_renderers_hide_solo_owner_key(
+    engine: Engine,
+) -> None:
+    """Human packet text uses display ownership without changing packet bytes."""
+    raw_story, raw_task = _packets(engine)
+    story = _with_solo_owner(raw_story)
+    task = _with_solo_owner(raw_task)
+    story_bytes = canonical_json(story)
+    task_bytes = canonical_json(task)
+
+    story_text = render_packet(story, "human")
+    task_text = render_packet(task, "human")
+
+    for rendered in (story_text, task_text):
+        assert (
+            "Sprint owner: Solo project — Solo operator for String Calculator Lab"
+            in rendered
+        )
+        assert "agileforge:sprint-owner:" not in rendered
+    assert canonical_json(story) == story_bytes
+    assert canonical_json(task) == task_bytes
 
 
 def test_agent_renderer_keeps_domain_evidence_but_not_internal_lineage(

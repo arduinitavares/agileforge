@@ -684,6 +684,7 @@ def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(
             "[agileforge:sprint-owner:solo-project:v1:project:1] "
             "Solo operator for Task 11 ('Plan immutable work',)"
         ),
+        "display_label": "Solo operator for Task 11 ('Plan immutable work',)",
         "named_team_override_allowed": True,
     }
     assert candidates["structural_evidence_scope"] == expected_scope
@@ -4480,8 +4481,10 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     assert data["schema_version"] == "agileforge.planning-artifact-review.v2"
     assert data["phase"] == "sprint_plan"
     candidate = _json_object(data["candidate"])
-    assert _json_object(candidate["sprint_owner"])["kind"] == "legacy_named_team"
-    assert _json_object(candidate["sprint_owner"])["label"] == "Review Projection Team"
+    sprint_owner = _json_object(candidate["sprint_owner"])
+    assert sprint_owner["kind"] == "legacy_named_team"
+    assert sprint_owner["label"] == "Review Projection Team"
+    assert sprint_owner["display_label"] == "Review Projection Team"
     selected = candidate["selected_stories"]
     assert isinstance(selected, list)
     selected_story = _json_object(selected[0])
@@ -4632,6 +4635,13 @@ def test_sprint_plan_review_reloads_owner_kind_from_attempt_evidence(  # noqa: P
     owner = _json_object(candidate["sprint_owner"])
     assert owner["kind"] == expected_kind
     assert owner["label"] == team_name
+    assert (
+        owner["display_label"]
+        == {
+            "solo_project": "Solo operator for Review",
+            "named_team": "Durable Named Team",
+        }[expected_kind]
+    )
 
 
 def test_pending_sprint_plan_review_reports_exact_source_stale_error(

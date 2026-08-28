@@ -8,6 +8,7 @@ import html
 from typing import TYPE_CHECKING, Literal, cast
 
 from services.packets.canonical import CanonicalPacketError, validate_canonical_packet
+from services.sprint_ownership import SprintOwnerEvidence, sprint_owner_projection
 
 if TYPE_CHECKING:
     from workflow.contracts import JsonObject, JsonValue
@@ -43,6 +44,25 @@ def _owner_kind_display(value: object) -> str:
         "legacy_named_team": "Legacy named team",
     }
     return displays[str(value)]
+
+
+def _owner_display(project: JsonObject, sprint: JsonObject) -> str:
+    try:
+        owner = SprintOwnerEvidence.model_validate(
+            {
+                "kind": sprint.get("owner_kind"),
+                "key": sprint.get("owner_key"),
+                "label": sprint.get("team_name"),
+            }
+        )
+        projection = sprint_owner_projection(
+            owner,
+            project_id=cast("int", project.get("project_id")),
+        )
+    except ValueError as error:
+        message = "Sprint owner evidence is invalid."
+        raise PacketRenderError("PACKET_CONTENT_INVALID", message) from error
+    return cast("str", projection["display_label"])
 
 
 def _validate(packet: JsonObject, flavor: str) -> tuple[PacketFlavor, str]:
@@ -90,7 +110,7 @@ def _human(packet: JsonObject, kind: str) -> str:
         f"Status: {_text(sprint.get('status'))}",
         (
             f"Sprint owner: {_owner_kind_display(sprint.get('owner_kind'))} — "
-            f"{_text(sprint.get('team_name'))}"
+            f"{_text(_owner_display(project, sprint))}"
         ),
         "",
         f"## Story: {_text(story.get('title'))}",

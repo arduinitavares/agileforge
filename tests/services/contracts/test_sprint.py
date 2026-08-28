@@ -275,3 +275,56 @@ def test_sprint_plan_envelope_has_exact_six_field_fingerprint_surface() -> None:
             candidate_set_fingerprint="sha256:" + "b" * 64,
             selected_story_ids_json="[2]",
         )
+
+
+def test_solo_owner_keeps_v1_envelope_bytes_and_fingerprint_exact() -> None:
+    output = SprintPlannerOutput(
+        sprint_goal="Ship alpha.",
+        selected_stories=(
+            SprintPlannerSelectedStory(
+                story_id=1,
+                story_item_id="US-0001",
+                reason_for_selection="It is ready.",
+                tasks=(
+                    StructuredTaskSpec(
+                        description="Implement alpha behavior",
+                        relevant_spec_item_ids=("REQ.alpha",),
+                        task_kind="implementation",
+                        artifact_targets=(),
+                        workstream_tags=("backend",),
+                        checklist_items=("Run the alpha test.",),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    _, canonical, fingerprint = build_sprint_plan_envelope(
+        team_name=(
+            "[agileforge:sprint-owner:solo-project:v1:project:9] "
+            "Solo operator for String Calculator Lab"
+        ),
+        spec_version_id=9,
+        spec_hash="sha256:" + "a" * 64,
+        candidate_set_fingerprint="sha256:" + "b" * 64,
+        planner_output=output,
+    )
+
+    assert canonical == (
+        '{"candidate_set_fingerprint":"sha256:'
+        + "b" * 64
+        + '","planner_output":{"selected_stories":[{"reason_for_selection":'
+        '"It is ready.","story_id":1,"story_item_id":"US-0001","tasks":'
+        '[{"artifact_targets":[],"checklist_items":["Run the alpha test."],'
+        '"description":"Implement alpha behavior","relevant_spec_item_ids":'
+        '["REQ.alpha"],"task_kind":"implementation","workstream_tags":'
+        '["backend"]}]}],"sprint_goal":"Ship alpha."},"schema_version":'
+        '"agileforge.sprint-plan-envelope.v1","spec_hash":"sha256:'
+        + "a"
+        * 64
+        + '","spec_version_id":9,"team_name":"[agileforge:sprint-owner:'
+        'solo-project:v1:project:9] Solo operator for String Calculator Lab"}'
+    )
+    assert fingerprint == (
+        "sha256:395e923fda04b9e0607fa62db66feb537ae98bb683f2367a9953213412d8bca7"
+    )

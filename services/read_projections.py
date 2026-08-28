@@ -71,6 +71,7 @@ from services.sprint_ownership import (
     SprintOwnerResolutionError,
     load_sprint_owner_evidence,
     resolve_sprint_owner,
+    sprint_owner_projection,
 )
 from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
@@ -2409,7 +2410,7 @@ class DurableReadProjectionService:
                 "items": items,
                 "count": len(items),
                 "sprint_owner": {
-                    **owner.model_dump(mode="json"),
+                    **sprint_owner_projection(owner, project_id=project_id),
                     "named_team_override_allowed": True,
                 },
                 "structural_evidence_scope": structural_evidence_scope_payload(),
@@ -2697,7 +2698,10 @@ class DurableReadProjectionService:
                         "created_by": artifact.created_by,
                         "created_at": _iso(artifact.created_at),
                         "team_name": envelope.team_name,
-                        "sprint_owner": owner.model_dump(mode="json"),
+                        "sprint_owner": sprint_owner_projection(
+                            owner,
+                            project_id=project_id,
+                        ),
                         "sprint_goal": envelope.planner_output.sprint_goal,
                         "selected_stories": selected_stories,
                     },

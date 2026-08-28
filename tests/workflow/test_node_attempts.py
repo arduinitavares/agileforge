@@ -703,6 +703,8 @@ def test_sprint_legacy_named_replay_preserves_the_stored_fingerprint(
             )
         ).one()
     assert receipt.request_fingerprint == stored_fingerprint
+    assert receipt.request_json == canonical_json(stored.model_dump(mode="json"))
+    assert '"owner_kind"' not in receipt.request_json
 
 
 def test_replay_query_returns_terminal_result_after_position_advanced(

@@ -12,6 +12,7 @@ import pytest
 from cli import main as cli_main
 from cli.main import (
     _invest_assessment_lines,
+    _render_planning_review,
     _story_item_lines,
     build_parser,
     main,
@@ -1392,6 +1393,7 @@ def _planning_review(phase: str) -> dict[str, object]:
                     "[agileforge:sprint-owner:solo-project:v1:project:41] "
                     "Solo operator for Exact Project"
                 ),
+                "display_label": "Solo operator for Exact Project",
             },
             "sprint_goal": "Ship trusted balances.",
             "selected_stories": [
@@ -1568,10 +1570,10 @@ def test_planning_review_reads_use_phase_specific_human_labels(
     assert "{" not in output
 
 
-def test_sprint_plan_review_renders_durable_owner_kind_and_label(
+def test_sprint_plan_review_renders_owner_kind_and_human_display(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """CLI review preserves explicit ownership evidence after durable reload."""
+    """CLI review keeps owner kind visible without exposing its durable key."""
     application = _Application()
 
     assert (
@@ -1583,12 +1585,56 @@ def test_sprint_plan_review_renders_durable_owner_kind_and_label(
     )
 
     output = capsys.readouterr().out
-    assert (
-        "Sprint owner: Solo project — "
-        "[agileforge:sprint-owner:solo-project:v1:project:41] "
-        "Solo operator for Exact Project"
-    ) in output
+    assert "Sprint owner: Solo project — Solo operator for Exact Project" in output
+    assert "agileforge:sprint-owner:" not in output
     assert "Team:" not in output
+
+
+@pytest.mark.parametrize(
+    ("kind", "key", "label", "display_label"),
+    [
+        (
+            "solo_project",
+            "agileforge:sprint-owner:solo-project:v1:project:42",
+            (
+                "[agileforge:sprint-owner:solo-project:v1:project:42] "
+                "Solo operator for Exact Project"
+            ),
+            "Solo operator for Exact Project",
+        ),
+        (
+            "named_team",
+            "agileforge:sprint-owner:solo-project:v1:project:41",
+            "Delivery Team",
+            "Delivery Team",
+        ),
+        (
+            "named_team",
+            f"agileforge:sprint-owner:named-team:v1:sha256:{'a' * 64}",
+            "Delivery Team",
+            "Delivery Team",
+        ),
+    ],
+)
+def test_sprint_plan_review_rejects_torn_owner_identity(
+    kind: str,
+    key: str,
+    label: str,
+    display_label: str,
+) -> None:
+    """CLI rendering fails closed when owner kind, key, and label disagree."""
+    review = _planning_review("sprint_plan")
+    candidate = cast("dict[str, object]", review["candidate"])
+    owner = cast("dict[str, object]", candidate["sprint_owner"])
+    owner.update(
+        kind=kind,
+        key=key,
+        label=label,
+        display_label=display_label,
+    )
+
+    with pytest.raises(ValueError, match="Sprint owner evidence is invalid"):
+        _render_planning_review(review)
 
 
 def test_backlog_decision_displays_evidence_and_keeps_binding_hidden(

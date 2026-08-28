@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
@@ -301,6 +302,7 @@ class FakeLifecycle:
                 },
                 "review": {
                     "phase": "sprint_plan",
+                    "project_id": _PROJECT_ID,
                     "candidate": self.sprint_plan_candidate,
                 },
             }
@@ -859,6 +861,7 @@ class FakeLifecycle:
 
     def _sprint_candidates_projection(self) -> JsonObject:
         return {
+            "project_id": _PROJECT_ID,
             "items": self.sprint_candidates,
             "count": len(self.sprint_candidates),
             "sprint_owner": {
@@ -868,6 +871,7 @@ class FakeLifecycle:
                     "[agileforge:sprint-owner:solo-project:v1:project:1] "
                     "Solo operator for Exact Project"
                 ),
+                "display_label": "Solo operator for Exact Project",
                 "named_team_override_allowed": True,
             },
         }
@@ -1070,18 +1074,29 @@ class FakeLifecycle:
         assert body["selected_story_ids"] == projected_candidate_ids
         if self.delivery_generation_failure:
             raise ValueError(self.delivery_generation_failure)
+        team_name = body.get(
+            "team_name",
+            "[agileforge:sprint-owner:solo-project:v1:project:1] "
+            "Solo operator for Exact Project",
+        )
+        assert isinstance(team_name, str)
+        owner_kind = "solo_project" if "team_name" not in body else "named_team"
+        owner_key = (
+            "agileforge:sprint-owner:solo-project:v1:project:1"
+            if owner_kind == "solo_project"
+            else (
+                "agileforge:sprint-owner:named-team:v1:sha256:"
+                f"{sha256(team_name.encode()).hexdigest()}"
+            )
+        )
         self.sprint_plan_candidate = {
-            "team_name": body.get(
-                "team_name",
-                "[agileforge:sprint-owner:solo-project:v1:project:1] "
-                "Solo operator for Exact Project",
-            ),
+            "team_name": team_name,
             "sprint_owner": {
-                "kind": "solo_project" if "team_name" not in body else "named_team",
-                "key": "agileforge:sprint-owner:solo-project:v1:project:1",
-                "label": body.get(
+                "kind": owner_kind,
+                "key": owner_key,
+                "label": team_name,
+                "display_label": body.get(
                     "team_name",
-                    "[agileforge:sprint-owner:solo-project:v1:project:1] "
                     "Solo operator for Exact Project",
                 ),
             },
@@ -1916,6 +1931,10 @@ def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
     expect(team_name).not_to_have_attribute("required", "")
     expect(sprint_form.get_by_text("Sprint owner", exact=True)).to_be_visible()
     expect(sprint_form.get_by_text("Solo operator for Exact Project")).to_be_visible()
+    expect(sprint_form).not_to_contain_text("agileforge:sprint-owner:")
+    expect(sprint_form).to_contain_text(
+        "Generate the Sprint plan from the selected Sprint candidates."
+    )
     generate_sprint_btn = sprint_form.locator('button[type="submit"]')
     expect(generate_sprint_btn).to_be_visible()
     expect(generate_sprint_btn).to_contain_text("Generate Sprint plan")
@@ -1927,6 +1946,7 @@ def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
     expect(review_card).to_contain_text("Sprint owner")
     expect(review_card).to_contain_text("Solo project")
     expect(review_card).to_contain_text("Solo operator for Exact Project")
+    expect(review_card).not_to_contain_text("agileforge:sprint-owner:")
     assert "team_name" not in fake.delivery_requests[-1][1]
 
 
@@ -2589,6 +2609,10 @@ def test_sprint_generation_defaults_to_solo_owner_and_blocks_duplicate_submissio
     expect(team_name).not_to_have_attribute("required", "")
     expect(form.get_by_text("Sprint owner", exact=True)).to_be_visible()
     expect(form.get_by_text("Solo operator for Exact Project")).to_be_visible()
+    expect(form).not_to_contain_text("agileforge:sprint-owner:")
+    expect(form).to_contain_text(
+        "Generate the Sprint plan from the selected Sprint candidates."
+    )
 
     busy_state = form.evaluate(
         """form => {
@@ -2616,6 +2640,7 @@ def test_sprint_generation_defaults_to_solo_owner_and_blocks_duplicate_submissio
     expect(review_card).to_contain_text("Sprint owner")
     expect(review_card).to_contain_text("Solo project")
     expect(review_card).to_contain_text("Solo operator for Exact Project")
+    expect(review_card).not_to_contain_text("agileforge:sprint-owner:")
     sprint_requests = [
         body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
@@ -2643,6 +2668,9 @@ def test_sprint_generation_posts_a_trimmed_named_team_override(
     form.locator('button[type="submit"]').click()
 
     expect(page.locator('[data-planning-review-card="sprint"]')).to_be_visible()
+    expect(page.locator('[data-planning-review-card="sprint"]')).to_contain_text(
+        "Delivery Team"
+    )
     sprint_requests = [
         body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]

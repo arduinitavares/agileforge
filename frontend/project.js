@@ -93,7 +93,7 @@ const DELIVERY_ACTION_CONFIG = {
         label: 'Generate Sprint plan',
         busyLabel: 'Generating Sprint plan...',
         icon: 'flag',
-        description: 'Generate the Sprint plan from the approved Stories.',
+        description: 'Generate the Sprint plan from the selected Sprint candidates.',
     },
 };
 
@@ -1200,12 +1200,65 @@ function sprintOwnerKindLabel(kind) {
     }[kind] ?? 'Unknown owner';
 }
 
-function sprintOwnerProjection(context = {}) {
-    const owner = context?.sprintCandidates?.sprint_owner;
+const validatedSprintOwnerProjections = new WeakMap();
+
+function sprintOwnerProjectionShape(value) {
+    const owner = reviewObject(value);
     if (!owner || typeof owner !== 'object' || Array.isArray(owner)) return null;
-    if (owner.kind !== 'solo_project' || owner.named_team_override_allowed !== true) return null;
+    if (!['solo_project', 'named_team', 'legacy_named_team'].includes(owner.kind)) return null;
     if (typeof owner.key !== 'string' || !owner.key.trim()) return null;
     if (typeof owner.label !== 'string' || !owner.label.trim()) return null;
+    if (typeof owner.display_label !== 'string' || !owner.display_label.trim()) return null;
+    if (owner.display_label.includes(owner.key)) return null;
+    if (owner.kind === 'solo_project') {
+        if (!owner.display_label.startsWith('Solo operator for ')) return null;
+        if (owner.label !== `[${owner.key}] ${owner.display_label}`) return null;
+    } else if (owner.display_label !== owner.label) {
+        return null;
+    }
+    return owner;
+}
+
+function sprintOwnerDisplayProjection(value, projectId) {
+    const owner = sprintOwnerProjectionShape(value);
+    if (!owner || validatedSprintOwnerProjections.get(owner) !== projectId) return null;
+    return owner;
+}
+
+async function validateSprintOwnerProjection(value, projectId) {
+    const owner = sprintOwnerProjectionShape(value);
+    if (!owner || !Number.isInteger(projectId) || projectId < 1) return null;
+    let expectedKey;
+    if (owner.kind === 'solo_project') {
+        expectedKey = `agileforge:sprint-owner:solo-project:v1:project:${projectId}`;
+    } else {
+        if (owner.kind === 'named_team' && (
+            owner.label !== owner.label.trim()
+            || sprintOwnerNamespaceCasefold(owner.label).startsWith('[agileforge:sprint-owner:')
+        )) return null;
+        if (!crypto?.subtle || typeof TextEncoder !== 'function') return null;
+        const digest = await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode(owner.label),
+        );
+        const hex = Array.from(new Uint8Array(digest), (byte) => (
+            byte.toString(16).padStart(2, '0')
+        )).join('');
+        const kind = owner.kind === 'named_team' ? 'named-team' : 'legacy-named-team';
+        expectedKey = `agileforge:sprint-owner:${kind}:v1:sha256:${hex}`;
+    }
+    if (owner.key !== expectedKey) return null;
+    validatedSprintOwnerProjections.set(owner, projectId);
+    return owner;
+}
+
+function sprintOwnerProjection(context = {}) {
+    const owner = sprintOwnerDisplayProjection(
+        context?.sprintCandidates?.sprint_owner,
+        context?.sprintCandidates?.project_id,
+    );
+    if (!owner || owner.kind !== 'solo_project') return null;
+    if (owner.named_team_override_allowed !== true) return null;
     return owner;
 }
 
@@ -1511,14 +1564,13 @@ function storyReviewMarkup(review, candidate) {
     </div>`;
 }
 
-function sprintReviewMarkup(candidate) {
+function sprintReviewMarkup(candidate, projectId) {
     const stories = reviewItems(candidate.selected_stories);
     if (!stories) return '';
-    const owner = reviewObject(candidate.sprint_owner);
-    const ownerKind = owner?.kind ?? candidate.owner_kind;
-    const ownerLabel = owner?.label ?? candidate.team_name;
+    const owner = sprintOwnerDisplayProjection(candidate.sprint_owner, projectId);
+    if (!owner) return '';
     return `<div class="space-y-4">
-        <p class="text-sm"><strong>Sprint owner:</strong> ${escapeWorkflowText(sprintOwnerKindLabel(ownerKind))} — ${escapeWorkflowText(reviewValue(ownerLabel))}</p>
+        <p class="text-sm"><strong>Sprint owner:</strong> ${escapeWorkflowText(sprintOwnerKindLabel(owner.kind))} — ${escapeWorkflowText(owner.display_label)}</p>
         <p class="text-sm"><strong>Sprint goal:</strong> ${escapeWorkflowText(reviewValue(candidate.sprint_goal))}</p>
         ${stories.map((rawStory) => {
             const story = reviewObject(rawStory);
@@ -1535,7 +1587,7 @@ function planningReviewContentMarkup(review) {
     if (review.phase === 'backlog') return backlogReviewMarkup(candidate);
     if (review.phase === 'roadmap') return roadmapReviewMarkup(candidate);
     if (review.phase === 'story') return storyReviewMarkup(review, candidate);
-    if (review.phase === 'sprint_plan') return sprintReviewMarkup(candidate);
+    if (review.phase === 'sprint_plan') return sprintReviewMarkup(candidate, review.project_id);
     return '';
 }
 
@@ -1661,7 +1713,7 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
             ${content}
             <div class="max-w-xl">
                 <p class="text-sm font-semibold">Sprint owner</p>
-                <p class="mt-1 break-anywhere text-sm leading-6 text-slate-700" data-sprint-owner-kind="${escapeWorkflowText(owner.kind)}" data-sprint-owner-key="${escapeWorkflowText(owner.key)}">${escapeWorkflowText(owner.label)}</p>
+                <p class="mt-1 break-anywhere text-sm leading-6 text-slate-700" data-sprint-owner-kind="${escapeWorkflowText(owner.kind)}">${escapeWorkflowText(owner.display_label)}</p>
                 <label for="delivery-team-name-${index}" class="mt-4 block text-sm font-semibold">Named team override</label>
                 <input id="delivery-team-name-${index}" name="team_name" type="text" autocomplete="organization"
                     class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
@@ -2372,6 +2424,23 @@ async function loadDashboard() {
             requestJson(`${base}/sprint/candidates`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
+        const sprintPlanReviewData = sprintPlanReview.data ?? {};
+        const sprintCandidatesData = sprintCandidates?.data ?? {};
+        await Promise.all([
+            validateSprintOwnerProjection(
+                sprintCandidatesData?.sprint_owner,
+                sprintCandidatesData?.project_id === selectedProjectId
+                    ? selectedProjectId
+                    : null,
+            ),
+            validateSprintOwnerProjection(
+                sprintPlanReviewData?.review?.candidate?.sprint_owner,
+                sprintPlanReviewData?.review?.project_id === selectedProjectId
+                    ? selectedProjectId
+                    : null,
+            ),
+        ]);
+        if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
             project: project.data ?? {},
             position: position.data ?? {},
@@ -2384,11 +2453,11 @@ async function loadDashboard() {
                 backlog: backlogReview.data ?? {},
                 roadmap: roadmapReview.data ?? {},
                 stories: storyReviews.data ?? { items: [] },
-                sprintPlan: sprintPlanReview.data ?? {},
+                sprintPlan: sprintPlanReviewData,
             },
             storyPending: storyPending.data ?? {},
             storyDependencies: storyDependencies?.data ?? {},
-            sprintCandidates: sprintCandidates?.data ?? {},
+            sprintCandidates: sprintCandidatesData,
         };
         if (
             storyMutationAtStart?.phase === 'awaiting_authority'

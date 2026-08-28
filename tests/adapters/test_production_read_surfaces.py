@@ -638,12 +638,18 @@ def _review(phase: str) -> dict[str, object]:
                     "4433d3cbd694dfae6e3f5747577b68f57c2df760563d7524a4e9635d721c64ff"
                 ),
                 "label": "Review team",
+                "display_label": "Review team",
             },
             "sprint_goal": "Deliver exact review.",
             "selected_stories": [story],
         }
         lineage = {}
-    return {"phase": phase, "lineage": lineage, "candidate": candidate}
+    return {
+        "phase": phase,
+        "project_id": 41,
+        "lineage": lineage,
+        "candidate": candidate,
+    }
 
 
 def _result(marker: str) -> dict[str, object]:

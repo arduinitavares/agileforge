@@ -53,6 +53,7 @@ from services.application import (
     VisionRevisionRequest,
     production_application,
 )
+from services.sprint_ownership import SprintOwnerEvidence, sprint_owner_projection
 from utils.logging_config import configure_logging
 from workflow.contracts import (
     JsonObject,
@@ -1568,7 +1569,11 @@ def _story_review_lines(
     return lines
 
 
-def _sprint_review_lines(candidate: dict[str, object]) -> list[str]:
+def _sprint_review_lines(
+    candidate: dict[str, object],
+    *,
+    project_id: int,
+) -> list[str]:
     owner = _review_object(candidate.get("sprint_owner"), "Sprint owner")
     owner_kind = owner.get("kind")
     if not isinstance(owner_kind, str):
@@ -1578,12 +1583,33 @@ def _sprint_review_lines(candidate: dict[str, object]) -> list[str]:
         "named_team": "Named team",
         "legacy_named_team": "Legacy named team",
     }.get(owner_kind)
-    owner_label = owner.get("label")
-    if owner_kind_label is None or not isinstance(owner_label, str) or not owner_label:
+    if owner_kind_label is None:
+        raise ValueError("Sprint owner evidence is invalid.")
+    try:
+        evidence = SprintOwnerEvidence.model_validate(
+            {
+                "kind": owner_kind,
+                "key": owner.get("key"),
+                "label": owner.get("label"),
+            }
+        )
+        validated = sprint_owner_projection(evidence, project_id=project_id)
+    except ValueError as error:
+        raise ValueError("Sprint owner evidence is invalid.") from error
+    validated_key = validated.get("key")
+    validated_display_label = validated.get("display_label")
+    owner_display_label = owner.get("display_label")
+    if (
+        not isinstance(validated_key, str)
+        or not isinstance(validated_display_label, str)
+        or not isinstance(owner_display_label, str)
+        or owner_display_label != validated_display_label
+        or validated_key in owner_display_label
+    ):
         raise ValueError("Sprint owner evidence is invalid.")
     lines = [
         "Sprint plan review",
-        f"Sprint owner: {owner_kind_label} — {owner_label}",
+        f"Sprint owner: {owner_kind_label} — {owner_display_label}",
         f"Sprint goal: {_review_text(candidate.get('sprint_goal'))}",
     ]
     for raw_story in _review_items(
@@ -1619,7 +1645,14 @@ def _render_planning_review(value: object) -> str:
     elif phase == "story":
         lines = _story_review_lines(review, candidate)
     elif phase == "sprint_plan":
-        lines = _sprint_review_lines(candidate)
+        project_id = review.get("project_id")
+        if (
+            not isinstance(project_id, int)
+            or isinstance(project_id, bool)
+            or project_id < 1
+        ):
+            raise ValueError("Sprint owner evidence is invalid.")
+        lines = _sprint_review_lines(candidate, project_id=project_id)
     else:
         raise ValueError("Planning review phase is unsupported.")
     return "\n".join(lines).strip() + "\n"
