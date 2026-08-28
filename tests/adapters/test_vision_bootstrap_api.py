@@ -75,7 +75,9 @@ class _BoundaryDomain:
         return self._position
 
     def transition(self, request: TransitionRequest) -> TransitionResult:
-        pytest.fail(f"unexpected transition: {request}")
+        pytest.fail(
+            f"unexpected transition: {request}"  # ty: ignore[invalid-argument-type]
+        )
 
     def load_persisted_attempt_input(
         self,
@@ -86,7 +88,7 @@ class _BoundaryDomain:
     ) -> JsonObject:
         pytest.fail(
             "unexpected persisted input load: "
-            f"{project_id}:{attempt_id}:{attempt_fingerprint}"
+            f"{project_id}:{attempt_id}:{attempt_fingerprint}"  # ty: ignore[invalid-argument-type]
         )
 
 
@@ -138,7 +140,9 @@ class _VisionInput:
         user_text: str,
     ) -> JsonObject:
         del project_id, decision, user_text
-        pytest.fail("bootstrap must not build clarification input")
+        pytest.fail(
+            "bootstrap must not build clarification input"  # ty: ignore[invalid-argument-type]
+        )
 
 
 class _BootstrapApplication(AgileForgeApplication):
@@ -181,7 +185,9 @@ class _PureReadApplication:
     def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
         del request
         self.bootstrap_calls += 1
-        pytest.fail("read route invoked Vision bootstrap")
+        pytest.fail(
+            "read route invoked Vision bootstrap"  # ty: ignore[invalid-argument-type]
+        )
 
 
 def test_bootstrap_post_forwards_only_mutation_metadata(

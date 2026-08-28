@@ -60,7 +60,9 @@ class _PureApplication:
     def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
         del request
         self.bootstrap_calls += 1
-        pytest.fail("read command invoked Vision bootstrap")
+        pytest.fail(
+            "read command invoked Vision bootstrap"  # ty: ignore[invalid-argument-type]
+        )
 
 
 def test_vision_bootstrap_cli_forwards_transport_metadata(

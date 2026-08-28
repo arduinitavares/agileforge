@@ -166,7 +166,7 @@ async def test_story_agent_replay_captures_raw_output_from_input_fixture(
             )
         )
         pytest.fail(
-            f"Story replay produced no final text. Diagnostic saved to {artifact_path}"
+            f"Story replay produced no final text. Diagnostic saved to {artifact_path}"  # ty: ignore[invalid-argument-type]
         )
 
     if parsed_json is None:
@@ -181,7 +181,7 @@ async def test_story_agent_replay_captures_raw_output_from_input_fixture(
             )
         )
         pytest.fail(
-            f"Story replay returned invalid JSON. Diagnostic saved to {artifact_path}"
+            f"Story replay returned invalid JSON. Diagnostic saved to {artifact_path}"  # ty: ignore[invalid-argument-type]
         )
 
     try:
@@ -199,7 +199,7 @@ async def test_story_agent_replay_captures_raw_output_from_input_fixture(
         )
         pytest.fail(
             "Story replay returned schema-invalid JSON. Diagnostic saved to "
-            f"{artifact_path}"
+            f"{artifact_path}"  # ty: ignore[invalid-argument-type]
         )
 
     assert raw_output.strip(), "Expected a non-empty raw model response"

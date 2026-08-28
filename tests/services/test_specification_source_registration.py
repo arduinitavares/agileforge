@@ -335,7 +335,9 @@ def test_prepare_rejects_filesystem_path_spelling_alias(
     repository = _git_repository(tmp_path)
     alias = repository / "SPECIFICATION.md"
     if not alias.exists():
-        pytest.skip("filesystem uses case-sensitive path lookup")
+        pytest.skip(
+            "filesystem uses case-sensitive path lookup"  # ty: ignore[too-many-positional-arguments]
+        )
     _seed_lineage_and_binding(engine, repository)
 
     with pytest.raises(SpecificationSourceRegistrationError) as caught:
@@ -353,7 +355,9 @@ def test_prepare_rejects_nonregular_source(engine: Engine, tmp_path: Path) -> No
     (repository / "specification.md").unlink()
     mkfifo = getattr(os, "mkfifo", None)
     if mkfifo is None:
-        pytest.skip("FIFO creation is unavailable on this platform")
+        pytest.skip(
+            "FIFO creation is unavailable on this platform"  # ty: ignore[too-many-positional-arguments]
+        )
     mkfifo(repository / "specification.md")
     _seed_lineage_and_binding(engine, repository)
 

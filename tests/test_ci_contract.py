@@ -12,6 +12,14 @@ import yaml
 WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 BOOLEAN_TAG = "tag:yaml.org,2002:bool"
+PYREPO_CHECK_REVISION = "40119c00d4efc469655dec16b1a976e1b3298d7d"
+PYREPO_CHECK_SOURCE = (
+    "git+https://github.com/arduinitavares/pyrepo-check.git@"
+    f"{PYREPO_CHECK_REVISION}"
+)
+PYTHON_313_COMPATIBILITY_COMMAND = (
+    "uv run --locked --exact --python 3.13 pytest"
+)
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -44,7 +52,9 @@ def _sequence(value: object) -> list[object]:
 def workflow() -> dict[str, object]:
     """Load the workflow with GitHub's literal trigger key preserved."""
     if not WORKFLOW_PATH.is_file():
-        pytest.skip("workflow is absent until the Task 6 implementation")
+        pytest.skip(
+            "workflow is absent until the Task 6 implementation"  # ty: ignore[too-many-positional-arguments]
+        )
     # WorkflowLoader only changes SafeLoader's boolean resolver for GitHub's `on` key.
     loaded = yaml.load(  # nosec B506
         WORKFLOW_PATH.read_text(encoding="utf-8"),
@@ -120,7 +130,7 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
 @pytest.mark.parametrize(
     ("job_name", "gate_command"),
     [
-        ("python-312", "uv run --locked pyrepo-check --all"),
+        ("python-312", "pyrepo-check --python 3.12 --all"),
         ("python-313", "./agileforge-dev check"),
     ],
 )
@@ -141,6 +151,54 @@ def test_python_jobs_install_playwright_chromium_before_gate(
 
     assert install_command in commands
     assert commands.index(install_command) < commands.index(gate_command)
+
+
+@pytest.mark.parametrize("job_name", ["python-312", "python-313"])
+def test_python_jobs_install_immutable_global_controller_before_gate(
+    workflow: dict[str, object],
+    job_name: str,
+) -> None:
+    """Keep the controller outside the locked Repository Environment."""
+    steps = _steps(_job(workflow, job_name))
+    install_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Install pyrepo-check controller"
+    )
+    install = steps[install_index]
+    install_command = install.get("run")
+
+    assert isinstance(install_command, str)
+    normalized_install = " ".join(install_command.split())
+    assert (
+        f'uv tool install --python 3.13.15 "{PYREPO_CHECK_SOURCE}"'
+        in normalized_install
+    )
+    assert 'echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"' in install_command
+
+    gate_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name")
+        in {"Run repository quality gate", "Run canonical full gate"}
+    )
+    assert install_index < gate_index
+
+
+def test_python_313_runs_locked_compatibility_tests_before_canonical_gate(
+    workflow: dict[str, object],
+) -> None:
+    """Preserve runtime compatibility while the canonical gate uses Python 3.12."""
+    commands = [
+        run
+        for step in _steps(_job(workflow, "python-313"))
+        if isinstance((run := step.get("run")), str)
+    ]
+
+    assert PYTHON_313_COMPATIBILITY_COMMAND in commands
+    assert commands.index(PYTHON_313_COMPATIBILITY_COMMAND) < commands.index(
+        "./agileforge-dev check"
+    )
 
 
 def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
@@ -175,9 +233,12 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
     frontend = _runs(_job(workflow, "frontend"))
 
     assert "uv lock --check" in python_312
-    assert "uv run --locked pyrepo-check --all" in python_312
+    assert "pyrepo-check --python 3.12 --all" in python_312
+    assert "uv run --locked pyrepo-check" not in python_312
     assert "uv lock --check" in python_313
+    assert PYTHON_313_COMPATIBILITY_COMMAND in python_313
     assert "./agileforge-dev check" in python_313
+    assert "uv run --locked pyrepo-check" not in python_313
     assert "scripts/verify_distribution.py" not in python_313
     assert (
         "node --test tests/test_workflow_position_display.mjs "

@@ -805,7 +805,9 @@ def test_story_readiness_cli_rejects_invalid_repairs(
 
     class UncalledApplication:
         def repair_story_readiness(self, request: object) -> object:
-            pytest.fail(f"invalid repair reached application: {request}")
+            pytest.fail(
+                f"invalid repair reached application: {request}"  # ty: ignore[invalid-argument-type]
+            )
 
     arguments = [
         "story",

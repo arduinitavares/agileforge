@@ -504,10 +504,14 @@ def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
 ) -> None:
     """Open a special leaf nonblocking and reject it before any read."""
     if not hasattr(vision_evidence_module.os, "mkfifo"):
-        pytest.skip("FIFO creation is unavailable on this platform.")
+        pytest.skip(
+            "FIFO creation is unavailable on this platform."  # ty: ignore[too-many-positional-arguments]
+        )
     nonblock = getattr(vision_evidence_module.os, "O_NONBLOCK", None)
     if not isinstance(nonblock, int):
-        pytest.skip("Nonblocking file opens are unavailable on this platform.")
+        pytest.skip(
+            "Nonblocking file opens are unavailable on this platform."  # ty: ignore[too-many-positional-arguments]
+        )
     fifo = repository / "README.md"
     vision_evidence_module.os.mkfifo(fifo)
     project_id = _add_project(engine)

@@ -698,7 +698,9 @@ def test_real_pre_identity_failure_cleans_process_group_and_profiles() -> None:
             if any(path.name.startswith(prefix) for path in base.iterdir()):
                 raise InjectedError
             time.sleep(0.05)
-        pytest.fail("launcher did not create an ephemeral profile")
+        pytest.fail(
+            "launcher did not create an ephemeral profile"  # ty: ignore[invalid-argument-type]
+        )
 
     with pytest.raises(InjectedError):
         smoke.run_smoke(

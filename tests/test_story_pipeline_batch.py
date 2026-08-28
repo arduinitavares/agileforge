@@ -3,6 +3,6 @@
 import pytest
 
 pytest.skip(
-    "process_story_batch has been removed. Skipping obsolete test module.",
+    "process_story_batch has been removed. Skipping obsolete test module.",  # ty: ignore[too-many-positional-arguments]
     allow_module_level=True,
 )

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 _EXPECTED_COMMANDS = (
     ("uv", "lock", "--check"),
-    ("uv", "run", "--locked", "pyrepo-check", "--all"),
+    ("pyrepo-check", "--python", "3.12", "--all"),
     (
         "node",
         "--test",

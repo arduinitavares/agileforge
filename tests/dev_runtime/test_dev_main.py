@@ -283,7 +283,7 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
 
     assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
     assert execution_lines == [
-        'exec uv --directory "$ROOT" run --locked agileforge-dev "$@"'
+        'exec uv --directory "$ROOT" run --locked --exact agileforge-dev "$@"'
     ]
     for forbidden in ("branch", "worktree", "database", "profile", "port"):
         assert forbidden not in source.lower()
@@ -330,6 +330,7 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
         str(launcher.parent.resolve()),
         "run",
         "--locked",
+        "--exact",
         "agileforge-dev",
         "--help",
     ]

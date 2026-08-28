@@ -234,7 +234,9 @@ def _assert_process_gone(process_id: int) -> None:
         except ProcessLookupError:
             return
         time.sleep(0.05)
-    pytest.fail(f"dashboard child still exists: {process_id}")
+    pytest.fail(
+        f"dashboard child still exists: {process_id}"  # ty: ignore[invalid-argument-type]
+    )
 
 
 def _assert_cli_isolation(

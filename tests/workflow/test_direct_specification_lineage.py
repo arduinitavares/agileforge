@@ -568,7 +568,9 @@ def _fail_if_deferred_module_is_imported(
     module = ModuleType(module_name)
 
     def fail_on_attribute(name: str) -> object:
-        pytest.fail(f"{module_name}.{name} imported before Task 5 guards failed")
+        pytest.fail(
+            f"{module_name}.{name} imported before Task 5 guards failed"  # ty: ignore[invalid-argument-type]
+        )
 
     module.__dict__["__getattr__"] = fail_on_attribute
     monkeypatch.setitem(sys.modules, module_name, module)
@@ -1038,7 +1040,9 @@ def test_backlog_handler_rejects_stale_lineage_before_persistence(
     task7_module = ModuleType("services.agent_workbench.backlog_phase")
 
     def fail_if_persistence_runs(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Task 7 persistence was reached before Task 5 guards failed")
+        pytest.fail(
+            "Task 7 persistence was reached before Task 5 guards failed"  # ty: ignore[invalid-argument-type]
+        )
 
     task7_module.__dict__["record_backlog_draft_in_session"] = fail_if_persistence_runs
     monkeypatch.setitem(

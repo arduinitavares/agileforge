@@ -413,7 +413,7 @@ def _communicate_initial_failure(
             _stop_process_group(process)
         pytest.fail(
             "durable terminal failure was committed, but the checkout-local "
-            f"launcher PID {process.pid} and product CLI PID {call_pid} remained alive",
+            f"launcher PID {process.pid} and product CLI PID {call_pid} remained alive",  # ty: ignore[invalid-argument-type]
         )
         raise AssertionError from error
     call_pids = [

@@ -25,12 +25,16 @@ jobs:
         with:
           version: "0.10.12"
           python-version: "3.12"
+      - name: Install pyrepo-check controller
+        run: |
+          uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@40119c00d4efc469655dec16b1a976e1b3298d7d"
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
       - name: Verify lock
         run: uv lock --check
       - name: Install Playwright Chromium
         run: uv run --locked python -m playwright install --with-deps chromium
       - name: Run repository quality gate
-        run: uv run --locked pyrepo-check --all
+        run: pyrepo-check --python 3.12 --all
 
   python-313:
     name: Python 3.13 full gate
@@ -42,10 +46,16 @@ jobs:
         with:
           version: "0.10.12"
           python-version: "3.13"
+      - name: Install pyrepo-check controller
+        run: |
+          uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@40119c00d4efc469655dec16b1a976e1b3298d7d"
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
       - name: Verify lock
         run: uv lock --check
       - name: Install Playwright Chromium
         run: uv run --locked python -m playwright install --with-deps chromium
+      - name: Run Python 3.13 compatibility tests
+        run: uv run --locked --exact --python 3.13 pytest
       - name: Run canonical full gate
         run: ./agileforge-dev check
 
