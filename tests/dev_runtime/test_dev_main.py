@@ -282,8 +282,17 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     execution_lines = [line for line in source.splitlines() if line.startswith("exec ")]
 
     assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
+    assert (launcher.parent / ".python-version").read_text(
+        encoding="utf-8"
+    ) == "3.13.15\n"
+    assert 'requires-python = ">=3.13.15,<3.14"' in (
+        launcher.parent / "pyproject.toml"
+    ).read_text(encoding="utf-8")
     assert execution_lines == [
-        'exec uv --directory "$ROOT" run --locked --exact agileforge-dev "$@"'
+        (
+            'exec uv --directory "$ROOT" run --locked --exact --python '
+            '3.13.15 agileforge-dev "$@"'
+        )
     ]
     for forbidden in ("branch", "worktree", "database", "profile", "port"):
         assert forbidden not in source.lower()
@@ -331,6 +340,8 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
         "run",
         "--locked",
         "--exact",
+        "--python",
+        "3.13.15",
         "agileforge-dev",
         "--help",
     ]
@@ -788,6 +799,42 @@ def test_info_json_is_complete_redacted_and_validated(
     assert serialized.count("open_router_api_key") == 1
     for secret_field in ('"password"', '"access_token"', '"api_token"'):
         assert secret_field not in serialized
+
+
+def test_info_rejects_profile_created_by_a_different_python_runtime(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fail closed instead of reporting stale interpreter provenance."""
+    module = _module()
+    assert (
+        module.main(
+            ["init", "--profile", "legacy-python", "--json"],
+            checkout_root=checkout,
+            runner=FakeRunner(checkout),
+            clock=_clock(),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    manifest = module.profile_paths(checkout, "legacy-python").manifest
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["python_version"] = "3.12.13"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = module.main(
+        ["info", "--profile", "legacy-python", "--json"],
+        checkout_root=checkout,
+        runner=FakeRunner(checkout),
+        clock=_clock(minute=1),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "error",
+        "exit_code": 1,
+        "error": "profile Python version does not match the current runtime",
+    }
 
 
 def test_info_secrets_file_reports_presence_without_credential_value(

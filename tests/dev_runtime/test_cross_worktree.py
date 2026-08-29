@@ -117,7 +117,9 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
     _git(clone, "config", "user.name", "Cross Worktree Tests")
     _git(clone, "config", "user.email", "cross-worktree@example.invalid")
     copied_files = (
+        ".python-version",
         "api.py",
+        "agileforge-dev",
         "cli/dev_checks.py",
         "cli/dev_main.py",
         "cli/dev_profiles.py",
@@ -322,6 +324,8 @@ def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
     fake_bin = _fake_path_shim(tmp_path)
     commit_one, commit_two = _commit_launcher_fixtures(source_root, clone)
     assert commit_one != commit_two
+    assert (clone / ".python-version").read_text(encoding="utf-8") == "3.13.15\n"
+    assert not (clone / ".venv").exists()
 
     added_worktrees: list[Path] = []
     ui_launchers: list[subprocess.Popen[str]] = []

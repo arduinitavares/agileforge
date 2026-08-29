@@ -34,7 +34,7 @@ CHECK_STAGES: tuple[CheckStage, ...] = (
     CheckStage(name="lock", command=("uv", "lock", "--check")),
     CheckStage(
         name="python-quality",
-        command=("pyrepo-check", "--python", "3.12", "--all"),
+        command=("pyrepo-check", "--python", "3.13.15", "--all"),
     ),
     CheckStage(
         name="frontend-tests",

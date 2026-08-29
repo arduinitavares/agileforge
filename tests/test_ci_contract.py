@@ -17,9 +17,7 @@ PYREPO_CHECK_SOURCE = (
     "git+https://github.com/arduinitavares/pyrepo-check.git@"
     f"{PYREPO_CHECK_REVISION}"
 )
-PYTHON_313_COMPATIBILITY_COMMAND = (
-    "uv run --locked --exact --python 3.13 pytest"
-)
+CANONICAL_PYTHON = "3.13.15"
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -108,11 +106,10 @@ def test_workflow_has_read_only_permissions_and_cancellation(
 
 
 def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
-    """Cover Ubuntu Python 3.12/3.13, Node, and macOS Python 3.13."""
+    """Pin every Python CI job to the canonical repository runtime."""
     expected = {
-        "python-312": ("ubuntu-latest", "3.12"),
-        "python-313": ("ubuntu-latest", "3.13"),
-        "macos-smoke": ("macos-latest", "3.13"),
+        "python-313": ("ubuntu-latest", CANONICAL_PYTHON),
+        "macos-smoke": ("macos-latest", CANONICAL_PYTHON),
     }
     for name, (runner, python_version) in expected.items():
         job = _job(workflow, name)
@@ -127,22 +124,13 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
     assert _job(workflow, "frontend")["runs-on"] == "ubuntu-latest"
 
 
-@pytest.mark.parametrize(
-    ("job_name", "gate_command"),
-    [
-        ("python-312", "pyrepo-check --python 3.12 --all"),
-        ("python-313", "./agileforge-dev check"),
-    ],
-)
 def test_python_jobs_install_playwright_chromium_before_gate(
     workflow: dict[str, object],
-    job_name: str,
-    gate_command: str,
 ) -> None:
     """Provision Chromium before running browser-bearing Python gates."""
     commands = [
         run
-        for step in _steps(_job(workflow, job_name))
+        for step in _steps(_job(workflow, "python-313"))
         if isinstance((run := step.get("run")), str)
     ]
     install_command = (
@@ -150,16 +138,14 @@ def test_python_jobs_install_playwright_chromium_before_gate(
     )
 
     assert install_command in commands
-    assert commands.index(install_command) < commands.index(gate_command)
+    assert commands.index(install_command) < commands.index("./agileforge-dev check")
 
 
-@pytest.mark.parametrize("job_name", ["python-312", "python-313"])
 def test_python_jobs_install_immutable_global_controller_before_gate(
     workflow: dict[str, object],
-    job_name: str,
 ) -> None:
     """Keep the controller outside the locked Repository Environment."""
-    steps = _steps(_job(workflow, job_name))
+    steps = _steps(_job(workflow, "python-313"))
     install_index = next(
         index
         for index, step in enumerate(steps)
@@ -183,22 +169,6 @@ def test_python_jobs_install_immutable_global_controller_before_gate(
         in {"Run repository quality gate", "Run canonical full gate"}
     )
     assert install_index < gate_index
-
-
-def test_python_313_runs_locked_compatibility_tests_before_canonical_gate(
-    workflow: dict[str, object],
-) -> None:
-    """Preserve runtime compatibility while the canonical gate uses Python 3.12."""
-    commands = [
-        run
-        for step in _steps(_job(workflow, "python-313"))
-        if isinstance((run := step.get("run")), str)
-    ]
-
-    assert PYTHON_313_COMPATIBILITY_COMMAND in commands
-    assert commands.index(PYTHON_313_COMPATIBILITY_COMMAND) < commands.index(
-        "./agileforge-dev check"
-    )
 
 
 def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
@@ -228,17 +198,13 @@ def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
 
 def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> None:
     """Use uv lock checks and repository-owned quality/runtime entry points."""
-    python_312 = _runs(_job(workflow, "python-312"))
     python_313 = _runs(_job(workflow, "python-313"))
     frontend = _runs(_job(workflow, "frontend"))
 
-    assert "uv lock --check" in python_312
-    assert "pyrepo-check --python 3.12 --all" in python_312
-    assert "uv run --locked pyrepo-check" not in python_312
     assert "uv lock --check" in python_313
-    assert PYTHON_313_COMPATIBILITY_COMMAND in python_313
     assert "./agileforge-dev check" in python_313
     assert "uv run --locked pyrepo-check" not in python_313
+    assert "pyrepo-check --python" not in python_313
     assert "scripts/verify_distribution.py" not in python_313
     assert (
         "node --test tests/test_workflow_position_display.mjs "

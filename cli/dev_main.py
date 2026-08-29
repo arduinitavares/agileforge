@@ -602,6 +602,9 @@ def _profile_info(
     clock: Clock,
 ) -> InfoResult:
     profile = load_profile(checkout_root, profile_name)
+    if profile.python_version != platform.python_version():
+        message = "profile Python version does not match the current runtime"
+        raise DeveloperCommandError(message)
     validation = _verify_business_schema(profile.business_database)
     current_commit = _current_commit(runner, checkout_root)
     configured_models = _configured_models(profile)

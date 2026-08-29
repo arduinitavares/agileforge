@@ -9,6 +9,7 @@ from pathlib import Path
 from cli.main import build_parser
 
 README_PATH = Path("README.md")
+PYTHON_VERSION_PATH = Path(".python-version")
 ENV_EXAMPLE_PATH = Path(".env.example")
 AGENTS_PATH = Path("AGENTS.md")
 CLI_MANUAL_PATH = Path("docs/agent-cli-manual.md")
@@ -81,6 +82,15 @@ def test_current_operating_docs_use_only_uv_for_python_setup() -> None:
         assert f"{installer} install" not in text
     assert "python -m " + installer_names[0] not in text
     assert "uv sync --frozen" in _read(README_PATH)
+
+
+def test_repository_owns_the_exact_supported_python_runtime() -> None:
+    """Pin pristine uv resolution before dependency installation begins."""
+    assert _read(PYTHON_VERSION_PATH) == "3.13.15\n"
+    assert 'requires-python = ">=3.13.15,<3.14"' in _read(Path("pyproject.toml"))
+    readme = _read(README_PATH)
+    assert "Python 3.13.15" in readme
+    assert "Python 3.12" not in readme
 
 
 def test_current_operating_docs_exclude_removed_runtime_guidance() -> None:

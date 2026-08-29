@@ -1,6 +1,6 @@
 # AgileForge
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13.15](https://img.shields.io/badge/python-3.13.15-blue.svg)](https://www.python.org/downloads/)
 [![Google ADK](https://img.shields.io/badge/Google-ADK-orange.svg)](https://github.com/google/adk-python)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -64,7 +64,7 @@ Human Specification review remains an explicit workflow transition.
 
 ## Quick Start
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), and an OpenRouter
+Prerequisites: Python 3.13.15, [uv](https://docs.astral.sh/uv/), and an OpenRouter
 key only when running model-backed nodes.
 
 ```sh

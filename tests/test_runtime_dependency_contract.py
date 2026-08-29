@@ -63,7 +63,7 @@ def test_quality_controller_stays_out_of_repository_environment() -> None:
     }
     lock_source = Path("uv.lock").read_text(encoding="utf-8")
 
-    assert project["project"]["requires-python"] == ">=3.12"
+    assert project["project"]["requires-python"] == ">=3.13.15,<3.14"
     assert "pyrepo-check" not in requirements_by_name
     assert "pytest-cov" not in requirements_by_name
     assert '\nname = "pyrepo-check"\n' not in lock_source
@@ -76,9 +76,10 @@ def test_quality_controller_stays_out_of_repository_environment() -> None:
     )
     assert requirements_by_name["ty"] == Requirement("ty>=0.0.35,<0.1")
     assert "dependency-groups" not in project["tool"]["uv"]
-    assert project["tool"]["ruff"]["target-version"] == "py312"
+    assert project["tool"]["ruff"]["target-version"] == "py313"
+    assert "UP043" in project["tool"]["ruff"]["lint"]["ignore"]
     assert project["tool"]["ruff"]["src"] == ["."]
-    assert project["tool"]["ty"]["environment"]["python-version"] == "3.12"
+    assert project["tool"]["ty"]["environment"]["python-version"] == "3.13"
     assert project["tool"]["ty"]["environment"]["root"] == ["."]
 
 

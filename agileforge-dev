@@ -34,4 +34,4 @@ unset \
     UV_WORKING_DIR \
     UV_WORKING_DIRECTORY \
     VIRTUAL_ENV
-exec uv --directory "$ROOT" run --locked --exact agileforge-dev "$@"
+exec uv --directory "$ROOT" run --locked --exact --python 3.13.15 agileforge-dev "$@"

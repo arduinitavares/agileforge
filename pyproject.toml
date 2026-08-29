@@ -7,7 +7,7 @@ name = "agileforge"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13.15,<3.14"
 dependencies = [
     "fastapi>=0.119.0",
     "GitPython==3.1.57",
@@ -113,7 +113,7 @@ exclude_lines = [
 directory = "artifacts/coverage-html"
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 88
 src = ["."]
 force-exclude = true
@@ -169,6 +169,7 @@ select = [
 ignore = [
     "COM812",
     "ISC001",
+    "UP043",
 ]
 fixable = ["ALL"]
 
@@ -198,7 +199,7 @@ exclude_dirs = [".venv", "notebooks"]
 skips = ["*_test.py", "*test_*.py"]
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.13"
 python-platform = "all"
 root = ["."]
 
