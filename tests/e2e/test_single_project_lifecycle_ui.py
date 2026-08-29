@@ -1273,6 +1273,86 @@ class FakeLifecycle:
         }
 
 
+def test_sprint_review_browser_shows_accepted_invest_without_false_gate() -> None:
+    """Render accepted INVEST evidence without changing profile or Sprint state."""
+    source = (_PROJECT_ROOT / "frontend" / "project.js").read_text(encoding="utf-8")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport=_DESKTOP_VIEWPORT)
+            page.set_content('<main id="review-root"></main>')
+            page.add_script_tag(content=source)
+            page.evaluate(
+                """async (assessment) => {
+                    const owner = {
+                        kind: 'solo_project',
+                        key: 'agileforge:sprint-owner:solo-project:v1:project:1',
+                        label: [
+                            '[agileforge:sprint-owner:solo-project:v1:project:1]',
+                            'Solo operator for Exact Project',
+                        ].join(' '),
+                        display_label: 'Solo operator for Exact Project',
+                    };
+                    if (!await validateSprintOwnerProjection(owner, 1)) {
+                        throw new Error('Sprint owner fixture is invalid.');
+                    }
+                    const selected = {
+                        binding: {
+                            decision_fingerprint: 'sha256:sprint-review-decision',
+                            instance_key: null,
+                        },
+                        review: {
+                            phase: 'sprint_plan',
+                            project_id: 1,
+                            candidate: {
+                                sprint_owner: owner,
+                                sprint_goal: 'Deliver exact accepted evidence.',
+                                selected_stories: [{
+                                    title: 'Delivery story draft',
+                                    statement: (
+                                        'As an operator, I want exact review '
+                                        + 'evidence.'
+                                    ),
+                                    persona: 'operator',
+                                    acceptance_criteria: [
+                                        'Accepted evidence is visible.',
+                                    ],
+                                    specification_evidence: [],
+                                    invest_assessment: assessment,
+                                    reason_for_selection: 'Highest accepted value.',
+                                    tasks: [{
+                                        description: 'Render the accepted evidence',
+                                        task_kind: 'implementation',
+                                        checklist_items: ['Verify review output'],
+                                        specification_evidence: [],
+                                    }],
+                                }],
+                            },
+                        },
+                    };
+                    document.querySelector('#review-root').innerHTML =
+                        planningReviewCardMarkup(
+                            'Sprint plan review', selected, 'sprint', 0,
+                        );
+                }""",
+                _valid_invest_assessment_payload(),
+            )
+
+            review = page.locator('[data-planning-review-card="sprint"]')
+            expect(review).to_be_visible()
+            expect(review.locator('[data-invest-assessment="true"]')).to_be_visible()
+            expect(review).to_contain_text("Self-contained Story increment.")
+            expect(review).not_to_contain_text("Quality Assessment Incomplete")
+            expect(review).not_to_contain_text("Acceptance is disabled.")
+            expect(
+                review.locator(
+                    '[data-planning-review="sprint"][data-review-decision="accepted"]'
+                )
+            ).to_be_enabled()
+        finally:
+            browser.close()
+
+
 @pytest.fixture(scope="module")
 def dashboard_harness() -> Iterator[DashboardHarness]:
     """Start one clean isolated AgileForge profile with no provider credentials."""

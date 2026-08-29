@@ -2649,6 +2649,9 @@ class DurableReadProjectionService:
                             "acceptance_criteria": list(
                                 source_item.acceptance_criteria
                             ),
+                            "invest_assessment": (
+                                source_item.invest_assessment.model_dump(mode="json")
+                            ),
                             "specification_evidence": story_evidence,
                             "reason_for_selection": selected.reason_for_selection,
                             "tasks": tasks,

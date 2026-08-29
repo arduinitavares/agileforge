@@ -4456,6 +4456,7 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
         _domain,
         _guards,
+        _invest_assessment,
         _record_and_accept_roadmap,
         _record_and_accept_story,
         _record_sprint_plan_draft,
@@ -4498,6 +4499,9 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     assert isinstance(selected, list)
     selected_story = _json_object(selected[0])
     assert selected_story["story_id"] == story_id
+    assert selected_story["invest_assessment"] == _invest_assessment().model_dump(
+        mode="json"
+    )
     assert selected_story["specification_evidence"]
     tasks = selected_story["tasks"]
     assert isinstance(tasks, list)

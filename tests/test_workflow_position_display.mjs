@@ -1608,18 +1608,49 @@ test('Sprint generation trims a named Team override and never transports a reser
     );
 });
 
-test('Sprint review renders human owner display without the durable key', async () => {
+test('Sprint review renders accepted INVEST evidence and keeps acceptance enabled', async () => {
     const context = loadFrontend();
     const sprintOwner = await validatedSprintOwner(context);
-    const markup = context.sprintReviewMarkup({
-        team_name: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
-        sprint_owner: sprintOwner,
-        sprint_goal: 'Ship the browser boundary.', selected_stories: [],
-    }, 7);
+    const acceptedStory = storyReview('backlog_item:PBI-000003')
+        .review.candidate.story_items[0];
+    const selected = {
+        binding: {
+            decision_fingerprint: 'sha256:sprint-review-decision',
+            instance_key: null,
+        },
+        review: {
+            phase: 'sprint_plan',
+            project_id: 7,
+            candidate: {
+                team_name: sprintOwner.label,
+                sprint_owner: sprintOwner,
+                sprint_goal: 'Ship the browser boundary.',
+                selected_stories: [{
+                    ...acceptedStory,
+                    reason_for_selection: 'Highest accepted value.',
+                    tasks: [],
+                }],
+            },
+        },
+    };
+
+    const markup = context.planningReviewCardMarkup(
+        'Sprint plan review', selected, 'sprint', 0,
+    );
     assert.ok(markup.includes('Sprint owner'));
     assert.ok(markup.includes('Solo project'));
     assert.ok(markup.includes('Solo operator for Exact Project'));
     assert.ok(!markup.includes('agileforge:sprint-owner:'));
+    assert.ok(markup.includes('data-invest-assessment="true"'));
+    assert.ok(markup.includes('Self-contained logic.'));
+    assert.ok(!markup.includes('Quality Assessment Incomplete'));
+    assert.ok(!markup.includes('Acceptance is disabled.'));
+    assert.ok(markup.includes('data-review-decision="accepted" class='));
+    assert.ok(!markup.includes('data-review-decision="accepted" disabled'));
+    assert.notStrictEqual(
+        context.planningReviewBinding(selected, 'sprint', 'accepted'),
+        null,
+    );
 });
 
 test('Sprint review preserves an exact named-Team display and rejects a missing display projection', async () => {

@@ -1298,6 +1298,41 @@ def _backlog_item() -> dict[str, object]:
     }
 
 
+def _valid_invest_assessment() -> dict[str, object]:
+    return {
+        "independent": {
+            "result": "pass",
+            "rationale": "Delivers self-contained increment.",
+            "evidence": "No unbuilt dependencies.",
+        },
+        "negotiable": {
+            "result": "pass",
+            "rationale": "Implementation details open to refinement.",
+            "evidence": "Focuses on user outcome.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Directly delivers user capability.",
+            "evidence": "Addresses requirement.",
+        },
+        "estimable": {
+            "result": "pass",
+            "rationale": "Scope is clear and bounded.",
+            "evidence": "Discrete criteria.",
+        },
+        "small": {
+            "result": "pass",
+            "rationale": "Sized for single iteration.",
+            "evidence": "Effort is M.",
+        },
+        "testable": {
+            "result": "pass",
+            "rationale": "Verifiable pass/fail criteria.",
+            "evidence": "Observable verification steps.",
+        },
+    }
+
+
 def _planning_review(phase: str) -> dict[str, object]:
     common: dict[str, object] = {
         "schema_version": "agileforge.planning-artifact-review.v1",
@@ -1335,38 +1370,7 @@ def _planning_review(phase: str) -> dict[str, object]:
                     "statement": "As a household, I want trusted balances.",
                     "persona": "household",
                     "acceptance_criteria": ["All accounts reconcile."],
-                    "invest_assessment": {
-                        "independent": {
-                            "result": "pass",
-                            "rationale": "Delivers self-contained increment.",
-                            "evidence": "No unbuilt dependencies.",
-                        },
-                        "negotiable": {
-                            "result": "pass",
-                            "rationale": "Implementation details open to refinement.",
-                            "evidence": "Focuses on user outcome.",
-                        },
-                        "valuable": {
-                            "result": "pass",
-                            "rationale": "Directly delivers user capability.",
-                            "evidence": "Addresses requirement.",
-                        },
-                        "estimable": {
-                            "result": "pass",
-                            "rationale": "Scope is clear and bounded.",
-                            "evidence": "Discrete criteria.",
-                        },
-                        "small": {
-                            "result": "pass",
-                            "rationale": "Sized for single iteration.",
-                            "evidence": "Effort is M.",
-                        },
-                        "testable": {
-                            "result": "pass",
-                            "rationale": "Verifiable pass/fail criteria.",
-                            "evidence": "Observable verification steps.",
-                        },
-                    },
+                    "invest_assessment": _valid_invest_assessment(),
                     "estimated_effort": "M",
                     "effort_rationale": "Moderate calculation scope.",
                     "order_rationale": "Initial balance reconciliation.",
@@ -1402,6 +1406,7 @@ def _planning_review(phase: str) -> dict[str, object]:
                     "statement": "As a household, I want trusted balances.",
                     "persona": "household",
                     "acceptance_criteria": ["All accounts reconcile."],
+                    "invest_assessment": _valid_invest_assessment(),
                     "specification_evidence": _evidence(),
                     "reason_for_selection": "Highest customer value.",
                     "tasks": [
@@ -1570,7 +1575,7 @@ def test_planning_review_reads_use_phase_specific_human_labels(
     assert "{" not in output
 
 
-def test_sprint_plan_review_renders_owner_kind_and_human_display(
+def test_sprint_plan_review_renders_owner_and_accepted_invest_assessment(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """CLI review keeps owner kind visible without exposing its durable key."""
@@ -1588,6 +1593,13 @@ def test_sprint_plan_review_renders_owner_kind_and_human_display(
     assert "Sprint owner: Solo project — Solo operator for Exact Project" in output
     assert "agileforge:sprint-owner:" not in output
     assert "Team:" not in output
+    assert "INVEST assessment:" in output
+    assert (
+        "- Independent [PASS]: Delivers self-contained increment. "
+        "(Evidence: No unbuilt dependencies.)"
+    ) in output
+    assert "[INVALID / MISSING]" not in output
+    assert "required quality evidence is incomplete" not in output
 
 
 @pytest.mark.parametrize(
