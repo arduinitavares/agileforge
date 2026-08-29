@@ -190,6 +190,16 @@ function sprintCandidateStory(overrides = {}) {
     });
 }
 
+function sprintCapacity(overrides = {}) {
+    return {
+        status: 'recommended',
+        recommended_max_story_points: 8,
+        source: 'project_metrics',
+        rationale: '8 points, based on the last 1 completed Sprints: 8.',
+        ...overrides,
+    };
+}
+
 const structuralEvidenceScope = {
     proves: [
         'exact Story identity',
@@ -434,7 +444,12 @@ test('Sprint generation displays the resolved solo owner and makes named Teams o
         }],
         {
             storyDependencies: dependencyProjection([candidate]),
-            sprintCandidates: { project_id: 7, items: [candidate], sprint_owner: sprintOwner },
+            sprintCandidates: {
+                project_id: 7,
+                items: [candidate],
+                sprint_owner: sprintOwner,
+                capacity: sprintCapacity(),
+            },
         },
     );
 
@@ -463,6 +478,117 @@ test('Sprint generation blocks when provider-free owner evidence is unavailable'
     );
 
     assert.ok(markup.includes('data-sprint-owner-projection-error="true"'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+});
+
+test('Sprint generation prepopulates an editable metrics capacity', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const sprintOwner = await validatedSprintOwner(context);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] }, {}, [{
+            node_id: 'planning.sprint.plan', instance_key: null,
+            request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+        }], {
+            storyDependencies: dependencyProjection([candidate]),
+            sprintCandidates: {
+                project_id: 7,
+                items: [candidate],
+                sprint_owner: sprintOwner,
+                capacity: sprintCapacity(),
+            },
+        },
+    );
+
+    assert.ok(markup.includes('name="max_story_points"'));
+    assert.ok(markup.includes('value="8"'));
+    assert.ok(markup.includes('Maximum story points'));
+    assert.ok(markup.includes('based on the last 1 completed Sprints'));
+    assert.ok(!markup.includes('button type="submit" disabled'));
+});
+
+test('Sprint generation requires a manually entered exact positive integer', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const sprintOwner = await validatedSprintOwner(context);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] }, {}, [{
+            node_id: 'planning.sprint.plan', instance_key: null,
+            request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+        }], {
+            storyDependencies: dependencyProjection([candidate]),
+            sprintCandidates: {
+                project_id: 7,
+                items: [candidate],
+                sprint_owner: sprintOwner,
+                capacity: sprintCapacity({
+                    status: 'manual_required',
+                    recommended_max_story_points: null,
+                    source: null,
+                    rationale: 'No completed Sprint capacity history is available. Enter a positive Maximum story points value.',
+                }),
+            },
+        },
+    );
+
+    assert.ok(markup.includes('name="max_story_points"'));
+    assert.ok(!markup.includes('value="8"'));
+    assert.ok(markup.includes('button type="submit" disabled'));
+    assert.equal(context.sprintCapacityPoints('8'), 8);
+    assert.equal(context.sprintCapacityPoints('0'), null);
+    assert.equal(context.sprintCapacityPoints('-8'), null);
+    assert.equal(context.sprintCapacityPoints('8.0'), null);
+    assert.equal(context.sprintCapacityPoints(' 8 '), null);
+});
+
+test('Sprint generation fails closed for unavailable capacity projections', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const sprintOwner = await validatedSprintOwner(context);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] }, {}, [{
+            node_id: 'planning.sprint.plan', instance_key: null,
+            request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+        }], {
+            storyDependencies: dependencyProjection([candidate]),
+            sprintCandidates: {
+                project_id: 7,
+                items: [candidate],
+                sprint_owner: sprintOwner,
+                capacity: sprintCapacity({
+                    status: 'unavailable',
+                    recommended_max_story_points: null,
+                    source: null,
+                    rationale: 'Sprint capacity recommendation is unavailable. Reload before planning.',
+                }),
+            },
+        },
+    );
+
+    assert.ok(markup.includes('data-sprint-capacity-projection-error="true"'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+});
+
+test('Sprint generation rejects a string-valued server capacity recommendation', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const sprintOwner = await validatedSprintOwner(context);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] }, {}, [{
+            node_id: 'planning.sprint.plan', instance_key: null,
+            request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+        }], {
+            storyDependencies: dependencyProjection([candidate]),
+            sprintCandidates: {
+                project_id: 7,
+                items: [candidate],
+                sprint_owner: sprintOwner,
+                capacity: sprintCapacity({ recommended_max_story_points: '8' }),
+            },
+        },
+    );
+
+    assert.ok(markup.includes('data-sprint-capacity-projection-error="true"'));
     assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
 });
 
@@ -1441,7 +1567,12 @@ test('Sprint generation submits the exact projected candidate IDs', async () => 
         position: {},
         planningReviews: {},
         storyDependencies: dependencyProjection([first, second]),
-        sprintCandidates: { project_id: 7, items: [second, first], sprint_owner: sprintOwnerProjection() },
+        sprintCandidates: {
+            project_id: 7,
+            items: [second, first],
+            sprint_owner: sprintOwnerProjection(),
+            capacity: sprintCapacity(),
+        },
     })}; loadDashboard = async () => true;`, context);
     await vm.runInContext(
         'validateSprintOwnerProjection(lifecycleState.sprintCandidates.sprint_owner, 7)',
@@ -1452,13 +1583,14 @@ test('Sprint generation submits the exact projected candidate IDs', async () => 
         'record_sprint_plan',
         directActionButton(action),
         null,
-        {},
+        { max_story_points: 8 },
     );
 
     const post = requests.find(({ options }) => options.method === 'POST');
     assert.ok(post);
     const body = JSON.parse(post.options.body);
     assert.deepEqual(body.selected_story_ids, [101, 103]);
+    assert.equal(body.max_story_points, 8);
     assert.ok(!Object.hasOwn(body, 'team_name'));
 });
 

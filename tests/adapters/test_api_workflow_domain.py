@@ -3530,6 +3530,26 @@ def test_invalid_sprint_semantics_fail_validation(
         )
 
 
+@pytest.mark.parametrize(
+    ("max_story_points", "expected_capacity"),
+    [(True, 1), ("8", 8)],
+)
+def test_sprint_api_request_preserves_existing_capacity_coercion(
+    max_story_points: object,
+    expected_capacity: int,
+) -> None:
+    """Keep existing API/CLI capacity parsing outside browser validation scope."""
+    request = SprintPlanningApiRequest.model_validate(
+        {
+            "idempotency_key": "sprint-valid-api-capacity",
+            "actor": "operator",
+            "max_story_points": max_story_points,
+        }
+    )
+
+    assert request.max_story_points == expected_capacity
+
+
 def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> None:
     """Prepare every callable delivery model contract from persisted lineage."""
     project_id = _seed_accepted_backlog(engine)

@@ -1262,6 +1262,57 @@ function sprintOwnerProjection(context = {}) {
     return owner;
 }
 
+function sprintCapacityPoints(value) {
+    const text = String(value ?? '');
+    if (!/^[1-9]\d*$/.test(text)) return null;
+    const points = Number(text);
+    return Number.isSafeInteger(points) ? points : null;
+}
+
+function sprintCapacityProjectionPoints(value) {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+        return null;
+    }
+    return value;
+}
+
+function sprintCapacityProjection(context = {}) {
+    const capacity = reviewObject(context?.sprintCandidates?.capacity);
+    if (!capacity) return null;
+    const rationale = capacity.rationale;
+    if (typeof rationale !== 'string' || !rationale.trim()) return null;
+    if (capacity.status === 'recommended') {
+        const points = sprintCapacityProjectionPoints(
+            capacity.recommended_max_story_points,
+        );
+        if (points === null || capacity.source !== 'project_metrics') return null;
+        return { status: 'recommended', points, source: capacity.source, rationale };
+    }
+    if (capacity.status === 'manual_required' || capacity.status === 'unavailable') {
+        if (capacity.recommended_max_story_points !== null || capacity.source !== null) return null;
+        return { status: capacity.status, points: null, source: null, rationale };
+    }
+    return null;
+}
+
+function sprintCapacityFields(context, value) {
+    const capacity = sprintCapacityProjection(context);
+    const maxStoryPoints = sprintCapacityPoints(value);
+    if (!capacity || capacity.status === 'unavailable' || maxStoryPoints === null) {
+        throw new Error('Enter a positive whole-number Maximum story points value before generating a Sprint plan.');
+    }
+    return { max_story_points: maxStoryPoints };
+}
+
+function syncSprintCapacityButton(form) {
+    const input = form?.querySelector?.('[name="max_story_points"]');
+    const submit = form?.querySelector?.('button[type="submit"]');
+    if (!input || !submit || form.dataset.submitting === 'true') return false;
+    const valid = sprintCapacityPoints(input.value) !== null;
+    submit.disabled = !valid;
+    return valid;
+}
+
 const SPRINT_OWNER_CASEFOLD_EXPANSIONS = new Map([
     ['ß', 'ss'],
     ['ſ', 's'],
@@ -1707,6 +1758,15 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
         if (!owner) {
             return `<section role="alert" data-sprint-owner-projection-error="true" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">${content}<p><strong>Sprint owner projection unavailable.</strong> Reload before generating a Sprint plan.</p></section>`;
         }
+        const capacity = sprintCapacityProjection(context);
+        if (!capacity || capacity.status === 'unavailable') {
+            return `<section role="alert" data-sprint-capacity-projection-error="true" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">${content}<p><strong>Sprint capacity recommendation unavailable.</strong> Reload before generating a Sprint plan.</p></section>`;
+        }
+        const recommendedValue = capacity.points === null ? '' : ` value="${capacity.points}"`;
+        const disabledAttr = capacity.points === null ? ' disabled' : '';
+        const capacityGuidance = capacity.status === 'recommended'
+            ? `<p class="mt-1 text-xs leading-5 text-slate-500">Recommendation from completed Sprint metrics: ${escapeWorkflowText(capacity.rationale)}</p>`
+            : `<p class="mt-1 text-xs leading-5 text-slate-500">${escapeWorkflowText(capacity.rationale)}</p>`;
         return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
             data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
             class="space-y-4 rounded-lg border border-slate-200 p-4">
@@ -1718,8 +1778,12 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
                 <input id="delivery-team-name-${index}" name="team_name" type="text" autocomplete="organization"
                     class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
                 <p class="mt-1 text-xs leading-5 text-slate-500">Optional. Leave blank to use the resolved Sprint owner.</p>
+                <label for="delivery-max-story-points-${index}" class="mt-4 block text-sm font-semibold">Maximum story points</label>
+                <input id="delivery-max-story-points-${index}" name="max_story_points" type="number" min="1" step="1" inputmode="numeric" required${recommendedValue}
+                    class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
+                ${capacityGuidance}
             </div>
-            <button type="submit" class="${BUTTON_PRIMARY}">
+            <button type="submit"${disabledAttr} class="${BUTTON_PRIMARY}">
                 <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
                 <span data-delivery-action-label="true">${escapeWorkflowText(details.label)}</span>
             </button>
@@ -2856,6 +2920,10 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             deliveryBinding = binding;
             const deliveryFields = { ...fields };
             if (requestKind === 'record_sprint_plan') {
+                Object.assign(
+                    deliveryFields,
+                    sprintCapacityFields(lifecycleState, fields.max_story_points),
+                );
                 const candidateIds = sprintGenerationCandidateIds(lifecycleState);
                 if (candidateIds === null) {
                     throw new Error(
@@ -2915,7 +2983,10 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             }
             const localMessage = mutationCompleted
                 ? `Delivery generation completed, but the dashboard could not reload. ${error.message}`
-                : error.message;
+                : (requestKind === 'record_sprint_plan'
+                    && error.code === 'SPRINT_CAPACITY_REQUIRED'
+                    ? 'Enter a positive Maximum story points value before generating a Sprint plan.'
+                    : error.message);
             const currentControls = currentDeliveryActionContainers(
                 deliveryBinding,
                 requestKind,
@@ -3133,10 +3204,21 @@ function installInteractions() {
             const fields = {};
             if (deliveryRequestKind === 'record_sprint_plan') {
                 const teamName = form.querySelector('[name="team_name"]');
+                const maxStoryPoints = form.querySelector('[name="max_story_points"]');
                 try {
                     Object.assign(fields, sprintTeamOverrideFields(teamName?.value));
                 } catch (error) {
                     setProjectError(error.message);
+                    return;
+                }
+                try {
+                    Object.assign(
+                        fields,
+                        sprintCapacityFields(lifecycleState, maxStoryPoints?.value),
+                    );
+                } catch (error) {
+                    setProjectError('Enter a positive whole-number Maximum story points value before generating a Sprint plan.');
+                    syncSprintCapacityButton(form);
                     return;
                 }
             }
@@ -3181,6 +3263,11 @@ function installInteractions() {
             if (submitLabel) submitLabel.textContent = idleLabel;
             if (textarea) textarea.disabled = false;
         }
+    });
+
+    document.addEventListener('input', (event) => {
+        const form = event.target?.closest?.('[data-delivery-generation-form="record_sprint_plan"]');
+        if (form) syncSprintCapacityButton(form);
     });
 
     document.addEventListener('click', async (event) => {

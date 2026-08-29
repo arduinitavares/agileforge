@@ -140,6 +140,205 @@ def build_sprint_metrics(
     }
 
 
+def build_sprint_capacity_state(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify durable metrics for browser display and execution fallback."""
+    recommendation = metrics.get("recommendation")
+    if not isinstance(recommendation, dict):
+        return _unavailable_capacity_state()
+
+    points = recommendation.get("recommended_next_sprint_points")
+    source_points = recommendation.get("source_completed_points")
+    source_sprint_ids = recommendation.get("source_sprint_ids")
+    sample_size = recommendation.get("sample_size")
+    if _is_clean_first_sprint_history(
+        metrics=metrics,
+        points=points,
+        source_points=source_points,
+        source_sprint_ids=source_sprint_ids,
+        sample_size=sample_size,
+    ):
+        return {
+            "status": "manual_required",
+            "recommended_max_story_points": None,
+            "source": None,
+            "rationale": (
+                "No completed Sprint capacity history is available. "
+                "Enter a positive Maximum story points value."
+            ),
+        }
+    if _is_valid_manual_capacity_history(
+        metrics=metrics,
+        recommendation=recommendation,
+    ):
+        return {
+            "status": "manual_required",
+            "recommended_max_story_points": None,
+            "source": None,
+            "rationale": (
+                "Completed Sprint history does not provide a positive capacity "
+                "recommendation. Enter a positive Maximum story points value."
+            ),
+        }
+    if not _is_valid_capacity_recommendation(
+        metrics=metrics,
+        recommendation=recommendation,
+    ):
+        return _unavailable_capacity_state()
+
+    return {
+        "status": "recommended",
+        "recommended_max_story_points": points,
+        "source": "project_metrics",
+        "rationale": (
+            f"{points} points, based on the last {sample_size} completed "
+            f"Sprints: {', '.join(str(value) for value in source_points)}."
+        ),
+    }
+
+
+def _is_clean_first_sprint_history(
+    *,
+    metrics: Mapping[str, Any],
+    points: object,
+    source_points: object,
+    source_sprint_ids: object,
+    sample_size: object,
+) -> bool:
+    return (
+        metrics.get("status") == "insufficient_history"
+        and metrics.get("completed_sprints") == []
+        and points is None
+        and _recommendation_basis(metrics) == "insufficient_history"
+        and source_points == []
+        and source_sprint_ids == []
+        and isinstance(sample_size, int)
+        and not isinstance(sample_size, bool)
+        and sample_size == 0
+    )
+
+
+def _recommendation_basis(metrics: Mapping[str, Any]) -> object:
+    """Read the untrusted recommendation basis without widening its contract."""
+    recommendation = metrics.get("recommendation")
+    return recommendation.get("basis") if isinstance(recommendation, dict) else None
+
+
+def _is_valid_capacity_recommendation(
+    *,
+    metrics: Mapping[str, Any],
+    recommendation: Mapping[str, Any],
+) -> bool:
+    points = recommendation.get("recommended_next_sprint_points")
+    return (
+        isinstance(points, int)
+        and not isinstance(points, bool)
+        and points > 0
+        and _has_valid_capacity_history(
+            metrics=metrics,
+            recommendation=recommendation,
+        )
+    )
+
+
+def _is_valid_manual_capacity_history(
+    *,
+    metrics: Mapping[str, Any],
+    recommendation: Mapping[str, Any],
+) -> bool:
+    points = recommendation.get("recommended_next_sprint_points")
+    return (
+        isinstance(points, int)
+        and not isinstance(points, bool)
+        and points == 0
+        and _has_valid_capacity_history(
+            metrics=metrics,
+            recommendation=recommendation,
+        )
+    )
+
+
+def _has_valid_capacity_history(
+    *,
+    metrics: Mapping[str, Any],
+    recommendation: Mapping[str, Any],
+) -> bool:
+    points = recommendation.get("recommended_next_sprint_points")
+    source_points = recommendation.get("source_completed_points")
+    source_sprint_ids = recommendation.get("source_sprint_ids")
+    sample_size = recommendation.get("sample_size")
+    return (
+        metrics.get("status") == "ready"
+        and isinstance(points, int)
+        and not isinstance(points, bool)
+        and points >= 0
+        and isinstance(source_points, list)
+        and all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in source_points
+        )
+        and isinstance(source_sprint_ids, list)
+        and all(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            for value in source_sprint_ids
+        )
+        and isinstance(sample_size, int)
+        and not isinstance(sample_size, bool)
+        and sample_size > 0
+        and len(source_points) == sample_size
+        and len(source_sprint_ids) == sample_size
+        and len(set(source_sprint_ids)) == sample_size
+        and recommendation.get("basis")
+        == f"last_{sample_size}_completed_sprints_average"
+        and _matches_capacity_history_sample(
+            completed_sprints=metrics.get("completed_sprints"),
+            source_sprint_ids=source_sprint_ids,
+            source_points=source_points,
+            sample_size=sample_size,
+        )
+        and points == _round_half_up(Decimal(sum(source_points)) / Decimal(sample_size))
+    )
+
+
+def _matches_capacity_history_sample(
+    *,
+    completed_sprints: object,
+    source_sprint_ids: list[object],
+    source_points: list[object],
+    sample_size: int,
+) -> bool:
+    if not isinstance(completed_sprints, list):
+        return False
+    if sample_size != min(3, len(completed_sprints)):
+        return False
+    sample = completed_sprints[:sample_size]
+    if not all(isinstance(row, dict) for row in sample):
+        return False
+    row_ids = [row.get("sprint_id") for row in sample]
+    row_points = [row.get("story_points_completed") for row in sample]
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0
+        for value in row_ids
+    ):
+        return False
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in row_points
+    ):
+        return False
+    return source_sprint_ids == row_ids and source_points == row_points
+
+
+def _unavailable_capacity_state() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "Sprint capacity recommendation is unavailable. Reload before planning."
+        ),
+    }
+
+
 def _sort_key(sprint: Mapping[str, Any]) -> tuple[datetime, int]:
     return (
         _parse_datetime(sprint.get("completed_at")) or OLDEST_COMPLETED_AT,

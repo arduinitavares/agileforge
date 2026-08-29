@@ -40,7 +40,10 @@ from services.contracts.specification_source import (
 )
 from services.contracts.story import STORY_POINTS_BY_EFFORT
 from services.packet_renderer import PacketRenderError, render_packet
-from services.phases.sprint_metrics import build_durable_sprint_metrics
+from services.phases.sprint_metrics import (
+    build_durable_sprint_metrics,
+    build_sprint_capacity_state,
+)
 from services.planning_artifact_content import (
     load_bound_sprint_plan_envelope,
     load_stored_backlog_planning_content,
@@ -2399,6 +2402,9 @@ class DurableReadProjectionService:
         snapshot_or_error = self._snapshot(project_id)
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
+        capacity = build_sprint_capacity_state(
+            build_durable_sprint_metrics(snapshot_or_error)
+        )
         items: list[JsonValue] = [
             _validated(item.model_dump(mode="json"))
             for item in snapshot_or_error.stories
@@ -2409,6 +2415,7 @@ class DurableReadProjectionService:
                 "project_id": project_id,
                 "items": items,
                 "count": len(items),
+                "capacity": capacity,
                 "sprint_owner": {
                     **sprint_owner_projection(owner, project_id=project_id),
                     "named_team_override_allowed": True,

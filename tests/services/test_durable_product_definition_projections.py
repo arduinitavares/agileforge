@@ -677,6 +677,15 @@ def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(
 
     candidates = _data(reads.sprint_candidates(project_id=1))
     assert candidates["items"] == []
+    assert candidates["capacity"] == {
+        "status": "manual_required",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "No completed Sprint capacity history is available. "
+            "Enter a positive Maximum story points value."
+        ),
+    }
     assert candidates["sprint_owner"] == {
         "kind": "solo_project",
         "key": "agileforge:sprint-owner:solo-project:v1:project:1",

@@ -69,7 +69,10 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
-from services.phases.sprint_metrics import build_durable_sprint_metrics
+from services.phases.sprint_metrics import (
+    build_durable_sprint_metrics,
+    build_sprint_capacity_state,
+)
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.project_lifecycle import (
     CreateProjectCommand,
@@ -4465,35 +4468,13 @@ def _resolve_sprint_capacity(
             "user_override",
             f"{requested_capacity} points provided by the operator.",
         )
-    metrics = build_durable_sprint_metrics(snapshot)
-    recommendation = metrics.get("recommendation")
-    if not isinstance(recommendation, dict):
-        return None
-    points = recommendation.get("recommended_next_sprint_points")
-    source_points = recommendation.get("source_completed_points")
-    sample_size = recommendation.get("sample_size")
-    if (
-        isinstance(points, bool)
-        or not isinstance(points, int)
-        or points <= 0
-        or not isinstance(source_points, list)
-        or not all(
-            isinstance(value, int) and not isinstance(value, bool)
-            for value in source_points
-        )
-        or isinstance(sample_size, bool)
-        or not isinstance(sample_size, int)
-        or sample_size <= 0
-        or len(source_points) != sample_size
-    ):
+    state = build_sprint_capacity_state(build_durable_sprint_metrics(snapshot))
+    if state["status"] != "recommended":
         return None
     return (
-        points,
-        "project_metrics",
-        (
-            f"{points} points, based on the last {sample_size} completed "
-            f"Sprints: {', '.join(str(value) for value in source_points)}."
-        ),
+        cast("int", state["recommended_max_story_points"]),
+        cast("Literal['project_metrics']", state["source"]),
+        cast("str", state["rationale"]),
     )
 
 

@@ -48,6 +48,7 @@ _HTTP_OK = 200
 _HTTP_CREATED = 201
 _HTTP_CONFLICT = 409
 _UI_SETTLE_MS = 150
+_SPRINT_CAPACITY_POINTS = 8
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
 _EXPECTED_REMOVE_SELECTION_REQUESTS = 2
@@ -195,6 +196,14 @@ class FakeLifecycle:
     stories: list[JsonValue] = field(default_factory=list)
     story_dependencies: list[JsonValue] = field(default_factory=list)
     sprint_candidates: list[JsonValue] = field(default_factory=list)
+    sprint_capacity: JsonObject = field(
+        default_factory=lambda: {
+            "status": "recommended",
+            "recommended_max_story_points": _SPRINT_CAPACITY_POINTS,
+            "source": "project_metrics",
+            "rationale": "8 points, based on the last 1 completed Sprints: 8.",
+        }
+    )
     structural_reconcile_requests: list[JsonObject] = field(default_factory=list)
     sprint_selection_requests: list[JsonObject] = field(default_factory=list)
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
@@ -864,6 +873,7 @@ class FakeLifecycle:
             "project_id": _PROJECT_ID,
             "items": self.sprint_candidates,
             "count": len(self.sprint_candidates),
+            "capacity": self.sprint_capacity,
             "sprint_owner": {
                 "kind": "solo_project",
                 "key": "agileforge:sprint-owner:solo-project:v1:project:1",
@@ -1063,9 +1073,16 @@ class FakeLifecycle:
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
         if "team_name" in body:
-            self._assert_fields(body, {"team_name", "selected_story_ids"})
+            self._assert_fields(
+                body,
+                {"team_name", "selected_story_ids", "max_story_points"},
+            )
         else:
-            self._assert_fields(body, {"selected_story_ids"})
+            self._assert_fields(body, {"selected_story_ids", "max_story_points"})
+        max_story_points = body["max_story_points"]
+        assert isinstance(max_story_points, int)
+        assert not isinstance(max_story_points, bool)
+        assert max_story_points > 0
         projected_candidate_ids = [
             story["story_id"]
             for story in self.sprint_candidates
@@ -2605,8 +2622,10 @@ def test_sprint_generation_defaults_to_solo_owner_and_blocks_duplicate_submissio
     context, page = _open_project_page(dashboard_harness, fake)
     form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     team_name = form.locator('[name="team_name"]')
+    capacity = form.locator('[name="max_story_points"]')
     expect(team_name).to_be_visible()
     expect(team_name).not_to_have_attribute("required", "")
+    expect(capacity).to_have_value("8")
     expect(form.get_by_text("Sprint owner", exact=True)).to_be_visible()
     expect(form.get_by_text("Solo operator for Exact Project")).to_be_visible()
     expect(form).not_to_contain_text("agileforge:sprint-owner:")
@@ -2647,7 +2666,52 @@ def test_sprint_generation_defaults_to_solo_owner_and_blocks_duplicate_submissio
     assert len(sprint_requests) == 1
     assert "team_name" not in sprint_requests[0]
     assert sprint_requests[0]["selected_story_ids"] == [101]
+    assert sprint_requests[0]["max_story_points"] == _SPRINT_CAPACITY_POINTS
 
+    context.close()
+
+
+def test_first_sprint_capacity_requires_manual_positive_integer(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Keep first-Sprint generation provider-free until capacity is supplied."""
+    fake = _delivery_ready_fake([_sprint_generation_action()])
+    _seed_progressive_stories(fake, 101, 102)
+    candidate = cast("JsonObject", fake.stories[0])
+    candidate["sprint_selection_state"] = "selected"
+    candidate["dependency_safe"] = True
+    candidate["sprint_candidate"] = True
+    fake.sprint_candidates = [candidate]
+    fake.sprint_capacity = {
+        "status": "manual_required",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "No completed Sprint capacity history is available. "
+            "Enter a positive Maximum story points value."
+        ),
+    }
+    context, page = _open_project_page(dashboard_harness, fake)
+    form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    capacity = form.locator('[name="max_story_points"]')
+    submit = form.locator('button[type="submit"]')
+
+    expect(capacity).to_be_visible()
+    expect(capacity).to_have_value("")
+    expect(submit).to_be_disabled()
+    assert not [
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
+    ]
+
+    capacity.fill("8")
+    expect(submit).to_be_enabled()
+    submit.click()
+
+    sprint_requests = [
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
+    ]
+    assert len(sprint_requests) == 1
+    assert sprint_requests[0]["max_story_points"] == _SPRINT_CAPACITY_POINTS
     context.close()
 
 
@@ -2677,6 +2741,7 @@ def test_sprint_generation_posts_a_trimmed_named_team_override(
     assert len(sprint_requests) == 1
     assert sprint_requests[0]["team_name"] == "Delivery Team"
     assert sprint_requests[0]["selected_story_ids"] == [101]
+    assert sprint_requests[0]["max_story_points"] == _SPRINT_CAPACITY_POINTS
 
     context.close()
 

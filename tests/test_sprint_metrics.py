@@ -74,6 +74,230 @@ def test_no_completed_sprints_returns_insufficient_history() -> None:
     assert metrics["recommendation"]["source_completed_points"] == []
 
 
+def test_capacity_state_requires_manual_input_without_completed_history() -> None:
+    """Keep clean first-Sprint history distinct from malformed metrics."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        build_sprint_metrics(project_id=7, completed_sprints=[])
+    )
+
+    assert state == {
+        "status": "manual_required",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "No completed Sprint capacity history is available. "
+            "Enter a positive Maximum story points value."
+        ),
+    }
+
+
+def test_capacity_state_exposes_a_valid_metrics_recommendation() -> None:
+    """Expose only a positive complete metrics recommendation for planning."""
+    metrics = build_sprint_metrics(
+        project_id=7,
+        completed_sprints=[
+            _completed_sprint(
+                4,
+                completed_at="2026-06-12T10:00:00Z",
+                story_points_completed=5,
+                elapsed_seconds=3600,
+            )
+        ],
+    )
+
+    state = sprint_metrics.build_sprint_capacity_state(metrics)
+
+    assert state == {
+        "status": "recommended",
+        "recommended_max_story_points": 5,
+        "source": "project_metrics",
+        "rationale": "5 points, based on the last 1 completed Sprints: 5.",
+    }
+
+
+def test_capacity_state_exposes_positive_recommendation_with_zero_point_history() -> (
+    None
+):
+    """Keep valid zero-point completed Sprints in a positive capacity average."""
+    metrics = build_sprint_metrics(
+        project_id=7,
+        completed_sprints=[
+            _completed_sprint(
+                4,
+                completed_at="2026-06-12T10:00:00Z",
+                story_points_completed=8,
+                elapsed_seconds=3600,
+            ),
+            _completed_sprint(
+                3,
+                completed_at="2026-06-11T10:00:00Z",
+                story_points_completed=0,
+                elapsed_seconds=3600,
+            ),
+        ],
+    )
+
+    state = sprint_metrics.build_sprint_capacity_state(metrics)
+
+    assert state["status"] == "recommended"
+    assert state["recommended_max_story_points"] == 4
+
+
+def test_capacity_state_requires_manual_input_for_valid_zero_point_history() -> None:
+    """Keep structurally valid zero-point history runnable with manual capacity."""
+    metrics = build_sprint_metrics(
+        project_id=7,
+        completed_sprints=[
+            _completed_sprint(
+                4,
+                completed_at="2026-06-12T10:00:00Z",
+                story_points_completed=0,
+                elapsed_seconds=3600,
+            )
+        ],
+    )
+
+    state = sprint_metrics.build_sprint_capacity_state(metrics)
+
+    assert state == {
+        "status": "manual_required",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "Completed Sprint history does not provide a positive capacity "
+            "recommendation. Enter a positive Maximum story points value."
+        ),
+    }
+
+
+def test_capacity_state_fails_closed_for_malformed_metrics_recommendation() -> None:
+    """Reject malformed recommendation fields rather than creating a default."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        {
+            "status": "ready",
+            "recommendation": {
+                "recommended_next_sprint_points": 5,
+                "source_completed_points": [5],
+                "sample_size": 2,
+            },
+        }
+    )
+
+    assert state == {
+        "status": "unavailable",
+        "recommended_max_story_points": None,
+        "source": None,
+        "rationale": (
+            "Sprint capacity recommendation is unavailable. Reload before planning."
+        ),
+    }
+
+
+def test_capacity_state_rejects_boolean_empty_history_sample_size() -> None:
+    """Do not mistake a boolean metric field for clean first-Sprint evidence."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        {
+            "status": "insufficient_history",
+            "completed_sprints": [],
+            "recommendation": {
+                "recommended_next_sprint_points": None,
+                "basis": "insufficient_history",
+                "source_completed_points": [],
+                "source_sprint_ids": [],
+                "sample_size": False,
+            },
+        }
+    )
+
+    assert state["status"] == "unavailable"
+
+
+def test_capacity_state_fails_closed_for_partial_history() -> None:
+    """Do not recommend capacity from incomplete completed-Sprint evidence."""
+    metrics = build_sprint_metrics(
+        project_id=7,
+        completed_sprints=[
+            _completed_sprint(
+                4,
+                completed_at="2026-06-12T10:00:00Z",
+                story_points_completed=8,
+                elapsed_seconds=None,
+                started_at=None,
+            )
+        ],
+    )
+
+    assert metrics["status"] == "partial_history"
+    state = sprint_metrics.build_sprint_capacity_state(metrics)
+    assert state["status"] == "unavailable"
+
+
+def test_capacity_state_rejects_inconsistent_completed_points() -> None:
+    """Do not promote a recommendation that disagrees with its source points."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        {
+            "status": "ready",
+            "recommendation": {
+                "recommended_next_sprint_points": 3,
+                "basis": "last_2_completed_sprints_average",
+                "source_sprint_ids": [12, 11],
+                "source_completed_points": [7, -1],
+                "sample_size": 2,
+            },
+        }
+    )
+
+    assert state["status"] == "unavailable"
+
+
+def test_capacity_state_rejects_recommendation_not_bound_to_history_rows() -> None:
+    """Reject a recommendation whose source differs from durable history."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        {
+            "status": "ready",
+            "completed_sprints": [
+                {
+                    "sprint_id": 999,
+                    "story_points_completed": 1,
+                }
+            ],
+            "recommendation": {
+                "recommended_next_sprint_points": 8,
+                "basis": "last_1_completed_sprints_average",
+                "source_sprint_ids": [1],
+                "source_completed_points": [8],
+                "sample_size": 1,
+            },
+        }
+    )
+
+    assert state["status"] == "unavailable"
+
+
+def test_capacity_state_rejects_boolean_history_row_values() -> None:
+    """Do not treat boolean row values as equal numeric capacity evidence."""
+    state = sprint_metrics.build_sprint_capacity_state(
+        {
+            "status": "ready",
+            "completed_sprints": [
+                {
+                    "sprint_id": True,
+                    "story_points_completed": 8,
+                }
+            ],
+            "recommendation": {
+                "recommended_next_sprint_points": 8,
+                "basis": "last_1_completed_sprints_average",
+                "source_sprint_ids": [1],
+                "source_completed_points": [8],
+                "sample_size": 1,
+            },
+        }
+    )
+
+    assert state["status"] == "unavailable"
+
+
 def test_durable_metrics_recommend_from_completed_story_points() -> None:
     """Use completed Story facts, not planned plan capacity, for recommendation."""
     completed_at = datetime(2026, 6, 12, 9, tzinfo=UTC)
