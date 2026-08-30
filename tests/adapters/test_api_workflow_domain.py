@@ -3176,9 +3176,9 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
     )
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
-    assert [
-        story.story_id for story in snapshot.stories if story.sprint_candidate
-    ] == [future_story_id]
+    assert [story.story_id for story in snapshot.stories if story.sprint_candidate] == [
+        future_story_id
+    ]
     backlog = next(
         item
         for item in snapshot.phase_artifacts
@@ -3342,8 +3342,10 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
             project_id=project_id,
             decision=decision,
             selected_story_ids=(completed_story_id, future_story_id),
-            selected_scope_fingerprint=story_dependency_source_fingerprint(current_scope),
-    )
+            selected_scope_fingerprint=story_dependency_source_fingerprint(
+                current_scope
+            ),
+        )
         is None
     )
 
@@ -3367,9 +3369,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
     assert response.json()["status"] == "success"
     with Session(engine) as session:
         applied = WorkflowFactRepository(session).load(project_id)
-    assert applied.story_dependency_reviews[-1].selected_story_ids == (
-        future_story_id,
-    )
+    assert applied.story_dependency_reviews[-1].selected_story_ids == (future_story_id,)
     projection = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
         project_id=project_id
     )
@@ -6002,6 +6002,68 @@ def test_application_backlog_continuation_position_rejects_malformed_join(
 def test_application_backlog_continuation_position_rejects_torn_projection() -> None:
     """A selected identity may not diverge from the durable reviewed candidate."""
     reads = _CountingBacklogReads(_backlog_continuation_projection(backlog_id=8))
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(
+            _backlog_continuation_position(_backlog_continuation_decision())
+        ),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert reads.calls == [(41, 7)]
+
+
+def test_backlog_rejects_malformed_optional_reentry() -> None:
+    """Only the exact accepted-correction tuple is a valid Feedback absence."""
+    decision = _backlog_continuation_decision(
+        reason="BACKLOG_CORRECTION_AVAILABLE",
+        request_kind="wrong_optional_request",
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert reads.calls == []
+
+
+def test_application_backlog_optional_reentry_is_valid_absence() -> None:
+    """A well-formed accepted correction remains outside Feedback continuation."""
+    decision = _backlog_continuation_decision(
+        reason="BACKLOG_CORRECTION_AVAILABLE",
+        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert (
+        _object(_items(result["errors"])[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
+    )
+    assert reads.calls == []
+
+
+def test_application_backlog_continuation_rejects_torn_rejected_projection() -> None:
+    """Rejected absence is valid only after candidate and lineage integrity checks."""
+    reads = _CountingBacklogReads(
+        _backlog_continuation_projection(backlog_id=8, state="rejected")
+    )
     application = AgileForgeApplication(
         workflow_domain=_Domain(
             _backlog_continuation_position(_backlog_continuation_decision())

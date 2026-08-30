@@ -1855,7 +1855,7 @@ class AgileForgeApplication:
         """Return the current durable workflow position."""
         return self._workflow_domain.position(project_id)
 
-    def backlog_review(self, project_id: int) -> JsonObject:
+    def backlog_review(self, project_id: int) -> JsonObject:  # noqa: PLR0911
         """Read a pending Backlog review or its exact Feedback continuation."""
         selection = self._delivery_review_selection
         if selection is None:
@@ -1868,7 +1868,6 @@ class AgileForgeApplication:
             decision
             for decision in position.decisions
             if decision.node_id == "backlog.generate"
-            and decision.reason_code != "BACKLOG_CORRECTION_AVAILABLE"
             and (
                 any(
                     reference.fact_type == "backlog"
@@ -1900,13 +1899,18 @@ class AgileForgeApplication:
                 "No planning review is currently available.",
                 code="PLANNING_REVIEW_NOT_AVAILABLE",
             )
+        if _backlog_optional_correction_is_valid(continuation[0]):
+            return _planning_review_read_error(
+                "No planning review is currently available.",
+                code="PLANNING_REVIEW_NOT_AVAILABLE",
+            )
         return self._backlog_feedback_continuation(
             project_id=project_id,
             decision=continuation[0],
             selection=selection,
         )
 
-    def _backlog_feedback_continuation(
+    def _backlog_feedback_continuation(  # noqa: PLR0911
         self,
         *,
         project_id: int,
@@ -1937,6 +1941,16 @@ class AgileForgeApplication:
         if result.get("ok") is not True:
             return result
         review = result.get("data")
+        if not _backlog_feedback_projection_matches(
+            review=review,
+            backlog_reference=backlog_reference,
+            specification_reference=specification_reference,
+            goal_reference=goal_reference,
+            feedback_required=False,
+        ):
+            return _planning_review_read_error(
+                "Backlog Feedback projection is invalid."
+            )
         if _backlog_terminal_review_state(review) == "rejected":
             return _planning_review_read_error(
                 "No planning review is currently available.",
@@ -5243,6 +5257,28 @@ def _backlog_feedback_continuation_references(
     return cast("tuple[FactReference, FactReference, FactReference]", selected)
 
 
+def _backlog_optional_correction_is_valid(decision: NodeDecision) -> bool:
+    """Recognize only the exact accepted-correction re-entry as valid absence."""
+    if (
+        decision.reason_code != "BACKLOG_CORRECTION_AVAILABLE"
+        or decision.request_kind != "record_backlog_draft"
+        or decision.instance_key is not None
+        or decision.category is not NodeCategory.AVAILABLE
+        or decision.recommendation_kind is not RecommendationKind.OPTIONAL_REENTRY
+    ):
+        return False
+    required = ("backlog", "specification", "product_goal")
+    counts = Counter(reference.fact_type for reference in decision.fact_references)
+    if any(
+        reference.fact_type not in required for reference in decision.fact_references
+    ) or any(counts[fact_type] != 1 for fact_type in required):
+        return False
+    return all(
+        _fact_reference_integer(reference) is not None
+        for reference in decision.fact_references
+    )
+
+
 def _fact_reference_integer(reference: FactReference) -> int | None:
     """Accept only positive integer fact identities in durable joins."""
     try:
@@ -5258,6 +5294,7 @@ def _backlog_feedback_projection_matches(
     backlog_reference: FactReference,
     specification_reference: FactReference,
     goal_reference: FactReference,
+    feedback_required: bool = True,
 ) -> bool:
     """Require durable reviewed content to match every current graph reference."""
     if not isinstance(review, dict):
@@ -5293,9 +5330,14 @@ def _backlog_feedback_projection_matches(
         and goal_data.get("product_goal_artifact_id")
         == _fact_reference_integer(goal_reference)
         and goal_data.get("product_goal_fingerprint") == goal_reference.fingerprint
-        and terminal_review_data.get("state") == "feedback"
-        and isinstance(rationale, str)
-        and rationale.strip()
+        and (
+            not feedback_required
+            or (
+                terminal_review_data.get("state") == "feedback"
+                and isinstance(rationale, str)
+                and rationale.strip()
+            )
+        )
     )
 
 
