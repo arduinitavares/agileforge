@@ -212,6 +212,90 @@ class StoryItemEnvelope(BaseModel):
         return self
 
 
+class LegacyCanonicalStoryItem(BaseModel):
+    """Closed pre-#221 Story item retained only for correction source validation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    story_item_id: str
+    story_title: Annotated[str, Field(min_length=1)]
+    statement: Annotated[str, Field(min_length=1)]
+    persona: Annotated[str, Field(min_length=1, max_length=_MAX_PERSONA_LENGTH)]
+    acceptance_criteria: tuple[str, ...] = Field(min_length=1)
+    spec_item_ids: tuple[str, ...]
+    invest_score: Literal["High", "Medium", "Low"]
+    estimated_effort: Literal["XS", "S", "M", "L", "XL"]
+    produced_artifacts: tuple[str, ...]
+    research_caveats: tuple[str, ...]
+    decomposition_warning: str | None
+    dependency_candidates: tuple[StoryDependencyCandidate, ...]
+
+    @field_validator("story_item_id")
+    @classmethod
+    def validate_host_item_id(cls, value: str) -> str:
+        """Reject impossible historical host Story IDs."""
+        return validate_story_item_id(value)
+
+    @field_validator("story_title", "statement", "persona")
+    @classmethod
+    def validate_nonblank_content(cls, value: str) -> str:
+        """Reject blank historical content without rewriting accepted bytes."""
+        return require_nonblank_text(value, field_name="Legacy Story item content")
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def validate_host_criteria(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank historical criteria while preserving exact ordering."""
+        if any(not criterion.strip() for criterion in value):
+            message = "acceptance criterion must not be empty or whitespace-only"
+            raise ValueError(message)
+        return value
+
+    @field_validator("spec_item_ids")
+    @classmethod
+    def validate_canonical_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require the stored historical evidence IDs to remain canonical."""
+        return validate_canonical_spec_item_ids(value)
+
+    @model_validator(mode="after")
+    def validate_derived_persona(self) -> Self:
+        """Require the historical persona to match the same host parser."""
+        if self.persona != parse_story_persona(self.statement):
+            message = "Story persona must equal the parsed statement persona"
+            raise ValueError(message)
+        return self
+
+
+class LegacyStoryItemEnvelope(BaseModel):
+    """Historical non-recursive Story fingerprint envelope."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item: LegacyCanonicalStoryItem
+    item_fingerprint: str
+
+    @model_validator(mode="after")
+    def validate_fingerprint(self) -> Self:
+        """Verify the stored fingerprint against the historical closed item shape."""
+        if self.item_fingerprint != canonical_hash(self.item.model_dump(mode="json")):
+            message = "Story item fingerprint does not match canonical item"
+            raise ValueError(message)
+        return self
+
+
+class LegacyCanonicalStoryOutput(BaseModel):
+    """Closed pre-#221 artifact shape accepted only as a correction source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    story_items: tuple[LegacyStoryItemEnvelope, ...] = Field(
+        min_length=1,
+        max_length=_MAX_STORY_ITEMS,
+    )
+    is_complete: bool
+    clarifying_questions: tuple[str, ...] = ()
+
+
 class StoryReplacementSource(BaseModel):
     """Exact accepted artifact identity embedded by the host in a replacement."""
 

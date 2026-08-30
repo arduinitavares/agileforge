@@ -20,8 +20,10 @@ from models.enums import SprintStatus
 from models.events import WorkflowEvent
 from models.workflow import (
     BacklogArtifact,
+    RoadmapArtifact,
     StoryArtifact,
     StoryArtifactDecision,
+    WorkflowNodeAttempt,
     WorkflowTransitionReceipt,
 )
 from services.agent_workbench import story_phase
@@ -165,6 +167,87 @@ def _story_content(
         clarifying_questions=(),
     )
     return output.model_dump(mode="json")
+
+
+def _legacy_story_content(*, requirement_index: int) -> JsonObject:
+    """Return the closed pre-#221 Story shape retained by accepted artifacts."""
+    item: JsonObject = {
+        "story_item_id": "US-0001",
+        "story_title": f"Legacy planning Story {requirement_index}",
+        "statement": (
+            "As an operator, I want durable planning facts, so that legacy "
+            f"correction {requirement_index} remains available."
+        ),
+        "persona": "operator",
+        "acceptance_criteria": ["Preserve the accepted legacy Story."],
+        "spec_item_ids": [f"REQ.planning-{requirement_index}"],
+        "invest_score": "High",
+        "estimated_effort": "M",
+        "produced_artifacts": ["planning records"],
+        "research_caveats": [],
+        "decomposition_warning": None,
+        "dependency_candidates": [],
+    }
+    return {
+        "story_items": [
+            {
+                "item": item,
+                "item_fingerprint": canonical_hash(item),
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+
+def _record_accepted_legacy_story(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    roadmap_id: int,
+    backlog_item_id: str,
+    requirement_index: int,
+    legacy_content: JsonObject | None = None,
+) -> StoryArtifact:
+    """Seed one historical accepted Story artifact without current-schema parsing."""
+    backlog = session.exec(
+        select(BacklogArtifact).where(BacklogArtifact.project_id == project_id)
+    ).one()
+    roadmap = session.get(RoadmapArtifact, roadmap_id)
+    assert roadmap is not None
+    content = legacy_content or _legacy_story_content(
+        requirement_index=requirement_index
+    )
+    artifact = StoryArtifact(
+        project_id=project_id,
+        source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+        source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+        backlog_item_id=backlog_item_id,
+        roadmap_artifact_id=roadmap_id,
+        roadmap_artifact_fingerprint=roadmap.content_fingerprint,
+        version_number=1,
+        canonical_content_json=canonical_json(content),
+        content_fingerprint=canonical_hash(content),
+        story_item_ids_json=canonical_json(["US-0001"]),
+        created_by="operator@example.com",
+        created_at=EVALUATED_AT,
+    )
+    session.add(artifact)
+    session.flush()
+    assert artifact.story_artifact_id is not None
+    session.add(
+        StoryArtifactDecision(
+            project_id=project_id,
+            story_artifact_id=artifact.story_artifact_id,
+            artifact_fingerprint=artifact.content_fingerprint,
+            decision="accepted",
+            rationale="Accepted before the current Story schema.",
+            reviewer="operator@example.com",
+            idempotency_key=f"accept-legacy-{backlog_item_id}",
+            decided_at=EVALUATED_AT,
+        )
+    )
+    return artifact
 
 
 def _seed_story_parent(
@@ -761,6 +844,216 @@ def test_story_set_correction_uses_accepted_artifact_when_rows_are_binding_inval
         rows = session.exec(select(UserStory)).all()
         assert len(rows) == 1
         assert rows[0].is_superseded is False
+
+
+def test_story_set_correction_accepts_exact_legacy_artifact_only_for_correction(
+    engine: Engine,
+) -> None:
+    """A hash-matching pre-#221 artifact remains correctable, never generatable."""
+    expected_legacy_artifact_count = 2
+    project_id, roadmap_id = _seed_story_parent(
+        engine,
+        requirements=("Plan first legacy work", "Plan second legacy work"),
+    )
+    with Session(engine) as session:
+        first = _record_accepted_legacy_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            backlog_item_id="PBI-000001",
+            requirement_index=1,
+        )
+        second = _record_accepted_legacy_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            backlog_item_id="PBI-000002",
+            requirement_index=2,
+        )
+        session.commit()
+        first_id = int(first.story_artifact_id or 0)
+        first_fingerprint = first.content_fingerprint
+        first_content = first.canonical_content_json
+        second_id = int(second.story_artifact_id or 0)
+        second_fingerprint = second.content_fingerprint
+        second_content = second.canonical_content_json
+        initial_attempt_count = len(session.exec(select(WorkflowNodeAttempt)).all())
+
+    position = _domain(engine).position(project_id)
+    corrections = tuple(
+        decision
+        for decision in position.decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    )
+    assert {decision.instance_key for decision in corrections} == {
+        "backlog_item:PBI-000001",
+        "backlog_item:PBI-000002",
+    }
+    first_correction = next(
+        decision
+        for decision in corrections
+        if decision.instance_key == "backlog_item:PBI-000001"
+    )
+    input_service = DeliveryActionInputService(engine=engine)
+    assert (
+        input_service.build(
+            project_id=project_id,
+            decision=first_correction,
+            node_id="planning.story.generate",
+        )
+        is None
+    )
+
+    class CapturingApplication(AgileForgeApplication):
+        calls: list[AgenticActionRequest]
+
+        def run_agentic_action(
+            self,
+            request: AgenticActionRequest,
+        ) -> TransitionResult:
+            self.calls.append(request)
+            return TransitionResult(ok=True, applied_node_id=request.node_id)
+
+    application = CapturingApplication(
+        workflow_domain=_domain(engine),
+        delivery_action_input=input_service,
+    )
+    application.calls = []
+    ordinary = application.generate_story(
+        DeliveryActionRequest(
+            project_id=project_id,
+            instance_key="backlog_item:PBI-000001",
+            idempotency_key="ordinary-legacy-story",
+            actor="operator@example.com",
+        )
+    )
+    assert ordinary.ok is False
+    assert application.calls == []
+
+    result = application.correct_story_set(
+        application_module.StorySetCorrectionRequest(
+            project_id=project_id,
+            instance_key="backlog_item:PBI-000001",
+            expected_decision_fingerprint=first_correction.decision_fingerprint,
+            accepted_story_artifact_id=first_id,
+            accepted_story_artifact_fingerprint=first_fingerprint,
+            idempotency_key="correct-legacy-story-set",
+            actor="operator@example.com",
+            correlation_id="legacy-correction-1",
+        )
+    )
+
+    assert result.ok is True
+    assert len(application.calls) == 1
+    action = application.calls[0]
+    assert action.instance_key == "backlog_item:PBI-000001"
+    assert action.decision_fingerprint == first_correction.decision_fingerprint
+    writer_input = action.input_payload["writer_input"]
+    assert isinstance(writer_input, dict)
+    assert "invest_score" in str(writer_input["user_input"])
+    with Session(engine) as session:
+        artifacts = {
+            int(artifact.story_artifact_id or 0): artifact
+            for artifact in session.exec(select(StoryArtifact)).all()
+        }
+        assert len(artifacts) == expected_legacy_artifact_count
+        assert artifacts[first_id].content_fingerprint == first_fingerprint
+        assert artifacts[first_id].canonical_content_json == first_content
+        assert artifacts[second_id].content_fingerprint == second_fingerprint
+        assert artifacts[second_id].canonical_content_json == second_content
+        assert (
+            len(session.exec(select(StoryArtifactDecision)).all())
+            == expected_legacy_artifact_count
+        )
+        assert (
+            len(session.exec(select(WorkflowNodeAttempt)).all())
+            == initial_attempt_count
+        )
+
+
+def test_story_set_correction_rejects_noncanonical_legacy_source_before_agent(
+    engine: Engine,
+) -> None:
+    """A hash-matching artifact still fails closed when it is not legacy canonical."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    malformed_content = _legacy_story_content(requirement_index=1)
+    story_items = malformed_content["story_items"]
+    assert isinstance(story_items, list)
+    envelope = story_items[0]
+    assert isinstance(envelope, dict)
+    item = envelope["item"]
+    assert isinstance(item, dict)
+    item["invest_score"] = "Unscored"
+    envelope["item_fingerprint"] = canonical_hash(item)
+    with Session(engine) as session:
+        artifact = _record_accepted_legacy_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            backlog_item_id="PBI-000001",
+            requirement_index=1,
+            legacy_content=malformed_content,
+        )
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+        artifact_count = len(session.exec(select(StoryArtifact)).all())
+        decision_count = len(session.exec(select(StoryArtifactDecision)).all())
+        attempt_count = len(session.exec(select(WorkflowNodeAttempt)).all())
+
+    position = _domain(engine).position(project_id)
+    correction = next(
+        decision
+        for decision in position.decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+        and decision.instance_key == "backlog_item:PBI-000001"
+    )
+    input_service = DeliveryActionInputService(engine=engine)
+    assert (
+        input_service.build(
+            project_id=project_id,
+            decision=correction,
+            node_id="planning.story.generate",
+            allow_legacy_story_correction=True,
+        )
+        is None
+    )
+
+    class CapturingApplication(AgileForgeApplication):
+        calls: list[AgenticActionRequest]
+
+        def run_agentic_action(
+            self,
+            request: AgenticActionRequest,
+        ) -> TransitionResult:
+            self.calls.append(request)
+            return TransitionResult(ok=True, applied_node_id=request.node_id)
+
+    application = CapturingApplication(
+        workflow_domain=_domain(engine),
+        delivery_action_input=input_service,
+    )
+    application.calls = []
+    result = application.correct_story_set(
+        application_module.StorySetCorrectionRequest(
+            project_id=project_id,
+            instance_key="backlog_item:PBI-000001",
+            expected_decision_fingerprint=correction.decision_fingerprint,
+            accepted_story_artifact_id=artifact_id,
+            accepted_story_artifact_fingerprint=artifact_fingerprint,
+            idempotency_key="reject-malformed-legacy-story",
+            actor="operator@example.com",
+        )
+    )
+
+    assert result.ok is False
+    assert application.calls == []
+    with Session(engine) as session:
+        assert len(session.exec(select(StoryArtifact)).all()) == artifact_count
+        assert len(session.exec(select(StoryArtifactDecision)).all()) == decision_count
+        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == attempt_count
 
 
 def test_story_set_correction_rejects_malformed_stale_and_foreign_guards_before_agent(

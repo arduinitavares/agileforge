@@ -61,6 +61,7 @@ from services.contracts.sprint import (
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    LegacyCanonicalStoryOutput,
     UserStoryWriterInput,
 )
 from services.node_attempt_replay import (
@@ -343,6 +344,7 @@ class _DeliveryActionInputPort(Protocol):
         project_id: int,
         decision: NodeDecision,
         node_id: str,
+        allow_legacy_story_correction: bool = False,
     ) -> JsonObject | WorkflowError | None: ...
 
     def build_story_correction(
@@ -842,6 +844,7 @@ class DeliveryActionInputService:
         project_id: int,
         decision: NodeDecision,
         node_id: str,
+        allow_legacy_story_correction: bool = False,
     ) -> JsonObject | WorkflowError | None:
         """Build one typed payload, or fail closed when durable input is incomplete."""
         if node_id == "planning.sprint.plan":
@@ -860,7 +863,14 @@ class DeliveryActionInputService:
                     elif node_id == "planning.roadmap.generate":
                         payload = _roadmap_input(session, decision, lineage)
                     elif node_id == "planning.story.generate":
-                        payload = _story_input(session, decision, lineage)
+                        payload = _story_input(
+                            session,
+                            decision,
+                            lineage,
+                            allow_legacy_story_correction=(
+                                allow_legacy_story_correction
+                            ),
+                        )
         except AcceptedSpecificationIntegrityError as error:
             return _accepted_specification_input_error(error)
         except (ValidationError, ValueError):
@@ -2407,6 +2417,7 @@ class AgileForgeApplication:
             project_id=request.project_id,
             decision=decision,
             node_id=node_id,
+            allow_legacy_story_correction=True,
         )
         if isinstance(input_payload, WorkflowError):
             return TransitionResult(ok=False, position=position, error=input_payload)
@@ -4583,6 +4594,8 @@ def _story_input(
     session: Session,
     decision: NodeDecision,
     lineage: _DeliveryLineage,
+    *,
+    allow_legacy_story_correction: bool = False,
 ) -> JsonObject | None:
     backlog_source = _required_backlog(session, decision, lineage)
     item_reference = _single_fact_reference(decision, "backlog_item")
@@ -4653,7 +4666,11 @@ def _story_input(
         if prior_content is None:
             message = "Prior Story content is not canonical."
             raise ValueError(message)
-        CanonicalStoryOutput.model_validate(prior_content)
+        _validate_prior_story_correction_content(
+            prior,
+            prior_content,
+            allow_legacy_story_correction=allow_legacy_story_correction,
+        )
         review = session.exec(
             select(StoryArtifactDecision).where(
                 col(StoryArtifactDecision.project_id) == prior.project_id,
@@ -4684,6 +4701,33 @@ def _story_input(
             "supersedes_story_artifact_id": supersedes_id,
         }
     )
+
+
+def _validate_prior_story_correction_content(
+    prior: StoryArtifact,
+    prior_content: JsonObject,
+    *,
+    allow_legacy_story_correction: bool,
+) -> None:
+    """Validate a retained Story source without widening ordinary Story parsing."""
+    try:
+        CanonicalStoryOutput.model_validate(prior_content)
+    except ValidationError:
+        if not allow_legacy_story_correction:
+            raise
+    else:
+        return
+    try:
+        legacy_output = LegacyCanonicalStoryOutput.model_validate(prior_content)
+    except ValidationError as error:
+        message = "Prior Story content is not a recognized canonical legacy artifact."
+        raise ValueError(message) from error
+    expected_item_ids = canonical_json(
+        [envelope.item.story_item_id for envelope in legacy_output.story_items]
+    )
+    if prior.story_item_ids_json != expected_item_ids:
+        message = "Legacy Story artifact item IDs do not match canonical content."
+        raise ValueError(message)
 
 
 type _SprintCapacity = tuple[
