@@ -406,8 +406,8 @@ Add focused tests for:
 - [ ] **Step 3: Run Task 3 RED**
 
 ```bash
-node --test tests/test_workflow_position_display.mjs \
-  --test-name-pattern='Backlog correction|Backlog Feedback focus'
+node --test --test-name-pattern='Backlog correction|Backlog Feedback focus' \
+  tests/test_workflow_position_display.mjs
 ```
 
 Expected: all new lock, phase, cleanup, and focus tests fail for the exact missing-state behaviors above.
@@ -427,8 +427,8 @@ Add `activeBacklogCorrectionMutation` beside, but independent of, `activeSpecifi
 - [ ] **Step 5: Run Task 3 GREEN**
 
 ```bash
-node --test tests/test_workflow_position_display.mjs \
-  --test-name-pattern='Backlog correction|Backlog Feedback focus'
+node --test --test-name-pattern='Backlog correction|Backlog Feedback focus' \
+  tests/test_workflow_position_display.mjs
 node --test tests/test_dashboard_review_safety.mjs tests/test_workflow_position_display.mjs
 ```
 
