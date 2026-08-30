@@ -83,6 +83,19 @@ from tests.workflow.test_execution_transitions import (
 from tests.workflow.test_execution_transitions import (
     _guards as execution_guards,
 )
+from tests.workflow.test_node_attempts import (
+    MutableClock,
+    _attempt_identity,
+    _completion_request,
+    _seed_accepted_specification_state,
+    _start_request,
+)
+from tests.workflow.test_node_attempts import (
+    _domain as attempt_domain,
+)
+from tests.workflow.test_node_attempts import (
+    _registry as attempt_registry,
+)
 from tests.workflow.test_planning_transitions import (
     _apply_current_dependencies,
     _guards,
@@ -126,6 +139,7 @@ from workflow.requests import (
     DecideSpecification,
     DecideSprintPlan,
     DecideStory,
+    FailNodeAttempt,
     RecordPostSprintTriage,
     ReviewSprint,
     StartNodeAttempt,
@@ -5912,7 +5926,7 @@ def test_application_review_read_distinguishes_absence_from_conflict() -> None:
         ),
     ],
 )
-def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle(
+def test_application_backlog_feedback_continuation_position_matrix(
     reason: str,
     category: NodeCategory,
     recommendation: RecommendationKind,
@@ -5959,6 +5973,79 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
         }
     }
     assert reads.calls == [(41, 7)]
+
+
+def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle(
+    engine: "Engine",
+) -> None:
+    """Retain one persisted Feedback review throughout real attempt transitions."""
+    project_id, spec_id, spec_hash = _seed_accepted_specification_state(engine)
+    clock = MutableClock(datetime(2026, 8, 30, tzinfo=UTC))
+    domain = attempt_domain(engine, clock, attempt_registry())
+    first_start = _start_request(domain, project_id, idempotency_key="seed-backlog")
+    started = domain.transition(first_start)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    assert domain.transition(
+        _completion_request(
+            start_request=first_start,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            specification=(spec_id, spec_hash),
+        )
+    ).ok
+    pending = domain.position(project_id)
+    review_decision = next(
+        item for item in pending.decisions if item.node_id == "backlog.review"
+    )
+    backlog_reference = next(
+        item for item in review_decision.fact_references if item.fact_type == "backlog"
+    )
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=DurableReadProjectionService(engine=engine),
+        delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
+    )
+    assert application.backlog_review(project_id)["ok"] is True
+    feedback = domain.transition(
+        DecideBacklog(
+            project_id=project_id,
+            graph_version=pending.graph_version,
+            fact_fingerprint=pending.fact_fingerprint,
+            decision_fingerprint=review_decision.decision_fingerprint,
+            instance_key=None,
+            backlog_artifact_id=int(backlog_reference.fact_id),
+            artifact_fingerprint=backlog_reference.fingerprint,
+            decision="feedback",
+            rationale="Show the retry boundary.",
+            idempotency_key="feedback-backlog",
+            actor="operator@example.com",
+            correlation_id="task-213",
+        )
+    )
+    assert feedback.ok
+    assert application.backlog_review(project_id)["ok"] is True
+    active_start = _start_request(domain, project_id, idempotency_key="active-backlog")
+    active = domain.transition(active_start)
+    assert active.ok
+    assert application.backlog_review(project_id)["ok"] is True
+    duplicate_request = _start_request(domain, project_id, idempotency_key="duplicate")
+    duplicate = domain.transition(duplicate_request)
+    assert duplicate.error is not None
+    assert duplicate.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    active_id, active_fingerprint = _attempt_identity(active)
+    failed = domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=active_id,
+            attempt_fingerprint=active_fingerprint,
+            failure_code="PROVIDER_UNAVAILABLE",
+            failure_message="Provider unavailable.",
+            idempotency_key="fail-backlog",
+            actor="operator@example.com",
+        )
+    )
+    assert failed.ok
+    assert application.backlog_review(project_id)["ok"] is True
 
 
 @pytest.mark.parametrize(
