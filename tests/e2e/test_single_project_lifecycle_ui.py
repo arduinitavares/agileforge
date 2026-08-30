@@ -645,7 +645,9 @@ class FakeLifecycle:
             "source_fingerprint": "sha256:hidden-registered-source",
             "producer_capability": "to-spec",
             "preparation_capability": "grill-with-docs",
+            "source": {"relative_path": "specs/product-specification.md"},
             "context": {"state": "absent", "document": None},
+            "adrs": [{"relative_path": "docs/adr/0004-registered-source.md"}],
         }
 
     def _structure_specification(self, body: JsonObject) -> None:
@@ -1239,23 +1241,68 @@ class FakeLifecycle:
             "fact_references": fact_references,
         }
         decisions: list[JsonValue] = [decision]
+        actions: list[JsonValue] = [
+            {
+                "node_id": decision["node_id"],
+                "instance_key": instance_key,
+                "request_kind": request_kind,
+                "endpoint": endpoint,
+                "transport": "semantic",
+            }
+        ]
+        revision_registration_available = self.specification_source is not None and (
+            self.specification is None or self.specification_feedback is not None
+        )
+        if revision_registration_available:
+            registration_references: list[JsonValue] = [
+                {
+                    "fact_type": "specification_source",
+                    "fact_id": str(
+                        self.specification_source["specification_source_id"]
+                    ),
+                    "fingerprint": self.specification_source["source_fingerprint"],
+                }
+            ]
+            if self.specification_feedback is not None:
+                registration_references.append(
+                    {
+                        "fact_type": "specification_candidate",
+                        "fact_id": "32",
+                        "fingerprint": "sha256:hidden-specification",
+                    }
+                )
+            decisions.append(
+                {
+                    "node_id": "specification.source.register",
+                    "child_graph_id": "specification",
+                    "request_kind": "register_specification_source",
+                    "category": "available",
+                    "instance_key": None,
+                    "reason_code": (
+                        "SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE"
+                        if self.specification_feedback is not None
+                        else "SPECIFICATION_SOURCE_REPLACEMENT_AVAILABLE"
+                    ),
+                    "decision_fingerprint": "sha256:hidden-source-revision",
+                    "fact_references": registration_references,
+                }
+            )
+            actions.append(
+                {
+                    "node_id": "specification.source.register",
+                    "instance_key": None,
+                    "request_kind": "register_specification_source",
+                    "endpoint": "specifications/source",
+                    "transport": "semantic",
+                }
+            )
         return {
             "graph_version": "agileforge.workflow.hidden",
             "fact_fingerprint": "sha256:hidden-facts",
             "decisions": decisions,
             "terminal": False,
             "actions": [],
-        } | {
-            "_actions": [
-                {
-                    "node_id": decision["node_id"],
-                    "instance_key": instance_key,
-                    "request_kind": request_kind,
-                    "endpoint": endpoint,
-                    "transport": "semantic",
-                }
-            ]
-        }
+        } | {"_actions": actions}
 
     def position_envelope(self) -> JsonObject:
         """Return position data and advertised actions in the HTTP shape."""
@@ -1668,7 +1715,9 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
             "source_fingerprint": "sha256:issue-204-source",
             "producer_capability": "to-spec",
             "preparation_capability": "grill-with-docs",
+            "source": {"relative_path": "specs/issue-204.md"},
             "context": {"state": "absent", "document": None},
+            "adrs": [],
         },
         specification={"rendered_markdown": "# Prior Feedback candidate"},
         specification_feedback="Restore the exact observable contract.",
@@ -1719,6 +1768,16 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
     expect(button).to_contain_text("Structuring Specification...")
     expect(status).to_be_visible()
     expect(status).to_have_text("Structuring Specification...")
+    expect(page.locator('[data-current-specification-source="true"]')).to_be_visible()
+    revision = page.locator('[data-specification-revision-registration="true"]')
+    expect(revision).not_to_have_attribute("open", "")
+    expect(revision).to_have_attribute("aria-disabled", "true")
+    assert (
+        revision.locator("button, input, textarea, select").evaluate_all(
+            "controls => controls.every((control) => control.disabled)"
+        )
+        is True
+    )
     assert page.evaluate("window.issue204Requests.length") == 1
     assert (
         page.evaluate(
@@ -1781,6 +1840,78 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
             name="Retry structuring from unchanged source",
         )
     ).not_to_be_visible()
+    assert fake.api_errors == []
+    context.close()
+
+
+def test_issue_211_shows_current_source_through_specification_lifecycle(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Keep current source facts visible while revised registration stays secondary."""
+    fake = FakeLifecycle(
+        repositories={},
+        project={
+            "project_id": _PROJECT_ID,
+            "name": "Issue 211 lifecycle",
+            "description": "Provider-free registered source state coverage.",
+        },
+        vision_candidate={"statement": "Accepted Vision"},
+        vision_accepted=True,
+        goal_candidate={"statement": "Accepted Product Goal"},
+        goal_accepted=True,
+        specification_source={
+            "specification_source_id": 31,
+            "source_fingerprint": "sha256:issue-211-source",
+            "producer_capability": "to-spec",
+            "preparation_capability": "grill-with-docs",
+            "source": {"relative_path": "specs/current-specification.md"},
+            "context": {"state": "absent", "document": None},
+            "adrs": [{"relative_path": "docs/adr/0004-source.md"}],
+        },
+    )
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    current = page.locator('[data-current-specification-source="true"]')
+    expect(current).to_be_visible()
+    expect(current).to_have_attribute("role", "status")
+    expect(current).to_contain_text("Current registered Specification source")
+    expect(current).to_contain_text("specs/current-specification.md")
+    expect(current).to_contain_text("docs/adr/0004-source.md")
+    expect(current).to_contain_text("grill-with-docs")
+    revision = page.locator('[data-specification-revision-registration="true"]')
+    expect(revision).to_be_visible()
+    expect(revision).not_to_have_attribute("open", "")
+    expect(
+        revision.locator('form[data-specification-source-form="true"]')
+    ).not_to_be_visible()
+    revision.locator("summary").click()
+    expect(
+        revision.locator('form[data-specification-source-form="true"]')
+    ).to_be_visible()
+
+    fake.specification = {"rendered_markdown": "# Pending source review"}
+    page.locator("#refresh-project").click()
+    expect(current).to_be_visible()
+    expect(page.get_by_text("Pending source review", exact=False)).to_be_visible()
+    expect(
+        page.locator(
+            '[data-review-scope="specification"][data-review-decision="accepted"]'
+        )
+    ).to_be_visible()
+
+    fake.specification_feedback = "Use a more observable source contract."
+    page.locator("#refresh-project").click()
+    expect(current).to_be_visible()
+    expect(
+        page.get_by_text("Choose how to address Specification Feedback")
+    ).to_be_visible()
+    expect(revision).to_be_visible()
+
+    assert fake.specification_source is not None
+    fake.specification_source["adrs"] = []
+    page.locator("#refresh-project").click()
+    expect(current).to_be_visible()
+    expect(current).to_contain_text("No ADRs")
     assert fake.api_errors == []
     context.close()
 

@@ -876,6 +876,38 @@ function specificationSourceRegistrationMarkup(actions) {
         : '';
 }
 
+function currentSpecificationSourceMarkup(source) {
+    const sourcePath = source?.source?.relative_path;
+    const preparationCapability = source?.preparation_capability;
+    if (typeof sourcePath !== 'string' || !sourcePath
+        || typeof preparationCapability !== 'string' || !preparationCapability) {
+        return '';
+    }
+    const adrPaths = (Array.isArray(source.adrs) ? source.adrs : [])
+        .map((adr) => adr?.relative_path)
+        .filter((path) => typeof path === 'string' && path);
+    const adrs = adrPaths.length ? adrPaths.join(', ') : 'No ADRs';
+    return `<section data-current-specification-source="true" role="status" class="max-w-3xl rounded-lg border border-sky-200 bg-sky-50 p-4">
+        <p class="text-sm font-semibold text-sky-950">Current registered Specification source</p>
+        <dl class="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+            <div class="min-w-0"><dt class="font-semibold text-slate-700">Source path</dt><dd class="mt-1 break-anywhere font-mono text-slate-900">${escapeWorkflowText(sourcePath)}</dd></div>
+            <div class="min-w-0"><dt class="font-semibold text-slate-700">Applicable ADRs</dt><dd class="mt-1 break-anywhere font-mono text-slate-900">${escapeWorkflowText(adrs)}</dd></div>
+            <div class="min-w-0"><dt class="font-semibold text-slate-700">Preparation capability</dt><dd class="mt-1 break-words font-mono text-slate-900">${escapeWorkflowText(preparationCapability)}</dd></div>
+        </dl>
+    </section>`;
+}
+
+function specificationRevisionRegistrationMarkup(registration) {
+    if (!registration) return '';
+    return `<details data-specification-revision-registration="true" class="max-w-3xl rounded-lg border border-slate-200 bg-white p-4">
+        <summary class="cursor-pointer text-sm font-semibold text-slate-800">Register a revised source</summary>
+        <div class="mt-4 border-t border-slate-200 pt-4">
+            <p class="mb-4 text-sm leading-6 text-slate-600">Choose this path only when the external Specification source itself changed.</p>
+            ${registration}
+        </div>
+    </details>`;
+}
+
 function acceptedSpecificationMarkup(current) {
     if (!current) return '';
     return `<div class="max-w-4xl space-y-3">
@@ -1035,13 +1067,7 @@ function specificationFeedbackContinuationMarkup(
     const rationale = projection.review.rationale
         ? `<p class="mt-2 text-sm leading-6 text-amber-900"><strong>Feedback:</strong> ${escapeWorkflowText(projection.review.rationale)}</p>`
         : '';
-    const revisedSource = registration
-        ? `<div class="mt-5 border-t border-amber-200 pt-5">
-            <p class="mb-3 text-sm font-semibold text-slate-800">Register a revised source</p>
-            <p class="mb-4 text-sm leading-6 text-slate-600">Choose this path only when the external Specification source itself changed.</p>
-            ${registration}
-        </div>`
-        : '';
+    const revisedSource = specificationRevisionRegistrationMarkup(registration);
     const sameSource = binding.mode === 'same-source-feedback';
     const instruction = sameSource
         ? 'Retry with the unchanged registered source when the candidate transformation needs correction.'
@@ -1072,6 +1098,13 @@ function specificationStructuringActionMarkup(label, icon) {
 function specificationPanelMarkup(projection, actions = [], position = {}) {
     const candidate = projection?.candidate;
     const registration = specificationSourceRegistrationMarkup(actions);
+    const currentSource = currentSpecificationSourceMarkup(projection?.source);
+    const revisedRegistration = projection?.source
+        ? specificationRevisionRegistrationMarkup(registration)
+        : registration;
+    const withSourceState = (markup) => projection?.source
+        ? `<div data-specification-source-state="true" class="space-y-5">${markup}</div>`
+        : markup;
     if (!candidate) {
         const structureBinding = captureSpecificationStructuringBinding({
             actions,
@@ -1090,15 +1123,18 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
             : '';
         const current = acceptedSpecificationMarkup(projection?.current);
         if (revisedSource) {
-            return [
+            return withSourceState([
                 current,
+                currentSource,
                 `<section data-specification-feedback-continuation="true" class="max-w-4xl space-y-5 rounded-lg border border-amber-300 bg-amber-50 p-5">
                     ${structure}
-                    ${registration ? `<div class="border-t border-amber-200 pt-5">${registration}</div>` : ''}
+                    ${revisedRegistration}
                 </section>`,
-            ].filter(Boolean).join('');
+            ].filter(Boolean).join(''));
         }
-        return [current, registration, structure].filter(Boolean).join('')
+        const markup = [current, currentSource, revisedRegistration, structure]
+            .filter(Boolean).join('');
+        return withSourceState(markup)
             || '<p class="text-sm text-slate-600">Specification preparation is waiting for the current lifecycle state.</p>';
     }
     const review = projection?.review;
@@ -1117,8 +1153,8 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
             registration,
             position,
         );
-    return `<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
-        ${controls}${reentry}`;
+    return withSourceState(`${currentSource}<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
+        ${controls}${reentry}`);
 }
 
 function findingMarkup(finding) {
@@ -3096,6 +3132,7 @@ function setSpecificationStructuringStatus(control, message) {
 
 function setSpecificationStructuringBusy(control, busy) {
     setSpecificationContinuationBusy(control, busy);
+    setSpecificationRevisionRegistrationBusy(control, busy);
     const label = control?.querySelector?.(
         '[data-specification-structuring-label="true"]',
     );
@@ -3128,6 +3165,28 @@ function setSpecificationContinuationBusy(control, busy) {
     Array.from(controls).forEach((item) => {
         if (item) item.disabled = busy;
     });
+}
+
+function setSpecificationRevisionRegistrationBusy(control, busy) {
+    const sourceState = control?.closest?.(
+        '[data-specification-source-state="true"]',
+    );
+    const revision = sourceState?.querySelector?.(
+        '[data-specification-revision-registration="true"]',
+    );
+    if (!revision) return;
+    const controls = revision.querySelectorAll('button, input, textarea, select');
+    Array.from(controls).forEach((item) => {
+        if (item) item.disabled = busy;
+    });
+    if (busy) {
+        revision.removeAttribute('open');
+        revision.setAttribute('aria-disabled', 'true');
+        revision.setAttribute('inert', '');
+        return;
+    }
+    revision.removeAttribute('aria-disabled');
+    revision.removeAttribute('inert');
 }
 
 function installInteractions() {
