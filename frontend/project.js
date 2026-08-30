@@ -2939,7 +2939,9 @@ function backlogPendingReview(state) {
 }
 
 function advertisedBacklogCorrectionAction(action) {
-    return action?.request_kind === 'record_backlog_draft';
+    return action?.node_id === 'backlog.generate'
+        || action?.endpoint === 'backlog/generate'
+        || action?.request_kind === 'record_backlog_draft';
 }
 
 function currentBacklogDecisions(state) {
@@ -2968,6 +2970,42 @@ function validNonFeedbackBacklogState(state, mutation) {
         && !hasAdvertisedBacklogCorrectionAction(state);
 }
 
+function exactBacklogPendingReferences(decision, candidate, specification, productGoal) {
+    const references = Array.isArray(decision?.fact_references)
+        ? decision.fact_references
+        : null;
+    const expected = {
+        backlog: [candidate?.backlog_artifact_id, candidate?.artifact_fingerprint],
+        specification: [specification?.spec_version_id, specification?.spec_hash],
+        product_goal: [productGoal?.product_goal_artifact_id, productGoal?.product_goal_fingerprint],
+    };
+    if (!references || references.length !== Object.keys(expected).length
+        || Object.values(expected).some(([id, fingerprint]) => !isConcreteReviewIdentity(id, fingerprint))) {
+        return false;
+    }
+    return Object.entries(expected).every(([factType, [factId, fingerprint]]) => {
+        const matches = references.filter((reference) => reference?.fact_type === factType);
+        return matches.length === 1
+            && matches[0].fact_id === factId
+            && matches[0].fingerprint === fingerprint;
+    });
+}
+
+function completeCorrectedBacklogCandidate(candidate, mutation) {
+    return candidate !== null
+        && Number.isInteger(candidate.backlog_artifact_id)
+        && candidate.backlog_artifact_id > 0
+        && typeof candidate.artifact_fingerprint === 'string'
+        && Boolean(candidate.artifact_fingerprint.trim())
+        && Number.isInteger(candidate.version_number)
+        && candidate.version_number > 0
+        && candidate.supersedes_backlog_artifact_id === mutation.backlogArtifactId
+        && Array.isArray(candidate.backlog_items)
+        && candidate.backlog_items.every((item) => reviewObject(item) !== null)
+        && typeof candidate.is_complete === 'boolean'
+        && Array.isArray(candidate.clarifying_questions);
+}
+
 function correctedPendingBacklogState(state, mutation) {
     const backlog = backlogPendingReview(state);
     const backlogReviewDecisions = currentBacklogDecisions(state)?.filter((decision) => (
@@ -2984,20 +3022,32 @@ function correctedPendingBacklogState(state, mutation) {
         && decision.reason_code === 'BACKLOG_REVIEW_REQUIRED'
         && decision.decision_fingerprint === backlog?.binding?.decision_fingerprint
     ));
-    const candidate = reviewObject(backlog?.review?.candidate);
+    const review = reviewObject(backlog?.review);
+    const candidate = reviewObject(review?.candidate);
+    const lineage = reviewObject(review?.lineage);
+    const specification = reviewObject(lineage?.specification);
+    const productGoal = reviewObject(lineage?.product_goal);
     return backlog !== null
         && Object.keys(backlog).length === 2
         && 'binding' in backlog
         && 'review' in backlog
-        && backlog.review?.phase === 'backlog'
-        && candidate !== null
-        && Number.isInteger(candidate.backlog_artifact_id)
-        && candidate.backlog_artifact_id > 0
-        && typeof candidate.artifact_fingerprint === 'string'
-        && Boolean(candidate.artifact_fingerprint.trim())
-        && candidate.supersedes_backlog_artifact_id === mutation.backlogArtifactId
+        && review?.phase === 'backlog'
+        && reviewObject(review?.review) !== null
+        && review.review.state === 'pending'
+        && completeCorrectedBacklogCandidate(candidate, mutation)
+        && isConcreteReviewIdentity(specification?.spec_version_id, specification?.spec_hash)
+        && isConcreteReviewIdentity(
+            productGoal?.product_goal_artifact_id,
+            productGoal?.product_goal_fingerprint,
+        )
         && backlogReviewDecisions?.length === 1
         && pendingDecision?.length === 1
+        && exactBacklogPendingReferences(
+            pendingDecision[0],
+            candidate,
+            specification,
+            productGoal,
+        )
         && !hasCurrentFeedbackDecision(state, mutation.decisionFingerprint)
         && !hasAdvertisedBacklogCorrectionAction(state);
 }

@@ -178,6 +178,7 @@ function correctedPendingBacklogState() {
     continuation.review.candidate = {
         ...continuation.review.candidate,
         backlog_artifact_id: 8,
+        artifact_fingerprint: 'sha256:backlog-8',
         version_number: 2,
         supersedes_backlog_artifact_id: 7,
     };
@@ -192,6 +193,11 @@ function correctedPendingBacklogState() {
                 recommendation_kind: 'required',
                 reason_code: 'BACKLOG_REVIEW_REQUIRED',
                 decision_fingerprint: 'sha256:pending-backlog',
+                fact_references: [
+                    { fact_type: 'backlog', fact_id: 8, fingerprint: 'sha256:backlog-8' },
+                    { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:specification-31' },
+                    { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:product-goal-21' },
+                ],
             }],
         },
         planningReviews: { backlog: continuation },
@@ -685,6 +691,20 @@ test('Backlog correction rejects torn absence and corrected-pending authority in
         ['absence with correction action', () => ({
             ...structuredClone(cleanAbsence), actions: structuredClone(old.actions),
         })],
+        ['absence with correction node and wrong request kind', () => ({
+            ...structuredClone(cleanAbsence),
+            actions: [{
+                node_id: 'backlog.generate', instance_key: null,
+                request_kind: 'decide_backlog', endpoint: 'backlog/other', transport: 'semantic',
+            }],
+        })],
+        ['absence with correction endpoint and missing request kind', () => ({
+            ...structuredClone(cleanAbsence),
+            actions: [{
+                node_id: 'backlog.other', instance_key: null,
+                endpoint: 'backlog/generate', transport: 'semantic',
+            }],
+        })],
         ['absence with null continuation', () => ({
             ...structuredClone(cleanAbsence), planningReviews: { backlog: { continuation: null } },
         })],
@@ -706,12 +726,85 @@ test('Backlog correction rejects torn absence and corrected-pending authority in
             pending.actions.push({ ...old.actions[0], endpoint: 'backlog/wrong' });
             return pending;
         }],
+        ['pending with correction node and endpoint but wrong request kind', () => {
+            const pending = correctedPendingBacklogState();
+            pending.actions.push({
+                node_id: 'backlog.generate', instance_key: null,
+                request_kind: 'decide_backlog', endpoint: 'backlog/generate', transport: 'semantic',
+            });
+            return pending;
+        }],
+        ['pending with correction node and missing request kind', () => {
+            const pending = correctedPendingBacklogState();
+            pending.actions.push({
+                node_id: 'backlog.generate', instance_key: null,
+                endpoint: 'backlog/other', transport: 'semantic',
+            });
+            return pending;
+        }],
         ['pending with a second Backlog review decision', () => {
             const pending = correctedPendingBacklogState();
             pending.position.decisions.push({
                 ...pending.position.decisions[0],
                 decision_fingerprint: 'sha256:second-pending-backlog',
             });
+            return pending;
+        }],
+        ['pending without corrected version', () => {
+            const pending = correctedPendingBacklogState();
+            delete pending.planningReviews.backlog.review.candidate.version_number;
+            return pending;
+        }],
+        ['pending with malformed corrected version', () => {
+            const pending = correctedPendingBacklogState();
+            pending.planningReviews.backlog.review.candidate.version_number = '2';
+            return pending;
+        }],
+        ['pending without Backlog content', () => {
+            const pending = correctedPendingBacklogState();
+            delete pending.planningReviews.backlog.review.candidate.backlog_items;
+            return pending;
+        }],
+        ['pending with malformed Backlog content', () => {
+            const pending = correctedPendingBacklogState();
+            pending.planningReviews.backlog.review.candidate.backlog_items = {};
+            return pending;
+        }],
+        ['pending without current review content', () => {
+            const pending = correctedPendingBacklogState();
+            delete pending.planningReviews.backlog.review.candidate.is_complete;
+            return pending;
+        }],
+        ['pending with malformed current review content', () => {
+            const pending = correctedPendingBacklogState();
+            pending.planningReviews.backlog.review.candidate.clarifying_questions = {};
+            return pending;
+        }],
+        ['pending without Specification lineage', () => {
+            const pending = correctedPendingBacklogState();
+            delete pending.planningReviews.backlog.review.lineage.specification;
+            return pending;
+        }],
+        ['pending with wrong Product Goal lineage', () => {
+            const pending = correctedPendingBacklogState();
+            pending.planningReviews.backlog.review.lineage.product_goal.product_goal_fingerprint = 'sha256:wrong-goal';
+            return pending;
+        }],
+        ['pending without Backlog fact reference', () => {
+            const pending = correctedPendingBacklogState();
+            pending.position.decisions[0].fact_references.shift();
+            return pending;
+        }],
+        ['pending with duplicate Specification fact reference', () => {
+            const pending = correctedPendingBacklogState();
+            pending.position.decisions[0].fact_references.push(
+                structuredClone(pending.position.decisions[0].fact_references[1]),
+            );
+            return pending;
+        }],
+        ['pending with wrong Product Goal fact reference', () => {
+            const pending = correctedPendingBacklogState();
+            pending.position.decisions[0].fact_references[2].fingerprint = 'sha256:wrong-goal';
             return pending;
         }],
     ];
