@@ -1707,8 +1707,17 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
     const isStory = scope === 'story';
     const isAcceptable = !isStory || isStoryReviewAcceptable(selected.review);
 
-    return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}">
-        <h3 class="text-sm font-semibold">${escapeWorkflowText(label)}</h3>
+    const candidate = reviewObject(selected.review.candidate);
+    const correctedIdentity = scope === 'backlog'
+        && Number.isInteger(candidate?.backlog_artifact_id)
+        && Number.isInteger(candidate?.version_number)
+        && Number.isInteger(candidate?.supersedes_backlog_artifact_id)
+        ? `Corrected Backlog candidate v${escapeWorkflowText(candidate.version_number)} (#${escapeWorkflowText(candidate.backlog_artifact_id)}), replacing #${escapeWorkflowText(candidate.supersedes_backlog_artifact_id)}`
+        : null;
+    const tabIndex = scope === 'backlog' ? ' tabindex="-1"' : '';
+
+    return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}"${tabIndex}>
+        <h3 class="text-sm font-semibold">${correctedIdentity ? `${correctedIdentity} - ` : ''}${escapeWorkflowText(label)}</h3>
         ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-story-evidence">Story proposal cannot be accepted: required INVEST, sizing, or ordering evidence is missing or malformed. Acceptance is disabled.</div>` : ''}
         <div class="mt-3 space-y-4">${content}</div>
         <div class="mt-4 flex flex-wrap gap-2">
@@ -1717,6 +1726,135 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
             <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="rejected" class="${BUTTON_DANGER}">Reject</button>
         </div>
     </article>`;
+}
+
+const BACKLOG_FEEDBACK_MODES = {
+    BACKLOG_REVISION_REQUIRED: {
+        mode: 'revision-ready', category: 'available', recommendation: 'recovery', attempt: false,
+        status: 'Backlog Feedback recorded',
+    },
+    BACKLOG_GENERATION_ACTIVE: {
+        mode: 'active', category: 'waiting', recommendation: 'required', attempt: false,
+        status: 'Backlog correction is in progress. The recorded Feedback remains current.',
+    },
+    BACKLOG_GENERATION_FAILED: {
+        mode: 'failed-retry', category: 'available', recommendation: 'recovery', attempt: true,
+        status: 'Backlog correction failed. No corrected candidate was produced; the recorded Feedback remains current.',
+    },
+    BACKLOG_GENERATION_RECOVERY_REQUIRED: {
+        mode: 'expired-recovery', category: 'available', recommendation: 'recovery', attempt: true,
+        status: 'The previous Backlog correction attempt expired. The recorded Feedback remains current and can be retried.',
+    },
+};
+
+function backlogFeedbackContinuationProjection(state) {
+    const continuation = state?.planningReviews?.backlog?.continuation;
+    if (!continuation) return { kind: 'absent' };
+    const binding = reviewObject(continuation.binding);
+    const review = reviewObject(continuation.review);
+    const candidate = reviewObject(review?.candidate);
+    const lineage = reviewObject(review?.lineage);
+    const specification = reviewObject(lineage?.specification);
+    const productGoal = reviewObject(lineage?.product_goal);
+    if (!binding || !review || !candidate || !specification || !productGoal
+        || binding.node_id !== 'backlog.generate'
+        || binding.instance_key !== null
+        || typeof binding.decision_fingerprint !== 'string'
+        || !binding.decision_fingerprint
+        || review.phase !== 'backlog'
+        || review.review?.state !== 'feedback'
+        || typeof review.review?.rationale !== 'string'
+        || !review.review.rationale.trim()) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
+    const decisions = Array.isArray(state?.position?.decisions) ? state.position.decisions : [];
+    const selected = decisions.filter((decision) => (
+        decision?.decision_fingerprint === binding.decision_fingerprint
+    ));
+    if (selected.length !== 1) return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    const decision = selected[0];
+    const mode = BACKLOG_FEEDBACK_MODES[decision?.reason_code];
+    if (!mode || decision.node_id !== 'backlog.generate'
+        || decision.instance_key !== null
+        || decision.request_kind !== 'record_backlog_draft'
+        || decision.category !== mode.category
+        || decision.recommendation_kind !== mode.recommendation) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
+    const references = Array.isArray(decision.fact_references) ? decision.fact_references : [];
+    const expected = {
+        backlog: [candidate.backlog_artifact_id, candidate.artifact_fingerprint],
+        specification: [specification.spec_version_id, specification.spec_hash],
+        product_goal: [productGoal.product_goal_artifact_id, productGoal.product_goal_fingerprint],
+    };
+    const allowed = mode.attempt ? new Set([...Object.keys(expected), 'node_attempt']) : new Set(Object.keys(expected));
+    if (references.some((reference) => !allowed.has(reference?.fact_type))) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
+    for (const [factType, [factId, fingerprint]] of Object.entries(expected)) {
+        const matches = references.filter((reference) => reference?.fact_type === factType);
+        if (matches.length !== 1 || matches[0].fact_id !== factId || matches[0].fingerprint !== fingerprint) {
+            return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+        }
+    }
+    if (references.filter((reference) => reference?.fact_type === 'node_attempt').length !== (mode.attempt ? 1 : 0)) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
+    return { kind: 'display', mode: mode.mode, decision, candidate, review };
+}
+
+function backlogCorrectionActionBinding(state, continuation) {
+    if (continuation?.kind === 'absent') return { kind: 'unavailable', reason: 'absent' };
+    if (continuation?.kind !== 'display') return { kind: 'error', code: 'BACKLOG_CORRECTION_ACTION_INVALID' };
+    if (continuation.mode === 'active') return { kind: 'unavailable', reason: 'active' };
+    const matches = (Array.isArray(state?.actions) ? state.actions : []).filter((action) => (
+        action?.node_id === 'backlog.generate'
+        && action.instance_key === null
+        && action.request_kind === 'record_backlog_draft'
+        && action.endpoint === 'backlog/generate'
+        && action.transport === 'semantic'
+    ));
+    return matches.length === 1
+        ? { kind: 'ready', action: matches[0] }
+        : { kind: 'error', code: 'BACKLOG_CORRECTION_ACTION_INVALID' };
+}
+
+function backlogCorrectionActionDetails(action) {
+    if (!action) return null;
+    return {
+        label: 'Regenerate Backlog from feedback',
+        busyLabel: 'Regenerating Backlog from feedback...',
+        description: 'Generate a corrected Product Backlog from the recorded Feedback.',
+        icon: 'refresh',
+    };
+}
+
+function backlogFeedbackContinuationMarkup(continuation, actionBinding) {
+    if (continuation?.kind !== 'display') {
+        return `<section data-backlog-feedback-projection-error="true" role="alert" tabindex="-1" class="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800">Backlog Feedback state is unavailable. Reload before taking another action.</section>`;
+    }
+    const candidate = continuation.candidate;
+    const details = actionBinding?.kind === 'ready'
+        ? backlogCorrectionActionDetails(actionBinding.action)
+        : null;
+    const action = details ? `<div data-backlog-correction-action="true" data-delivery-generation-action="record_backlog_draft" ${deliveryActionBindingAttributes(actionBinding.action)} class="mt-4">
+        <p class="mb-3 text-sm leading-6 text-slate-600">${details.description}</p>
+        <button type="button" data-direct-action="record_backlog_draft" class="${BUTTON_PRIMARY}">
+            <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
+            <span data-delivery-action-label="true">${details.label}</span>
+        </button>
+        <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true" class="mt-3 text-sm leading-6 text-slate-700"></p>
+    </div>` : '';
+    const actionError = actionBinding?.kind === 'error'
+        ? '<p data-backlog-feedback-projection-error="true" role="alert" tabindex="-1" class="mt-4 text-sm text-red-800">Backlog correction action is unavailable. Reload before taking another action.</p>'
+        : '';
+    return `<section data-backlog-feedback-continuation="true" tabindex="-1" class="rounded-lg border border-amber-300 bg-amber-50 p-4">
+        <h3 class="text-sm font-semibold text-amber-950">${escapeWorkflowText(BACKLOG_FEEDBACK_MODES[continuation.decision.reason_code].status)}</h3>
+        <p class="mt-2 text-sm font-semibold text-slate-800">Backlog candidate v${escapeWorkflowText(candidate.version_number)} (#${escapeWorkflowText(candidate.backlog_artifact_id)})</p>
+        <div class="mt-3 space-y-4">${backlogReviewMarkup(candidate)}</div>
+        <p class="mt-4 text-sm leading-6 text-amber-950"><strong>Feedback:</strong> ${escapeWorkflowText(continuation.review.review.rationale)}</p>
+        ${actionError}${action}
+    </section>`;
 }
 
 function deliveryActionBindingAttributes(action) {
@@ -2285,7 +2423,14 @@ function sprintCandidatePoolMarkup(candidates) {
 
 function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {}) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
+    const backlogState = { position, planningReviews: reviews, actions };
+    const backlogContinuation = backlogFeedbackContinuationProjection(backlogState);
+    const backlogCorrection = backlogCorrectionActionBinding(backlogState, backlogContinuation);
+    const backlogFeedback = reviews?.backlog?.continuation
+        ? backlogFeedbackContinuationMarkup(backlogContinuation, backlogCorrection)
+        : '';
     const cards = [
+        backlogFeedback,
         planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'),
         planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap'),
         ...storyItems.map((item, index) => {
@@ -2318,9 +2463,10 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const dependencySection = storyDependencyReviewMarkup(dependencyAction, stories, dependencies);
     const candidateSection = sprintCandidatePoolMarkup(candidates);
 
-    const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
-        Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind]),
-    );
+    const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) => (
+        Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind])
+        && !(reviews?.backlog?.continuation && action?.request_kind === 'record_backlog_draft')
+    ));
     const actionMarkup = availableDeliveryActions.map((action, index) =>
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
     );
@@ -3105,6 +3251,10 @@ function setDeliveryActionBusy(control, busy, requestKind, keepDisabled = false)
     if (busy) {
         control?.setAttribute?.('aria-busy', 'true');
         let busyText = config?.busyLabel ?? 'Generating...';
+        if (requestKind === 'record_backlog_draft'
+            && (label?.textContent ?? '').startsWith('Regenerate Backlog from feedback')) {
+            busyText = 'Regenerating Backlog from feedback...';
+        }
         if (requestKind === 'record_story_draft') {
             const instance = action?.dataset?.deliveryActionInstance
                 ?? control?.dataset?.deliveryActionInstance;

@@ -78,6 +78,86 @@ function selectedReview(statement = '<img src=x onerror=alert(1)>') {
     };
 }
 
+function feedbackContinuation(mode, content, rationale) {
+    const decisions = {
+        'revision-ready': ['available', 'recovery', 'BACKLOG_REVISION_REQUIRED', false],
+        active: ['waiting', 'required', 'BACKLOG_GENERATION_ACTIVE', false],
+        'failed-retry': ['available', 'recovery', 'BACKLOG_GENERATION_FAILED', true],
+        'expired-recovery': ['available', 'recovery', 'BACKLOG_GENERATION_RECOVERY_REQUIRED', true],
+    };
+    const [category, recommendation_kind, reason_code, hasAttempt] = decisions[mode];
+    const decision = {
+        node_id: 'backlog.generate', instance_key: null, request_kind: 'record_backlog_draft',
+        category, recommendation_kind, reason_code,
+        decision_fingerprint: 'sha256:hidden-backlog-decision-canary',
+        fact_references: [
+            { fact_type: 'backlog', fact_id: 7, fingerprint: 'sha256:hidden-backlog-artifact-canary' },
+            { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:hidden-specification-canary' },
+            { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:hidden-product-goal-canary' },
+            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: 81, fingerprint: 'sha256:hidden-node-attempt-canary' }] : []),
+        ],
+    };
+    return {
+        position: { decisions: [decision] },
+        reviews: { backlog: { continuation: {
+            binding: { node_id: 'backlog.generate', instance_key: null, decision_fingerprint: decision.decision_fingerprint },
+            review: {
+                phase: 'backlog',
+                lineage: {
+                    specification: { spec_version_id: 31, spec_hash: 'sha256:hidden-specification-canary' },
+                    product_goal: { product_goal_artifact_id: 21, product_goal_fingerprint: 'sha256:hidden-product-goal-canary' },
+                },
+                candidate: {
+                    backlog_artifact_id: 7, artifact_fingerprint: 'sha256:hidden-backlog-artifact-canary',
+                    version_number: 1, supersedes_backlog_artifact_id: null,
+                    backlog_items: [{ backlog_item_id: 'PBI-000001', priority: 1, requirement: content, value_driver: 'sha256:customer-token', justification: 'Visible justification', estimated_effort: 'M', technical_note: null, specification_evidence: [] }],
+                    is_complete: true, clarifying_questions: [],
+                },
+                review: { state: 'feedback', rationale, reviewer: 'reviewer-hidden@example.com' },
+            },
+        } } },
+        actions: mode === 'active' ? [] : [{
+            node_id: 'backlog.generate', instance_key: null, request_kind: 'record_backlog_draft',
+            endpoint: 'backlog/generate', transport: 'semantic',
+        }],
+    };
+}
+
+test('Backlog Feedback rendering escapes durable content and hides exact internal canaries', () => {
+    const context = loadFrontend();
+    const hidden = [
+        'sha256:hidden-backlog-decision-canary',
+        'sha256:hidden-backlog-artifact-canary',
+        'sha256:hidden-specification-canary',
+        'sha256:hidden-product-goal-canary',
+        'sha256:hidden-node-attempt-canary',
+        'reviewer-hidden@example.com',
+    ];
+    for (const mode of ['revision-ready', 'active', 'failed-retry', 'expired-recovery']) {
+        const state = feedbackContinuation(mode, '<img src=x onerror=alert(1)>', '<script>alert(1)</script>');
+        const markup = context.deliveryPanelMarkup(state.position, state.reviews, state.actions);
+        assert.ok(markup.includes('data-backlog-feedback-continuation="true"'));
+        assert.ok(markup.includes('&lt;img src=x onerror=alert(1)&gt;'));
+        assert.ok(markup.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+        assert.ok(!markup.includes('<img src=x'));
+        assert.ok(markup.includes('sha256:customer-token'));
+        assert.ok(!markup.includes('BACKLOG_'));
+        assert.ok(!markup.includes('data-planning-review='));
+        hidden.forEach((value) => assert.ok(!markup.includes(value)));
+    }
+});
+
+test('Backlog Feedback keeps valid content when its advertised correction action is invalid', () => {
+    const context = loadFrontend();
+    const state = feedbackContinuation('revision-ready', 'Durable Backlog content', 'Durable Feedback rationale');
+    state.actions = [{ ...state.actions[0], endpoint: 'backlog/incorrect' }];
+    const markup = context.deliveryPanelMarkup(state.position, state.reviews, state.actions);
+    assert.ok(markup.includes('Durable Backlog content'));
+    assert.ok(markup.includes('Durable Feedback rationale'));
+    assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+    assert.ok(!markup.includes('data-backlog-correction-action="true"'));
+});
+
 test('review cards escape evidence and render it before controls', () => {
     const context = loadFrontend();
     const markup = context.planningReviewCardMarkup(

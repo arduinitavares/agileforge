@@ -165,6 +165,170 @@ function storyAction(overrides = {}) {
     };
 }
 
+function backlogFeedbackState(mode, overrides = {}) {
+    const matrix = {
+        'revision-ready': ['available', 'recovery', 'BACKLOG_REVISION_REQUIRED', false],
+        active: ['waiting', 'required', 'BACKLOG_GENERATION_ACTIVE', false],
+        'failed-retry': ['available', 'recovery', 'BACKLOG_GENERATION_FAILED', true],
+        'expired-recovery': ['available', 'recovery', 'BACKLOG_GENERATION_RECOVERY_REQUIRED', true],
+    };
+    const [category, recommendation_kind, reason_code, hasAttempt] = matrix[mode];
+    const decision = {
+        node_id: 'backlog.generate',
+        instance_key: null,
+        request_kind: 'record_backlog_draft',
+        category,
+        recommendation_kind,
+        reason_code,
+        decision_fingerprint: `sha256:decision-${mode}`,
+        fact_references: [
+            { fact_type: 'backlog', fact_id: 7, fingerprint: 'sha256:backlog-7' },
+            { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:specification-31' },
+            { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:product-goal-21' },
+            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: 81, fingerprint: 'sha256:attempt-81' }] : []),
+        ],
+        ...overrides.decision,
+    };
+    const continuation = {
+        binding: {
+            node_id: 'backlog.generate',
+            instance_key: null,
+            decision_fingerprint: decision.decision_fingerprint,
+            ...overrides.binding,
+        },
+        review: {
+            phase: 'backlog',
+            lineage: {
+                specification: { spec_version_id: 31, spec_hash: 'sha256:specification-31' },
+                product_goal: { product_goal_artifact_id: 21, product_goal_fingerprint: 'sha256:product-goal-21' },
+            },
+            candidate: {
+                backlog_artifact_id: 7,
+                artifact_fingerprint: 'sha256:backlog-7',
+                version_number: 1,
+                supersedes_backlog_artifact_id: null,
+                backlog_items: [],
+                is_complete: true,
+                clarifying_questions: [],
+            },
+            review: { state: 'feedback', rationale: 'Show the retry boundary.' },
+            ...overrides.review,
+        },
+    };
+    const action = {
+        node_id: 'backlog.generate',
+        instance_key: null,
+        request_kind: 'record_backlog_draft',
+        endpoint: 'backlog/generate',
+        transport: 'semantic',
+        ...overrides.action,
+    };
+    return {
+        position: { decisions: [decision] },
+        planningReviews: { backlog: { continuation } },
+        actions: mode === 'active' ? [] : [action],
+    };
+}
+
+test('Backlog Feedback display and correction-action contracts keep validation independent', () => {
+    const context = loadFrontend();
+    for (const mode of ['revision-ready', 'active', 'failed-retry', 'expired-recovery']) {
+        const state = backlogFeedbackState(mode);
+        const display = context.backlogFeedbackContinuationProjection(state);
+        assert.equal(display.kind, 'display');
+        assert.equal(display.mode, mode);
+        const action = context.backlogCorrectionActionBinding(state, display);
+        if (mode === 'active') {
+            assert.equal(JSON.stringify(action), JSON.stringify({ kind: 'unavailable', reason: 'active' }));
+        } else {
+            assert.equal(action.kind, 'ready');
+            assert.equal(action.action.endpoint, 'backlog/generate');
+        }
+    }
+
+    const absent = context.backlogFeedbackContinuationProjection({ position: { decisions: [] }, planningReviews: {}, actions: [] });
+    assert.equal(JSON.stringify(absent), JSON.stringify({ kind: 'absent' }));
+    assert.equal(
+        JSON.stringify(context.backlogCorrectionActionBinding({ actions: [] }, absent)),
+        JSON.stringify({ kind: 'unavailable', reason: 'absent' }),
+    );
+
+    const malformed = backlogFeedbackState('revision-ready', {
+        binding: { node_id: 'backlog.review' },
+    });
+    assert.equal(context.backlogFeedbackContinuationProjection(malformed).kind, 'error');
+});
+
+test('Backlog Feedback keeps durable display when correction action validation fails', () => {
+    const context = loadFrontend();
+    const invalidActions = [
+        [],
+        [
+            backlogFeedbackState('revision-ready').actions[0],
+            backlogFeedbackState('revision-ready').actions[0],
+        ],
+        [{ ...backlogFeedbackState('revision-ready').actions[0], endpoint: 'backlog/wrong' }],
+        [{ ...backlogFeedbackState('revision-ready').actions[0], transport: 'wrong' }],
+        [{ ...backlogFeedbackState('revision-ready').actions[0], node_id: 'backlog.review' }],
+        [{ ...backlogFeedbackState('revision-ready').actions[0], request_kind: 'decide_backlog' }],
+        [{ ...backlogFeedbackState('revision-ready').actions[0], instance_key: 'unexpected' }],
+    ];
+
+    for (const actions of invalidActions) {
+        const state = backlogFeedbackState('revision-ready');
+        state.actions = actions;
+        const display = context.backlogFeedbackContinuationProjection(state);
+        assert.equal(display.kind, 'display');
+        assert.equal(
+            JSON.stringify(context.backlogCorrectionActionBinding(state, display)),
+            JSON.stringify({ kind: 'error', code: 'BACKLOG_CORRECTION_ACTION_INVALID' }),
+        );
+        const markup = context.deliveryPanelMarkup(state.position, state.planningReviews, state.actions);
+        assert.ok(markup.includes('Backlog Feedback recorded'));
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+    }
+});
+
+test('Backlog generation labels separate initial and Feedback correction states', () => {
+    const context = loadFrontend();
+    const initial = {
+        node_id: 'backlog.generate', instance_key: null, request_kind: 'record_backlog_draft',
+        endpoint: 'backlog/generate', transport: 'semantic',
+    };
+    const initialMarkup = context.deliveryPanelMarkup(
+        { decisions: [{ ...initial, category: 'available', recommendation_kind: 'required', reason_code: 'BACKLOG_GENERATION_REQUIRED' }] },
+        {}, [initial],
+    );
+    assert.ok(initialMarkup.includes('Generate Backlog'));
+    assert.equal(context.deliveryGenerationActionDetails(initial).busyLabel, 'Generating Backlog...');
+
+    const corrected = backlogFeedbackState('revision-ready');
+    const correctionMarkup = context.deliveryPanelMarkup(
+        corrected.position, corrected.planningReviews, corrected.actions,
+    );
+    assert.ok(correctionMarkup.includes('Regenerate Backlog from feedback'));
+    assert.equal(
+        context.backlogCorrectionActionDetails(corrected.actions[0]).busyLabel,
+        'Regenerating Backlog from feedback...',
+    );
+});
+
+test('corrected pending Backlog review renders candidate and parent identity', () => {
+    const context = loadFrontend();
+    const selected = backlogFeedbackState('revision-ready').planningReviews.backlog.continuation;
+    selected.binding = { decision_fingerprint: 'sha256:pending-backlog', instance_key: null };
+    selected.review.candidate = {
+        ...selected.review.candidate,
+        backlog_artifact_id: 8,
+        version_number: 2,
+        supersedes_backlog_artifact_id: 7,
+    };
+    selected.review.review = { state: 'pending' };
+    const markup = context.deliveryPanelMarkup({ decisions: [] }, { backlog: selected }, []);
+    assert.ok(markup.includes('Corrected Backlog candidate v2 (#8), replacing #7'));
+    assert.ok(markup.includes('data-planning-review-card="backlog" tabindex="-1"'));
+});
+
 function selectedScopeStory(overrides = {}) {
     return {
         story_id: 101,
