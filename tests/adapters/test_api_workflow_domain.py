@@ -5620,6 +5620,72 @@ def _backlog_continuation_projection(  # noqa: PLR0913
     }
 
 
+def _backlog_continuation_references(
+    *,
+    node_attempt_count: int = 0,
+) -> tuple[FactReference, ...]:
+    """Build the exact durable identities carried by a continuation decision."""
+    return (
+        FactReference(fact_type="backlog", fact_id="7", fingerprint="sha256:backlog-7"),
+        FactReference(
+            fact_type="specification",
+            fact_id="31",
+            fingerprint="sha256:specification-31",
+        ),
+        FactReference(
+            fact_type="product_goal", fact_id="21", fingerprint="sha256:goal-21"
+        ),
+        *(
+            FactReference(
+                fact_type="node_attempt",
+                fact_id=str(101 + index),
+                fingerprint=f"sha256:attempt-{101 + index}",
+            )
+            for index in range(node_attempt_count)
+        ),
+    )
+
+
+def _without_backlog_continuation_reference(
+    fact_type: str,
+    *,
+    node_attempt_count: int = 0,
+) -> tuple[FactReference, ...]:
+    """Remove one required fact type from an otherwise exact reference tuple."""
+    return tuple(
+        reference
+        for reference in _backlog_continuation_references(
+            node_attempt_count=node_attempt_count
+        )
+        if reference.fact_type != fact_type
+    )
+
+
+def _duplicate_backlog_continuation_reference(
+    fact_type: str,
+    *,
+    node_attempt_count: int = 0,
+) -> tuple[FactReference, ...]:
+    """Duplicate one fact type in an otherwise exact reference tuple."""
+    references = _backlog_continuation_references(node_attempt_count=node_attempt_count)
+    duplicate = next(item for item in references if item.fact_type == fact_type)
+    return (*references, duplicate)
+
+
+def _replace_backlog_continuation_reference(
+    fact_type: str,
+    *,
+    fact_id: str,
+) -> tuple[FactReference, ...]:
+    """Replace one durable fact ID while preserving all other decision evidence."""
+    return tuple(
+        reference.model_copy(update={"fact_id": fact_id})
+        if reference.fact_type == fact_type
+        else reference
+        for reference in _backlog_continuation_references()
+    )
+
+
 def _backlog_continuation_decision(  # noqa: PLR0913
     *,
     reason: str = "BACKLOG_REVISION_REQUIRED",
@@ -5639,21 +5705,7 @@ def _backlog_continuation_decision(  # noqa: PLR0913
         instance_key=instance_key,
         decision_fingerprint="continuation-decision",
         fact_references=(
-            (
-                FactReference(
-                    fact_type="backlog", fact_id="7", fingerprint="sha256:backlog-7"
-                ),
-                FactReference(
-                    fact_type="specification",
-                    fact_id="31",
-                    fingerprint="sha256:specification-31",
-                ),
-                FactReference(
-                    fact_type="product_goal", fact_id="21", fingerprint="sha256:goal-21"
-                ),
-            )
-            if references is None
-            else references
+            _backlog_continuation_references() if references is None else references
         ),
     )
 
@@ -6108,30 +6160,157 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
 @pytest.mark.parametrize(
     "decision",
     [
-        _backlog_continuation_decision(request_kind="wrong_request"),
-        _backlog_continuation_decision(instance_key="unexpected"),
-        _backlog_continuation_decision(category=NodeCategory.WAITING),
-        _backlog_continuation_decision(recommendation=RecommendationKind.REQUIRED),
-        _backlog_continuation_decision(reason="UNKNOWN_BACKLOG_REASON"),
-        _backlog_continuation_decision(references=()),
-        _backlog_continuation_decision(
-            references=(
-                *_backlog_continuation_decision().fact_references,
-                FactReference(
-                    fact_type="unexpected", fact_id="1", fingerprint="sha256:extra"
+        pytest.param(
+            _backlog_continuation_decision(request_kind="wrong_request"),
+            id="wrong-request-kind",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(instance_key="unexpected"),
+            id="non-null-instance",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(category=NodeCategory.WAITING),
+            id="wrong-category-revision-ready",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_ACTIVE",
+                category=NodeCategory.AVAILABLE,
+                recommendation=RecommendationKind.REQUIRED,
+            ),
+            id="wrong-category-active",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_FAILED",
+                category=NodeCategory.WAITING,
+                references=_backlog_continuation_references(node_attempt_count=1),
+            ),
+            id="wrong-category-failed-retry",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                category=NodeCategory.WAITING,
+                references=_backlog_continuation_references(node_attempt_count=1),
+            ),
+            id="wrong-category-expired-recovery",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(recommendation=RecommendationKind.REQUIRED),
+            id="wrong-recommendation-revision-ready",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_ACTIVE",
+                category=NodeCategory.WAITING,
+                recommendation=RecommendationKind.RECOVERY,
+            ),
+            id="wrong-recommendation-active",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_FAILED",
+                recommendation=RecommendationKind.REQUIRED,
+                references=_backlog_continuation_references(node_attempt_count=1),
+            ),
+            id="wrong-recommendation-failed-retry",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                recommendation=RecommendationKind.REQUIRED,
+                references=_backlog_continuation_references(node_attempt_count=1),
+            ),
+            id="wrong-recommendation-expired-recovery",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(reason="BACKLOG_GENERATION_REQUIRED"),
+            id="wrong-known-reason-with-candidate",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(reason="UNKNOWN_BACKLOG_REASON"),
+            id="unknown-reason-with-candidate",
+        ),
+        *(
+            pytest.param(
+                _backlog_continuation_decision(
+                    references=_without_backlog_continuation_reference(fact_type)
                 ),
+                id=f"zero-{fact_type}-references",
             )
+            for fact_type in ("backlog", "specification", "product_goal")
+        ),
+        *(
+            pytest.param(
+                _backlog_continuation_decision(
+                    references=_duplicate_backlog_continuation_reference(fact_type)
+                ),
+                id=f"duplicate-{fact_type}-references",
+            )
+            for fact_type in ("backlog", "specification", "product_goal")
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                references=(
+                    *_backlog_continuation_references(),
+                    FactReference(
+                        fact_type="unexpected", fact_id="1", fingerprint="sha256:extra"
+                    ),
+                )
+            ),
+            id="unexpected-fact-type",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                references=_backlog_continuation_references(node_attempt_count=1)
+            ),
+            id="node-attempt-present-revision-ready",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_ACTIVE",
+                category=NodeCategory.WAITING,
+                recommendation=RecommendationKind.REQUIRED,
+                references=_backlog_continuation_references(node_attempt_count=1),
+            ),
+            id="node-attempt-present-active",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(reason="BACKLOG_GENERATION_FAILED"),
+            id="node-attempt-absent-failed-retry",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_FAILED",
+                references=_backlog_continuation_references(node_attempt_count=2),
+            ),
+            id="node-attempt-duplicate-failed-retry",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_RECOVERY_REQUIRED"
+            ),
+            id="node-attempt-absent-expired-recovery",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                references=_backlog_continuation_references(node_attempt_count=2),
+            ),
+            id="node-attempt-duplicate-expired-recovery",
         ),
     ],
 )
-def test_application_backlog_continuation_position_rejects_malformed_join(
+def test_application_backlog_continuation_position_rejects_malformed_structure(
     decision: NodeDecision,
 ) -> None:
-    """Malformed candidate continuation facts fail closed before durable reads."""
+    """Reject malformed candidate structure before durable selection or reads."""
     reads = _CountingBacklogReads(_backlog_continuation_projection())
     selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
     application = AgileForgeApplication(
-        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        workflow_domain=domain,
         read_projection=cast("Any", reads),
         delivery_review_selection=selection,
     )
@@ -6140,58 +6319,246 @@ def test_application_backlog_continuation_position_rejects_malformed_join(
 
     assert result["ok"] is False
     assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert selection.calls == []
     assert reads.calls == []
 
 
-def test_application_backlog_continuation_position_rejects_torn_projection() -> None:
-    """A selected identity may not diverge from the durable reviewed candidate."""
-    reads = _CountingBacklogReads(_backlog_continuation_projection(backlog_id=8))
-    application = AgileForgeApplication(
-        workflow_domain=_Domain(
-            _backlog_continuation_position(_backlog_continuation_decision())
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param(None, id="nullable-selection"),
+        pytest.param((8, "sha256:backlog-7"), id="selected-backlog-id-mismatch"),
+        pytest.param(
+            (7, "sha256:selected-backlog-mismatch"),
+            id="selected-backlog-fingerprint-mismatch",
         ),
+    ],
+)
+def test_application_backlog_continuation_position_rejects_selection_identity(
+    identity: tuple[int, str] | None,
+) -> None:
+    """Reject nullable or torn selected identity before durable projection."""
+    decision = _backlog_continuation_decision()
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection(identity)
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
         read_projection=cast("Any", reads),
-        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+        delivery_review_selection=selection,
     )
 
     result = application.backlog_review(41)
 
     assert result["ok"] is False
     assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
-    assert reads.calls == [(41, 7)]
+    assert domain.position_calls == 1
+    assert selection.calls == [(41, decision, "backlog")]
+    assert reads.calls == []
 
 
-def test_backlog_rejects_malformed_optional_reentry() -> None:
+@pytest.mark.parametrize(
+    ("decision", "identity", "projection"),
+    [
+        pytest.param(
+            _backlog_continuation_decision(
+                references=_replace_backlog_continuation_reference(
+                    "backlog", fact_id="8"
+                )
+            ),
+            (8, "sha256:backlog-7"),
+            _backlog_continuation_projection(),
+            id="wrong-backlog-reference",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                references=_replace_backlog_continuation_reference(
+                    "specification", fact_id="32"
+                )
+            ),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(),
+            id="wrong-specification-reference",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(
+                references=_replace_backlog_continuation_reference(
+                    "product_goal", fact_id="22"
+                )
+            ),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(),
+            id="wrong-product-goal-reference",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(backlog_id=8),
+            id="projected-candidate-id-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(
+                backlog_fingerprint="sha256:projected-backlog-mismatch"
+            ),
+            id="projected-candidate-fingerprint-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(specification_id=32),
+            id="projected-specification-id-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(
+                specification_hash="sha256:projected-specification-mismatch"
+            ),
+            id="projected-specification-hash-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(goal_id=22),
+            id="projected-product-goal-id-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(
+                goal_fingerprint="sha256:projected-goal-mismatch"
+            ),
+            id="projected-product-goal-fingerprint-mismatch",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(state="pending"),
+            id="pending-terminal-review-state",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(state="accepted"),
+            id="accepted-terminal-review-state",
+        ),
+        pytest.param(
+            _backlog_continuation_decision(),
+            (7, "sha256:backlog-7"),
+            _backlog_continuation_projection(rationale="   "),
+            id="blank-feedback-rationale",
+        ),
+    ],
+)
+def test_application_backlog_continuation_position_rejects_torn_projection(
+    decision: NodeDecision,
+    identity: tuple[int, str],
+    projection: JsonObject,
+) -> None:
+    """Reject exact-reference or durable projection divergence after one read."""
+    reads = _CountingBacklogReads(projection)
+    selection = _NullableBacklogSelection(identity)
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert selection.calls == [(41, decision, "backlog")]
+    assert reads.calls == [(41, identity[0])]
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        pytest.param(
+            _backlog_continuation_position(
+                _position("backlog.review", "decide_backlog", None).decisions[0],
+                _backlog_continuation_decision(),
+            ),
+            id="pending-plus-continuation",
+        ),
+        pytest.param(
+            _backlog_continuation_position(
+                _backlog_continuation_decision(),
+                _backlog_continuation_decision().model_copy(
+                    update={"decision_fingerprint": "continuation-decision-2"}
+                ),
+            ),
+            id="two-candidate-continuation-decisions",
+        ),
+    ],
+)
+def test_application_backlog_continuation_position_rejects_ambiguous_modes(
+    position: WorkflowPosition,
+) -> None:
+    """Reject non-unique review modes before durable selection or reads."""
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(position)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert selection.calls == []
+    assert reads.calls == []
+
+
+def test_backlog_continuation_position_rejects_malformed_optional_reentry() -> None:
     """Only the exact accepted-correction tuple is a valid Feedback absence."""
     decision = _backlog_continuation_decision(
         reason="BACKLOG_CORRECTION_AVAILABLE",
+        recommendation=RecommendationKind.OPTIONAL_REENTRY,
         request_kind="wrong_optional_request",
     )
     reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
     application = AgileForgeApplication(
-        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        workflow_domain=domain,
         read_projection=cast("Any", reads),
-        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+        delivery_review_selection=selection,
     )
 
     result = application.backlog_review(41)
 
     assert result["ok"] is False
     assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert selection.calls == []
     assert reads.calls == []
 
 
-def test_application_backlog_optional_reentry_is_valid_absence() -> None:
-    """A well-formed accepted correction remains outside Feedback continuation."""
+def test_backlog_continuation_position_initial_generation_is_valid_absence() -> None:
+    """Initial generation without a reviewed Backlog is explicit valid absence."""
     decision = _backlog_continuation_decision(
-        reason="BACKLOG_CORRECTION_AVAILABLE",
-        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+        reason="BACKLOG_GENERATION_REQUIRED",
+        recommendation=RecommendationKind.REQUIRED,
+        references=_without_backlog_continuation_reference("backlog"),
     )
     reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
     application = AgileForgeApplication(
-        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        workflow_domain=domain,
         read_projection=cast("Any", reads),
-        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+        delivery_review_selection=selection,
     )
 
     result = application.backlog_review(41)
@@ -6200,26 +6567,80 @@ def test_application_backlog_optional_reentry_is_valid_absence() -> None:
     assert (
         _object(_items(result["errors"])[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
     )
+    assert domain.position_calls == 1
+    assert selection.calls == []
     assert reads.calls == []
 
 
-def test_application_backlog_continuation_rejects_torn_rejected_projection() -> None:
+def test_backlog_continuation_position_optional_reentry_is_valid_absence() -> None:
+    """A well-formed accepted correction remains outside Feedback continuation."""
+    decision = _backlog_continuation_decision(
+        reason="BACKLOG_CORRECTION_AVAILABLE",
+        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert (
+        _object(_items(result["errors"])[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
+    )
+    assert domain.position_calls == 1
+    assert selection.calls == []
+    assert reads.calls == []
+
+
+def test_backlog_continuation_position_rejects_torn_rejected_projection() -> None:
     """Rejected absence is valid only after candidate and lineage integrity checks."""
     reads = _CountingBacklogReads(
         _backlog_continuation_projection(backlog_id=8, state="rejected")
     )
+    decision = _backlog_continuation_decision()
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
     application = AgileForgeApplication(
-        workflow_domain=_Domain(
-            _backlog_continuation_position(_backlog_continuation_decision())
-        ),
+        workflow_domain=domain,
         read_projection=cast("Any", reads),
-        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+        delivery_review_selection=selection,
     )
 
     result = application.backlog_review(41)
 
     assert result["ok"] is False
     assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert selection.calls == [(41, decision, "backlog")]
+    assert reads.calls == [(41, 7)]
+
+
+def test_backlog_continuation_position_rejected_review_is_valid_absence() -> None:
+    """An exact rejected terminal review remains explicit valid absence."""
+    decision = _backlog_continuation_decision()
+    reads = _CountingBacklogReads(_backlog_continuation_projection(state="rejected"))
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert (
+        _object(_items(result["errors"])[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
+    )
+    assert domain.position_calls == 1
+    assert selection.calls == [(41, decision, "backlog")]
     assert reads.calls == [(41, 7)]
 
 
