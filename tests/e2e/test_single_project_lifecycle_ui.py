@@ -169,6 +169,7 @@ class FakeLifecycle:
     goal_candidate: JsonObject | None = None
     goal_accepted: bool = False
     specification_source: JsonObject | None = None
+    specification_source_registrations: list[JsonObject] = field(default_factory=list)
     specification: JsonObject | None = None
     specification_feedback: str | None = None
     specification_structure_reason: str | None = None
@@ -637,17 +638,26 @@ class FakeLifecycle:
             body,
             {"source_path", "preparation_capability", "adr_paths"},
         )
-        assert body["source_path"] == "specs/product-specification.md"
-        assert body["preparation_capability"] == "grill-with-docs"
-        assert body["adr_paths"] == ["docs/adr/0004-registered-source.md"]
+        source_path = body["source_path"]
+        preparation_capability = body["preparation_capability"]
+        adr_paths = body["adr_paths"]
+        assert isinstance(source_path, str)
+        assert isinstance(preparation_capability, str)
+        assert preparation_capability == "grill-with-docs"
+        assert isinstance(adr_paths, list)
+        assert all(isinstance(path, str) for path in adr_paths)
+        self.specification_source_registrations.append(dict(body))
+        registration_number = len(self.specification_source_registrations)
         self.specification_source = {
-            "specification_source_id": 31,
-            "source_fingerprint": "sha256:hidden-registered-source",
+            "specification_source_id": 30 + registration_number,
+            "source_fingerprint": (
+                f"sha256:hidden-registered-source-{registration_number}"
+            ),
             "producer_capability": "to-spec",
-            "preparation_capability": "grill-with-docs",
-            "source": {"relative_path": "specs/product-specification.md"},
+            "preparation_capability": preparation_capability,
+            "source": {"relative_path": source_path},
             "context": {"state": "absent", "document": None},
-            "adrs": [{"relative_path": "docs/adr/0004-registered-source.md"}],
+            "adrs": [{"relative_path": path} for path in adr_paths],
         }
 
     def _structure_specification(self, body: JsonObject) -> None:
@@ -1638,13 +1648,10 @@ def _complete_vision_and_goal(
 
 
 def _record_and_review_definition(page: Page) -> None:
-    page.locator("#specification-source-path").fill("specs/product-specification.md")
-    page.locator("#specification-preparation-capability").select_option(
-        "grill-with-docs"
-    )
-    page.locator("#specification-adr-paths").fill("docs/adr/0004-registered-source.md")
-    page.locator('form[data-specification-source-form="true"]').evaluate(
-        "form => form.requestSubmit()"
+    _submit_specification_source(
+        page,
+        "specs/product-specification.md",
+        "docs/adr/0004-registered-source.md",
     )
     expect(page.get_by_role("button", name="Structure Specification")).to_be_visible()
     page.locator('[data-direct-action="structure_specification"]').click()
@@ -1653,6 +1660,67 @@ def _record_and_review_definition(page: Page) -> None:
         page.get_by_text("Every candidate has a scoped human decision.")
     ).to_be_visible()
     _accept_review(page, "specification")
+
+
+def _submit_specification_source(
+    page: Page,
+    source_path: str,
+    adr_path: str,
+) -> None:
+    form = page.locator('form[data-specification-source-form="true"]')
+    form.locator('[name="source_path"]').fill(source_path)
+    form.locator('[name="adr_paths"]').fill(adr_path)
+    form.locator('[name="preparation_capability"]').select_option("grill-with-docs")
+    form.evaluate("form => form.requestSubmit()")
+
+
+def _assert_specification_refresh_stays_locked(page: Page) -> None:
+    page.evaluate(
+        """() => {
+            window.issue204OriginalStructureButton = document.querySelector(
+                '[data-direct-action="structure_specification"]',
+            );
+        }"""
+    )
+    page.locator("#refresh-project").click()
+    page.wait_for_function(
+        """() => window.issue204OriginalStructureButton
+            !== document.querySelector(
+                '[data-direct-action="structure_specification"]',
+            )"""
+    )
+    replacement = page.locator('[data-direct-action="structure_specification"]')
+    expect(replacement).to_be_disabled()
+    expect(replacement).to_have_attribute("aria-busy", "true")
+    expect(
+        page.locator('[data-specification-revision-registration="true"]')
+    ).to_have_attribute("aria-disabled", "true")
+    replacement.evaluate("button => button.click()")
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert page.evaluate("window.issue204Requests.length") == 1
+
+
+def _assert_issue_204_failure_restores_source_controls(page: Page) -> None:
+    button = page.locator('[data-direct-action="structure_specification"]')
+    status = page.locator('[data-specification-structuring-status="true"]')
+    expect(button).to_be_enabled()
+    expect(button).not_to_have_attribute("aria-busy", "true")
+    expect(status).to_contain_text(
+        "Specification structurer provider execution failed."
+    )
+    expect(status).to_contain_text("No new candidate was produced.")
+    expect(status).to_contain_text("The prior candidate and Feedback remain current.")
+    expect(page.get_by_text("Prior Feedback candidate", exact=False)).to_be_visible()
+    expect(button).to_be_visible()
+    revision = page.locator('[data-specification-revision-registration="true"]')
+    expect(revision).not_to_have_attribute("aria-disabled", "true")
+    assert revision.evaluate("details => !details.hasAttribute('inert')")
+    assert (
+        revision.locator("button, input, textarea, select").evaluate_all(
+            "controls => controls.every((control) => !control.disabled)"
+        )
+        is True
+    )
 
 
 def _assert_create_modal_keyboard_contract(page: Page) -> None:
@@ -1786,6 +1854,8 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         == "sha256:hidden-decision"
     )
 
+    _assert_specification_refresh_stays_locked(page)
+
     fake.specification_structure_reason = "SPECIFICATION_STRUCTURER_FAILED"
     fake.specification_structure_decision_fingerprint = "sha256:failed-decision"
     page.evaluate(
@@ -1801,17 +1871,10 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
             },
         })"""
     )
-    expect(button).to_be_enabled()
-    expect(button).not_to_have_attribute("aria-busy", "true")
-    expect(status).to_contain_text(
-        "Specification structurer provider execution failed."
-    )
-    expect(status).to_contain_text("No new candidate was produced.")
-    expect(status).to_contain_text("The prior candidate and Feedback remain current.")
-    expect(page.get_by_text("Prior Feedback candidate", exact=False)).to_be_visible()
-    expect(button).to_be_visible()
+    _assert_issue_204_failure_restores_source_controls(page)
     assert page.evaluate("window.issue204Requests.length") == 1
 
+    button = page.locator('[data-direct-action="structure_specification"]')
     button.click()
     page.wait_for_function("window.resolveIssue204Structure !== null")
     expect(button).to_be_disabled()
@@ -1847,7 +1910,7 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
 def test_issue_211_shows_current_source_through_specification_lifecycle(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Keep current source facts visible while revised registration stays secondary."""
+    """Keep initial and revised source registration visibly distinct."""
     fake = FakeLifecycle(
         repositories={},
         project={
@@ -1859,17 +1922,14 @@ def test_issue_211_shows_current_source_through_specification_lifecycle(
         vision_accepted=True,
         goal_candidate={"statement": "Accepted Product Goal"},
         goal_accepted=True,
-        specification_source={
-            "specification_source_id": 31,
-            "source_fingerprint": "sha256:issue-211-source",
-            "producer_capability": "to-spec",
-            "preparation_capability": "grill-with-docs",
-            "source": {"relative_path": "specs/current-specification.md"},
-            "context": {"state": "absent", "document": None},
-            "adrs": [{"relative_path": "docs/adr/0004-source.md"}],
-        },
     )
     context, page = _open_project_page(dashboard_harness, fake)
+
+    _submit_specification_source(
+        page,
+        "specs/current-specification.md",
+        "docs/adr/0004-source.md",
+    )
 
     current = page.locator('[data-current-specification-source="true"]')
     expect(current).to_be_visible()
@@ -1888,6 +1948,22 @@ def test_issue_211_shows_current_source_through_specification_lifecycle(
     expect(
         revision.locator('form[data-specification-source-form="true"]')
     ).to_be_visible()
+    _submit_specification_source(
+        page,
+        "specs/revised-source.md",
+        "docs/adr/0005-revised.md",
+    )
+
+    expect(current).to_contain_text("specs/revised-source.md")
+    expect(current).to_contain_text("docs/adr/0005-revised.md")
+    revision = page.locator('[data-specification-revision-registration="true"]')
+    expect(revision).not_to_have_attribute("open", "")
+    expect(
+        revision.locator('form[data-specification-source-form="true"]')
+    ).not_to_be_visible()
+    assert [
+        request["source_path"] for request in fake.specification_source_registrations
+    ] == ["specs/current-specification.md", "specs/revised-source.md"]
 
     fake.specification = {"rendered_markdown": "# Pending source review"}
     page.locator("#refresh-project").click()
@@ -1906,6 +1982,10 @@ def test_issue_211_shows_current_source_through_specification_lifecycle(
         page.get_by_text("Choose how to address Specification Feedback")
     ).to_be_visible()
     expect(revision).to_be_visible()
+    expect(revision).not_to_have_attribute("open", "")
+    expect(
+        revision.locator('form[data-specification-source-form="true"]')
+    ).not_to_be_visible()
 
     assert fake.specification_source is not None
     fake.specification_source["adrs"] = []
@@ -1913,6 +1993,127 @@ def test_issue_211_shows_current_source_through_specification_lifecycle(
     expect(current).to_be_visible()
     expect(current).to_contain_text("No ADRs")
     assert fake.api_errors == []
+    context.close()
+
+
+def test_issue_211_fails_closed_for_malformed_and_hostile_source_projections(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Prevent malformed source evidence from exposing mutations or markup."""
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    page = context.new_page()
+    page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    registration_action: JsonObject = {
+        "request_kind": "register_specification_source",
+        "endpoint": "specifications/source",
+        "transport": "semantic",
+    }
+    structuring_action: JsonObject = {
+        "request_kind": "structure_specification",
+        "endpoint": "specifications/structure",
+        "transport": "semantic",
+    }
+    valid_source: JsonObject = {
+        "specification_source_id": 31,
+        "source_fingerprint": "sha256:issue-211-source",
+        "preparation_capability": "grill-with-docs",
+        "source": {"relative_path": "specs/current-specification.md"},
+        "adrs": [{"relative_path": "docs/adr/0004-source.md"}],
+    }
+    candidate: JsonObject = {"rendered_markdown": "# Candidate"}
+    position: JsonObject = {
+        "decisions": [
+            {
+                "node_id": "specification.structure",
+                "request_kind": "structure_specification",
+                "category": "available",
+                "decision_fingerprint": "sha256:issue-211-structure",
+                "fact_references": [
+                    {
+                        "fact_type": "specification_source",
+                        "fact_id": "31",
+                        "fingerprint": "sha256:issue-211-source",
+                    }
+                ],
+            }
+        ]
+    }
+
+    for review_state in ("rejected", "accepted"):
+        page.evaluate(
+            """({ projection, actions }) => {
+                document.querySelector('#specification-panel').innerHTML =
+                    specificationPanelMarkup(projection, actions, {});
+            }""",
+            {
+                "projection": {
+                    "source": valid_source,
+                    "candidate": candidate,
+                    "review": {"state": review_state},
+                },
+                "actions": [registration_action],
+            },
+        )
+        revision = page.locator('[data-specification-revision-registration="true"]')
+        expect(revision).to_be_visible()
+        expect(revision).not_to_have_attribute("open", "")
+        expect(
+            revision.locator('form[data-specification-source-form="true"]')
+        ).not_to_be_visible()
+
+    malformed_sources = [
+        {**valid_source, "source": {"relative_path": "   "}},
+        {**valid_source, "preparation_capability": "   "},
+        {**valid_source, "adrs": "docs/adr/not-an-array.md"},
+        {**valid_source, "adrs": [{"relative_path": "   "}]},
+    ]
+    for source in malformed_sources:
+        page.evaluate(
+            """({ projection, actions, position }) => {
+                document.querySelector('#specification-panel').innerHTML =
+                    specificationPanelMarkup(projection, actions, position);
+            }""",
+            {
+                "projection": {"source": source, "candidate": None, "review": None},
+                "actions": [registration_action, structuring_action],
+                "position": position,
+            },
+        )
+        unavailable = page.locator(
+            '[data-current-specification-source-unavailable="true"]'
+        )
+        expect(unavailable).to_be_visible()
+        expect(unavailable).to_have_attribute("role", "alert")
+        expect(
+            page.locator('form[data-specification-source-form="true"]')
+        ).to_have_count(0)
+        expect(
+            page.locator('[data-direct-action="structure_specification"]')
+        ).to_have_count(0)
+
+    hostile = '<img src=x onerror="window.issue211Xss=true">'
+    hostile_source = {
+        **valid_source,
+        "source": {"relative_path": hostile},
+        "preparation_capability": hostile,
+        "adrs": [{"relative_path": hostile}],
+    }
+    page.evaluate(
+        """({ projection }) => {
+            window.issue211Xss = false;
+            document.querySelector('#specification-panel').innerHTML =
+                specificationPanelMarkup(projection, [], {});
+        }""",
+        {"projection": {"source": hostile_source, "candidate": None, "review": None}},
+    )
+    current = page.locator('[data-current-specification-source="true"]')
+    expect(current).to_contain_text(hostile)
+    assert current.locator("img").count() == 0
+    assert "<img" not in current.inner_html()
+    assert page.evaluate("window.issue211Xss") is False
     context.close()
 
 

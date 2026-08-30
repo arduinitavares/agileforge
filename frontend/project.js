@@ -130,6 +130,7 @@ let dashboardLoadSequence = 0;
 let activeDashboardLoadController = null;
 let activeStoryMutation = null;
 let activeDependencyMutation = null;
+let activeSpecificationMutation = null;
 let lifecycleState = {
     project: {},
     position: {},
@@ -876,23 +877,30 @@ function specificationSourceRegistrationMarkup(actions) {
         : '';
 }
 
-function currentSpecificationSourceMarkup(source) {
+function currentSpecificationSourceDisplay(source) {
+    if (!source || typeof source !== 'object') return null;
     const sourcePath = source?.source?.relative_path;
     const preparationCapability = source?.preparation_capability;
-    if (typeof sourcePath !== 'string' || !sourcePath
-        || typeof preparationCapability !== 'string' || !preparationCapability) {
-        return '';
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()
+        || typeof preparationCapability !== 'string' || !preparationCapability.trim()
+        || !Array.isArray(source.adrs)) return null;
+    const adrPaths = source.adrs.map((adr) => adr?.relative_path);
+    if (adrPaths.some((path) => typeof path !== 'string' || !path.trim())) return null;
+    return { sourcePath, preparationCapability, adrPaths };
+}
+
+function currentSpecificationSourceMarkup(source, display = currentSpecificationSourceDisplay(source)) {
+    if (source === null || source === undefined) return '';
+    if (!display) {
+        return `<section data-current-specification-source-unavailable="true" role="alert" class="max-w-3xl rounded-lg border border-red-300 bg-red-50 p-4 text-sm leading-6 text-red-900">Current Specification source evidence is unavailable. Source registration and structuring controls are unavailable until the current source projection is complete.</section>`;
     }
-    const adrPaths = (Array.isArray(source.adrs) ? source.adrs : [])
-        .map((adr) => adr?.relative_path)
-        .filter((path) => typeof path === 'string' && path);
-    const adrs = adrPaths.length ? adrPaths.join(', ') : 'No ADRs';
+    const adrs = display.adrPaths.length ? display.adrPaths.join(', ') : 'No ADRs';
     return `<section data-current-specification-source="true" role="status" class="max-w-3xl rounded-lg border border-sky-200 bg-sky-50 p-4">
         <p class="text-sm font-semibold text-sky-950">Current registered Specification source</p>
         <dl class="mt-3 grid gap-3 text-sm sm:grid-cols-3">
-            <div class="min-w-0"><dt class="font-semibold text-slate-700">Source path</dt><dd class="mt-1 break-anywhere font-mono text-slate-900">${escapeWorkflowText(sourcePath)}</dd></div>
+            <div class="min-w-0"><dt class="font-semibold text-slate-700">Source path</dt><dd class="mt-1 break-anywhere font-mono text-slate-900">${escapeWorkflowText(display.sourcePath)}</dd></div>
             <div class="min-w-0"><dt class="font-semibold text-slate-700">Applicable ADRs</dt><dd class="mt-1 break-anywhere font-mono text-slate-900">${escapeWorkflowText(adrs)}</dd></div>
-            <div class="min-w-0"><dt class="font-semibold text-slate-700">Preparation capability</dt><dd class="mt-1 break-words font-mono text-slate-900">${escapeWorkflowText(preparationCapability)}</dd></div>
+            <div class="min-w-0"><dt class="font-semibold text-slate-700">Preparation capability</dt><dd class="mt-1 break-words font-mono text-slate-900">${escapeWorkflowText(display.preparationCapability)}</dd></div>
         </dl>
     </section>`;
 }
@@ -1054,20 +1062,19 @@ function captureSpecificationSourceRegistrationBinding(state) {
 function specificationFeedbackContinuationMarkup(
     projection,
     actions,
-    registration,
+    revisedRegistration,
     position,
 ) {
-    if (projection?.review?.state !== 'feedback') return registration;
+    if (projection?.review?.state !== 'feedback') return revisedRegistration;
     const binding = captureSpecificationStructuringBinding({
         actions,
         position,
         specification: projection,
     });
-    if (!binding) return registration;
+    if (!binding) return revisedRegistration;
     const rationale = projection.review.rationale
         ? `<p class="mt-2 text-sm leading-6 text-amber-900"><strong>Feedback:</strong> ${escapeWorkflowText(projection.review.rationale)}</p>`
         : '';
-    const revisedSource = specificationRevisionRegistrationMarkup(registration);
     const sameSource = binding.mode === 'same-source-feedback';
     const instruction = sameSource
         ? 'Retry with the unchanged registered source when the candidate transformation needs correction.'
@@ -1080,7 +1087,7 @@ function specificationFeedbackContinuationMarkup(
         ${rationale}
         <p class="mt-4 text-sm leading-6 text-slate-700">${instruction}</p>
         ${specificationStructuringActionMarkup(label, 'refresh')}
-        ${revisedSource}
+        ${revisedRegistration}
     </section>`;
 }
 
@@ -1097,20 +1104,28 @@ function specificationStructuringActionMarkup(label, icon) {
 
 function specificationPanelMarkup(projection, actions = [], position = {}) {
     const candidate = projection?.candidate;
-    const registration = specificationSourceRegistrationMarkup(actions);
-    const currentSource = currentSpecificationSourceMarkup(projection?.source);
-    const revisedRegistration = projection?.source
+    const source = projection?.source;
+    const hasCurrentSource = source !== null && source !== undefined;
+    const sourceDisplay = currentSpecificationSourceDisplay(source);
+    const hasValidCurrentSource = sourceDisplay !== null;
+    const registration = hasCurrentSource && !hasValidCurrentSource
+        ? ''
+        : specificationSourceRegistrationMarkup(actions);
+    const currentSource = currentSpecificationSourceMarkup(source, sourceDisplay);
+    const revisedRegistration = hasValidCurrentSource
         ? specificationRevisionRegistrationMarkup(registration)
         : registration;
-    const withSourceState = (markup) => projection?.source
+    const withSourceState = (markup) => hasCurrentSource
         ? `<div data-specification-source-state="true" class="space-y-5">${markup}</div>`
         : markup;
     if (!candidate) {
-        const structureBinding = captureSpecificationStructuringBinding({
-            actions,
-            position,
-            specification: projection,
-        });
+        const structureBinding = hasValidCurrentSource
+            ? captureSpecificationStructuringBinding({
+                actions,
+                position,
+                specification: projection,
+            })
+            : null;
         const revisedSource = structureBinding?.mode === 'revised-source';
         const structure = structureBinding
             ? `<div class="max-w-3xl">
@@ -1147,12 +1162,12 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
         : '';
     const reentry = review?.state === 'pending'
         ? ''
-        : specificationFeedbackContinuationMarkup(
+        : (hasValidCurrentSource ? specificationFeedbackContinuationMarkup(
             projection,
             actions,
-            registration,
+            revisedRegistration,
             position,
-        );
+        ) : '');
     return withSourceState(`${currentSource}<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
         ${controls}${reentry}`);
 }
@@ -2412,6 +2427,7 @@ function renderDashboard() {
             lifecycleState,
         ),
     );
+    reapplyActiveSpecificationMutation();
 }
 
 function validationIssueMessage(issue) {
@@ -2911,6 +2927,7 @@ async function submitHumanAction() {
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
     if (button.disabled) return false;
     const isSpecificationStructuring = requestKind === 'structure_specification';
+    if (isSpecificationStructuring && activeSpecificationMutation) return false;
     const isDeliveryGeneration = Boolean(DELIVERY_ACTION_CONFIG[requestKind]);
     const setBusy = (targetButton, busy) => {
         if (isSpecificationStructuring) {
@@ -2922,6 +2939,7 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
         }
     };
     let specificationBinding = null;
+    let specificationMutationToken = null;
     let deliveryBinding = null;
     let deliveryReconciled = false;
     let mutationCompleted = false;
@@ -2936,6 +2954,11 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
                 );
             }
             specificationBinding = binding;
+            specificationMutationToken = crypto.randomUUID();
+            activeSpecificationMutation = {
+                token: specificationMutationToken,
+                kind: 'structuring',
+            };
             await postAction(
                 binding.action,
                 {},
@@ -3036,7 +3059,15 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             return true;
         }
     } finally {
-        if (isDeliveryGeneration && !deliveryReconciled) {
+        if (isSpecificationStructuring) {
+            if (activeSpecificationMutation?.token === specificationMutationToken) {
+                activeSpecificationMutation = null;
+            }
+            const currentButton = document.querySelector?.(
+                '[data-direct-action="structure_specification"]',
+            ) ?? button;
+            setSpecificationStructuringBusy(currentButton, false);
+        } else if (isDeliveryGeneration && !deliveryReconciled) {
             setDeliveryActionBusy(button, false, requestKind, true);
         } else {
             setBusy(button, false);
@@ -3189,6 +3220,33 @@ function setSpecificationRevisionRegistrationBusy(control, busy) {
     revision.removeAttribute('inert');
 }
 
+function setSpecificationSourceRegistrationBusy(form, busy) {
+    const panel = form?.closest?.('#specification-panel')
+        ?? document.getElementById('specification-panel');
+    const controls = panel?.querySelectorAll?.(
+        '[data-specification-source-form="true"] button, [data-specification-source-form="true"] input, [data-specification-source-form="true"] textarea, [data-specification-source-form="true"] select, [data-direct-action="structure_specification"]',
+    ) ?? [];
+    Array.from(controls).forEach((control) => {
+        control.disabled = busy;
+        control.toggleAttribute('aria-disabled', busy);
+    });
+}
+
+function reapplyActiveSpecificationMutation() {
+    const mutation = activeSpecificationMutation;
+    if (!mutation) return;
+    if (mutation.kind === 'structuring') {
+        const button = document.querySelector(
+            '[data-direct-action="structure_specification"]',
+        );
+        if (button) setSpecificationStructuringBusy(button, true);
+        return;
+    }
+    document.querySelectorAll('[data-specification-source-form="true"]').forEach(
+        (form) => setSpecificationSourceRegistrationBusy(form, true),
+    );
+}
+
 function installInteractions() {
     document.addEventListener('submit', async (event) => {
         const form = event.target;
@@ -3207,7 +3265,7 @@ function installInteractions() {
         }
         if (form?.dataset?.specificationSourceForm === 'true') {
             event.preventDefault();
-            if (form.dataset.submitting === 'true') return;
+            if (form.dataset.submitting === 'true' || activeSpecificationMutation) return;
             const binding = captureSpecificationSourceRegistrationBinding(
                 lifecycleState,
             );
@@ -3236,7 +3294,12 @@ function installInteractions() {
             }
             const submit = form.querySelector('button[type="submit"]');
             form.dataset.submitting = 'true';
-            setSpecificationContinuationBusy(form, true);
+            const specificationMutationToken = crypto.randomUUID();
+            activeSpecificationMutation = {
+                token: specificationMutationToken,
+                kind: 'source-registration',
+            };
+            setSpecificationSourceRegistrationBusy(form, true);
             setProjectError('');
             try {
                 await postAction(
@@ -3248,9 +3311,15 @@ function installInteractions() {
             } catch (error) {
                 setProjectError(error.message);
             } finally {
+                if (activeSpecificationMutation?.token === specificationMutationToken) {
+                    activeSpecificationMutation = null;
+                }
                 delete form.dataset.submitting;
-                setSpecificationContinuationBusy(form, false);
-                if (submit) submit.disabled = false;
+                const currentForm = document.querySelector(
+                    'form[data-specification-source-form="true"]',
+                ) ?? form;
+                setSpecificationSourceRegistrationBusy(currentForm, false);
+                if (submit && currentForm === form) submit.disabled = false;
             }
             return;
         }
