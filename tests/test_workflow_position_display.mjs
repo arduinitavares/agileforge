@@ -183,9 +183,25 @@ function correctedPendingBacklogState() {
     };
     continuation.review.review = { state: 'pending' };
     return {
-        position: { decisions: [] },
+        position: {
+            decisions: [{
+                node_id: 'backlog.review',
+                instance_key: null,
+                request_kind: 'decide_backlog',
+                category: 'waiting',
+                recommendation_kind: 'required',
+                reason_code: 'BACKLOG_REVIEW_REQUIRED',
+                decision_fingerprint: 'sha256:pending-backlog',
+            }],
+        },
         planningReviews: { backlog: continuation },
-        actions: [],
+        actions: [{
+            node_id: 'backlog.review',
+            instance_key: null,
+            request_kind: 'decide_backlog',
+            endpoint: 'backlog/decide',
+            transport: 'semantic',
+        }],
     };
 }
 
@@ -645,6 +661,87 @@ test('Backlog correction reconciliation preserves uncertain loads and only clear
     `, malformed);
     await assert.rejects(malformed.loadDashboard());
     assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', malformed), 'awaiting_authority');
+});
+
+test('Backlog correction rejects torn absence and corrected-pending authority in both token phases', async () => {
+    const old = backlogFeedbackState('revision-ready');
+    const token = (phase) => `
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-torn-${phase}', phase: '${phase}',
+            action: ${JSON.stringify(old.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `;
+    const cleanAbsence = {
+        position: { decisions: [{ node_id: 'roadmap.generate', decision_fingerprint: 'sha256:roadmap' }] },
+        planningReviews: { backlog: {} },
+        actions: [],
+    };
+    const tornStates = [
+        ['absence with prior Feedback decision', () => ({
+            ...structuredClone(cleanAbsence), position: structuredClone(old.position),
+        })],
+        ['absence with correction action', () => ({
+            ...structuredClone(cleanAbsence), actions: structuredClone(old.actions),
+        })],
+        ['absence with null continuation', () => ({
+            ...structuredClone(cleanAbsence), planningReviews: { backlog: { continuation: null } },
+        })],
+        ['absence with unknown key', () => ({
+            ...structuredClone(cleanAbsence), planningReviews: { backlog: { torn: true } },
+        })],
+        ['pending with prior Feedback decision', () => {
+            const pending = correctedPendingBacklogState();
+            pending.position.decisions.push(structuredClone(old.position.decisions[0]));
+            return pending;
+        }],
+        ['pending with prior correction action', () => {
+            const pending = correctedPendingBacklogState();
+            pending.actions.push(structuredClone(old.actions[0]));
+            return pending;
+        }],
+        ['pending with malformed correction action', () => {
+            const pending = correctedPendingBacklogState();
+            pending.actions.push({ ...old.actions[0], endpoint: 'backlog/wrong' });
+            return pending;
+        }],
+        ['pending with a second Backlog review decision', () => {
+            const pending = correctedPendingBacklogState();
+            pending.position.decisions.push({
+                ...pending.position.decisions[0],
+                decision_fingerprint: 'sha256:second-pending-backlog',
+            });
+            return pending;
+        }],
+    ];
+
+    for (const phase of ['awaiting_authority', 'recovering_failure']) {
+        for (const [name, build] of tornStates) {
+            const context = loadFrontend(dashboardResponse(build()));
+            vm.runInContext(token(phase), context);
+            assert.strictEqual(await context.loadDashboard(), true, `${phase}: ${name}`);
+            assert.equal(
+                vm.runInContext('activeBacklogCorrectionMutation.phase', context),
+                phase,
+                `${phase}: ${name}`,
+            );
+        }
+
+        for (const [name, state] of [
+            ['complete absence', cleanAbsence],
+            ['complete corrected pending', correctedPendingBacklogState()],
+        ]) {
+            const context = loadFrontend(dashboardResponse(state));
+            vm.runInContext(token(phase), context);
+            assert.strictEqual(await context.loadDashboard(), true, `${phase}: ${name}`);
+            assert.strictEqual(
+                vm.runInContext('activeBacklogCorrectionMutation', context),
+                null,
+                `${phase}: ${name}`,
+            );
+        }
+    }
 });
 
 test('Backlog correction recovery clears only authoritative active or fresh correction states', async () => {

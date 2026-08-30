@@ -2938,11 +2938,68 @@ function backlogPendingReview(state) {
     return backlogPendingReviewIsValid(backlog) ? backlog : null;
 }
 
-function validNonFeedbackBacklogState(state) {
+function advertisedBacklogCorrectionAction(action) {
+    return action?.request_kind === 'record_backlog_draft';
+}
+
+function currentBacklogDecisions(state) {
+    const decisions = state?.position?.decisions;
+    return Array.isArray(decisions) ? decisions : null;
+}
+
+function hasCurrentFeedbackDecision(state, decisionFingerprint) {
+    const decisions = currentBacklogDecisions(state);
+    return decisions === null || decisions.some((decision) => (
+        decision?.decision_fingerprint === decisionFingerprint
+        || isBacklogFeedbackContinuationDecision(decision)
+    ));
+}
+
+function hasAdvertisedBacklogCorrectionAction(state) {
+    return !Array.isArray(state?.actions)
+        || state.actions.some(advertisedBacklogCorrectionAction);
+}
+
+function validNonFeedbackBacklogState(state, mutation) {
     const backlog = reviewObject(state?.planningReviews?.backlog);
-    if (!backlog || backlog.continuation) return false;
-    const hasTopLevelReview = 'binding' in backlog || 'review' in backlog;
-    return !hasTopLevelReview || backlogPendingReviewIsValid(backlog);
+    return backlog !== null
+        && Object.keys(backlog).length === 0
+        && !hasCurrentFeedbackDecision(state, mutation.decisionFingerprint)
+        && !hasAdvertisedBacklogCorrectionAction(state);
+}
+
+function correctedPendingBacklogState(state, mutation) {
+    const backlog = backlogPendingReview(state);
+    const backlogReviewDecisions = currentBacklogDecisions(state)?.filter((decision) => (
+        decision?.node_id === 'backlog.review'
+        && decision.instance_key === null
+        && decision.request_kind === 'decide_backlog'
+    ));
+    const pendingDecision = backlogReviewDecisions?.filter((decision) => (
+        decision?.node_id === 'backlog.review'
+        && decision.instance_key === null
+        && decision.request_kind === 'decide_backlog'
+        && decision.category === 'waiting'
+        && decision.recommendation_kind === 'required'
+        && decision.reason_code === 'BACKLOG_REVIEW_REQUIRED'
+        && decision.decision_fingerprint === backlog?.binding?.decision_fingerprint
+    ));
+    const candidate = reviewObject(backlog?.review?.candidate);
+    return backlog !== null
+        && Object.keys(backlog).length === 2
+        && 'binding' in backlog
+        && 'review' in backlog
+        && backlog.review?.phase === 'backlog'
+        && candidate !== null
+        && Number.isInteger(candidate.backlog_artifact_id)
+        && candidate.backlog_artifact_id > 0
+        && typeof candidate.artifact_fingerprint === 'string'
+        && Boolean(candidate.artifact_fingerprint.trim())
+        && candidate.supersedes_backlog_artifact_id === mutation.backlogArtifactId
+        && backlogReviewDecisions?.length === 1
+        && pendingDecision?.length === 1
+        && !hasCurrentFeedbackDecision(state, mutation.decisionFingerprint)
+        && !hasAdvertisedBacklogCorrectionAction(state);
 }
 
 function reconcileBacklogCorrectionMutation(mutationAtStart) {
@@ -2955,16 +3012,14 @@ function reconcileBacklogCorrectionMutation(mutationAtStart) {
     const mutation = activeBacklogCorrectionMutation;
     const continuation = backlogFeedbackContinuationProjection(lifecycleState);
     const correction = backlogCorrectionActionBinding(lifecycleState, continuation);
-    const pending = backlogPendingReview(lifecycleState);
-    const correctedPending = pending?.review?.candidate?.supersedes_backlog_artifact_id
-        === mutation.backlogArtifactId;
+    const correctedPending = correctedPendingBacklogState(lifecycleState, mutation);
     const completeContinuation = continuation.kind === 'display'
         && (continuation.mode === 'active'
             ? correction.kind === 'unavailable' && correction.reason === 'active'
             : correction.kind === 'ready');
     const qualifyingBacklogState = mutation.phase === 'recovering_failure'
-        ? (completeContinuation || correctedPending || validNonFeedbackBacklogState(lifecycleState))
-        : (correctedPending || validNonFeedbackBacklogState(lifecycleState));
+        ? (completeContinuation || correctedPending || validNonFeedbackBacklogState(lifecycleState, mutation))
+        : (correctedPending || validNonFeedbackBacklogState(lifecycleState, mutation));
     const focusMutation = mutation.focusIntent ? { ...mutation } : null;
     if (qualifyingBacklogState) activeBacklogCorrectionMutation = null;
     return focusMutation;
