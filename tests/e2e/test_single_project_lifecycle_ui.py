@@ -1691,6 +1691,7 @@ def test_sprint_review_browser_shows_accepted_invest_without_false_gate() -> Non
                         },
                         review: {
                             phase: 'sprint_plan',
+                            review: {state: 'pending'},
                             project_id: 1,
                             candidate: {
                                 sprint_owner: owner,
@@ -2853,6 +2854,7 @@ def _story_review(
         },
         "review": {
             "phase": "story",
+            "review": {"state": "pending"},
             "lineage": {
                 "backlog_item": {
                     "requirement": "Keep Story actions bound to their backlog item.",
