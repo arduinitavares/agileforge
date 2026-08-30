@@ -131,6 +131,7 @@ let activeDashboardLoadController = null;
 let activeStoryMutation = null;
 let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
+let activeBacklogCorrectionMutation = null;
 let lifecycleState = {
     project: {},
     position: {},
@@ -1857,7 +1858,7 @@ function backlogFeedbackContinuationMarkup(continuation, actionBinding) {
     const details = actionBinding?.kind === 'ready'
         ? backlogCorrectionActionDetails(actionBinding.action)
         : null;
-    const action = details ? `<div data-backlog-correction-action="true" data-delivery-generation-action="record_backlog_draft" ${deliveryActionBindingAttributes(actionBinding.action)} class="mt-4">
+    const action = details ? `<div data-backlog-correction-action="true" data-delivery-generation-action="record_backlog_draft" ${deliveryActionBindingAttributes(actionBinding.action)} tabindex="-1" class="mt-4">
         <p class="mb-3 text-sm leading-6 text-slate-600">${details.description}</p>
         <button type="button" data-direct-action="record_backlog_draft" class="${BUTTON_PRIMARY}">
             <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
@@ -2615,6 +2616,7 @@ function renderDashboard() {
         ),
     );
     reapplyActiveSpecificationMutation();
+    reapplyActiveBacklogCorrectionMutation();
 }
 
 function validationIssueMessage(issue) {
@@ -2691,6 +2693,12 @@ async function loadDashboard() {
             token: activeDependencyMutation.token,
             phase: activeDependencyMutation.phase,
         };
+    const backlogCorrectionMutationAtStart = activeBacklogCorrectionMutation === null
+        ? null
+        : {
+            token: activeBacklogCorrectionMutation.token,
+            phase: activeBacklogCorrectionMutation.phase,
+        };
     activeDashboardLoadController?.abort();
     const controller = new AbortController();
     activeDashboardLoadController = controller;
@@ -2762,6 +2770,9 @@ async function loadDashboard() {
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidatesData,
         };
+        const backlogFocusMutation = reconcileBacklogCorrectionMutation(
+            backlogCorrectionMutationAtStart,
+        );
         if (
             storyMutationAtStart?.phase === 'awaiting_authority'
             && activeStoryMutation?.token === storyMutationAtStart.token
@@ -2778,6 +2789,7 @@ async function loadDashboard() {
         }
         setProjectError('');
         renderDashboard();
+        consumeBacklogCorrectionFocus(backlogFocusMutation);
         return true;
     } catch (error) {
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
@@ -2886,6 +2898,108 @@ function currentDeliveryActionContainers(action, requestKind) {
         (candidate) => deliveryActionElementMatches(candidate, action, requestKind),
     );
     return exact ? [exact] : [];
+}
+
+function deliveryActionsMatch(left, right) {
+    return left?.node_id === right?.node_id
+        && (left?.instance_key ?? null) === (right?.instance_key ?? null)
+        && left?.request_kind === right?.request_kind
+        && left?.endpoint === right?.endpoint
+        && (left?.transport ?? '') === (right?.transport ?? '');
+}
+
+function captureBacklogCorrectionBinding(state, control) {
+    const continuation = backlogFeedbackContinuationProjection(state);
+    const correction = backlogCorrectionActionBinding(state, continuation);
+    const binding = captureDeliveryActionBinding(state, control, 'record_backlog_draft');
+    if (continuation.kind !== 'display' || correction.kind !== 'ready'
+        || !binding || !deliveryActionsMatch(binding, correction.action)) {
+        return null;
+    }
+    return {
+        action: binding,
+        backlogArtifactId: continuation.candidate.backlog_artifact_id,
+        decisionFingerprint: continuation.decision.decision_fingerprint,
+    };
+}
+
+function reapplyActiveBacklogCorrectionMutation() {
+    const mutation = activeBacklogCorrectionMutation;
+    if (!mutation) return;
+    currentDeliveryActionContainers(mutation.action, 'record_backlog_draft').forEach((container) => {
+        const control = container.querySelector?.('[data-direct-action="record_backlog_draft"]')
+            ?? container;
+        setDeliveryActionBusy(control, true, 'record_backlog_draft', true);
+    });
+}
+
+function backlogPendingReview(state) {
+    const backlog = reviewObject(state?.planningReviews?.backlog);
+    return backlogPendingReviewIsValid(backlog) ? backlog : null;
+}
+
+function validNonFeedbackBacklogState(state) {
+    const backlog = reviewObject(state?.planningReviews?.backlog);
+    if (!backlog || backlog.continuation) return false;
+    const hasTopLevelReview = 'binding' in backlog || 'review' in backlog;
+    return !hasTopLevelReview || backlogPendingReviewIsValid(backlog);
+}
+
+function reconcileBacklogCorrectionMutation(mutationAtStart) {
+    if (!mutationAtStart
+        || activeBacklogCorrectionMutation?.token !== mutationAtStart.token
+        || activeBacklogCorrectionMutation.phase !== mutationAtStart.phase
+        || mutationAtStart.phase === 'submitting') {
+        return null;
+    }
+    const mutation = activeBacklogCorrectionMutation;
+    const continuation = backlogFeedbackContinuationProjection(lifecycleState);
+    const correction = backlogCorrectionActionBinding(lifecycleState, continuation);
+    const pending = backlogPendingReview(lifecycleState);
+    const correctedPending = pending?.review?.candidate?.supersedes_backlog_artifact_id
+        === mutation.backlogArtifactId;
+    const completeContinuation = continuation.kind === 'display'
+        && (continuation.mode === 'active'
+            ? correction.kind === 'unavailable' && correction.reason === 'active'
+            : correction.kind === 'ready');
+    const qualifyingBacklogState = mutation.phase === 'recovering_failure'
+        ? (completeContinuation || correctedPending || validNonFeedbackBacklogState(lifecycleState))
+        : (correctedPending || validNonFeedbackBacklogState(lifecycleState));
+    const focusMutation = mutation.focusIntent ? { ...mutation } : null;
+    if (qualifyingBacklogState) activeBacklogCorrectionMutation = null;
+    return focusMutation;
+}
+
+function backlogCorrectionFocusSelector(state) {
+    const backlog = reviewObject(state?.planningReviews?.backlog);
+    if (backlogPendingReviewIsValid(backlog)) return '[data-planning-review-card="backlog"]';
+    if (!backlog || (('binding' in backlog || 'review' in backlog) && !backlogPendingReviewIsValid(backlog))) {
+        return '[data-backlog-feedback-projection-error="true"]';
+    }
+    const continuation = backlogFeedbackContinuationProjection(state);
+    const correction = backlogCorrectionActionBinding(state, continuation);
+    if (continuation.kind !== 'display' || correction.kind === 'error') {
+        return '[data-backlog-feedback-projection-error="true"]';
+    }
+    if (continuation.mode === 'active') return '[data-backlog-feedback-continuation="true"]';
+    if (correction.kind === 'ready') return '[data-backlog-correction-action="true"]:not([disabled])';
+    return null;
+}
+
+function consumeBacklogCorrectionFocus(mutation = activeBacklogCorrectionMutation) {
+    if (!mutation?.focusIntent) return;
+    const selector = backlogCorrectionFocusSelector(lifecycleState);
+    const target = selector ? document.querySelector(selector) : null;
+    const fallback = selector === '[data-backlog-correction-action="true"]:not([disabled])'
+        ? document.querySelector('[data-backlog-feedback-continuation="true"]')
+        : null;
+    (target ?? fallback)?.focus?.();
+    if (activeBacklogCorrectionMutation?.token === mutation.token) {
+        activeBacklogCorrectionMutation = {
+            ...activeBacklogCorrectionMutation,
+            focusIntent: false,
+        };
+    }
 }
 
 function reviewCandidateFingerprint(state, scope) {
@@ -3111,8 +3225,81 @@ async function submitHumanAction() {
     await loadDashboard();
 }
 
+async function runBacklogCorrection(binding, button) {
+    if (activeBacklogCorrectionMutation) return false;
+    const token = crypto.randomUUID();
+    let mutationCompleted = false;
+    activeBacklogCorrectionMutation = {
+        token,
+        phase: 'submitting',
+        action: binding.action,
+        backlogArtifactId: binding.backlogArtifactId,
+        decisionFingerprint: binding.decisionFingerprint,
+        focusIntent: true,
+    };
+    setDeliveryActionBusy(button, true, 'record_backlog_draft', true);
+    setProjectError('');
+    try {
+        await postAction(binding.action);
+        mutationCompleted = true;
+        if (activeBacklogCorrectionMutation?.token === token
+            && activeBacklogCorrectionMutation.phase === 'submitting') {
+            activeBacklogCorrectionMutation = {
+                ...activeBacklogCorrectionMutation,
+                phase: 'awaiting_authority',
+            };
+            renderDashboard();
+        }
+        const refreshed = await loadDashboard();
+        if (refreshed !== true) {
+            throw new Error(
+                'The Backlog correction was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.',
+            );
+        }
+        if (activeBacklogCorrectionMutation?.token === token) {
+            throw new Error(
+                'The Backlog correction was accepted, but the current project projection did not confirm the result. Controls remain locked until a successful refresh.',
+            );
+        }
+    } catch (error) {
+        if (!mutationCompleted
+            && activeBacklogCorrectionMutation?.token === token
+            && activeBacklogCorrectionMutation.phase === 'submitting') {
+            activeBacklogCorrectionMutation = {
+                ...activeBacklogCorrectionMutation,
+                phase: 'recovering_failure',
+            };
+            renderDashboard();
+            try {
+                await loadDashboard();
+            } catch (_loadError) {
+                // Keep correction controls locked until a current projection arrives.
+            }
+        }
+        const localMessage = error.message;
+        const currentControls = currentDeliveryActionContainers(
+            binding.action,
+            'record_backlog_draft',
+        );
+        setProjectError(localMessage);
+        (currentControls.length ? currentControls : [button]).forEach(
+            (control) => setDeliveryActionStatus(control, localMessage),
+        );
+    } finally {
+        if (activeBacklogCorrectionMutation?.token === token) {
+            reapplyActiveBacklogCorrectionMutation();
+        }
+    }
+    return true;
+}
+
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
     if (button.disabled) return false;
+    if (requestKind === 'record_backlog_draft' && activeBacklogCorrectionMutation) return false;
+    const backlogCorrection = requestKind === 'record_backlog_draft'
+        ? captureBacklogCorrectionBinding(lifecycleState, button)
+        : null;
+    if (backlogCorrection) return runBacklogCorrection(backlogCorrection, button);
     const isSpecificationStructuring = requestKind === 'structure_specification';
     if (isSpecificationStructuring && activeSpecificationMutation) return false;
     const isDeliveryGeneration = Boolean(DELIVERY_ACTION_CONFIG[requestKind]);

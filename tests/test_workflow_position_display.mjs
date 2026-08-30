@@ -155,6 +155,66 @@ function directActionButton(action) {
     return button;
 }
 
+function backlogCorrectionButton(action) {
+    const button = directActionButton(action);
+    button._label.textContent = 'Regenerate Backlog from feedback';
+    Object.assign(button._wrapper.dataset, {
+        backlogCorrectionAction: 'true',
+        deliveryGenerationAction: action.request_kind,
+        deliveryActionNode: action.node_id,
+        deliveryActionInstance: action.instance_key ?? '',
+        deliveryActionHasInstance: action.instance_key === null || action.instance_key === undefined
+            ? 'false'
+            : 'true',
+        deliveryActionEndpoint: action.endpoint,
+        deliveryActionTransport: action.transport ?? '',
+    });
+    return button;
+}
+
+function correctedPendingBacklogState() {
+    const continuation = backlogFeedbackState('revision-ready').planningReviews.backlog.continuation;
+    continuation.binding = { decision_fingerprint: 'sha256:pending-backlog', instance_key: null };
+    continuation.review.candidate = {
+        ...continuation.review.candidate,
+        backlog_artifact_id: 8,
+        version_number: 2,
+        supersedes_backlog_artifact_id: 7,
+    };
+    continuation.review.review = { state: 'pending' };
+    return {
+        position: { decisions: [] },
+        planningReviews: { backlog: continuation },
+        actions: [],
+    };
+}
+
+function installBacklogCorrectionDom(context, controls, focusTargets = {}) {
+    context.document.querySelectorAll = (selector) => (
+        selector === '[data-delivery-generation-action="record_backlog_draft"]' ? controls.map((button) => button._wrapper) : []
+    );
+    context.document.querySelector = (selector) => focusTargets[selector] ?? null;
+}
+
+function dashboardResponse(state) {
+    return async (url, options = {}) => {
+        if (options.method === 'POST') {
+            return { ok: true, status: 200, text: async () => '{}' };
+        }
+        if (url.endsWith('/position')) {
+            return {
+                ok: true,
+                status: 200,
+                text: async () => JSON.stringify({ data: state.position, actions: state.actions }),
+            };
+        }
+        if (url.endsWith('/backlog/review')) {
+            return { ok: true, status: 200, text: async () => JSON.stringify({ data: state.planningReviews.backlog }) };
+        }
+        return { ok: true, status: 200, text: async () => JSON.stringify({ data: {} }) };
+    };
+}
+
 function storyAction(overrides = {}) {
     return {
         node_id: 'planning.story.generate',
@@ -451,6 +511,281 @@ test('corrected pending Backlog review renders candidate and parent identity', (
     const markup = context.deliveryPanelMarkup({ decisions: [] }, { backlog: selected }, []);
     assert.ok(markup.includes('Corrected Backlog candidate v2 (#8), replacing #7'));
     assert.ok(markup.includes('data-planning-review-card="backlog" tabindex="-1"'));
+});
+
+test('Backlog correction module lock blocks a stale rerender until authority reconciles', async () => {
+    let postCount = 0;
+    let resolveCorrection;
+    let reloadFails = true;
+    const corrected = correctedPendingBacklogState();
+    const context = loadFrontend(async (url, options = {}) => {
+        if (options.method === 'POST') {
+            postCount += 1;
+            return new Promise((resolve) => { resolveCorrection = resolve; });
+        }
+        if (reloadFails) throw new Error('dashboard reload unavailable');
+        return dashboardResponse(corrected)(url, options);
+    });
+    const stale = backlogFeedbackState('revision-ready');
+    const original = backlogCorrectionButton(stale.actions[0]);
+    const replacement = backlogCorrectionButton(stale.actions[0]);
+    let correctedFocuses = 0;
+    installBacklogCorrectionDom(context, [original], {
+        '[data-planning-review-card="backlog"]': { focus() { correctedFocuses += 1; } },
+    });
+    vm.runInContext(`selectedProjectId = 7; lifecycleState = ${JSON.stringify(stale)};`, context);
+
+    const submission = context.runDirectAction('record_backlog_draft', original);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const submitting = JSON.parse(vm.runInContext(
+        'JSON.stringify(activeBacklogCorrectionMutation)',
+        context,
+    ));
+    assert.equal(postCount, 1);
+    assert.equal(submitting.phase, 'submitting');
+    assert.equal(original.disabled, true);
+    assert.equal(original.ariaBusy, 'true');
+    assert.equal(original._label.textContent, 'Regenerating Backlog from feedback...');
+
+    installBacklogCorrectionDom(context, [replacement], {
+        '[data-planning-review-card="backlog"]': { focus() { correctedFocuses += 1; } },
+    });
+    context.reapplyActiveBacklogCorrectionMutation();
+    await context.runDirectAction('record_backlog_draft', replacement);
+    await context.runDirectAction('record_backlog_draft', replacement);
+    assert.equal(replacement.disabled, true);
+    assert.equal(postCount, 1);
+
+    resolveCorrection({ ok: true, status: 200, text: async () => '{}' });
+    await submission;
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'awaiting_authority');
+    assert.notEqual(vm.runInContext('activeBacklogCorrectionMutation', context), null);
+    assert.equal(original.disabled, true);
+    assert.equal(replacement.disabled, true);
+
+    reloadFails = false;
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', context), null);
+    assert.equal(correctedFocuses, 1);
+});
+
+test('Backlog correction rejects into recovery before an authoritative reload', async () => {
+    let releaseDashboard;
+    const dashboardGate = new Promise((resolve) => { releaseDashboard = resolve; });
+    const failedRetry = backlogFeedbackState('failed-retry');
+    const context = loadFrontend(async (url, options = {}) => {
+        if (options.method === 'POST') throw new Error('provider unavailable');
+        await dashboardGate;
+        return dashboardResponse(failedRetry)(url, options);
+    });
+    const prior = backlogFeedbackState('revision-ready');
+    const initiating = backlogCorrectionButton(prior.actions[0]);
+    installBacklogCorrectionDom(context, [initiating]);
+    vm.runInContext(`selectedProjectId = 7; lifecycleState = ${JSON.stringify(prior)};`, context);
+
+    const submission = context.runDirectAction('record_backlog_draft', initiating);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'recovering_failure');
+    assert.equal(initiating.disabled, true);
+
+    releaseDashboard();
+    await submission;
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', context), null);
+    assert.equal(initiating.disabled, true);
+    const refreshed = context.deliveryPanelMarkup(
+        failedRetry.position,
+        failedRetry.planningReviews,
+        failedRetry.actions,
+    );
+    assert.ok(refreshed.includes('data-backlog-correction-action="true"'));
+    assert.ok(!refreshed.includes('data-backlog-correction-action="true" disabled'));
+});
+
+test('Backlog correction reconciliation preserves uncertain loads and only clears qualifying authority', async () => {
+    const sameContinuation = backlogFeedbackState('revision-ready');
+    const context = loadFrontend(dashboardResponse(sameContinuation));
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState = ${JSON.stringify(sameContinuation)};
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-token-1',
+            phase: 'submitting',
+            action: ${JSON.stringify(sameContinuation.actions[0])},
+            backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready',
+            focusIntent: false,
+        };
+    `, context);
+
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'submitting');
+
+    vm.runInContext("activeBacklogCorrectionMutation.phase = 'awaiting_authority';", context);
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'awaiting_authority');
+
+    const absence = { position: { decisions: [] }, planningReviews: { backlog: {} }, actions: [] };
+    context.fetch = dashboardResponse(absence);
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', context), null);
+
+    const malformed = loadFrontend(async () => {
+        throw new Error('dashboard reload unavailable');
+    });
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-token-2', phase: 'awaiting_authority',
+            action: ${JSON.stringify(sameContinuation.actions[0])},
+            backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready',
+            focusIntent: false,
+        };
+    `, malformed);
+    await assert.rejects(malformed.loadDashboard());
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', malformed), 'awaiting_authority');
+});
+
+test('Backlog correction recovery clears only authoritative active or fresh correction states', async () => {
+    const prior = backlogFeedbackState('revision-ready');
+    const active = backlogFeedbackState('active');
+    const activeContext = loadFrontend(dashboardResponse(active));
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-active', phase: 'recovering_failure',
+            action: ${JSON.stringify(prior.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `, activeContext);
+    assert.strictEqual(await activeContext.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', activeContext), null);
+    assert.ok(!activeContext.deliveryPanelMarkup(
+        active.position,
+        active.planningReviews,
+        active.actions,
+    ).includes('data-backlog-correction-action="true"'));
+
+    const fresh = backlogFeedbackState('revision-ready');
+    fresh.position.decisions[0].decision_fingerprint = 'sha256:fresh-decision';
+    fresh.planningReviews.backlog.continuation.binding.decision_fingerprint = 'sha256:fresh-decision';
+    const oldControl = backlogCorrectionButton(prior.actions[0]);
+    const freshContext = loadFrontend(dashboardResponse(fresh));
+    installBacklogCorrectionDom(freshContext, [oldControl]);
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-fresh', phase: 'recovering_failure',
+            action: ${JSON.stringify(prior.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `, freshContext);
+    freshContext.reapplyActiveBacklogCorrectionMutation();
+    assert.equal(oldControl.disabled, true);
+    assert.strictEqual(await freshContext.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', freshContext), null);
+    assert.equal(oldControl.disabled, true);
+    assert.ok(freshContext.deliveryPanelMarkup(
+        fresh.position,
+        fresh.planningReviews,
+        fresh.actions,
+    ).includes('data-backlog-correction-action="true"'));
+
+    const malformed = backlogFeedbackState('revision-ready');
+    malformed.planningReviews.backlog.continuation.binding.node_id = 'backlog.review';
+    const malformedContext = loadFrontend(dashboardResponse(malformed));
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-malformed', phase: 'recovering_failure',
+            action: ${JSON.stringify(prior.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `, malformedContext);
+    assert.strictEqual(await malformedContext.loadDashboard(), true);
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', malformedContext), 'recovering_failure');
+
+    const invalidAction = backlogFeedbackState('revision-ready');
+    invalidAction.actions[0].endpoint = 'backlog/wrong';
+    const invalidActionContext = loadFrontend(dashboardResponse(invalidAction));
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-invalid-action', phase: 'recovering_failure',
+            action: ${JSON.stringify(prior.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `, invalidActionContext);
+    assert.strictEqual(await invalidActionContext.loadDashboard(), true);
+    assert.equal(
+        vm.runInContext('activeBacklogCorrectionMutation.phase', invalidActionContext),
+        'recovering_failure',
+    );
+});
+
+test('Backlog correction token survives an aborted and superseded dashboard load', async () => {
+    let fetchCount = 0;
+    const context = loadFrontend(async (_url, options = {}) => {
+        fetchCount += 1;
+        if (fetchCount <= 13) {
+            return new Promise((_resolve, reject) => {
+                options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+            });
+        }
+        throw new Error('replacement dashboard load unavailable');
+    });
+    const state = backlogFeedbackState('revision-ready');
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-superseded', phase: 'awaiting_authority',
+            action: ${JSON.stringify(state.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: false,
+        };
+    `, context);
+
+    const firstLoad = context.loadDashboard();
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondLoad = context.loadDashboard();
+    assert.strictEqual(await firstLoad, false);
+    await assert.rejects(secondLoad, /replacement dashboard load unavailable/);
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'awaiting_authority');
+});
+
+test('Backlog Feedback focus chooses the current authoritative target once', () => {
+    const focusCases = [
+        ['revision-ready', '[data-backlog-correction-action="true"]:not([disabled])'],
+        ['active', '[data-backlog-feedback-continuation="true"]'],
+        ['projection-error', '[data-backlog-feedback-projection-error="true"]'],
+        ['corrected-pending', '[data-planning-review-card="backlog"]'],
+    ];
+    for (const [mode, selector] of focusCases) {
+        const context = loadFrontend();
+        const state = mode === 'corrected-pending'
+            ? correctedPendingBacklogState()
+            : backlogFeedbackState(mode === 'projection-error' ? 'revision-ready' : mode);
+        if (mode === 'projection-error') {
+            state.planningReviews.backlog.continuation.binding.node_id = 'backlog.review';
+        }
+        let focusCount = 0;
+        installBacklogCorrectionDom(context, [], {
+            [selector]: { focus() { focusCount += 1; } },
+        });
+        vm.runInContext(`
+            lifecycleState = ${JSON.stringify(state)};
+            activeBacklogCorrectionMutation = {
+                token: 'backlog-focus-${mode}', phase: 'awaiting_authority',
+                action: ${JSON.stringify(backlogFeedbackState('revision-ready').actions[0])},
+                backlogArtifactId: 7, decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: true,
+            };
+        `, context);
+
+        context.consumeBacklogCorrectionFocus();
+        context.consumeBacklogCorrectionFocus();
+        assert.equal(focusCount, 1, mode);
+        assert.equal(vm.runInContext('activeBacklogCorrectionMutation.focusIntent', context), false, mode);
+    }
 });
 
 function selectedScopeStory(overrides = {}) {
