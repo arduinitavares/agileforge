@@ -264,6 +264,7 @@ class FakeLifecycle:
                 },
                 "review": {
                     "phase": "backlog",
+                    "review": {"state": "pending"},
                     "candidate": self.backlog_candidate,
                 },
             }
@@ -279,6 +280,7 @@ class FakeLifecycle:
                 },
                 "review": {
                     "phase": "roadmap",
+                    "review": {"state": "pending"},
                     "candidate": self.roadmap_candidate,
                 },
             }
@@ -296,6 +298,7 @@ class FakeLifecycle:
                         },
                         "review": {
                             "phase": "story",
+                            "review": {"state": "pending"},
                             "lineage": {
                                 "backlog_item": {
                                     "backlog_item_id": "PBI-000001",
@@ -323,6 +326,7 @@ class FakeLifecycle:
                 },
                 "review": {
                     "phase": "sprint_plan",
+                    "review": {"state": "pending"},
                     "project_id": _PROJECT_ID,
                     "candidate": self.sprint_plan_candidate,
                 },
