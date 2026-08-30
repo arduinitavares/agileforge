@@ -158,6 +158,25 @@ test('Backlog Feedback keeps valid content when its advertised correction action
     assert.ok(!markup.includes('data-backlog-correction-action="true"'));
 });
 
+test('Backlog Feedback payloads never render terminal review controls', () => {
+    const context = loadFrontend();
+    const continuation = feedbackContinuation('revision-ready', 'Visible content', 'Visible rationale');
+    const topLevel = continuation.reviews.backlog.continuation;
+    const variants = [
+        { ...topLevel, review: { ...topLevel.review, review: { state: 'feedback', rationale: 'Feedback' } } },
+        { ...topLevel, continuation: topLevel },
+        { ...topLevel, review: { ...topLevel.review, review: { state: 'rejected' } } },
+    ];
+    for (const backlog of variants) {
+        const markup = context.deliveryPanelMarkup(continuation.position, { backlog }, continuation.actions);
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+        assert.ok(!markup.includes('data-planning-review="backlog"'));
+        assert.ok(!markup.includes('>Accept</button>'));
+        assert.ok(!markup.includes('>Request changes</button>'));
+        assert.ok(!markup.includes('>Reject</button>'));
+    }
+});
+
 test('review cards escape evidence and render it before controls', () => {
     const context = loadFrontend();
     const markup = context.planningReviewCardMarkup(

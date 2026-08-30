@@ -109,6 +109,7 @@ function storyReview(instanceKey) {
                 is_complete: true,
                 clarifying_questions: [],
             },
+            review: { state: 'pending' },
         },
     };
 }
@@ -286,6 +287,108 @@ test('Backlog Feedback keeps durable display when correction action validation f
         const markup = context.deliveryPanelMarkup(state.position, state.planningReviews, state.actions);
         assert.ok(markup.includes('Backlog Feedback recorded'));
         assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+    }
+});
+
+test('Backlog Feedback rejects torn or ambiguous durable joins before binding correction actions', () => {
+    const context = loadFrontend();
+    const reference = (state, factType) => state.position.decisions[0].fact_references.find(
+        (item) => item.fact_type === factType,
+    );
+    const cases = [
+        ['a second candidate continuation decision', (state) => {
+            state.position.decisions.push({
+                ...state.position.decisions[0],
+                decision_fingerprint: 'sha256:second-continuation',
+            });
+        }],
+        ['candidate ID missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.candidate.backlog_artifact_id = undefined;
+            reference(state, 'backlog').fact_id = undefined;
+        }],
+        ['candidate fingerprint missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.candidate.artifact_fingerprint = undefined;
+            reference(state, 'backlog').fingerprint = undefined;
+        }],
+        ['Specification ID missing from projection', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.specification.spec_version_id = undefined;
+        }],
+        ['Specification ID missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.specification.spec_version_id = undefined;
+            reference(state, 'specification').fact_id = undefined;
+        }],
+        ['Specification hash missing from projection', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.specification.spec_hash = undefined;
+        }],
+        ['Specification hash missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.specification.spec_hash = undefined;
+            reference(state, 'specification').fingerprint = undefined;
+        }],
+        ['Product Goal ID missing from projection', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.product_goal.product_goal_artifact_id = undefined;
+        }],
+        ['Product Goal ID missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.product_goal.product_goal_artifact_id = undefined;
+            reference(state, 'product_goal').fact_id = undefined;
+        }],
+        ['Product Goal fingerprint missing from projection', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.product_goal.product_goal_fingerprint = undefined;
+        }],
+        ['Product Goal fingerprint missing on both sides', (state) => {
+            state.planningReviews.backlog.continuation.review.lineage.product_goal.product_goal_fingerprint = undefined;
+            reference(state, 'product_goal').fingerprint = undefined;
+        }],
+        ['node attempt ID missing', (state) => { reference(state, 'node_attempt').fact_id = undefined; }],
+        ['node attempt fingerprint missing', (state) => { reference(state, 'node_attempt').fingerprint = undefined; }],
+        ['duplicate node attempt', (state) => {
+            state.position.decisions[0].fact_references.push({
+                fact_type: 'node_attempt', fact_id: 82, fingerprint: 'sha256:attempt-82',
+            });
+        }],
+        ['unexpected fact type', (state) => {
+            state.position.decisions[0].fact_references.push({
+                fact_type: 'unexpected', fact_id: 1, fingerprint: 'sha256:unexpected',
+            });
+        }],
+    ];
+
+    for (const [name, mutate] of cases) {
+        const state = backlogFeedbackState(
+            name.includes('node attempt') || name.includes('unexpected') ? 'failed-retry' : 'revision-ready',
+        );
+        mutate(state);
+        const display = context.backlogFeedbackContinuationProjection(state);
+        assert.equal(display.kind, 'error', name);
+        assert.equal(
+            context.backlogCorrectionActionBinding(state, display).kind,
+            'error',
+            name,
+        );
+        const markup = context.deliveryPanelMarkup(state.position, state.planningReviews, state.actions);
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'), name);
+        assert.ok(!markup.includes('data-backlog-correction-action="true"'), name);
+    }
+});
+
+test('Backlog pending review cards require one exact pending shape and exclude Feedback continuations', () => {
+    const context = loadFrontend();
+    const validPending = backlogFeedbackState('revision-ready').planningReviews.backlog.continuation;
+    validPending.binding = { decision_fingerprint: 'sha256:pending-backlog', instance_key: null };
+    validPending.review.review = { state: 'pending' };
+    const unchanged = context.deliveryPanelMarkup({ decisions: [] }, { backlog: validPending }, []);
+    assert.ok(unchanged.includes('data-planning-review-card="backlog"'));
+    assert.ok(unchanged.includes('data-planning-review="backlog"'));
+
+    const invalidTopLevels = [
+        ['Feedback top-level review', { ...validPending, review: { ...validPending.review, review: { state: 'feedback', rationale: 'No controls.' } } }],
+        ['pending review and continuation', { ...validPending, continuation: backlogFeedbackState('revision-ready').planningReviews.backlog.continuation }],
+        ['malformed top-level state', { ...validPending, review: { ...validPending.review, review: { state: 'accepted' } } }],
+    ];
+    for (const [name, backlog] of invalidTopLevels) {
+        const markup = context.deliveryPanelMarkup({ decisions: [] }, { backlog }, []);
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'), name);
+        assert.ok(!markup.includes('data-planning-review-card="backlog"'), name);
+        assert.ok(!markup.includes('data-planning-review="backlog"'), name);
     }
 });
 
@@ -1795,6 +1898,7 @@ test('Sprint review renders accepted INVEST evidence and keeps acceptance enable
                     tasks: [],
                 }],
             },
+            review: { state: 'pending' },
         },
     };
 

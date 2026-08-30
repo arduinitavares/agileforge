@@ -1701,7 +1701,7 @@ function planningReviewAcceptButtonMarkup(scope, index, isAcceptable) {
 }
 
 function planningReviewCardMarkup(label, selected, scope, index = 0) {
-    if (!selected?.review || !selected?.binding) return '';
+    if (!selected?.review || !selected?.binding || selected.review.review?.state !== 'pending') return '';
     const content = planningReviewContentMarkup(selected.review);
     if (!content) return '';
     const isStory = scope === 'story';
@@ -1747,6 +1747,18 @@ const BACKLOG_FEEDBACK_MODES = {
     },
 };
 
+function isConcreteReviewIdentity(id, fingerprint) {
+    return Number.isInteger(id) && id > 0
+        && typeof fingerprint === 'string' && Boolean(fingerprint.trim());
+}
+
+function isBacklogFeedbackContinuationDecision(decision) {
+    return decision?.node_id === 'backlog.generate'
+        && decision.instance_key === null
+        && decision.request_kind === 'record_backlog_draft'
+        && Boolean(BACKLOG_FEEDBACK_MODES[decision.reason_code]);
+}
+
 function backlogFeedbackContinuationProjection(state) {
     const continuation = state?.planningReviews?.backlog?.continuation;
     if (!continuation) return { kind: 'absent' };
@@ -1768,11 +1780,12 @@ function backlogFeedbackContinuationProjection(state) {
         return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
     }
     const decisions = Array.isArray(state?.position?.decisions) ? state.position.decisions : [];
-    const selected = decisions.filter((decision) => (
-        decision?.decision_fingerprint === binding.decision_fingerprint
-    ));
-    if (selected.length !== 1) return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
-    const decision = selected[0];
+    const continuationDecisions = decisions.filter(isBacklogFeedbackContinuationDecision);
+    if (continuationDecisions.length !== 1) return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    const decision = continuationDecisions[0];
+    if (decision.decision_fingerprint !== binding.decision_fingerprint) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
     const mode = BACKLOG_FEEDBACK_MODES[decision?.reason_code];
     if (!mode || decision.node_id !== 'backlog.generate'
         || decision.instance_key !== null
@@ -1787,17 +1800,24 @@ function backlogFeedbackContinuationProjection(state) {
         specification: [specification.spec_version_id, specification.spec_hash],
         product_goal: [productGoal.product_goal_artifact_id, productGoal.product_goal_fingerprint],
     };
+    if (Object.values(expected).some(([id, fingerprint]) => !isConcreteReviewIdentity(id, fingerprint))) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
     const allowed = mode.attempt ? new Set([...Object.keys(expected), 'node_attempt']) : new Set(Object.keys(expected));
     if (references.some((reference) => !allowed.has(reference?.fact_type))) {
         return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
     }
     for (const [factType, [factId, fingerprint]] of Object.entries(expected)) {
         const matches = references.filter((reference) => reference?.fact_type === factType);
-        if (matches.length !== 1 || matches[0].fact_id !== factId || matches[0].fingerprint !== fingerprint) {
+        if (matches.length !== 1
+            || !isConcreteReviewIdentity(matches[0].fact_id, matches[0].fingerprint)
+            || matches[0].fact_id !== factId || matches[0].fingerprint !== fingerprint) {
             return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
         }
     }
-    if (references.filter((reference) => reference?.fact_type === 'node_attempt').length !== (mode.attempt ? 1 : 0)) {
+    const attempts = references.filter((reference) => reference?.fact_type === 'node_attempt');
+    if (attempts.length !== (mode.attempt ? 1 : 0)
+        || (mode.attempt && !isConcreteReviewIdentity(attempts[0].fact_id, attempts[0].fingerprint))) {
         return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
     }
     return { kind: 'display', mode: mode.mode, decision, candidate, review };
@@ -1855,6 +1875,16 @@ function backlogFeedbackContinuationMarkup(continuation, actionBinding) {
         <p class="mt-4 text-sm leading-6 text-amber-950"><strong>Feedback:</strong> ${escapeWorkflowText(continuation.review.review.rationale)}</p>
         ${actionError}${action}
     </section>`;
+}
+
+function backlogPendingReviewIsValid(backlog) {
+    return reviewObject(backlog?.binding) !== null
+        && reviewObject(backlog?.review) !== null
+        && backlog.review.review?.state === 'pending';
+}
+
+function backlogProjectionErrorMarkup() {
+    return '<section data-backlog-feedback-projection-error="true" role="alert" tabindex="-1" class="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800">Backlog review state is unavailable. Reload before taking another action.</section>';
 }
 
 function deliveryActionBindingAttributes(action) {
@@ -2426,12 +2456,19 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const backlogState = { position, planningReviews: reviews, actions };
     const backlogContinuation = backlogFeedbackContinuationProjection(backlogState);
     const backlogCorrection = backlogCorrectionActionBinding(backlogState, backlogContinuation);
-    const backlogFeedback = reviews?.backlog?.continuation
-        ? backlogFeedbackContinuationMarkup(backlogContinuation, backlogCorrection)
-        : '';
+    const backlog = reviewObject(reviews?.backlog);
+    const hasContinuation = Boolean(backlog?.continuation);
+    const hasTopLevelReview = Boolean(backlog)
+        && ('binding' in backlog || 'review' in backlog);
+    const invalidBacklogReview = (hasContinuation && hasTopLevelReview)
+        || (hasTopLevelReview && !backlogPendingReviewIsValid(backlog));
+    const backlogCard = invalidBacklogReview
+        ? backlogProjectionErrorMarkup()
+        : (hasContinuation
+            ? backlogFeedbackContinuationMarkup(backlogContinuation, backlogCorrection)
+            : planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'));
     const cards = [
-        backlogFeedback,
-        planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'),
+        backlogCard,
         planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap'),
         ...storyItems.map((item, index) => {
             const pbiId = item?.binding?.instance_key?.startsWith('backlog_item:')
@@ -2465,7 +2502,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) => (
         Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind])
-        && !(reviews?.backlog?.continuation && action?.request_kind === 'record_backlog_draft')
+        && !((hasContinuation || invalidBacklogReview) && action?.request_kind === 'record_backlog_draft')
     ));
     const actionMarkup = availableDeliveryActions.map((action, index) =>
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
