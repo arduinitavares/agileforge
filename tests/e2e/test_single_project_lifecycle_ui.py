@@ -4131,13 +4131,21 @@ def test_story_review_disables_acceptance_when_required_evidence_is_malformed(
 def _defer_issue_213_correction(page: Page) -> None:
     """Hold only the Backlog correction POST in the browser, never the route."""
     page.evaluate(
-        """() => {
+        """(projectId) => {
             const originalFetch = window.fetch.bind(window);
             window.issue213CorrectionRequests = [];
             window.resolveIssue213Correction = null;
             window.fetch = (input, init = {}) => {
-                const url = String(input);
-                if (url.endsWith('/backlog/generate') && init.method === 'POST') {
+                const requestUrl = new URL(
+                    input instanceof Request ? input.url : String(input),
+                    window.location.href,
+                );
+                const correctionPath =
+                    `/api/projects/${projectId}/backlog/generate`;
+                if (requestUrl.origin === window.location.origin
+                        && requestUrl.pathname === correctionPath
+                        && requestUrl.search === ''
+                        && init.method === 'POST') {
                     window.issue213CorrectionRequests.push({
                         headers: Object.fromEntries(new Headers(init.headers)),
                     });
@@ -4153,7 +4161,8 @@ def _defer_issue_213_correction(page: Page) -> None:
                 }
                 return originalFetch(input, init);
             };
-        }"""
+        }""",
+        _PROJECT_ID,
     )
 
 
@@ -4163,7 +4172,23 @@ def _assert_issue_213_feedback(page: Page, *, status: str) -> Locator:
     expect(continuation).to_contain_text(status)
     expect(continuation).to_contain_text("Backlog candidate v1 (#7)")
     expect(continuation).to_contain_text("Keep the retry boundary visible.")
+    expect(continuation).to_contain_text("Priority")
+    expect(continuation).to_contain_text("high")
+    expect(continuation).to_contain_text("Value driver")
+    expect(continuation).to_contain_text("operator confidence")
+    expect(continuation).to_contain_text("Estimated effort")
+    expect(continuation).to_contain_text("small")
+    expect(continuation).to_contain_text("Justification")
+    expect(continuation).to_contain_text("The correction state must survive reload.")
     expect(continuation).to_contain_text("Show the retry boundary.")
+    correction = continuation.locator('[data-backlog-correction-action="true"]')
+    if "in progress" in status:
+        expect(correction).not_to_be_attached()
+    else:
+        expect(correction).to_be_visible()
+        action = correction.locator('button[data-direct-action="record_backlog_draft"]')
+        expect(action).to_be_enabled()
+        expect(action).to_contain_text("Regenerate Backlog from feedback")
     return continuation
 
 
@@ -4183,6 +4208,40 @@ def _assert_focus(page: Page, selector: str) -> None:
     )
 
 
+def _assert_issue_213_deferred_endpoint_is_exact(page: Page) -> None:
+    """Prove wrong project and prefix POSTs cannot consume the deferred slot."""
+    intercepted = page.evaluate(
+        f"""() => {{
+            const init = {{ method: 'POST', body: JSON.stringify({{}}) }};
+            const wrongPrefix =
+                '/wrong-api/projects/{_PROJECT_ID}/backlog/generate';
+            void window.fetch('/api/projects/{_PROJECT_ID + 1}/backlog/generate', init);
+            void window.fetch(wrongPrefix, init);
+            return window.issue213CorrectionRequests.length;
+        }}"""
+    )
+    assert intercepted == 0
+
+
+def _assert_issue_213_corrected_pending(page: Page) -> Locator:
+    """Verify corrected review authority has no residual Feedback controls."""
+    corrected = page.locator('[data-planning-review-card="backlog"]')
+    expect(corrected).to_be_visible()
+    expect(corrected).to_contain_text(
+        "Corrected Backlog candidate v2 (#8), replacing #7"
+    )
+    expect(
+        corrected.locator(
+            '[data-planning-review="backlog"][data-review-decision="accepted"]'
+        )
+    ).to_be_enabled()
+    expect(
+        page.locator('[data-backlog-feedback-continuation="true"]')
+    ).not_to_be_attached()
+    expect(page.locator('[data-backlog-correction-action="true"]')).not_to_be_attached()
+    return corrected
+
+
 def test_issue_213_feedback_context_survives_refresh_and_new_tab(
     dashboard_harness: DashboardHarness,
 ) -> None:
@@ -4199,6 +4258,9 @@ def test_issue_213_feedback_context_survives_refresh_and_new_tab(
     correction = page.locator('[data-backlog-correction-action="true"]')
     expect(correction).to_contain_text("Regenerate Backlog from feedback")
     _assert_focus(page, '[data-backlog-correction-action="true"]')
+
+    _defer_issue_213_correction(page)
+    _assert_issue_213_deferred_endpoint_is_exact(page)
 
     page.locator("#refresh-project").click()
     _assert_issue_213_feedback(page, status="Backlog Feedback recorded")
@@ -4218,7 +4280,10 @@ def test_issue_213_feedback_context_survives_refresh_and_new_tab(
         )
         is True
     )
-    assert fake.api_errors == []
+    assert len(fake.api_errors) == 1
+    assert fake.api_errors[0].startswith(
+        "Unexpected API path: /api/projects/2/backlog/generate"
+    )
     assert continuation.is_visible()
     context.close()
 
@@ -4268,6 +4333,9 @@ def _assert_issue_213_active_duplicate(
     expect(
         second.locator('[data-backlog-correction-action="true"]')
     ).not_to_be_attached()
+    second.reload(wait_until="networkidle")
+    _assert_issue_213_feedback(second, status=_ISSUE_213_ACTIVE_STATUS)
+    assert fake.provider_entry_count == 1
 
 
 def test_issue_213_active_failure_and_expiry_are_durable(
@@ -4310,6 +4378,7 @@ def test_issue_213_active_failure_and_expiry_are_durable(
     retry = page.locator('[data-backlog-correction-action="true"] button')
     expect(retry).to_be_enabled()
     _assert_focus(page, '[data-backlog-correction-action="true"]')
+    assert original_element.evaluate("element => element.disabled") is True
     assert original_element.evaluate("element => element.isConnected") is False
 
     page.reload(wait_until="networkidle")
@@ -4317,6 +4386,9 @@ def test_issue_213_active_failure_and_expiry_are_durable(
         page,
         status=_ISSUE_213_FAILED_STATUS,
     )
+    expect(
+        page.locator('[data-backlog-correction-action="true"] button')
+    ).to_be_enabled()
     third = context.new_page()
     third.goto(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
@@ -4341,6 +4413,9 @@ def test_issue_213_active_failure_and_expiry_are_durable(
         page,
         status=_ISSUE_213_EXPIRED_STATUS,
     )
+    expect(
+        page.locator('[data-backlog-correction-action="true"] button')
+    ).to_be_enabled()
     fourth = context.new_page()
     fourth.goto(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
@@ -4408,31 +4483,16 @@ def test_issue_213_correction_reconciles_stale_and_successful_outcomes(
     expect(replacement).not_to_be_attached()
 
     page.locator("#refresh-project").click()
-    corrected = page.locator('[data-planning-review-card="backlog"]')
-    expect(corrected).to_contain_text(
-        "Corrected Backlog candidate v2 (#8), replacing #7"
-    )
-    expect(
-        corrected.locator(
-            '[data-planning-review="backlog"][data-review-decision="accepted"]'
-        )
-    ).to_be_enabled()
+    _assert_issue_213_corrected_pending(page)
     _assert_focus(page, '[data-planning-review-card="backlog"]')
 
     page.reload(wait_until="networkidle")
-    expect(page.locator('[data-planning-review-card="backlog"]')).to_contain_text(
-        "Corrected Backlog candidate v2 (#8), replacing #7"
-    )
+    _assert_issue_213_corrected_pending(page)
     second = context.new_page()
     second.goto(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
         wait_until="networkidle",
     )
-    expect(second.locator('[data-planning-review-card="backlog"]')).to_contain_text(
-        "Corrected Backlog candidate v2 (#8), replacing #7"
-    )
-    expect(
-        second.locator('[data-backlog-feedback-continuation="true"]')
-    ).not_to_be_attached()
+    _assert_issue_213_corrected_pending(second)
     assert fake.api_errors == []
     context.close()
