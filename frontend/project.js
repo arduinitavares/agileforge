@@ -1878,7 +1878,11 @@ function backlogFeedbackContinuationMarkup(continuation, actionBinding) {
 }
 
 function backlogPendingReviewIsValid(backlog) {
-    return reviewObject(backlog?.binding) !== null
+    const binding = reviewObject(backlog?.binding);
+    return binding !== null
+        && typeof binding.decision_fingerprint === 'string'
+        && Boolean(binding.decision_fingerprint.trim())
+        && binding.instance_key === null
         && reviewObject(backlog?.review) !== null
         && backlog.review.review?.state === 'pending';
 }

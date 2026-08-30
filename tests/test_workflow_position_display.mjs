@@ -390,6 +390,27 @@ test('Backlog pending review cards require one exact pending shape and exclude F
         assert.ok(!markup.includes('data-planning-review-card="backlog"'), name);
         assert.ok(!markup.includes('data-planning-review="backlog"'), name);
     }
+
+    const malformedBindings = [
+        ['binding missing', (backlog) => { delete backlog.binding; }],
+        ['binding is not an object', (backlog) => { backlog.binding = 'not-an-object'; }],
+        ['binding is empty', (backlog) => { backlog.binding = {}; }],
+        ['decision fingerprint missing', (backlog) => { delete backlog.binding.decision_fingerprint; }],
+        ['decision fingerprint is blank', (backlog) => { backlog.binding.decision_fingerprint = '   '; }],
+        ['decision fingerprint is non-string', (backlog) => { backlog.binding.decision_fingerprint = 7; }],
+        ['instance key is undefined', (backlog) => { backlog.binding.instance_key = undefined; }],
+        ['instance key is a string', (backlog) => { backlog.binding.instance_key = 'backlog_item:PBI-000001'; }],
+    ];
+    const advertisedBacklogAction = backlogFeedbackState('revision-ready').actions;
+    for (const [name, mutate] of malformedBindings) {
+        const backlog = structuredClone(validPending);
+        mutate(backlog);
+        const markup = context.deliveryPanelMarkup({ decisions: [] }, { backlog }, advertisedBacklogAction);
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'), name);
+        assert.ok(!markup.includes('data-planning-review="backlog"'), name);
+        assert.ok(!markup.includes('data-backlog-correction-action="true"'), name);
+        assert.ok(!markup.includes('data-direct-action="record_backlog_draft"'), name);
+    }
 });
 
 test('Backlog generation labels separate initial and Feedback correction states', () => {
