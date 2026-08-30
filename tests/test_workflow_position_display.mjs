@@ -1130,6 +1130,250 @@ test('workflow position hides graph guards and machine fingerprints', () => {
     assert.ok(!markup.includes('backlog.generate'));
 });
 
+function acceptedSprintStatus(overrides = {}) {
+    const fingerprint = `sha256:${'a'.repeat(64)}`;
+    const candidateFingerprint = `sha256:${'b'.repeat(64)}`;
+    const taskFingerprint = `sha256:${'c'.repeat(64)}`;
+    return {
+        project_id: 7,
+        sprint: { sprint_id: 31, status: 'planned', completed_at: null },
+        accepted_plan: {
+            sprint_id: 31,
+            status: 'planned',
+            goal: 'Ship accepted scope.',
+            owner: {
+                kind: 'named_team',
+                key: 'agileforge:sprint-owner:named-team:v1:sha256:468c0b971b948afb301b21a6eaea9425aa5568e111f623452bfa5ff3af938ff6',
+                label: 'Core team',
+                display_label: 'Core team',
+            },
+            sprint_plan_artifact_id: 41,
+            sprint_plan_artifact_decision_id: 51,
+            plan_fingerprint: fingerprint,
+            candidate_set_fingerprint: candidateFingerprint,
+            task_content_fingerprint: taskFingerprint,
+            acceptance: {
+                rationale: 'Scope is coherent.',
+                reviewer: 'operator@example.com',
+                decided_at: '2026-08-30T12:00:00Z',
+            },
+            selected_stories: [{
+                story_id: 61,
+                story_item_id: 'US-0001',
+                title: 'Keep Sprint continuity',
+                story_points: 3,
+                task_count: 1,
+            }],
+            total_points: 3,
+            task_count: 1,
+        },
+        start: null,
+        tasks: [{
+            task_id: 71,
+            sprint_id: 31,
+            story_id: 61,
+            description: 'Render exact next work.',
+            status: 'To Do',
+            fact_fingerprint: `sha256:${'e'.repeat(64)}`,
+        }],
+        review: null,
+        closure: null,
+        ...overrides,
+    };
+}
+
+function sprintDecision(requestKind, reasonCode, recommendationKind, factReferences = []) {
+    return {
+        node_id: requestKind === 'start_sprint'
+            ? 'planning.sprint.start'
+            : 'planning.sprint.plan',
+        instance_key: null,
+        request_kind: requestKind,
+        category: 'available',
+        recommendation_kind: recommendationKind,
+        reason_code: reasonCode,
+        decision_fingerprint: `sha256:${'d'.repeat(64)}`,
+        fact_references: factReferences,
+    };
+}
+
+function sprintStartReferences(status = acceptedSprintStatus()) {
+    const plan = status.accepted_plan;
+    return [
+        { fact_type: 'sprint_plan', fact_id: String(plan.sprint_plan_artifact_id), fingerprint: plan.plan_fingerprint },
+        { fact_type: 'candidate_set', fact_id: String(status.project_id), fingerprint: plan.candidate_set_fingerprint },
+        { fact_type: 'sprint_plan_tasks', fact_id: String(status.sprint.sprint_id), fingerprint: plan.task_content_fingerprint },
+    ];
+}
+
+test('Sprint card deterministically prefers required start over optional correction', () => {
+    const context = loadFrontend();
+    const status = acceptedSprintStatus();
+    const start = sprintDecision(
+        'start_sprint',
+        'SPRINT_READY_TO_START',
+        'required',
+        sprintStartReferences(status),
+    );
+    const correction = sprintDecision(
+        'record_sprint_plan',
+        'SPRINT_PLAN_CORRECTION_AVAILABLE',
+        'optional_reentry',
+    );
+    const actions = [
+        { node_id: start.node_id, instance_key: null, request_kind: 'start_sprint', endpoint: 'sprint/start', transport: 'semantic' },
+        { node_id: correction.node_id, instance_key: null, request_kind: 'record_sprint_plan', endpoint: 'sprint/generate', transport: 'semantic' },
+    ];
+    for (const decisions of [[correction, start], [start, correction]]) {
+        const sprint = context.lifecycleCardProjection(
+            { decisions }, actions, { sprintStatus: { kind: 'ready', data: status } },
+        ).find((card) => card.stage === 'Sprint');
+        assert.equal(sprint.status, 'Ready to start');
+        assert.equal(sprint.reason, 'Accepted Sprint plan is ready to start.');
+    }
+});
+
+test('Sprint status parsing and start binding fail closed on torn authority', async () => {
+    const context = loadFrontend();
+    const status = acceptedSprintStatus();
+    assert.ok(await context.validateSprintStatusProjection(status, 7));
+    assert.equal(
+        await context.validateSprintStatusProjection({ ...status, project_id: 8 }, 7),
+        null,
+    );
+    assert.equal(
+        await context.validateSprintStatusProjection({
+            ...status,
+            accepted_plan: { ...status.accepted_plan, task_count: 2 },
+        }, 7),
+        null,
+    );
+    const decision = sprintDecision(
+        'start_sprint',
+        'SPRINT_READY_TO_START',
+        'required',
+        sprintStartReferences(status),
+    );
+    const action = {
+        node_id: decision.node_id,
+        instance_key: null,
+        request_kind: 'start_sprint',
+        endpoint: 'sprint/start',
+        transport: 'semantic',
+    };
+    const binding = context.sprintStartBinding(status, { decisions: [decision] }, [action]);
+    assert.equal(binding.decisionFingerprint, decision.decision_fingerprint);
+    decision.fact_references[2].fingerprint = `sha256:${'f'.repeat(64)}`;
+    assert.equal(context.sprintStartBinding(status, { decisions: [decision] }, [action]), null);
+});
+
+test('Sprint status renders complete active execution actions without response-order choice', () => {
+    const context = loadFrontend();
+    const planned = acceptedSprintStatus();
+    const active = {
+        ...planned,
+        sprint: { ...planned.sprint, status: 'active' },
+        accepted_plan: { ...planned.accepted_plan, status: 'active' },
+        start: {
+            sprint_id: 31,
+            sprint_plan_artifact_id: 41,
+            sprint_plan_artifact_decision_id: 51,
+            plan_fingerprint: planned.accepted_plan.plan_fingerprint,
+            candidate_set_fingerprint: planned.accepted_plan.candidate_set_fingerprint,
+            task_content_fingerprint: planned.accepted_plan.task_content_fingerprint,
+        },
+        tasks: [
+            ...planned.tasks,
+            {
+                task_id: 72,
+                sprint_id: 31,
+                story_id: 61,
+                description: 'Second exact task.',
+                status: 'To Do',
+                fact_fingerprint: `sha256:${'e'.repeat(64)}`,
+            },
+        ],
+    };
+    const action = (taskId) => ({
+        node_id: 'execution.task.complete',
+        instance_key: `task:${taskId}`,
+        request_kind: 'complete_task',
+        endpoint: 'sprint/task/complete',
+        transport: 'semantic',
+    });
+    const decision = (taskId) => ({
+        node_id: 'execution.task.complete',
+        instance_key: `task:${taskId}`,
+        request_kind: 'complete_task',
+        category: 'available',
+        recommendation_kind: 'required',
+        reason_code: 'NEXT_TASK_READY',
+        fact_references: [{ fact_type: 'task', fact_id: String(taskId), fingerprint: `sha256:${'e'.repeat(64)}` }],
+    });
+    const position = { decisions: [decision(72), decision(71)] };
+    const markup = context.sprintStatusMarkup(
+        { kind: 'ready', data: active }, position, [action(72), action(71)],
+    );
+    assert.ok(markup.includes('Sprint #31 is active'));
+    assert.ok(markup.includes('Task #71'));
+    assert.ok(markup.includes('Task #72'));
+    assert.ok(markup.indexOf('Task #71') < markup.indexOf('Task #72'));
+    assert.ok(markup.includes('2 current execution actions'));
+    const executionCard = context.lifecycleCardProjection(
+        position,
+        [action(72), action(71)],
+        { sprintStatus: { kind: 'ready', data: active } },
+    ).find((card) => card.stage === 'Execution');
+    assert.equal(executionCard.status, 'Active');
+
+    const torn = {
+        ...active,
+        tasks: active.tasks.map((task) => task.task_id === 71
+            ? {
+                ...task,
+                status: 'Done',
+                fact_fingerprint: `sha256:${'f'.repeat(64)}`,
+            }
+            : task),
+    };
+    const tornProjection = context.sprintExecutionProjection(
+        torn,
+        position,
+        [action(72), action(71)],
+    );
+    assert.equal(tornProjection.kind, 'error');
+    assert.equal(tornProjection.items.length, 0);
+
+    const zero = context.sprintStatusMarkup(
+        { kind: 'ready', data: active }, { decisions: [] }, [],
+    );
+    assert.ok(zero.includes('No execution action is currently available'));
+});
+
+test('Sprint status failure locks correction generation instead of contradicting its alert', () => {
+    const context = loadFrontend();
+    const correction = sprintDecision(
+        'record_sprint_plan',
+        'SPRINT_PLAN_CORRECTION_AVAILABLE',
+        'optional_reentry',
+    );
+    const action = {
+        node_id: correction.node_id,
+        instance_key: null,
+        request_kind: 'record_sprint_plan',
+        endpoint: 'sprint/generate',
+        transport: 'semantic',
+    };
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [correction] },
+        {},
+        [action],
+        { sprintStatus: { kind: 'error' } },
+    );
+    assert.ok(markup.includes('Sprint status unavailable'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+});
+
 test('delivery generation submits the exact rendered Story selector', async () => {
     const requests = [];
     const context = loadFrontend(async (url, options = {}) => {

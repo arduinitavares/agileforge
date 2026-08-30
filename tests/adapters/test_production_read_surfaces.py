@@ -255,6 +255,7 @@ def test_production_api_registers_retained_read_routes() -> None:
         ("GET", "/api/projects/{project_id}/story/dependencies"),
         ("GET", "/api/projects/{project_id}/sprint/history"),
         ("GET", "/api/projects/{project_id}/sprint/metrics"),
+        ("GET", "/api/projects/{project_id}/sprint/status"),
         ("GET", "/api/projects/{project_id}/sprints"),
         ("GET", "/api/projects/{project_id}/sprints/{sprint_id}"),
         ("GET", "/api/projects/{project_id}/sprints/{sprint_id}/tasks"),
@@ -322,6 +323,7 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
         client.get("/api/projects/41"),
         client.get("/api/projects/41/vision/history"),
         client.get("/api/projects/41/story/pending"),
+        client.get("/api/projects/41/sprint/status"),
         client.get("/api/projects/41/sprints/7"),
         client.get("/api/projects/41/sprints/7/tasks/13/packet?flavor=compact"),
     ]
@@ -332,6 +334,7 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
         "artifact-history",
         "story-pending",
         "sprint-status",
+        "sprint-status",
         "task-packet",
     ]
     assert application.calls == [
@@ -341,6 +344,7 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
             {"project_id": 41, "node_id": "vision.interview", "instance_key": None},
         ),
         ("story_pending", {"project_id": 41}),
+        ("sprint_status", {"project_id": 41, "sprint_id": None}),
         ("sprint_status", {"project_id": 41, "sprint_id": 7}),
         (
             "task_packet",

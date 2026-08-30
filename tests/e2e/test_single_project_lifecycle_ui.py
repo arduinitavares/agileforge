@@ -412,6 +412,8 @@ class FakeLifecycle:
                 )
             elif suffix == "/position":
                 response = (_HTTP_OK, self.position_envelope())
+            elif suffix == "/sprint/status":
+                response = self._sprint_status_response()
             else:
                 response = self._planning_review_response(suffix)
                 if response is None:
@@ -437,6 +439,21 @@ class FakeLifecycle:
     @staticmethod
     def _mutation_result() -> JsonObject:
         return {"status": "success", "data": {"output": {"recorded": True}}}
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        return (
+            404,
+            {
+                "detail": {
+                    "errors": [
+                        {
+                            "code": "SPRINT_NOT_FOUND",
+                            "message": "No matching Sprint was found.",
+                        }
+                    ]
+                }
+            },
+        )
 
     def _read(self, suffix: str) -> JsonObject:
         if self.dependency_reload_failure and self.dependency_apply_requests:
@@ -1342,6 +1359,258 @@ class FakeLifecycle:
             "status": "success",
             "data": projection,
             "actions": actions,
+        }
+
+
+@dataclass
+class SprintContinuityLifecycle(FakeLifecycle):
+    """Synthetic accepted Sprint lifecycle for issue #227 browser coverage."""
+
+    sprint_active: bool = False
+    start_requests: list[JsonObject] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Seed accepted product context around one immutable Sprint plan."""
+        self.project = {
+            "project_id": _PROJECT_ID,
+            "name": "Issue 227 Sprint continuity",
+            "description": "Provider-free accepted Sprint lifecycle.",
+            "user_stories_count": 1,
+            "sprint_count": 1,
+        }
+        self.vision_candidate = {
+            "statement": "Keep accepted Sprint intent visible.",
+            "review_fingerprint": _fingerprint("a"),
+        }
+        self.vision_accepted = True
+        self.goal_candidate = {
+            "statement": "Start only the exact accepted Sprint.",
+            "fingerprint": _fingerprint("b"),
+        }
+        self.goal_accepted = True
+        self.specification_source = {
+            "specification_source_id": 31,
+            "source_fingerprint": _fingerprint("c"),
+            "producer_capability": "to-spec",
+            "preparation_capability": "grill-with-docs",
+            "context": {"state": "absent", "document": None},
+        }
+        self.specification = {
+            "title": "Accepted Sprint continuity",
+            "rendered_markdown": "# Accepted Sprint continuity",
+        }
+        self.specification_accepted = True
+        self.backlog_candidate = {
+            "backlog_items": [
+                {
+                    "backlog_item_id": "PBI-000001",
+                    "requirement": "Keep accepted Sprint intent visible.",
+                }
+            ]
+        }
+        self.backlog_accepted = True
+        self.roadmap_candidate = {"roadmap_summary": "Deliver continuity."}
+        self.roadmap_accepted = True
+        self.story_accepted = True
+        self.sprint_plan_accepted = True
+        _seed_progressive_stories(self, 101, 102)
+        candidate = cast("JsonObject", self.stories[0])
+        candidate["sprint_selection_state"] = "selected"
+        candidate["dependency_safe"] = True
+        candidate["sprint_candidate"] = True
+        self.sprint_candidates = [candidate]
+
+    @staticmethod
+    def _plan_fingerprint() -> str:
+        return _fingerprint("a")
+
+    @staticmethod
+    def _candidate_fingerprint() -> str:
+        return _fingerprint("b")
+
+    @staticmethod
+    def _task_fingerprint() -> str:
+        return _fingerprint("c")
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        status = "active" if self.sprint_active else "planned"
+        plan: JsonObject = {
+            "sprint_id": 31,
+            "status": status,
+            "goal": "Deliver accepted Sprint continuity.",
+            "owner": {
+                "kind": "solo_project",
+                "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+                "label": (
+                    "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                    "Solo operator for Exact Project"
+                ),
+                "display_label": "Solo operator for Exact Project",
+            },
+            "sprint_plan_artifact_id": 41,
+            "sprint_plan_artifact_decision_id": 51,
+            "plan_fingerprint": self._plan_fingerprint(),
+            "candidate_set_fingerprint": self._candidate_fingerprint(),
+            "task_content_fingerprint": self._task_fingerprint(),
+            "acceptance": {
+                "rationale": "The exact scope is ready.",
+                "reviewer": "operator@example.com",
+                "decided_at": "2026-08-30T12:00:00Z",
+            },
+            "selected_stories": [
+                {
+                    "story_id": 101,
+                    "story_item_id": "US-0101",
+                    "title": "Keep accepted Sprint intent visible",
+                    "story_points": 3,
+                    "task_count": 1,
+                }
+            ],
+            "total_points": 3,
+            "task_count": 1,
+        }
+        start: JsonObject | None = None
+        if self.sprint_active:
+            start = {
+                "start_id": 61,
+                "sprint_id": 31,
+                "sprint_plan_artifact_id": 41,
+                "sprint_plan_artifact_decision_id": 51,
+                "plan_fingerprint": self._plan_fingerprint(),
+                "candidate_set_fingerprint": self._candidate_fingerprint(),
+                "task_content_fingerprint": self._task_fingerprint(),
+            }
+        data: JsonObject = {
+            "project_id": _PROJECT_ID,
+            "sprint": {"sprint_id": 31, "status": status, "completed_at": None},
+            "accepted_plan": plan,
+            "start": start,
+            "tasks": [
+                {
+                    "task_id": 71,
+                    "sprint_id": 31,
+                    "story_id": 101,
+                    "description": "Render the accepted Sprint and next Task.",
+                    "status": "To Do",
+                    "fact_fingerprint": _fingerprint("e"),
+                }
+            ],
+            "review": None,
+            "closure": None,
+        }
+        return _HTTP_OK, self._success(data)
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        if suffix != "/sprint/start":
+            return super()._mutate(suffix, body, headers)
+        self._assert_fields(body, {"idempotency_key"})
+        assert isinstance(body["idempotency_key"], str)
+        assert body["idempotency_key"]
+        assert headers.get("x-agileforge-expected-decision") == _fingerprint("e")
+        self.start_requests.append(dict(body))
+        self.sprint_active = True
+        return _HTTP_OK, self._mutation_result()
+
+    def _position_projection(self) -> JsonObject:
+        if self.sprint_active:
+            decision: JsonObject = {
+                "node_id": "execution.task.complete",
+                "child_graph_id": "execution",
+                "request_kind": "complete_task",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": "task:71",
+                "reason_code": "NEXT_TASK_READY",
+                "decision_fingerprint": _fingerprint("d"),
+                "fact_references": [
+                    {
+                        "fact_type": "task",
+                        "fact_id": "71",
+                        "fingerprint": _fingerprint("e"),
+                    }
+                ],
+            }
+            action: JsonObject = {
+                "node_id": "execution.task.complete",
+                "instance_key": "task:71",
+                "request_kind": "complete_task",
+                "endpoint": "sprint/task/complete",
+                "transport": "semantic",
+            }
+            return {
+                "graph_version": "agileforge.workflow.hidden",
+                "fact_fingerprint": _fingerprint("f"),
+                "decisions": [decision],
+                "terminal": False,
+                "actions": [],
+                "_actions": [action],
+            }
+        correction: JsonObject = {
+            "node_id": "planning.sprint.plan",
+            "child_graph_id": "planning",
+            "request_kind": "record_sprint_plan",
+            "category": "available",
+            "recommendation_kind": "optional_reentry",
+            "instance_key": None,
+            "reason_code": "SPRINT_PLAN_CORRECTION_AVAILABLE",
+            "decision_fingerprint": _fingerprint("d"),
+            "fact_references": [],
+        }
+        start: JsonObject = {
+            "node_id": "planning.sprint.start",
+            "child_graph_id": "planning",
+            "request_kind": "start_sprint",
+            "category": "available",
+            "recommendation_kind": "required",
+            "instance_key": None,
+            "reason_code": "SPRINT_READY_TO_START",
+            "decision_fingerprint": _fingerprint("e"),
+            "fact_references": [
+                {
+                    "fact_type": "sprint_plan",
+                    "fact_id": "41",
+                    "fingerprint": self._plan_fingerprint(),
+                },
+                {
+                    "fact_type": "candidate_set",
+                    "fact_id": str(_PROJECT_ID),
+                    "fingerprint": self._candidate_fingerprint(),
+                },
+                {
+                    "fact_type": "sprint_plan_tasks",
+                    "fact_id": "31",
+                    "fingerprint": self._task_fingerprint(),
+                },
+            ],
+        }
+        actions: list[JsonValue] = [
+            {
+                "node_id": "planning.sprint.plan",
+                "instance_key": None,
+                "request_kind": "record_sprint_plan",
+                "endpoint": "sprint/generate",
+                "transport": "semantic",
+            },
+            {
+                "node_id": "planning.sprint.start",
+                "instance_key": None,
+                "request_kind": "start_sprint",
+                "endpoint": "sprint/start",
+                "transport": "semantic",
+            },
+        ]
+        return {
+            "graph_version": "agileforge.workflow.hidden",
+            "fact_fingerprint": _fingerprint("f"),
+            "decisions": [correction, start],
+            "terminal": False,
+            "actions": [],
+            "_actions": actions,
         }
 
 
@@ -2575,6 +2844,7 @@ def test_single_project_dashboard_loads_every_exact_planning_review() -> None:
         "/roadmap/review",
         "/story/reviews",
         "/sprint/plan/review",
+        "/sprint/status",
     ):
         assert endpoint in source
 
@@ -2772,6 +3042,88 @@ def test_issue_212_delivery_generation_lifecycle_flow(
     page.locator('[data-apply-dependencies="true"]').click()
     page.wait_for_timeout(_UI_SETTLE_MS)
     _verify_sprint_lifecycle_flow(page, fake)
+
+    context.close()
+
+
+def test_issue_227_accepted_sprint_survives_reload_and_starts_exactly_once(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Keep one accepted Sprint visible through reload, start, and Active follow-up."""
+    fake = SprintContinuityLifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    sprint_section = page.locator('[data-sprint-status="planned"]')
+    expect(sprint_section).to_be_visible()
+    expect(sprint_section).to_contain_text("Sprint #31 is planned")
+    expect(sprint_section).to_contain_text("Deliver accepted Sprint continuity.")
+    expect(sprint_section).to_contain_text("Solo operator for Exact Project")
+    expect(sprint_section).to_contain_text("US-0101")
+    expect(page.locator('[data-lifecycle-card="Sprint"]')).to_contain_text(
+        "Ready to start"
+    )
+    expect(page.locator('[data-planning-review-card="sprint"]')).to_have_count(0)
+    evidence = sprint_section.locator('[data-sprint-plan-evidence="true"]')
+    assert evidence.get_attribute("open") is None
+    expect(sprint_section.locator('[data-sprint-correction="true"]')).to_be_visible()
+
+    page.reload(wait_until="networkidle")
+    expect(page.locator('[data-sprint-status="planned"]')).to_contain_text(
+        "Sprint #31 is planned"
+    )
+    second_page = context.new_page()
+    second_page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    expect(second_page.locator('[data-sprint-status="planned"]')).to_contain_text(
+        "Sprint #31 is planned"
+    )
+    second_page.close()
+
+    page.evaluate(
+        """() => {
+            const originalFetch = window.fetch.bind(window);
+            window.releaseIssue227Start = null;
+            window.fetch = (input, init = {}) => {
+                const url = String(input);
+                if (url.endsWith('/sprint/start') && init.method === 'POST') {
+                    return new Promise((_resolve, reject) => {
+                        window.releaseIssue227Start = () => {
+                            window.releaseIssue227Start = null;
+                            originalFetch(input, init).then(
+                                () => reject(new TypeError('Synthetic lost response')),
+                                reject,
+                            );
+                        };
+                    });
+                }
+                return originalFetch(input, init);
+            };
+        }"""
+    )
+    start_button = page.locator('[data-direct-action="start_sprint"]')
+    start_button.click()
+    dialog = page.locator("#human-action-dialog")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Start Sprint #31")
+    expect(dialog).to_contain_text("exact accepted Sprint plan")
+    page.locator("#human-action-submit").click()
+    expect(start_button).to_be_disabled()
+    expect(start_button).to_contain_text("Starting Sprint...")
+    assert len(fake.start_requests) == 0
+
+    page.evaluate("window.releaseIssue227Start()")
+    expect(dialog).not_to_be_visible()
+    active = page.locator('[data-sprint-status="active"]')
+    expect(active).to_be_visible()
+    expect(active).to_contain_text("Sprint #31 is active")
+    expect(active).to_contain_text("1 current execution action")
+    expect(active).to_contain_text("Task #71")
+    expect(active).to_contain_text("Render the accepted Sprint and next Task.")
+    expect(page.locator('[data-direct-action="start_sprint"]')).to_have_count(0)
+    assert len(fake.start_requests) == 1
+    assert fake.api_errors == []
 
     context.close()
 

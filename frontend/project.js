@@ -67,6 +67,7 @@ const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'record_vision_interview_turn',
     'register_specification_source',
     'repair_story_readiness',
+    'start_sprint',
     'structure_specification',
 ]);
 
@@ -132,6 +133,8 @@ let activeStoryMutation = null;
 let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
 let activeBacklogCorrectionMutation = null;
+let activeSprintMutation = null;
+let sprintStartRetry = null;
 let backlogFeedbackFocusIntent = false;
 let lifecycleState = {
     project: {},
@@ -147,6 +150,7 @@ let lifecycleState = {
         sprintPlan: {},
     },
     repository: {},
+    sprintStatus: { kind: 'absent' },
 };
 
 function lifecycleStageLabels() {
@@ -365,6 +369,35 @@ function decisionRank(category) {
     }[category] ?? 0;
 }
 
+function recommendationRank(kind) {
+    return {
+        required: 3,
+        recovery: 2,
+        optional_reentry: 1,
+    }[kind] ?? 0;
+}
+
+function compareLifecycleDecisions(left, right, actions) {
+    const leftPriority = [
+        decisionRank(left?.category),
+        isActionableDecision(left, actions) ? 1 : 0,
+        recommendationRank(left?.recommendation_kind),
+    ];
+    const rightPriority = [
+        decisionRank(right?.category),
+        isActionableDecision(right, actions) ? 1 : 0,
+        recommendationRank(right?.recommendation_kind),
+    ];
+    for (let index = 0; index < leftPriority.length; index += 1) {
+        if (leftPriority[index] !== rightPriority[index]) {
+            return leftPriority[index] - rightPriority[index];
+        }
+    }
+    const leftKey = `${left?.request_kind ?? ''}:${left?.reason_code ?? ''}`;
+    const rightKey = `${right?.request_kind ?? ''}:${right?.reason_code ?? ''}`;
+    return rightKey.localeCompare(leftKey);
+}
+
 function isActionableDecision(decision, actions) {
     return DASHBOARD_CONTROL_REQUEST_KINDS.has(decision?.request_kind)
         && findDecisionAction(actions, decision) !== null;
@@ -381,7 +414,16 @@ function lifecycleCardActions(position, actions, projections) {
     });
 }
 
-function stageStatus(decision, actions) {
+function stageStatus(decision, actions, projections = {}) {
+    if (
+        decision?.request_kind === 'start_sprint'
+        && projections?.sprintStatus?.kind === 'ready'
+        && sprintStartBinding(
+            projections.sprintStatus.data,
+            { decisions: [decision] },
+            actions,
+        )
+    ) return 'Ready to start';
     const category = decision?.category;
     if (category === 'available') {
         return isActionableDecision(decision, actions) ? 'Ready' : 'Waiting';
@@ -422,7 +464,16 @@ function waitingReason(decision) {
     return `${sentence[0].toUpperCase()}${sentence.slice(1)}.`;
 }
 
-function stageReason(decision, actions) {
+function stageReason(decision, actions, projections = {}) {
+    if (
+        decision?.request_kind === 'start_sprint'
+        && projections?.sprintStatus?.kind === 'ready'
+        && sprintStartBinding(
+            projections.sprintStatus.data,
+            { decisions: [decision] },
+            actions,
+        )
+    ) return 'Accepted Sprint plan is ready to start.';
     const blockers = Array.isArray(decision?.blockers) ? decision.blockers : [];
     const blocker = blockers.find((item) => typeof item?.message === 'string');
     if (blocker) return blocker.message;
@@ -450,7 +501,7 @@ function lifecycleCardProjection(position, actions = [], projections = {}) {
         const stage = decisionStage(decision);
         if (!stage) return;
         const current = byStage.get(stage);
-        if (!current || decisionRank(decision.category) > decisionRank(current.category)) {
+        if (!current || compareLifecycleDecisions(decision, current, cardActions) > 0) {
             byStage.set(stage, decision);
         }
     });
@@ -476,8 +527,8 @@ function lifecycleCardProjection(position, actions = [], projections = {}) {
         }
         return {
             stage,
-            status: stageStatus(decision, cardActions),
-            reason: decision ? stageReason(decision, cardActions) : null,
+            status: stageStatus(decision, cardActions, projections),
+            reason: decision ? stageReason(decision, cardActions, projections) : null,
             tone: stageTone(decision, cardActions),
         };
     });
@@ -505,6 +556,17 @@ function lifecycleCardProjection(position, actions = [], projections = {}) {
         setCard('Specification', 'pending_human');
     } else if (specification?.current || specification?.review?.state === 'accepted') {
         setCard('Specification', 'complete');
+    }
+
+    if (projections?.sprintStatus?.kind === 'ready') {
+        const sprintStatus = projections.sprintStatus.data?.sprint?.status;
+        if (sprintStatus === 'active') {
+            setCard('Sprint', 'complete');
+            setCard('Execution', 'active');
+        } else if (sprintStatus === 'completed') {
+            setCard('Sprint', 'complete');
+            setCard('Execution', 'complete');
+        }
     }
 
     return cards;
@@ -1303,6 +1365,213 @@ async function validateSprintOwnerProjection(value, projectId) {
     if (owner.key !== expectedKey) return null;
     validatedSprintOwnerProjections.set(owner, projectId);
     return owner;
+}
+
+function positiveInteger(value) {
+    return Number.isSafeInteger(value) && value > 0;
+}
+
+function exactFactReference(decision, factType, factId, fingerprint) {
+    const references = Array.isArray(decision?.fact_references)
+        ? decision.fact_references
+        : [];
+    const matches = references.filter((reference) => reference?.fact_type === factType);
+    return isSha256Fingerprint(fingerprint)
+        && matches.length === 1
+        && matches[0].fact_id === String(factId)
+        && matches[0].fingerprint === fingerprint;
+}
+
+async function validateSprintStatusProjection(value, projectId) {
+    const data = reviewObject(value);
+    const sprint = reviewObject(data?.sprint);
+    const plan = reviewObject(data?.accepted_plan);
+    const acceptance = reviewObject(plan?.acceptance);
+    const stories = reviewItems(plan?.selected_stories);
+    const tasks = reviewItems(data?.tasks);
+    if (
+        data?.project_id !== projectId
+        || !positiveInteger(sprint?.sprint_id)
+        || !['planned', 'active', 'completed'].includes(sprint?.status)
+        || plan?.sprint_id !== sprint.sprint_id
+        || plan?.status !== sprint.status
+        || typeof plan?.goal !== 'string'
+        || !plan.goal.trim()
+        || !positiveInteger(plan?.sprint_plan_artifact_id)
+        || !positiveInteger(plan?.sprint_plan_artifact_decision_id)
+        || !isSha256Fingerprint(plan?.plan_fingerprint)
+        || !isSha256Fingerprint(plan?.candidate_set_fingerprint)
+        || !isSha256Fingerprint(plan?.task_content_fingerprint)
+        || typeof acceptance?.rationale !== 'string'
+        || !acceptance.rationale.trim()
+        || typeof acceptance?.reviewer !== 'string'
+        || !acceptance.reviewer.trim()
+        || typeof acceptance?.decided_at !== 'string'
+        || !acceptance.decided_at.trim()
+        || !stories?.length
+        || !tasks
+    ) return null;
+    const owner = await validateSprintOwnerProjection(plan.owner, projectId);
+    if (!owner) return null;
+
+    const storyIds = new Set();
+    let totalPoints = 0;
+    let taskCount = 0;
+    for (const story of stories) {
+        if (
+            !positiveInteger(story?.story_id)
+            || storyIds.has(story.story_id)
+            || typeof story?.story_item_id !== 'string'
+            || !story.story_item_id.trim()
+            || typeof story?.title !== 'string'
+            || !story.title.trim()
+            || !positiveInteger(story?.story_points)
+            || !positiveInteger(story?.task_count)
+        ) return null;
+        storyIds.add(story.story_id);
+        totalPoints += story.story_points;
+        taskCount += story.task_count;
+    }
+    const taskIds = new Set();
+    for (const task of tasks) {
+        if (
+            !positiveInteger(task?.task_id)
+            || taskIds.has(task.task_id)
+            || task?.sprint_id !== sprint.sprint_id
+            || !storyIds.has(task?.story_id)
+            || typeof task?.description !== 'string'
+            || !task.description.trim()
+            || typeof task?.status !== 'string'
+            || !task.status.trim()
+            || !isSha256Fingerprint(task?.fact_fingerprint)
+        ) return null;
+        taskIds.add(task.task_id);
+    }
+    if (
+        plan.total_points !== totalPoints
+        || plan.task_count !== taskCount
+        || tasks.length !== taskCount
+    ) return null;
+
+    const start = data.start;
+    if (sprint.status === 'planned') {
+        if (start !== null) return null;
+    } else if (
+        !reviewObject(start)
+        || start.sprint_id !== sprint.sprint_id
+        || start.sprint_plan_artifact_id !== plan.sprint_plan_artifact_id
+        || start.sprint_plan_artifact_decision_id
+            !== plan.sprint_plan_artifact_decision_id
+        || start.plan_fingerprint !== plan.plan_fingerprint
+        || start.candidate_set_fingerprint !== plan.candidate_set_fingerprint
+        || start.task_content_fingerprint !== plan.task_content_fingerprint
+    ) return null;
+    return data;
+}
+
+function sprintStartBinding(status, position, actions) {
+    const sprint = reviewObject(status?.sprint);
+    const plan = reviewObject(status?.accepted_plan);
+    if (sprint?.status !== 'planned' || plan?.status !== 'planned') return null;
+    const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
+        .filter((decision) => (
+            decision?.request_kind === 'start_sprint'
+            && decision.category === 'available'
+            && decision.recommendation_kind === 'required'
+            && decision.reason_code === 'SPRINT_READY_TO_START'
+        ));
+    if (decisions.length !== 1) return null;
+    const decision = decisions[0];
+    const action = findDecisionAction(actions, decision);
+    if (
+        !action
+        || action.endpoint !== 'sprint/start'
+        || action.transport !== 'semantic'
+        || !isSha256Fingerprint(decision.decision_fingerprint)
+        || !exactFactReference(
+            decision,
+            'sprint_plan',
+            plan.sprint_plan_artifact_id,
+            plan.plan_fingerprint,
+        )
+        || !exactFactReference(
+            decision,
+            'candidate_set',
+            status.project_id,
+            plan.candidate_set_fingerprint,
+        )
+        || !exactFactReference(
+            decision,
+            'sprint_plan_tasks',
+            sprint.sprint_id,
+            plan.task_content_fingerprint,
+        )
+    ) return null;
+    return {
+        action: captureAction(action),
+        decisionFingerprint: decision.decision_fingerprint,
+        sprintId: sprint.sprint_id,
+        sprintPlanArtifactId: plan.sprint_plan_artifact_id,
+        sprintPlanArtifactDecisionId: plan.sprint_plan_artifact_decision_id,
+        planFingerprint: plan.plan_fingerprint,
+        candidateSetFingerprint: plan.candidate_set_fingerprint,
+        taskContentFingerprint: plan.task_content_fingerprint,
+    };
+}
+
+function sprintCorrectionBinding(status, position, actions) {
+    if (status?.sprint?.status !== 'planned') return null;
+    const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
+        .filter((decision) => (
+            decision?.request_kind === 'record_sprint_plan'
+            && decision.category === 'available'
+            && decision.recommendation_kind === 'optional_reentry'
+            && decision.reason_code === 'SPRINT_PLAN_CORRECTION_AVAILABLE'
+        ));
+    if (decisions.length !== 1) return null;
+    const action = findDecisionAction(actions, decisions[0]);
+    return action?.endpoint === 'sprint/generate' ? captureAction(action) : null;
+}
+
+function sprintExecutionProjection(status, position, actions) {
+    if (status?.sprint?.status !== 'active') return { kind: 'absent', items: [] };
+    const taskById = new Map((Array.isArray(status?.tasks) ? status.tasks : [])
+        .map((task) => [task.task_id, task]));
+    const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
+        .filter((decision) => decision?.request_kind === 'complete_task');
+    const items = [];
+    const projectedTaskIds = new Set();
+    for (const decision of decisions) {
+        const taskId = Number.parseInt(
+            String(decision?.instance_key ?? '').replace(/^task:/, ''),
+            10,
+        );
+        const action = findDecisionAction(actions, decision);
+        const task = taskById.get(taskId);
+        if (
+            !positiveInteger(taskId)
+            || projectedTaskIds.has(taskId)
+            || decision.instance_key !== `task:${taskId}`
+            || decision.category !== 'available'
+            || !['NEXT_TASK_READY', 'IN_PROGRESS_TASK_REQUIRED'].includes(
+                decision.reason_code,
+            )
+            || !action
+            || action.endpoint !== 'sprint/task/complete'
+            || !exactFactReference(
+                decision,
+                'task',
+                taskId,
+                task?.fact_fingerprint,
+            )
+            || !task
+            || ['Done', 'Cancelled'].includes(task.status)
+        ) return { kind: 'error', items: [] };
+        projectedTaskIds.add(taskId);
+        items.push({ task, action: captureAction(action), decision });
+    }
+    items.sort((left, right) => left.task.task_id - right.task.task_id);
+    return { kind: items.length ? 'ready' : 'absent', items };
 }
 
 function sprintOwnerProjection(context = {}) {
@@ -2471,6 +2740,87 @@ function sprintCandidatePoolMarkup(candidates) {
     </div>`;
 }
 
+function sprintAcceptedPlanEvidenceMarkup(plan) {
+    const stories = plan.selected_stories.map((story) => `
+        <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <p class="font-semibold text-slate-900">${escapeWorkflowText(story.story_item_id)} · ${escapeWorkflowText(story.title)}</p>
+            <p class="mt-1 text-xs text-slate-600">${story.story_points} points · ${story.task_count} ${story.task_count === 1 ? 'task' : 'tasks'}</p>
+        </li>
+    `).join('');
+    return `<details class="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3" data-sprint-plan-evidence="true">
+        <summary class="cursor-pointer text-sm font-semibold text-slate-800">Accepted planning evidence</summary>
+        <div class="mt-3 space-y-3 text-sm text-slate-700">
+            <p><strong>Accepted by:</strong> ${escapeWorkflowText(plan.acceptance.reviewer)} · ${escapeWorkflowText(plan.acceptance.decided_at)}</p>
+            <p><strong>Rationale:</strong> ${escapeWorkflowText(plan.acceptance.rationale)}</p>
+            <ul class="space-y-2">${stories}</ul>
+        </div>
+    </details>`;
+}
+
+function sprintStatusMarkup(sprintState, position = {}, actions = [], context = {}) {
+    if (sprintState?.kind === 'absent') return '';
+    if (sprintState?.kind !== 'ready') {
+        return `<section role="alert" data-sprint-status-error="true" class="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800"><strong>Sprint status unavailable.</strong> Reload before starting or continuing Sprint work. Controls remain locked.</section>`;
+    }
+    const status = sprintState.data;
+    const sprint = status.sprint;
+    const plan = status.accepted_plan;
+    const heading = sprint.status === 'planned'
+        ? `Sprint #${sprint.sprint_id} is planned`
+        : (sprint.status === 'active'
+            ? `Sprint #${sprint.sprint_id} is active`
+            : `Sprint #${sprint.sprint_id} is complete`);
+    const start = sprintStartBinding(status, position, actions);
+    const correction = sprintCorrectionBinding(status, position, actions);
+    const startBusy = activeSprintMutation !== null;
+    const startMarkup = start ? `<button type="button" data-direct-action="start_sprint" ${deliveryActionBindingAttributes(start.action)}${startBusy ? ' disabled aria-disabled="true" aria-busy="true"' : ''} class="${BUTTON_PRIMARY}">
+        <span class="material-symbols-outlined" aria-hidden="true">play_arrow</span>
+        <span data-sprint-start-label="true">${startBusy ? 'Starting Sprint...' : 'Start Sprint'}</span>
+    </button>` : (sprint.status === 'planned'
+        ? '<p class="text-sm text-slate-600">Start is locked until the current graph and accepted-plan evidence agree.</p>'
+        : '');
+    const correctionMarkup = correction ? `<details class="rounded-lg border border-slate-200 bg-white p-3" data-sprint-correction="true">
+        <summary class="cursor-pointer text-sm font-semibold text-slate-700">Correct accepted plan</summary>
+        <div class="mt-3">${deliveryGenerationActionMarkup(
+            correction,
+            position,
+            context.planningReviews ?? {},
+            0,
+            context,
+        )}</div>
+    </details>` : '';
+
+    let executionMarkup = '';
+    if (sprint.status === 'active') {
+        const execution = sprintExecutionProjection(status, position, actions);
+        if (execution.kind === 'error') {
+            executionMarkup = '<p role="alert" class="mt-4 text-sm text-red-800">Current execution action projection is inconsistent. Task controls remain locked.</p>';
+        } else if (execution.kind === 'absent') {
+            executionMarkup = '<p class="mt-4 text-sm text-slate-600">No execution action is currently available.</p>';
+        } else {
+            executionMarkup = `<div class="mt-4 space-y-2" data-sprint-execution-actions="true">
+                <p class="text-sm font-semibold text-slate-800">${execution.items.length} current execution ${execution.items.length === 1 ? 'action' : 'actions'}</p>
+                <ul class="space-y-2">${execution.items.map(({ task }) => `<li class="rounded-lg border border-sky-200 bg-sky-50 p-3"><p class="text-sm font-semibold text-sky-950">Task #${task.task_id}</p><p class="mt-1 text-sm text-slate-700">${escapeWorkflowText(task.description)}</p></li>`).join('')}</ul>
+                <p class="text-xs text-slate-500">Task completion evidence is recorded through the existing Task workflow.</p>
+            </div>`;
+        }
+    }
+    return `<section class="rounded-lg border border-emerald-300 bg-emerald-50 p-5" data-sprint-status="${escapeWorkflowText(sprint.status)}">
+        <p class="text-xs font-semibold uppercase tracking-wide text-emerald-800">Current Sprint</p>
+        <h3 class="mt-1 text-lg font-bold text-emerald-950">${escapeWorkflowText(heading)}</h3>
+        <p class="mt-3 text-sm leading-6 text-slate-800"><strong>Goal:</strong> ${escapeWorkflowText(plan.goal)}</p>
+        <dl class="mt-3 grid gap-2 text-sm sm:grid-cols-3">
+            <div><dt class="font-semibold text-slate-600">Owner</dt><dd>${escapeWorkflowText(plan.owner.display_label)}</dd></div>
+            <div><dt class="font-semibold text-slate-600">Scope</dt><dd>${plan.selected_stories.length} ${plan.selected_stories.length === 1 ? 'Story' : 'Stories'} · ${plan.total_points} points</dd></div>
+            <div><dt class="font-semibold text-slate-600">Tasks</dt><dd>${plan.task_count}</dd></div>
+        </dl>
+        <div class="mt-4 flex flex-wrap items-start gap-3">${startMarkup}</div>
+        ${executionMarkup}
+        ${sprintAcceptedPlanEvidenceMarkup(plan)}
+        ${correctionMarkup}
+    </section>`;
+}
+
 function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {}) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
     const backlogState = { position, planningReviews: reviews, actions };
@@ -2504,7 +2854,9 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
             const cardTitle = pbiId ? `Story review for ${pbiId}` : `Story review ${index + 1}`;
             return planningReviewCardMarkup(cardTitle, item, 'story', index);
         }),
-        planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
+        context?.sprintStatus?.kind === 'ready'
+            ? ''
+            : planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
     ].filter(Boolean);
 
     const stories = Array.isArray(context?.storyDependencies?.stories)
@@ -2526,16 +2878,28 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const readinessSection = storyReadinessMarkup(stories, context);
     const dependencySection = storyDependencyReviewMarkup(dependencyAction, stories, dependencies);
     const candidateSection = sprintCandidatePoolMarkup(candidates);
+    const sprintSection = sprintStatusMarkup(
+        context?.sprintStatus,
+        position,
+        actions,
+        context,
+    );
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) => (
         Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind])
         && !((hasContinuation || invalidBacklogReview) && action?.request_kind === 'record_backlog_draft')
+        && !(
+            typeof context?.sprintStatus?.kind === 'string'
+            && context.sprintStatus.kind !== 'absent'
+            && action?.request_kind === 'record_sprint_plan'
+        )
     ));
     const actionMarkup = availableDeliveryActions.map((action, index) =>
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
     );
 
     const sections = [
+        sprintSection,
         cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
         readinessSection,
         dependencySection,
@@ -2701,6 +3065,19 @@ async function requestPlanningReview(url, options) {
     }
 }
 
+async function requestSprintStatus(url, options) {
+    try {
+        const response = await requestJson(url, options);
+        return { kind: 'candidate', data: response?.data };
+    } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        if (error.status === 404 && error.code === 'SPRINT_NOT_FOUND') {
+            return { kind: 'absent' };
+        }
+        return { kind: 'error', message: error.message };
+    }
+}
+
 async function loadDashboard() {
     const sequence = ++dashboardLoadSequence;
     const storyMutationAtStart = activeStoryMutation === null
@@ -2741,6 +3118,7 @@ async function loadDashboard() {
             storyPending,
             storyDependencies,
             sprintCandidates,
+            sprintStatusResponse,
         ] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
@@ -2755,10 +3133,24 @@ async function loadDashboard() {
             requestJson(`${base}/story/pending`, options),
             requestJson(`${base}/story/dependencies`, options),
             requestJson(`${base}/sprint/candidates`, options),
+            requestSprintStatus(`${base}/sprint/status`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         const sprintPlanReviewData = sprintPlanReview.data ?? {};
         const sprintCandidatesData = sprintCandidates?.data ?? {};
+        const positionData = position.data ?? {};
+        const positionActions = position.actions ?? [];
+        const validatedSprintStatus = sprintStatusResponse.kind === 'candidate'
+            ? await validateSprintStatusProjection(
+                sprintStatusResponse.data,
+                selectedProjectId,
+            )
+            : null;
+        const sprintAuthorityAdvertised = positionActions.some((action) => (
+            ['start_sprint', 'complete_task'].includes(action?.request_kind)
+        ));
+        const sprintStatusAbsent = sprintStatusResponse.kind === 'absent'
+            && !sprintAuthorityAdvertised;
         await Promise.all([
             validateSprintOwnerProjection(
                 sprintCandidatesData?.sprint_owner,
@@ -2776,8 +3168,8 @@ async function loadDashboard() {
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
             project: project.data ?? {},
-            position: position.data ?? {},
-            actions: position.actions ?? [],
+            position: positionData,
+            actions: positionActions,
             vision: vision.data ?? {},
             goal: goal.data ?? {},
             specification: specification.data ?? {},
@@ -2791,6 +3183,15 @@ async function loadDashboard() {
             storyPending: storyPending.data ?? {},
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidatesData,
+            sprintStatus: sprintStatusAbsent
+                ? { kind: 'absent' }
+                : (validatedSprintStatus
+                    ? { kind: 'ready', data: validatedSprintStatus }
+                    : {
+                        kind: 'error',
+                        message: sprintStatusResponse.message
+                            ?? 'Sprint status projection is incomplete.',
+                    }),
         };
         const backlogFocusMutation = reconcileBacklogCorrectionMutation(
             backlogCorrectionMutationAtStart,
@@ -2913,6 +3314,18 @@ function captureDeliveryActionBinding(state, control, requestKind) {
     return matches.length === 1 ? captureAction(matches[0]) : null;
 }
 
+function captureSprintStartControlBinding(state, control) {
+    const expected = sprintStartBinding(
+        state?.sprintStatus?.data,
+        state?.position,
+        state?.actions,
+    );
+    const rendered = captureDeliveryActionBinding(state, control, 'start_sprint');
+    return expected && rendered && deliveryActionsMatch(expected.action, rendered)
+        ? expected
+        : null;
+}
+
 function currentDeliveryActionContainers(action, requestKind) {
     const candidates = Array.from(document.querySelectorAll?.(
         `[data-delivery-generation-action="${requestKind}"]`,
@@ -2929,6 +3342,43 @@ function deliveryActionsMatch(left, right) {
         && left?.request_kind === right?.request_kind
         && left?.endpoint === right?.endpoint
         && (left?.transport ?? '') === (right?.transport ?? '');
+}
+
+function sprintStartConfirmed(state, binding) {
+    const status = state?.sprintStatus;
+    const data = status?.kind === 'ready' ? status.data : null;
+    const sprint = data?.sprint;
+    const plan = data?.accepted_plan;
+    const start = data?.start;
+    const startStillAdvertised = (Array.isArray(state?.actions) ? state.actions : [])
+        .some((action) => action?.request_kind === 'start_sprint');
+    const startDecisionStillPresent = (
+        Array.isArray(state?.position?.decisions) ? state.position.decisions : []
+    ).some((decision) => (
+        decision?.request_kind === 'start_sprint'
+        && decision.reason_code === 'SPRINT_READY_TO_START'
+    ));
+    return Boolean(
+        sprint?.sprint_id === binding.sprintId
+        && sprint.status === 'active'
+        && plan?.sprint_id === binding.sprintId
+        && plan.status === 'active'
+        && plan.sprint_plan_artifact_id === binding.sprintPlanArtifactId
+        && plan.sprint_plan_artifact_decision_id
+            === binding.sprintPlanArtifactDecisionId
+        && plan.plan_fingerprint === binding.planFingerprint
+        && plan.candidate_set_fingerprint === binding.candidateSetFingerprint
+        && plan.task_content_fingerprint === binding.taskContentFingerprint
+        && start?.sprint_id === binding.sprintId
+        && start.sprint_plan_artifact_id === binding.sprintPlanArtifactId
+        && start.sprint_plan_artifact_decision_id
+            === binding.sprintPlanArtifactDecisionId
+        && start.plan_fingerprint === binding.planFingerprint
+        && start.candidate_set_fingerprint === binding.candidateSetFingerprint
+        && start.task_content_fingerprint === binding.taskContentFingerprint
+        && !startStillAdvertised
+        && !startDecisionStillPresent
+    );
 }
 
 function captureBacklogCorrectionBinding(state, control) {
@@ -3355,6 +3805,9 @@ async function submitHumanAction() {
             pending.fields ?? {},
         );
         return;
+    } else if (pending.kind === 'sprint-start') {
+        await runSprintStart(pending.binding, pending.button);
+        return;
     } else if (pending.kind === 'goal-outcome') {
         const requestKind = pending.outcome === 'fulfilled'
             ? 'fulfill_product_goal'
@@ -3435,6 +3888,93 @@ async function runBacklogCorrection(binding, button) {
         }
     }
     return true;
+}
+
+function sprintStartBindingsMatch(left, right) {
+    return Boolean(
+        left && right
+        && left.decisionFingerprint === right.decisionFingerprint
+        && left.sprintId === right.sprintId
+        && left.sprintPlanArtifactId === right.sprintPlanArtifactId
+        && left.sprintPlanArtifactDecisionId === right.sprintPlanArtifactDecisionId
+        && left.planFingerprint === right.planFingerprint
+        && left.candidateSetFingerprint === right.candidateSetFingerprint
+        && left.taskContentFingerprint === right.taskContentFingerprint
+    );
+}
+
+function completeSprintStartReconciliation(token) {
+    if (activeSprintMutation?.token === token) activeSprintMutation = null;
+    sprintStartRetry = null;
+    closeHumanDialog();
+    renderDashboard();
+}
+
+async function runSprintStart(binding, button) {
+    if (activeSprintMutation) return false;
+    const token = sprintStartBindingsMatch(sprintStartRetry?.binding, binding)
+        ? sprintStartRetry.token
+        : `dashboard-${crypto.randomUUID()}`;
+    sprintStartRetry = null;
+    let mutationCompleted = false;
+    activeSprintMutation = { token, binding, phase: 'submitting' };
+    button.disabled = true;
+    button.setAttribute('aria-disabled', 'true');
+    button.setAttribute('aria-busy', 'true');
+    const label = button.querySelector?.('[data-sprint-start-label="true"]');
+    if (label) label.textContent = 'Starting Sprint...';
+    setProjectError('');
+    try {
+        await postAction(
+            binding.action,
+            { idempotency_key: token },
+            { expectedDecision: binding.decisionFingerprint },
+        );
+        mutationCompleted = true;
+        if (activeSprintMutation?.token === token) {
+            activeSprintMutation = { ...activeSprintMutation, phase: 'awaiting_authority' };
+        }
+        const refreshed = await loadDashboard();
+        if (refreshed !== true || !sprintStartConfirmed(lifecycleState, binding)) {
+            throw new Error(
+                'Sprint start was accepted, but the authoritative status did not confirm the same Sprint as active. Controls remain locked until a successful refresh.',
+            );
+        }
+        completeSprintStartReconciliation(token);
+        return true;
+    } catch (error) {
+        if (!mutationCompleted && activeSprintMutation?.token === token) {
+            activeSprintMutation = { ...activeSprintMutation, phase: 'reconciling' };
+            let refreshed = false;
+            try {
+                refreshed = await loadDashboard() === true;
+            } catch (_loadError) {
+                // Preserve the uncertainty lock until authority can be reloaded.
+            }
+            if (refreshed && sprintStartConfirmed(lifecycleState, binding)) {
+                completeSprintStartReconciliation(token);
+                return true;
+            }
+            const current = refreshed
+                ? sprintStartBinding(
+                    lifecycleState?.sprintStatus?.data,
+                    lifecycleState?.position,
+                    lifecycleState?.actions,
+                )
+                : null;
+            if (current) {
+                if (sprintStartBindingsMatch(current, binding)) {
+                    sprintStartRetry = { token, binding };
+                }
+                if (activeSprintMutation?.token === token) activeSprintMutation = null;
+                renderDashboard();
+                throw new Error(
+                    `Sprint start was not confirmed. Review the current Sprint and retry. ${error.message}`,
+                );
+            }
+        }
+        throw error;
+    }
 }
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
@@ -4011,6 +4551,27 @@ function installInteractions() {
                 title: `${details.intentVerb} Stories for ${details.pbiId}`,
                 description: `Confirm Story ${details.intentLabel.toLowerCase()} for ${details.pbiId}: ${details.requirement}`,
                 submitLabel: `${details.intentVerb} Stories`,
+                field: 'none',
+                required: false,
+                hideRationale: true,
+            });
+            return;
+        }
+        if (button.dataset.directAction === 'start_sprint') {
+            const binding = captureSprintStartControlBinding(lifecycleState, button);
+            if (!binding) {
+                setProjectError(
+                    'This Sprint start action changed. Reload and review the current accepted Sprint.',
+                );
+                return;
+            }
+            openHumanDialog({
+                kind: 'sprint-start',
+                binding,
+                button,
+                title: `Start Sprint #${binding.sprintId}`,
+                description: 'Confirm starting the exact accepted Sprint plan shown on this page.',
+                submitLabel: 'Start Sprint',
                 field: 'none',
                 required: false,
                 hideRationale: true,

@@ -470,7 +470,14 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
             in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
             or (
                 decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
-                and decision.request_kind == "register_specification_source"
+                and (
+                    decision.request_kind == "register_specification_source"
+                    or (
+                        decision.request_kind == "record_sprint_plan"
+                        and decision.reason_code
+                        == "SPRINT_PLAN_CORRECTION_AVAILABLE"
+                    )
+                )
             )
         )
         and decision.request_kind in SEMANTIC_API_PATHS | DELIVERY_API_PATHS
@@ -1020,6 +1027,14 @@ def get_sprint_metrics(project_id: int) -> dict[str, object]:
     return _read_payload(_application().reads.sprint_metrics(project_id=project_id))
 
 
+@app.get("/api/projects/{project_id}/sprint/status")
+def get_current_sprint(project_id: int) -> dict[str, object]:
+    """Return the same selected Sprint status projection used by the CLI."""
+    return _read_payload(
+        _application().reads.sprint_status(project_id=project_id, sprint_id=None)
+    )
+
+
 @app.get("/api/projects/{project_id}/sprints")
 def get_sprints(project_id: int) -> dict[str, object]:
     """Return retained Sprint list and history data."""
@@ -1385,11 +1400,19 @@ def repair_project_story_readiness(
 def start_project_sprint(
     project_id: int,
     req: SprintStartApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(alias="X-AgileForge-Expected-Decision", include_in_schema=False),
+    ],
 ) -> dict[str, object]:
     """Start the exact accepted current Sprint plan."""
     return _result_payload(
         _application().start_sprint(
-            SprintStartRequest(project_id=project_id, **_metadata(req))
+            SprintStartRequest(
+                project_id=project_id,
+                expected_decision_fingerprint=expected_decision,
+                **_metadata(req),
+            )
         )
     )
 

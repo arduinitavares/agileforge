@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
-from models.core import Project, Sprint, UserStory
+from models.core import Project, Sprint, Team, UserStory
 from models.events import TaskExecutionLog
 from models.product_definition import (
     ProductGoalArtifact,
@@ -91,7 +91,9 @@ from workflow.definitions.product_goal import (
     select_product_goal_interview_state,
 )
 from workflow.definitions.vision import select_vision_interview_state
-from workflow.fingerprints import canonical_json
+from workflow.execution_integrity import ExecutionIntegrityError, execution_contract
+from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.planning_integrity import current_task_content_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -2781,10 +2783,18 @@ class DurableReadProjectionService:
                 sprint_id=sprint_id,
             )
         selected_id = sprint.sprint_id
+        accepted_plan = self._accepted_sprint_plan_status(
+            project_id=project_id,
+            sprint=sprint,
+            snapshot=snapshot,
+        )
+        if accepted_plan.get("ok") is not True:
+            return accepted_plan
         return _success(
             {
                 "project_id": project_id,
                 "sprint": _validated(sprint.model_dump(mode="json")),
+                "accepted_plan": _result_data(accepted_plan),
                 "start": next(
                     (
                         _validated(item.model_dump(mode="json"))
@@ -2794,7 +2804,12 @@ class DurableReadProjectionService:
                     None,
                 ),
                 "tasks": [
-                    _validated(item.model_dump(mode="json"))
+                    {
+                        **_validated(item.model_dump(mode="json")),
+                        "fact_fingerprint": canonical_hash(
+                            item.model_dump(mode="json")
+                        ),
+                    }
                     for item in snapshot.tasks
                     if item.sprint_id == selected_id
                 ],
@@ -2815,6 +2830,186 @@ class DurableReadProjectionService:
                     None,
                 ),
             }
+        )
+
+    def _accepted_sprint_plan_status(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        *,
+        project_id: int,
+        sprint: SprintFact,
+        snapshot: WorkflowFactSnapshot,
+    ) -> JsonObject:
+        """Project one accepted plan only when all Sprint lineage still agrees."""
+        sprint_id = sprint.sprint_id
+        starts = tuple(
+            item for item in snapshot.sprint_starts if item.sprint_id == sprint_id
+        )
+        if sprint.status == "planned":
+            plans = tuple(
+                item
+                for item in snapshot.planning_artifacts
+                if item.artifact_type == "sprint_plan"
+                and item.activated_sprint_id == sprint_id
+                and item.status == "accepted"
+            )
+            if len(plans) != 1 or starts:
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            plan = plans[0]
+            decisions = tuple(
+                item
+                for item in snapshot.review_decisions
+                if item.artifact_type == "sprint"
+                and item.artifact_id == plan.artifact_id
+                and item.artifact_fingerprint == plan.artifact_fingerprint
+                and item.decision == "accepted"
+            )
+            if len(decisions) != 1:
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            decision = decisions[0]
+            if (
+                current_task_content_fingerprint(
+                    snapshot.tasks,
+                    sprint_id=sprint_id,
+                    story_ids=plan.selected_story_ids,
+                )
+                != plan.task_content_fingerprint
+            ):
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+        else:
+            if len(starts) != 1:
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            try:
+                contract = execution_contract(snapshot, sprint_id)
+            except ExecutionIntegrityError:
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            plan = contract.plan
+            decision = contract.decision
+        if (
+            plan.candidate_set_fingerprint is None
+            or plan.task_content_fingerprint is None
+            or not plan.selected_story_ids
+        ):
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+
+        review_result = self.sprint_plan_review(
+            project_id=project_id,
+            sprint_plan_artifact_id=plan.artifact_id,
+        )
+        if review_result.get("ok") is not True:
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+        review_data = _result_data(review_result)
+        candidate = review_data.get("candidate")
+        review = review_data.get("review")
+        if not isinstance(candidate, dict) or not isinstance(review, dict):
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+
+        selected = candidate.get("selected_stories")
+        owner = candidate.get("sprint_owner")
+        goal = candidate.get("sprint_goal")
+        if (
+            candidate.get("sprint_plan_artifact_id") != plan.artifact_id
+            or candidate.get("artifact_fingerprint") != plan.artifact_fingerprint
+            or candidate.get("candidate_set_fingerprint")
+            != plan.candidate_set_fingerprint
+            or review.get("state") != "accepted"
+            or review.get("activated_sprint_id") != sprint_id
+            or not isinstance(goal, str)
+            or not goal.strip()
+            or not isinstance(owner, dict)
+            or not isinstance(selected, list)
+        ):
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+
+        with Session(self._engine) as session:
+            sprint_row = session.get(Sprint, sprint_id)
+            team_row = (
+                None
+                if sprint_row is None
+                else session.get(Team, sprint_row.team_id)
+            )
+        if (
+            sprint_row is None
+            or sprint_row.project_id != project_id
+            or sprint_row.goal != goal
+            or team_row is None
+            or team_row.name != owner.get("label")
+        ):
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+
+        stories_by_id = {item.story_id: item for item in snapshot.stories}
+        tasks_by_story: dict[int, int] = {}
+        for task in snapshot.tasks:
+            if task.sprint_id == sprint_id:
+                tasks_by_story[task.story_id] = tasks_by_story.get(task.story_id, 0) + 1
+        summaries: list[JsonValue] = []
+        selected_ids: list[int] = []
+        total_points = 0
+        total_tasks = 0
+        for item in selected:
+            if not isinstance(item, dict):
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            story_id = item.get("story_id")
+            title = item.get("title")
+            item_id = item.get("story_item_id")
+            planned_tasks = item.get("tasks")
+            story = stories_by_id.get(story_id) if isinstance(story_id, int) else None
+            task_count = tasks_by_story.get(story.story_id, 0) if story else 0
+            if (
+                story is None
+                or sprint_id not in story.sprint_ids
+                or story.source_story_item_id != item_id
+                or not isinstance(title, str)
+                or not title.strip()
+                or not isinstance(planned_tasks, list)
+                or len(planned_tasks) != task_count
+                or not isinstance(story.story_points, int)
+                or story.story_points <= 0
+            ):
+                return self._sprint_status_inconsistent(project_id, sprint_id)
+            selected_ids.append(story.story_id)
+            total_points += story.story_points
+            total_tasks += task_count
+            summaries.append(
+                {
+                    "story_id": story.story_id,
+                    "story_item_id": story.source_story_item_id,
+                    "title": title,
+                    "story_points": story.story_points,
+                    "task_count": task_count,
+                }
+            )
+        if tuple(selected_ids) != plan.selected_story_ids:
+            return self._sprint_status_inconsistent(project_id, sprint_id)
+
+        return _success(
+            {
+                "sprint_id": sprint_id,
+                "status": sprint.status,
+                "goal": goal,
+                "owner": owner,
+                "sprint_plan_artifact_id": plan.artifact_id,
+                "sprint_plan_artifact_decision_id": decision.decision_id,
+                "plan_fingerprint": plan.artifact_fingerprint,
+                "candidate_set_fingerprint": plan.candidate_set_fingerprint,
+                "task_content_fingerprint": plan.task_content_fingerprint,
+                "acceptance": {
+                    "rationale": review.get("rationale"),
+                    "reviewer": review.get("reviewer"),
+                    "decided_at": review.get("decided_at"),
+                },
+                "selected_stories": summaries,
+                "total_points": total_points,
+                "task_count": total_tasks,
+            }
+        )
+
+    @staticmethod
+    def _sprint_status_inconsistent(project_id: int, sprint_id: int) -> JsonObject:
+        return _error(
+            "SPRINT_STATUS_INCONSISTENT",
+            "Sprint status projection is inconsistent.",
+            project_id=project_id,
+            sprint_id=sprint_id,
         )
 
     def sprint_tasks(

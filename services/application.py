@@ -1550,6 +1550,13 @@ def _story_eligibility_item(
 class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
+    expected_decision_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
+
 
 class _ExecutionMutationRequest(FrozenModel):
     """Transport metadata shared by strict execution and triage requests."""
@@ -3045,45 +3052,12 @@ class AgileForgeApplication:
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "planning.sprint.start")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
-            stale = tuple(
-                item
-                for item in position.decisions
-                if item.node_id == "planning.sprint.start"
-                and item.category is NodeCategory.INVALID
-                and item.reason_code == "STALE_SPECIFICATION"
-            )
-            if len(stale) == 1:
-                message = "Sprint start requires the current accepted Specification."
-                blocker = Blocker(code="STALE_SPECIFICATION", message=message)
-                return TransitionResult(
-                    ok=False,
-                    position=position,
-                    error=WorkflowError(
-                        code=WorkflowErrorCode.STALE_SPECIFICATION,
-                        message=message,
-                        blockers=(blocker,),
-                    ),
-                )
-            blocked = tuple(
-                item
-                for item in position.decisions
-                if item.node_id == "planning.sprint.start"
-                and item.category is NodeCategory.BLOCKED
-                and len(item.blockers) == 1
-                and item.blockers[0].code == "ACTIVE_SPRINT_EXISTS"
-            )
-            if len(blocked) == 1:
-                blocker = blocked[0].blockers[0]
-                return TransitionResult(
-                    ok=False,
-                    position=position,
-                    error=WorkflowError(
-                        code=WorkflowErrorCode.ACTIVE_SPRINT_EXISTS,
-                        message=blocker.message,
-                        blockers=(blocker,),
-                    ),
-                )
-            return _transition_not_available(position, "planning.sprint.start")
+            return _unavailable_sprint_start_action(position)
+        if (
+            request.expected_decision_fingerprint is not None
+            and request.expected_decision_fingerprint != decision.decision_fingerprint
+        ):
+            return _stale_sprint_start_action(position)
         return self.transition(
             StartSprint(
                 project_id=request.project_id,
@@ -5430,6 +5404,64 @@ def _stale_specification_structuring_action(
             ),
         ),
     )
+
+
+def _stale_sprint_start_action(position: WorkflowPosition) -> TransitionResult:
+    """Reject a Start Sprint control whose exact graph decision changed."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message=(
+                "The Sprint start action changed after it was shown. "
+                "Reload and review the current accepted Sprint."
+            ),
+        ),
+    )
+
+
+def _unavailable_sprint_start_action(position: WorkflowPosition) -> TransitionResult:
+    """Preserve exact stale-Spec and active-Sprint start failures."""
+    stale = tuple(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.sprint.start"
+        and item.category is NodeCategory.INVALID
+        and item.reason_code == "STALE_SPECIFICATION"
+    )
+    if len(stale) == 1:
+        message = "Sprint start requires the current accepted Specification."
+        blocker = Blocker(code="STALE_SPECIFICATION", message=message)
+        return TransitionResult(
+            ok=False,
+            position=position,
+            error=WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION,
+                message=message,
+                blockers=(blocker,),
+            ),
+        )
+    blocked = tuple(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.sprint.start"
+        and item.category is NodeCategory.BLOCKED
+        and len(item.blockers) == 1
+        and item.blockers[0].code == "ACTIVE_SPRINT_EXISTS"
+    )
+    if len(blocked) == 1:
+        blocker = blocked[0].blockers[0]
+        return TransitionResult(
+            ok=False,
+            position=position,
+            error=WorkflowError(
+                code=WorkflowErrorCode.ACTIVE_SPRINT_EXISTS,
+                message=blocker.message,
+                blockers=(blocker,),
+            ),
+        )
+    return _transition_not_available(position, "planning.sprint.start")
 
 
 def _stale_specification_source_registration_action(

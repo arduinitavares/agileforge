@@ -1113,7 +1113,7 @@ def _planning_review_headers(path: str) -> dict[str, str]:
             "SprintStartRequest",
             "start_sprint",
             "planning.sprint.start",
-            {},
+            {"expected_decision_fingerprint": "decision-planning.sprint.start"},
             {},
             {},
         ),
@@ -1189,7 +1189,12 @@ def test_planning_action_application_derives_internal_guards(
             "repair_story_readiness",
             {"repairs": ({"story_id": 7, "story_points": 3, "rank": "101"},)},
         ),
-        ("start_sprint", "SprintStartRequest", "start_sprint", {}),
+        (
+            "start_sprint",
+            "SprintStartRequest",
+            "start_sprint",
+            {"expected_decision_fingerprint": "decision-planning.sprint.start"},
+        ),
     ],
 )
 def test_planning_action_application_replays_before_current_position(
@@ -2076,11 +2081,43 @@ def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
             project_id=project_id,
             idempotency_key="selection-start-sprint",
             actor="operator",
+            expected_decision_fingerprint=next(
+                item.decision_fingerprint
+                for item in application.position(project_id=project_id).decisions
+                if item.node_id == "planning.sprint.start"
+            ),
         )
     )
 
     assert started.ok is True
     assert started.applied_node_id == "planning.sprint.start"
+
+
+def test_sprint_start_rejects_a_replaced_browser_decision_before_transition() -> None:
+    """Never let stale displayed plan A start freshly corrected plan C."""
+    current = _delivery_decision(
+        node_id="planning.sprint.start",
+        request_kind="start_sprint",
+    ).model_copy(update={"decision_fingerprint": "decision-current-plan-c"})
+    domain = _CapturingTransitionDomain(_vision_position(current))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        planning_action_selection=_PlanningActionSelection(),
+    )
+
+    result = application.start_sprint(
+        application_module.SprintStartRequest(
+            project_id=PROJECT_ID,
+            idempotency_key="stale-displayed-plan-a",
+            actor="operator",
+            expected_decision_fingerprint="decision-displayed-plan-a",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert domain.requests == []
 
 
 @dataclass(frozen=True)
@@ -4054,6 +4091,11 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
 
     response = TestClient(api_module.app).post(
         path,
+        headers=(
+            {"X-AgileForge-Expected-Decision": "decision-shown"}
+            if path.endswith("/sprint/start")
+            else None
+        ),
         json={
             **payload,
             "idempotency_key": "planning-action-41",
@@ -4068,9 +4110,25 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
     assert not hasattr(request, "graph_version")
     assert not hasattr(request, "fact_fingerprint")
     assert not hasattr(request, "decision_fingerprint")
+    if request_type_name == "SprintStartRequest":
+        assert isinstance(request, application_module.SprintStartRequest)
+        assert request.expected_decision_fingerprint == "decision-shown"
     if request_type_name == "StoryDependenciesApplyRequest":
         assert isinstance(request, application_module.StoryDependenciesApplyRequest)
         assert request.selected_scope_fingerprint == "sha256:" + ("a" * 64)
+
+
+def test_sprint_start_api_requires_the_displayed_decision_guard() -> None:
+    """Reject Start Sprint when the browser omits its rendered graph binding."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/sprint/start",
+        json={
+            "idempotency_key": "unguarded-start-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 @pytest.mark.parametrize(
@@ -4601,10 +4659,10 @@ def test_position_advertises_only_executable_semantic_api_routes(
     assert all("decision_fingerprint" not in item for item in actions)
 
 
-def test_position_advertises_optional_specification_source_reentry_only(
+def test_position_advertises_only_supported_optional_reentry_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Expose source re-entry without making all optional work immediate."""
+    """Expose exact source and Sprint corrections without all optional work."""
     source = NodeDecision(
         node_id="specification.source.register",
         child_graph_id="specification",
@@ -4623,10 +4681,23 @@ def test_position_advertises_optional_specification_source_reentry_only(
         reason_code="VISION_OPTIONAL_REENTRY",
         decision_fingerprint="vision-reentry",
     )
+    sprint_correction = NodeDecision(
+        node_id="planning.sprint.plan",
+        child_graph_id="planning",
+        request_kind="record_sprint_plan",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPRINT_PLAN_CORRECTION_AVAILABLE",
+        decision_fingerprint="sprint-correction",
+    )
     position = _all_request_kinds_position().model_copy(
         update={
-            "available_nodes": (source.node_id, unrelated.node_id),
-            "decisions": (source, unrelated),
+            "available_nodes": (
+                source.node_id,
+                sprint_correction.node_id,
+                unrelated.node_id,
+            ),
+            "decisions": (source, sprint_correction, unrelated),
         }
     )
     monkeypatch.setattr(
@@ -4645,7 +4716,14 @@ def test_position_advertises_optional_specification_source_reentry_only(
             "request_kind": "register_specification_source",
             "endpoint": "specifications/source",
             "transport": "semantic",
-        }
+        },
+        {
+            "node_id": "planning.sprint.plan",
+            "instance_key": None,
+            "request_kind": "record_sprint_plan",
+            "endpoint": "sprint/generate",
+            "transport": "semantic",
+        },
     ]
 
 
