@@ -837,9 +837,24 @@ class WorkflowDomain:
                 attempt_id=request.attempt_id,
                 evaluated_at=evaluated_at,
             )
-        position = self._graph.evaluate(snapshot, evaluated_at)
-        decision = self._decision(position, request)
-        if decision is None:
+        # The request and durable attempt already bind the original decision
+        # fingerprint. Remove only this live attempt to recover the underlying
+        # decision semantics that an active overlay intentionally masks.
+        completion_snapshot = snapshot.model_copy(
+            update={
+                "node_attempts": tuple(
+                    attempt
+                    for attempt in snapshot.node_attempts
+                    if attempt.attempt_id != request.attempt_id
+                )
+            }
+        )
+        completion_position = self._graph.evaluate(completion_snapshot, evaluated_at)
+        decision = self._decision(completion_position, request)
+        if (
+            decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+        ):
             return self._obsolete_attempt(
                 session,
                 project_id=request.project_id,
@@ -869,10 +884,10 @@ class WorkflowDomain:
                 output=result.output,
                 evaluated_at=evaluated_at,
             )
-        elif isinstance(request, CompleteSpecificationStructuring):
+        else:
             error = result.error
             if error is None:
-                message = "Failed Specification structuring has no structured error."
+                message = "Failed attempt completion has no structured error."
                 raise RuntimeError(message)
             session.add(
                 WorkflowNodeAttemptOutcome(

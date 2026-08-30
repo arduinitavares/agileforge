@@ -1744,6 +1744,108 @@ def test_story_runner_valid_first_persists_one_draft_and_replays_without_provide
         assert outcomes[0].status == "success"
 
 
+def test_story_set_correction_runner_completes_with_its_start_authority(
+    engine: Engine,
+) -> None:
+    """Complete an accepted Story-set correction through the real runner path."""
+    leaf = CountingLeafAgent(
+        name="story_set_correction",
+        response=_story_provider_output(spec_item_ids=("REQ.planning-1",)),
+        calls=[],
+    )
+    system = _story_runner_system(engine, leaf=leaf)
+    initial_position = system.domain.position(system.project_id)
+    initial_decision = _story_decision(system.domain, system.project_id)
+    initial = system.runner.run(
+        initial_decision,
+        system.payload,
+        guards=AdkRunGuards(
+            position=initial_position,
+            idempotency_key="issue-228-story-source",
+            actor="operator@example.com",
+            correlation_id="issue-228-story-source",
+        ),
+    )
+    assert initial.ok is True
+    with Session(engine) as session:
+        source = session.exec(select(StoryArtifact)).one()
+        source_id = int(source.story_artifact_id or 0)
+        source_fingerprint = source.content_fingerprint
+
+    review_position = system.domain.position(system.project_id)
+    review_decision = next(
+        decision
+        for decision in review_position.decisions
+        if decision.node_id == "planning.story.review"
+        and decision.instance_key == initial_decision.instance_key
+    )
+    accepted = system.domain.transition(
+        DecideStory(
+            project_id=system.project_id,
+            graph_version=review_position.graph_version,
+            fact_fingerprint=review_position.fact_fingerprint,
+            decision_fingerprint=review_decision.decision_fingerprint,
+            instance_key=review_decision.instance_key,
+            idempotency_key="issue-228-story-accept",
+            actor="operator@example.com",
+            correlation_id="issue-228-story-accept",
+            backlog_item_id="PBI-000001",
+            story_artifact_id=source_id,
+            artifact_fingerprint=source_fingerprint,
+            decision="accepted",
+            rationale="Accept the source Story set before correction.",
+        )
+    )
+    assert accepted.ok is True
+
+    correction_position = system.domain.position(system.project_id)
+    correction_decision = _story_decision(system.domain, system.project_id)
+    assert correction_decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    prepared = DeliveryActionInputService(engine=engine).build(
+        project_id=system.project_id,
+        decision=correction_decision,
+        node_id="planning.story.generate",
+        allow_legacy_story_correction=True,
+    )
+    assert isinstance(prepared, dict)
+    correction_payload: JsonObject = JSON_OBJECT.validate_python(
+        {
+            **prepared,
+            "story_set_correction": {
+                "accepted_story_artifact_id": source_id,
+                "accepted_story_artifact_fingerprint": source_fingerprint,
+            },
+        }
+    )
+
+    correction = system.runner.run(
+        correction_decision,
+        correction_payload,
+        guards=AdkRunGuards(
+            position=correction_position,
+            idempotency_key="issue-228-story-correction",
+            actor="operator@example.com",
+            correlation_id="issue-228-story-correction",
+        ),
+    )
+
+    assert correction.ok is True
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        artifacts = session.exec(
+            select(StoryArtifact).order_by(col(StoryArtifact.story_artifact_id))
+        ).all()
+        assert len(artifacts) == 2  # noqa: PLR2004
+        replacement = artifacts[1]
+        assert replacement.supersedes_story_artifact_id == source_id
+        assert replacement.content_fingerprint != source_fingerprint
+        attempts = _node_attempts(session, "planning.story.generate")
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(attempts) == 2  # noqa: PLR2004
+        assert len(outcomes) == 2  # noqa: PLR2004
+        assert [outcome.status for outcome in outcomes] == ["success", "success"]
+
+
 def _issue_222_story_item(
     *,
     title: str,

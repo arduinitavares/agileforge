@@ -912,6 +912,36 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
         assert outcome.output_fingerprint is not None
 
 
+def test_completion_conflict_writes_terminal_failure_outcome(
+    engine: Engine,
+) -> None:
+    """Do not strand a live attempt when its guarded completion conflicts."""
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    start_request = _start_request(domain, project_id)
+    started = domain.transition(start_request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    completion = _completion_request(
+        start_request=start_request,
+        attempt_id=attempt_id,
+        attempt_fingerprint=attempt_fingerprint,
+        specification=(spec_version_id, spec_hash),
+    ).model_copy(update={"spec_hash": "sha256:" + ("0" * 64)})
+
+    conflicted = domain.transition(completion)
+    replay = domain.transition(start_request)
+
+    assert conflicted.ok is False
+    assert conflicted.error is not None
+    assert conflicted.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert replay == conflicted.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        outcome = _backlog_outcomes(session)[0]
+        assert outcome.status == "failure"
+        assert outcome.failure_code == WorkflowErrorCode.WORKFLOW_FACT_CONFLICT.value
+        assert outcome.failure_message == conflicted.error.message
+
+
 def test_completed_attempt_updates_start_receipt_with_terminal_command_result(
     engine: Engine,
 ) -> None:
