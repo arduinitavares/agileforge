@@ -1754,6 +1754,10 @@ function isConcreteReviewIdentity(id, fingerprint) {
         && typeof fingerprint === 'string' && Boolean(fingerprint.trim());
 }
 
+function isCanonicalFactReferenceId(value) {
+    return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+}
+
 function isBacklogFeedbackContinuationDecision(decision) {
     return decision?.node_id === 'backlog.generate'
         && decision.instance_key === null
@@ -1762,10 +1766,17 @@ function isBacklogFeedbackContinuationDecision(decision) {
 }
 
 function backlogFeedbackContinuationProjection(state) {
-    const continuation = state?.planningReviews?.backlog?.continuation;
-    if (!continuation) return { kind: 'absent' };
-    const binding = reviewObject(continuation.binding);
-    const review = reviewObject(continuation.review);
+    const backlog = reviewObject(state?.planningReviews?.backlog);
+    if (backlog !== null && Object.keys(backlog).length === 0) {
+        return { kind: 'absent' };
+    }
+    if (backlog === null
+        || !Object.prototype.hasOwnProperty.call(backlog, 'continuation')) {
+        return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
+    }
+    const continuation = reviewObject(backlog.continuation);
+    const binding = reviewObject(continuation?.binding);
+    const review = reviewObject(continuation?.review);
     const candidate = reviewObject(review?.candidate);
     const lineage = reviewObject(review?.lineage);
     const specification = reviewObject(lineage?.specification);
@@ -1812,14 +1823,17 @@ function backlogFeedbackContinuationProjection(state) {
     for (const [factType, [factId, fingerprint]] of Object.entries(expected)) {
         const matches = references.filter((reference) => reference?.fact_type === factType);
         if (matches.length !== 1
-            || !isConcreteReviewIdentity(matches[0].fact_id, matches[0].fingerprint)
-            || matches[0].fact_id !== factId || matches[0].fingerprint !== fingerprint) {
+            || !isCanonicalFactReferenceId(matches[0].fact_id)
+            || matches[0].fact_id !== String(factId)
+            || matches[0].fingerprint !== fingerprint) {
             return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
         }
     }
     const attempts = references.filter((reference) => reference?.fact_type === 'node_attempt');
     if (attempts.length !== (mode.attempt ? 1 : 0)
-        || (mode.attempt && !isConcreteReviewIdentity(attempts[0].fact_id, attempts[0].fingerprint))) {
+        || (mode.attempt && (!isCanonicalFactReferenceId(attempts[0].fact_id)
+            || typeof attempts[0].fingerprint !== 'string'
+            || !attempts[0].fingerprint.trim()))) {
         return { kind: 'error', code: 'BACKLOG_FEEDBACK_PROJECTION_INVALID' };
     }
     return { kind: 'display', mode: mode.mode, decision, candidate, review };
@@ -2463,11 +2477,18 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const backlogContinuation = backlogFeedbackContinuationProjection(backlogState);
     const backlogCorrection = backlogCorrectionActionBinding(backlogState, backlogContinuation);
     const backlog = reviewObject(reviews?.backlog);
-    const hasContinuation = Boolean(backlog?.continuation);
+    const hasContinuation = backlog !== null
+        && Object.prototype.hasOwnProperty.call(backlog, 'continuation');
     const hasTopLevelReview = Boolean(backlog)
         && ('binding' in backlog || 'review' in backlog);
-    const invalidBacklogReview = (hasContinuation && hasTopLevelReview)
-        || (hasTopLevelReview && !backlogPendingReviewIsValid(backlog));
+    const exactBacklogAbsence = backlog !== null && Object.keys(backlog).length === 0;
+    const validPendingBacklogReview = !hasContinuation && backlogPendingReviewIsValid(backlog);
+    const validContinuation = hasContinuation
+        && !hasTopLevelReview
+        && backlogContinuation.kind === 'display';
+    const invalidBacklogReview = !exactBacklogAbsence
+        && !validPendingBacklogReview
+        && !validContinuation;
     const backlogCard = invalidBacklogReview
         ? backlogProjectionErrorMarkup()
         : (hasContinuation
@@ -2988,7 +3009,8 @@ function exactBacklogPendingReferences(decision, candidate, specification, produ
     return Object.entries(expected).every(([factType, [factId, fingerprint]]) => {
         const matches = references.filter((reference) => reference?.fact_type === factType);
         return matches.length === 1
-            && matches[0].fact_id === factId
+            && isCanonicalFactReferenceId(matches[0].fact_id)
+            && matches[0].fact_id === String(factId)
             && matches[0].fingerprint === fingerprint;
     });
 }
@@ -3072,7 +3094,9 @@ function reconcileBacklogCorrectionMutation(mutationAtStart) {
     const qualifyingBacklogState = mutation.phase === 'recovering_failure'
         ? (completeContinuation || correctedPending || validNonFeedbackBacklogState(lifecycleState, mutation))
         : (correctedPending || validNonFeedbackBacklogState(lifecycleState, mutation));
-    const focusMutation = mutation.focusIntent ? { ...mutation } : null;
+    const focusMutation = qualifyingBacklogState && mutation.focusIntent
+        ? { ...mutation }
+        : null;
     if (qualifyingBacklogState) activeBacklogCorrectionMutation = null;
     return focusMutation;
 }

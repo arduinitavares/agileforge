@@ -91,10 +91,10 @@ function feedbackContinuation(mode, content, rationale) {
         category, recommendation_kind, reason_code,
         decision_fingerprint: 'sha256:hidden-backlog-decision-canary',
         fact_references: [
-            { fact_type: 'backlog', fact_id: 7, fingerprint: 'sha256:hidden-backlog-artifact-canary' },
-            { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:hidden-specification-canary' },
-            { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:hidden-product-goal-canary' },
-            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: 81, fingerprint: 'sha256:hidden-node-attempt-canary' }] : []),
+            { fact_type: 'backlog', fact_id: '7', fingerprint: 'sha256:hidden-backlog-artifact-canary' },
+            { fact_type: 'specification', fact_id: '31', fingerprint: 'sha256:hidden-specification-canary' },
+            { fact_type: 'product_goal', fact_id: '21', fingerprint: 'sha256:hidden-product-goal-canary' },
+            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: '81', fingerprint: 'sha256:hidden-node-attempt-canary' }] : []),
         ],
     };
     return {

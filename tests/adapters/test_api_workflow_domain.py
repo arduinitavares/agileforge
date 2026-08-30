@@ -6938,6 +6938,43 @@ def test_backlog_continuation_position_rejects_malformed_optional_reentry() -> N
     assert reads.calls == []
 
 
+@pytest.mark.parametrize(
+    ("references", "selection_calls"),
+    [
+        (_without_backlog_continuation_reference("backlog"), 0),
+        (_duplicate_backlog_continuation_reference("backlog"), 0),
+        (_replace_backlog_continuation_reference("backlog", fact_id="8"), 1),
+    ],
+    ids=["missing-backlog", "duplicate-backlog", "wrong-backlog"],
+)
+def test_backlog_optional_reentry_rejects_every_invalid_backlog_reference(
+    references: tuple[FactReference, ...],
+    selection_calls: int,
+) -> None:
+    """Reason-classified optional correction must validate its exact reference tuple."""
+    decision = _backlog_continuation_decision(
+        reason="BACKLOG_CORRECTION_AVAILABLE",
+        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+        references=references,
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert domain.position_calls == 1
+    assert len(selection.calls) == selection_calls
+    assert reads.calls == []
+
+
 def test_backlog_continuation_position_initial_generation_is_valid_absence() -> None:
     """Initial generation without a reviewed Backlog is explicit valid absence."""
     decision = _backlog_continuation_decision(
@@ -6987,7 +7024,7 @@ def test_backlog_continuation_position_optional_reentry_is_valid_absence() -> No
         _object(_items(result["errors"])[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
     )
     assert domain.position_calls == 1
-    assert selection.calls == []
+    assert len(selection.calls) == 1
     assert reads.calls == []
 
 

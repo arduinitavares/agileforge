@@ -1435,17 +1435,17 @@ class BacklogFeedbackLifecycle(FakeLifecycle):
         references: list[JsonValue] = [
             {
                 "fact_type": "backlog",
-                "fact_id": candidate["backlog_artifact_id"],
+                "fact_id": str(candidate["backlog_artifact_id"]),
                 "fingerprint": candidate["artifact_fingerprint"],
             },
             {
                 "fact_type": "specification",
-                "fact_id": 41,
+                "fact_id": "41",
                 "fingerprint": "sha256:issue-213-specification",
             },
             {
                 "fact_type": "product_goal",
-                "fact_id": 11,
+                "fact_id": "11",
                 "fingerprint": "sha256:issue-213-goal",
             },
         ]
@@ -1453,7 +1453,7 @@ class BacklogFeedbackLifecycle(FakeLifecycle):
             references.append(
                 {
                     "fact_type": "node_attempt",
-                    "fact_id": 91,
+                    "fact_id": "91",
                     "fingerprint": "sha256:issue-213-attempt",
                 }
             )

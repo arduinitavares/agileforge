@@ -1879,6 +1879,7 @@ class AgileForgeApplication:
                     "BACKLOG_GENERATION_ACTIVE",
                     "BACKLOG_GENERATION_FAILED",
                     "BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                    "BACKLOG_CORRECTION_AVAILABLE",
                 }
             )
         )
@@ -1899,7 +1900,29 @@ class AgileForgeApplication:
                 "No planning review is currently available.",
                 code="PLANNING_REVIEW_NOT_AVAILABLE",
             )
-        if _backlog_optional_correction_is_valid(continuation[0]):
+        optional_correction = continuation[0]
+        if optional_correction.reason_code == "BACKLOG_CORRECTION_AVAILABLE":
+            if not _backlog_optional_correction_is_valid(optional_correction):
+                return _planning_review_read_error(
+                    "Backlog correction re-entry is invalid."
+                )
+            backlog_reference = next(
+                reference
+                for reference in optional_correction.fact_references
+                if reference.fact_type == "backlog"
+            )
+            identity = selection.review_identity(
+                project_id=project_id,
+                decision=optional_correction,
+                fact_type="backlog",
+            )
+            if identity != (
+                _fact_reference_integer(backlog_reference),
+                backlog_reference.fingerprint,
+            ):
+                return _planning_review_read_error(
+                    "Backlog correction selection is invalid."
+                )
             return _planning_review_read_error(
                 "No planning review is currently available.",
                 code="PLANNING_REVIEW_NOT_AVAILABLE",

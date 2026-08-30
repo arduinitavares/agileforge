@@ -194,9 +194,9 @@ function correctedPendingBacklogState() {
                 reason_code: 'BACKLOG_REVIEW_REQUIRED',
                 decision_fingerprint: 'sha256:pending-backlog',
                 fact_references: [
-                    { fact_type: 'backlog', fact_id: 8, fingerprint: 'sha256:backlog-8' },
-                    { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:specification-31' },
-                    { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:product-goal-21' },
+                    { fact_type: 'backlog', fact_id: '8', fingerprint: 'sha256:backlog-8' },
+                    { fact_type: 'specification', fact_id: '31', fingerprint: 'sha256:specification-31' },
+                    { fact_type: 'product_goal', fact_id: '21', fingerprint: 'sha256:product-goal-21' },
                 ],
             }],
         },
@@ -265,10 +265,10 @@ function backlogFeedbackState(mode, overrides = {}) {
         reason_code,
         decision_fingerprint: `sha256:decision-${mode}`,
         fact_references: [
-            { fact_type: 'backlog', fact_id: 7, fingerprint: 'sha256:backlog-7' },
-            { fact_type: 'specification', fact_id: 31, fingerprint: 'sha256:specification-31' },
-            { fact_type: 'product_goal', fact_id: 21, fingerprint: 'sha256:product-goal-21' },
-            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: 81, fingerprint: 'sha256:attempt-81' }] : []),
+            { fact_type: 'backlog', fact_id: '7', fingerprint: 'sha256:backlog-7' },
+            { fact_type: 'specification', fact_id: '31', fingerprint: 'sha256:specification-31' },
+            { fact_type: 'product_goal', fact_id: '21', fingerprint: 'sha256:product-goal-21' },
+            ...(hasAttempt ? [{ fact_type: 'node_attempt', fact_id: '81', fingerprint: 'sha256:attempt-81' }] : []),
         ],
         ...overrides.decision,
     };
@@ -329,7 +329,7 @@ test('Backlog Feedback display and correction-action contracts keep validation i
         }
     }
 
-    const absent = context.backlogFeedbackContinuationProjection({ position: { decisions: [] }, planningReviews: {}, actions: [] });
+    const absent = context.backlogFeedbackContinuationProjection({ position: { decisions: [] }, planningReviews: { backlog: {} }, actions: [] });
     assert.equal(JSON.stringify(absent), JSON.stringify({ kind: 'absent' }));
     assert.equal(
         JSON.stringify(context.backlogCorrectionActionBinding({ actions: [] }, absent)),
@@ -369,6 +369,20 @@ test('Backlog Feedback keeps durable display when correction action validation f
         const markup = context.deliveryPanelMarkup(state.position, state.planningReviews, state.actions);
         assert.ok(markup.includes('Backlog Feedback recorded'));
         assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+    }
+});
+
+test('Backlog Feedback fails closed for every non-empty non-pending Backlog read shape', () => {
+    const context = loadFrontend();
+    for (const backlog of [{ continuation: null }, { torn: true }]) {
+        const action = backlogFeedbackState('revision-ready').actions[0];
+        const markup = context.deliveryPanelMarkup(
+            { decisions: [] },
+            { backlog },
+            [action],
+        );
+        assert.ok(markup.includes('data-backlog-feedback-projection-error="true"'));
+        assert.ok(!markup.includes('data-delivery-generation-action="record_backlog_draft"'));
     }
 });
 
@@ -422,14 +436,17 @@ test('Backlog Feedback rejects torn or ambiguous durable joins before binding co
         }],
         ['node attempt ID missing', (state) => { reference(state, 'node_attempt').fact_id = undefined; }],
         ['node attempt fingerprint missing', (state) => { reference(state, 'node_attempt').fingerprint = undefined; }],
+        ['Backlog reference is not a canonical positive string', (state) => {
+            reference(state, 'backlog').fact_id = '07';
+        }],
         ['duplicate node attempt', (state) => {
             state.position.decisions[0].fact_references.push({
-                fact_type: 'node_attempt', fact_id: 82, fingerprint: 'sha256:attempt-82',
+                fact_type: 'node_attempt', fact_id: '82', fingerprint: 'sha256:attempt-82',
             });
         }],
         ['unexpected fact type', (state) => {
             state.position.decisions[0].fact_references.push({
-                fact_type: 'unexpected', fact_id: 1, fingerprint: 'sha256:unexpected',
+                fact_type: 'unexpected', fact_id: '1', fingerprint: 'sha256:unexpected',
             });
         }],
     ];
@@ -503,7 +520,7 @@ test('Backlog generation labels separate initial and Feedback correction states'
     };
     const initialMarkup = context.deliveryPanelMarkup(
         { decisions: [{ ...initial, category: 'available', recommendation_kind: 'required', reason_code: 'BACKLOG_GENERATION_REQUIRED' }] },
-        {}, [initial],
+        { backlog: {} }, [initial],
     );
     assert.ok(initialMarkup.includes('Generate Backlog'));
     assert.equal(context.deliveryGenerationActionDetails(initial).busyLabel, 'Generating Backlog...');
@@ -667,6 +684,36 @@ test('Backlog correction reconciliation preserves uncertain loads and only clear
     `, malformed);
     await assert.rejects(malformed.loadDashboard());
     assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', malformed), 'awaiting_authority');
+});
+
+test('Backlog correction preserves focus through a same-decision reload until corrected-pending authority arrives', async () => {
+    const sameContinuation = backlogFeedbackState('revision-ready');
+    const correctedPending = correctedPendingBacklogState();
+    const context = loadFrontend(dashboardResponse(sameContinuation));
+    let focusCount = 0;
+    installBacklogCorrectionDom(context, [], {
+        '[data-backlog-correction-action="true"]:not([disabled])': { focus() { focusCount += 1; } },
+        '[data-planning-review-card="backlog"]': { focus() { focusCount += 1; } },
+    });
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState = ${JSON.stringify(sameContinuation)};
+        activeBacklogCorrectionMutation = {
+            token: 'backlog-focus-authority', phase: 'awaiting_authority',
+            action: ${JSON.stringify(sameContinuation.actions[0])}, backlogArtifactId: 7,
+            decisionFingerprint: 'sha256:decision-revision-ready', focusIntent: true,
+        };
+    `, context);
+
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.phase', context), 'awaiting_authority');
+    assert.equal(vm.runInContext('activeBacklogCorrectionMutation.focusIntent', context), true);
+    assert.equal(focusCount, 0);
+
+    context.fetch = dashboardResponse(correctedPending);
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeBacklogCorrectionMutation', context), null);
+    assert.equal(focusCount, 1);
 });
 
 test('Backlog correction rejects torn absence and corrected-pending authority in both token phases', async () => {
