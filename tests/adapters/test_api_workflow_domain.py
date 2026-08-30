@@ -27,6 +27,7 @@ from models.workflow import (
     SprintPlanArtifact,
     StoryArtifact,
     WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactRepository
@@ -5561,6 +5562,23 @@ class _CountingBacklogReads:
         return self.result
 
 
+class _CountingDurableBacklogReads:
+    """Count calls while retaining the real durable Backlog projection."""
+
+    def __init__(self, engine: "Engine") -> None:
+        self._reads = DurableReadProjectionService(engine=engine)
+        self.calls: list[tuple[int, int]] = []
+
+    def backlog_review(
+        self, *, project_id: int, backlog_artifact_id: int
+    ) -> JsonObject:
+        self.calls.append((project_id, backlog_artifact_id))
+        return self._reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=backlog_artifact_id,
+        )
+
+
 class _NullableBacklogSelection:
     """Return a controlled durable identity after recording the exact selection."""
 
@@ -5729,6 +5747,185 @@ def _backlog_continuation_position(*decisions: NodeDecision) -> WorkflowPosition
         terminal=False,
         decisions=decisions,
     )
+
+
+def _backlog_lifecycle_decision(
+    position: WorkflowPosition,
+    *,
+    node_id: str,
+) -> NodeDecision:
+    """Return the one current Backlog decision carrying durable candidate context."""
+    matches = [
+        decision
+        for decision in position.decisions
+        if decision.node_id == node_id
+        and any(
+            reference.fact_type == "backlog"
+            for reference in decision.fact_references
+        )
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _exact_fact_reference(decision: NodeDecision, fact_type: str) -> FactReference:
+    """Return one required durable reference and assert exact cardinality."""
+    matches = [
+        reference
+        for reference in decision.fact_references
+        if reference.fact_type == fact_type
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _assert_backlog_lifecycle_continuation_decision(
+    decision: NodeDecision,
+    *,
+    category: NodeCategory,
+    recommendation: RecommendationKind,
+    reason: str,
+    durable_references: tuple[FactReference, ...],
+) -> None:
+    """Assert the complete state-specific Backlog continuation contract."""
+    assert (
+        decision.node_id,
+        decision.child_graph_id,
+        decision.request_kind,
+        decision.category,
+        decision.recommendation_kind,
+        decision.reason_code,
+        decision.instance_key,
+    ) == (
+        "backlog.generate",
+        "backlog",
+        "record_backlog_draft",
+        category,
+        recommendation,
+        reason,
+        None,
+    )
+    assert decision.fact_references == durable_references
+
+
+def _real_backlog_lifecycle_review(  # noqa: PLR0913
+    *,
+    project_id: int,
+    backlog_reference: FactReference,
+    specification_reference: FactReference,
+    goal_reference: FactReference,
+    requirement: str,
+    version_number: int,
+    supersedes_backlog_artifact_id: int | None,
+    created_at: str,
+    review: JsonObject,
+) -> JsonObject:
+    """Build the hand-derived review contract for the persisted lifecycle fixture."""
+    return {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "backlog",
+        "project_id": project_id,
+        "lineage": {
+            "specification": {
+                "spec_version_id": int(specification_reference.fact_id),
+                "spec_hash": specification_reference.fingerprint,
+                "status": "approved",
+            },
+            "product_goal": {
+                "product_goal_artifact_id": int(goal_reference.fact_id),
+                "product_goal_fingerprint": goal_reference.fingerprint,
+            },
+        },
+        "candidate": {
+            "backlog_artifact_id": int(backlog_reference.fact_id),
+            "artifact_fingerprint": backlog_reference.fingerprint,
+            "version_number": version_number,
+            "supersedes_backlog_artifact_id": supersedes_backlog_artifact_id,
+            "created_by": "operator@example.com",
+            "created_at": created_at,
+            "backlog_items": [
+                {
+                    "backlog_item_id": "PBI-000001",
+                    "priority": 1,
+                    "requirement": requirement,
+                    "value_driver": "Strategic",
+                    "justification": (
+                        "Execution trace cannot own workflow position."
+                    ),
+                    "estimated_effort": "M",
+                    "technical_note": None,
+                    "specification_evidence": [
+                        {
+                            "spec_item_id": "REQ.task-15",
+                            "title": "Durable attempts",
+                            "statement": "Persist one recoverable attempt.",
+                            "level": "MUST",
+                            "acceptance_criteria": ["The attempt is durable."],
+                            "verification_method": "integration-test",
+                        }
+                    ],
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        "review": review,
+    }
+
+
+def _assert_real_backlog_pending_read(  # noqa: PLR0913
+    application: AgileForgeApplication,
+    reads: _CountingDurableBacklogReads,
+    *,
+    project_id: int,
+    decision: NodeDecision,
+    backlog_reference: FactReference,
+    review: JsonObject,
+) -> None:
+    """Assert one exact unchanged pending application response and projection call."""
+    reads.calls.clear()
+    assert application.backlog_review(project_id) == {
+        "ok": True,
+        "data": {
+            "binding": {
+                "decision_fingerprint": decision.decision_fingerprint,
+                "instance_key": decision.instance_key,
+            },
+            "review": review,
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    assert reads.calls == [(project_id, int(backlog_reference.fact_id))]
+
+
+def _assert_real_backlog_continuation_read(  # noqa: PLR0913
+    application: AgileForgeApplication,
+    reads: _CountingDurableBacklogReads,
+    *,
+    project_id: int,
+    decision: NodeDecision,
+    backlog_reference: FactReference,
+    review: JsonObject,
+) -> None:
+    """Assert one exact continuation response and one durable projection call."""
+    reads.calls.clear()
+    assert application.backlog_review(project_id) == {
+        "ok": True,
+        "data": {
+            "continuation": {
+                "binding": {
+                    "node_id": "backlog.generate",
+                    "decision_fingerprint": decision.decision_fingerprint,
+                    "instance_key": decision.instance_key,
+                },
+                "review": review,
+            }
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    assert reads.calls == [(project_id, int(backlog_reference.fact_id))]
 
 
 def _selected_projection(project_id: int, artifact_id: int, phase: str) -> JsonObject:
@@ -6038,27 +6235,64 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
     first_start = _start_request(domain, project_id, idempotency_key="seed-backlog")
     started = domain.transition(first_start)
     attempt_id, attempt_fingerprint = _attempt_identity(started)
-    assert domain.transition(
-        _completion_request(
-            start_request=first_start,
-            attempt_id=attempt_id,
-            attempt_fingerprint=attempt_fingerprint,
-            specification=(spec_id, spec_hash),
-        )
-    ).ok
+    initial_completion = _completion_request(
+        start_request=first_start,
+        attempt_id=attempt_id,
+        attempt_fingerprint=attempt_fingerprint,
+        specification=(spec_id, spec_hash),
+    )
+    assert domain.transition(initial_completion).ok
     pending = domain.position(project_id)
-    review_decision = next(
-        item for item in pending.decisions if item.node_id == "backlog.review"
+    review_decision = _backlog_lifecycle_decision(
+        pending,
+        node_id="backlog.review",
     )
-    backlog_reference = next(
-        item for item in review_decision.fact_references if item.fact_type == "backlog"
+    goal_reference = _exact_fact_reference(review_decision, "product_goal")
+    specification_reference = _exact_fact_reference(review_decision, "specification")
+    backlog_reference = _exact_fact_reference(review_decision, "backlog")
+    assert goal_reference == FactReference(
+        fact_type="product_goal",
+        fact_id=str(first_start.normalized_input["product_goal_artifact_id"]),
+        fingerprint=cast(
+            "str", first_start.normalized_input["product_goal_fingerprint"]
+        ),
     )
+    assert specification_reference == FactReference(
+        fact_type="specification",
+        fact_id=str(spec_id),
+        fingerprint=spec_hash,
+    )
+    assert backlog_reference.fingerprint == initial_completion.content_fingerprint
+    lineage_references = (
+        goal_reference,
+        specification_reference,
+        backlog_reference,
+    )
+    reads = _CountingDurableBacklogReads(engine)
     application = AgileForgeApplication(
         workflow_domain=domain,
-        read_projection=DurableReadProjectionService(engine=engine),
+        read_projection=cast("Any", reads),
         delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
     )
-    assert application.backlog_review(project_id)["ok"] is True
+    pending_review = _real_backlog_lifecycle_review(
+        project_id=project_id,
+        backlog_reference=backlog_reference,
+        specification_reference=specification_reference,
+        goal_reference=goal_reference,
+        requirement="Persist durable node attempts",
+        version_number=1,
+        supersedes_backlog_artifact_id=None,
+        created_at="2026-08-30T00:00:00",
+        review={"state": "pending"},
+    )
+    _assert_real_backlog_pending_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=review_decision,
+        backlog_reference=backlog_reference,
+        review=pending_review,
+    )
     feedback = domain.transition(
         DecideBacklog(
             project_id=project_id,
@@ -6076,16 +6310,104 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
         )
     )
     assert feedback.ok
-    assert application.backlog_review(project_id)["ok"] is True
+    revision_ready = domain.position(project_id)
+    revision_decision = _backlog_lifecycle_decision(
+        revision_ready,
+        node_id="backlog.generate",
+    )
+    _assert_backlog_lifecycle_continuation_decision(
+        revision_decision,
+        category=NodeCategory.AVAILABLE,
+        recommendation=RecommendationKind.RECOVERY,
+        reason="BACKLOG_REVISION_REQUIRED",
+        durable_references=lineage_references,
+    )
+    feedback_review = _real_backlog_lifecycle_review(
+        project_id=project_id,
+        backlog_reference=backlog_reference,
+        specification_reference=specification_reference,
+        goal_reference=goal_reference,
+        requirement="Persist durable node attempts",
+        version_number=1,
+        supersedes_backlog_artifact_id=None,
+        created_at="2026-08-30T00:00:00",
+        review={
+            "state": "feedback",
+            "rationale": "Show the retry boundary.",
+            "reviewer": "operator@example.com",
+            "decided_at": "2026-08-30T00:00:00",
+        },
+    )
+    _assert_real_backlog_continuation_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=revision_decision,
+        backlog_reference=backlog_reference,
+        review=feedback_review,
+    )
     active_start = _start_request(domain, project_id, idempotency_key="active-backlog")
+    assert (
+        active_start.decision_fingerprint,
+        active_start.target_instance_key,
+    ) == (
+        revision_decision.decision_fingerprint,
+        revision_decision.instance_key,
+    )
     active = domain.transition(active_start)
     assert active.ok
-    assert application.backlog_review(project_id)["ok"] is True
+    active_id, active_fingerprint = _attempt_identity(active)
+    active_position = domain.position(project_id)
+    active_decision = _backlog_lifecycle_decision(
+        active_position,
+        node_id="backlog.generate",
+    )
+    _assert_backlog_lifecycle_continuation_decision(
+        active_decision,
+        category=NodeCategory.WAITING,
+        recommendation=RecommendationKind.REQUIRED,
+        reason="BACKLOG_GENERATION_ACTIVE",
+        durable_references=lineage_references,
+    )
+    _assert_real_backlog_continuation_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=active_decision,
+        backlog_reference=backlog_reference,
+        review=feedback_review,
+    )
     duplicate_request = _start_request(domain, project_id, idempotency_key="duplicate")
     duplicate = domain.transition(duplicate_request)
+    assert duplicate.ok is False
     assert duplicate.error is not None
     assert duplicate.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
-    active_id, active_fingerprint = _attempt_identity(active)
+    with Session(engine) as session:
+        attempts = list(
+            session.exec(
+                select(WorkflowNodeAttempt).where(
+                    col(WorkflowNodeAttempt.project_id) == project_id,
+                    col(WorkflowNodeAttempt.node_id) == "backlog.generate",
+                )
+            ).all()
+        )
+        completed_attempt_ids = {
+            outcome.workflow_node_attempt_id
+            for outcome in session.exec(
+                select(WorkflowNodeAttemptOutcome).where(
+                    col(WorkflowNodeAttemptOutcome.project_id) == project_id
+                )
+            ).all()
+        }
+        live_attempts = [
+            attempt
+            for attempt in attempts
+            if attempt.workflow_node_attempt_id not in completed_attempt_ids
+        ]
+        assert [
+            (attempt.workflow_node_attempt_id, attempt.attempt_fingerprint)
+            for attempt in live_attempts
+        ] == [(active_id, active_fingerprint)]
     failed = domain.transition(
         FailNodeAttempt(
             project_id=project_id,
@@ -6098,24 +6420,61 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
         )
     )
     assert failed.ok
-    assert application.backlog_review(project_id)["ok"] is True
+    failed_retry = domain.position(project_id)
+    failed_decision = _backlog_lifecycle_decision(
+        failed_retry,
+        node_id="backlog.generate",
+    )
+    first_attempt_reference = FactReference(
+        fact_type="node_attempt",
+        fact_id=str(active_id),
+        fingerprint=active_fingerprint,
+    )
+    _assert_backlog_lifecycle_continuation_decision(
+        failed_decision,
+        category=NodeCategory.AVAILABLE,
+        recommendation=RecommendationKind.RECOVERY,
+        reason="BACKLOG_GENERATION_FAILED",
+        durable_references=(*lineage_references, first_attempt_reference),
+    )
+    _assert_real_backlog_continuation_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=failed_decision,
+        backlog_reference=backlog_reference,
+        review=feedback_review,
+    )
     second_start = _start_request(domain, project_id, idempotency_key="retry-backlog")
     second = domain.transition(second_start)
-    second_id, _second_fingerprint = _attempt_identity(second)
     assert second.ok
+    second_id, second_fingerprint = _attempt_identity(second)
     clock.now_value += timedelta(seconds=60)
     recovery = domain.position(project_id)
-    recovery_decision = next(
-        item for item in recovery.decisions if item.node_id == "backlog.generate"
+    recovery_decision = _backlog_lifecycle_decision(
+        recovery,
+        node_id="backlog.generate",
     )
-    attempt_references = [
-        item
-        for item in recovery_decision.fact_references
-        if item.fact_type == "node_attempt"
-    ]
-    assert recovery_decision.reason_code == "BACKLOG_GENERATION_RECOVERY_REQUIRED"
-    assert [item.fact_id for item in attempt_references] == [str(second_id)]
-    assert application.backlog_review(project_id)["ok"] is True
+    second_attempt_reference = FactReference(
+        fact_type="node_attempt",
+        fact_id=str(second_id),
+        fingerprint=second_fingerprint,
+    )
+    _assert_backlog_lifecycle_continuation_decision(
+        recovery_decision,
+        category=NodeCategory.AVAILABLE,
+        recommendation=RecommendationKind.RECOVERY,
+        reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+        durable_references=(*lineage_references, second_attempt_reference),
+    )
+    _assert_real_backlog_continuation_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=recovery_decision,
+        backlog_reference=backlog_reference,
+        review=feedback_review,
+    )
     replacement_start = _start_request(
         domain, project_id, idempotency_key="replace-backlog"
     )
@@ -6152,9 +6511,43 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
         )
     )
     assert domain.transition(replacement_request).ok
-    corrected_pending = application.backlog_review(project_id)
-    assert corrected_pending["ok"] is True
-    assert "binding" in _object(corrected_pending["data"])
+    corrected_position = domain.position(project_id)
+    corrected_decision = _backlog_lifecycle_decision(
+        corrected_position,
+        node_id="backlog.review",
+    )
+    replacement_backlog_reference = _exact_fact_reference(
+        corrected_decision,
+        "backlog",
+    )
+    assert corrected_decision.fact_references == (
+        goal_reference,
+        specification_reference,
+        replacement_backlog_reference,
+    )
+    assert replacement_backlog_reference.fingerprint == (
+        replacement_request.content_fingerprint
+    )
+    assert replacement_backlog_reference.fact_id != backlog_reference.fact_id
+    corrected_review = _real_backlog_lifecycle_review(
+        project_id=project_id,
+        backlog_reference=replacement_backlog_reference,
+        specification_reference=specification_reference,
+        goal_reference=goal_reference,
+        requirement="Persist corrected durable node attempts",
+        version_number=2,
+        supersedes_backlog_artifact_id=int(backlog_reference.fact_id),
+        created_at="2026-08-30T00:01:00",
+        review={"state": "pending"},
+    )
+    _assert_real_backlog_pending_read(
+        application,
+        reads,
+        project_id=project_id,
+        decision=corrected_decision,
+        backlog_reference=replacement_backlog_reference,
+        review=corrected_review,
+    )
 
 
 @pytest.mark.parametrize(
