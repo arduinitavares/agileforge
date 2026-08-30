@@ -706,7 +706,9 @@ class _DeliveryInput:
         project_id: int,
         decision: NodeDecision,
         node_id: str,
+        allow_legacy_story_correction: bool = False,
     ) -> JsonObject | None:
+        _ = allow_legacy_story_correction
         self.build_calls.append((project_id, decision.decision_fingerprint, node_id))
         return self.payload
 
