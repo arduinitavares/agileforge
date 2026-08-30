@@ -46,6 +46,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StorySetCorrectionRequest,
     StorySprintSelectionRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
@@ -204,6 +205,11 @@ class _Application(Protocol):
     def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult: ...
 
     def generate_story(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
+    def correct_story_set(
+        self,
+        request: StorySetCorrectionRequest,
+    ) -> TransitionResult: ...
 
     def generate_sprint(self, request: SprintPlanningRequest) -> TransitionResult: ...
 
@@ -716,6 +722,23 @@ def _install_lifecycle_mutations(
         generate = _semantic_leaf(branches[(group,)], "generate", handler)
         generate.add_argument("--instance-key", required=group == "story")
 
+    story_correct = _semantic_leaf(
+        branches[("story",)],
+        "correct",
+        _story_correct,
+    )
+    story_correct.add_argument("--instance-key", required=True)
+    story_correct.add_argument("--expected-decision-fingerprint", required=True)
+    story_correct.add_argument(
+        "--accepted-story-artifact-id",
+        type=int,
+        required=True,
+    )
+    story_correct.add_argument(
+        "--accepted-story-artifact-fingerprint",
+        required=True,
+    )
+
     for group, handler in (
         ("backlog", _backlog_decide),
         ("roadmap", _roadmap_decide),
@@ -1195,6 +1218,27 @@ def _roadmap_generate(args: argparse.Namespace, application: _Application) -> in
 
 def _story_generate(args: argparse.Namespace, application: _Application) -> int:
     return _emit_result(application.generate_story(_delivery_action_request(args)))
+
+
+def _story_correct(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.correct_story_set(
+            StorySetCorrectionRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                expected_decision_fingerprint=(
+                    args.expected_decision_fingerprint
+                ),
+                accepted_story_artifact_id=args.accepted_story_artifact_id,
+                accepted_story_artifact_fingerprint=(
+                    args.accepted_story_artifact_fingerprint
+                ),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
 
 
 def _sprint_generate(args: argparse.Namespace, application: _Application) -> int:

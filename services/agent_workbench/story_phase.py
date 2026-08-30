@@ -81,6 +81,7 @@ class RecordStoryDraftInput:
     supersedes_story_artifact_id: int | None
     actor: str
     recorded_at: datetime
+    identical_successor_authorized: bool = False
 
 
 @dataclass(frozen=True)
@@ -482,6 +483,39 @@ def record_story_draft_in_session(
         specification=parent.specification,
         backlog_item=parent.backlog_item,
     )
+    replacement_source = content.replacement_source
+    if inputs.identical_successor_authorized != (replacement_source is not None):
+        message = "Story replacement source does not match its authorization."
+        raise ValueError(message)
+    if replacement_source is not None:
+        superseded = session.get(
+            StoryArtifact,
+            inputs.supersedes_story_artifact_id,
+        )
+        superseded_decision = session.exec(
+            select(StoryArtifactDecision).where(
+                col(StoryArtifactDecision.project_id) == inputs.project_id,
+                col(StoryArtifactDecision.story_artifact_id)
+                == inputs.supersedes_story_artifact_id,
+            )
+        ).one_or_none()
+        if (
+            superseded is None
+            or superseded.project_id != inputs.project_id
+            or superseded.source_backlog_artifact_id
+            != inputs.source_backlog_artifact_id
+            or superseded.backlog_item_id != inputs.backlog_item_id
+            or superseded.story_artifact_id
+            != replacement_source.story_artifact_id
+            or superseded.content_fingerprint
+            != replacement_source.artifact_fingerprint
+            or superseded_decision is None
+            or superseded_decision.artifact_fingerprint
+            != replacement_source.artifact_fingerprint
+            or superseded_decision.decision != "accepted"
+        ):
+            message = "Story replacement source is not the exact accepted parent."
+            raise ValueError(message)
     chain_key = (
         inputs.project_id,
         inputs.source_backlog_artifact_id,

@@ -876,6 +876,55 @@ def test_story_generation_renders_each_exact_requirement_selector() -> None:
         assert "--model-id" not in item["command"]
 
 
+def test_story_correction_renders_exact_artifact_bound_command() -> None:
+    """Render the optional graph correction as the dedicated guarded CLI flow."""
+    artifact_id = 91
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    decision = NodeDecision(
+        node_id="planning.story.generate",
+        instance_key="backlog_item:PBI-000001",
+        child_graph_id="planning",
+        request_kind="record_story_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="STORY_CORRECTION_AVAILABLE",
+        decision_fingerprint=decision_fingerprint,
+        fact_references=(
+            FactReference(
+                fact_type="story",
+                fact_id=str(artifact_id),
+                fingerprint=artifact_fingerprint,
+            ),
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == 1
+    tokens = shlex.split(commands[0]["command"])
+    assert tokens[:3] == ["agileforge", "story", "correct"]
+    parsed = build_parser().parse_args(
+        [
+            _PLACEHOLDERS.get(argument, argument)
+            for argument in tokens[1:]
+        ]
+    )
+    assert parsed.instance_key == "backlog_item:PBI-000001"
+    assert parsed.expected_decision_fingerprint == decision_fingerprint
+    assert parsed.accepted_story_artifact_id == artifact_id
+    assert parsed.accepted_story_artifact_fingerprint == artifact_fingerprint
+
+
 def test_multiple_story_review_bindings_are_ambiguous() -> None:
     """Do not advertise one semantic command for several hidden Story bindings."""
     decisions = tuple(

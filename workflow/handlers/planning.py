@@ -375,6 +375,10 @@ def execute_record_story_draft(
             fingerprint=request.roadmap_artifact_fingerprint,
         )
         or request.supersedes_story_artifact_id != _expected_parent(decision, "story")
+        or (
+            request.identical_successor_authorized
+            and decision.reason_code != "STORY_CORRECTION_AVAILABLE"
+        )
     ):
         return _conflict("RecordStoryDraft does not target exact graph facts.")
     from services.agent_workbench.story_phase import (  # noqa: PLC0415
@@ -397,6 +401,9 @@ def execute_record_story_draft(
                 canonical_content=request.canonical_content,
                 content_fingerprint=request.content_fingerprint,
                 supersedes_story_artifact_id=request.supersedes_story_artifact_id,
+                identical_successor_authorized=(
+                    request.identical_successor_authorized
+                ),
                 actor=request.actor,
                 recorded_at=evaluated_at,
             ),

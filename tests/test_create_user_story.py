@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
+import services.application as application_module
 from models.core import Sprint, SprintStory, Team, UserStory
 from models.enums import SprintStatus
 from models.events import WorkflowEvent
@@ -434,6 +435,10 @@ def test_accepted_a_terminal_b_accepted_c_switches_only_on_c_acceptance(
         story_c = session.get(UserStory, accepted_c.activated_story_ids[0])
         assert story_c is not None
         assert story_c.is_superseded is False
+        assert story_c.validation_evidence is not None
+        assert session.exec(
+            select(SprintStory).where(SprintStory.story_id == story_c.story_id)
+        ).all() == []
         pinned = session.exec(
             select(SprintStory).where(
                 SprintStory.sprint_id == sprint.sprint_id,
@@ -680,6 +685,170 @@ def test_story_correction_request_and_host_resolution_bind_exact_accepted_item( 
     assert conflict is not None
     assert not isinstance(conflict, tuple)
     assert conflict.code.value == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_story_set_correction_uses_accepted_artifact_when_rows_are_binding_invalid(
+    engine: Engine,
+) -> None:
+    """Recover the complete PBI Story set without trusting a broken row."""
+    request_type = getattr(application_module, "StorySetCorrectionRequest", None)
+    assert request_type is not None, "Story-set correction request is unavailable."
+
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+        )
+        accepted = _decide_story(session, artifact, decision="accepted", offset=2)
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+        story_id = accepted.activated_story_ids[0]
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.source_story_item_fingerprint = "sha256:" + ("0" * 64)
+        session.add(story)
+        session.commit()
+
+    position = _domain(engine).position(project_id)
+    correction = next(
+        decision
+        for decision in position.decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    )
+    request = request_type(
+        project_id=project_id,
+        instance_key="backlog_item:PBI-000001",
+        expected_decision_fingerprint=correction.decision_fingerprint,
+        accepted_story_artifact_id=artifact_id,
+        accepted_story_artifact_fingerprint=artifact_fingerprint,
+        idempotency_key="correct-story-set",
+        actor="operator@example.com",
+        correlation_id="correction-set-1",
+    )
+
+    class CapturingApplication(AgileForgeApplication):
+        calls: list[AgenticActionRequest]
+
+        def run_agentic_action(
+            self,
+            request: AgenticActionRequest,
+        ) -> TransitionResult:
+            self.calls.append(request)
+            return TransitionResult(ok=True, applied_node_id=request.node_id)
+
+    application = CapturingApplication(
+        workflow_domain=_domain(engine),
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    application.calls = []
+    result = application.correct_story_set(request)
+
+    assert result.ok is True
+    assert len(application.calls) == 1
+    action = application.calls[0]
+    assert action.instance_key == "backlog_item:PBI-000001"
+    assert action.decision_fingerprint == correction.decision_fingerprint
+    assert action.input_payload["story_set_correction"] == {
+        "accepted_story_artifact_id": artifact_id,
+        "accepted_story_artifact_fingerprint": artifact_fingerprint,
+    }
+    with Session(engine) as session:
+        assert len(session.exec(select(StoryArtifact)).all()) == 1
+        rows = session.exec(select(UserStory)).all()
+        assert len(rows) == 1
+        assert rows[0].is_superseded is False
+
+
+def test_story_set_correction_rejects_malformed_stale_and_foreign_guards_before_agent(
+    engine: Engine,
+) -> None:
+    """Fail closed on every caller-owned correction identity before execution."""
+    request_type = application_module.StorySetCorrectionRequest
+    for invalid in (
+        {"instance_key": "PBI-000001"},
+        {"accepted_story_artifact_id": 0},
+        {"expected_decision_fingerprint": "not-a-fingerprint"},
+        {"accepted_story_artifact_fingerprint": "not-a-fingerprint"},
+    ):
+        payload: dict[str, Any] = {
+            "project_id": 1,
+            "instance_key": "backlog_item:PBI-000001",
+            "expected_decision_fingerprint": "sha256:" + ("b" * 64),
+            "accepted_story_artifact_id": 1,
+            "accepted_story_artifact_fingerprint": "sha256:" + ("a" * 64),
+            "idempotency_key": "invalid-correction",
+            "actor": "operator@example.com",
+            **invalid,
+        }
+        with pytest.raises(ValidationError):
+            request_type(**payload)
+
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+        )
+        _decide_story(session, artifact, decision="accepted", offset=2)
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+    correction = next(
+        decision
+        for decision in _domain(engine).position(project_id).decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    )
+    foreign_project_id, _foreign_roadmap_id = _seed_story_parent(
+        engine,
+        requirements=("Plan foreign work",),
+    )
+    base: dict[str, Any] = {
+        "project_id": project_id,
+        "instance_key": "backlog_item:PBI-000001",
+        "expected_decision_fingerprint": correction.decision_fingerprint,
+        "accepted_story_artifact_id": artifact_id,
+        "accepted_story_artifact_fingerprint": artifact_fingerprint,
+        "idempotency_key": "guarded-correction",
+        "actor": "operator@example.com",
+    }
+
+    class CapturingApplication(AgileForgeApplication):
+        calls: list[AgenticActionRequest]
+
+        def run_agentic_action(
+            self,
+            request: AgenticActionRequest,
+        ) -> TransitionResult:
+            self.calls.append(request)
+            return TransitionResult(ok=True, applied_node_id=request.node_id)
+
+    for changed in (
+        {"instance_key": "backlog_item:PBI-999999"},
+        {"expected_decision_fingerprint": "sha256:" + ("c" * 64)},
+        {"accepted_story_artifact_id": artifact_id + 1},
+        {"accepted_story_artifact_fingerprint": "sha256:" + ("d" * 64)},
+        {"project_id": foreign_project_id},
+    ):
+        application = CapturingApplication(
+            workflow_domain=_domain(engine),
+            delivery_action_input=DeliveryActionInputService(engine=engine),
+        )
+        application.calls = []
+
+        result = application.correct_story_set(
+            request_type.model_validate({**base, **changed})
+        )
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.code.value == "TRANSITION_NOT_AVAILABLE"
+        assert application.calls == []
 
 
 @pytest.mark.parametrize(
@@ -1267,6 +1436,80 @@ def test_story_correction_replay_binds_semantics_and_stored_instance(
         replay(story_id=43, guidance="Keep exact evidence.", stored_selector=True),
         replay(story_id=42, guidance="Changed.", stored_selector=True),
         replay(story_id=42, guidance="Keep exact evidence.", stored_selector=False),
+    ):
+        assert conflict is not None
+        assert conflict.error is not None
+        assert conflict.error.code.value == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_story_set_correction_replay_requires_exact_artifact_and_graph_guards(
+    engine: Engine,
+) -> None:
+    """Replay only the same PBI, decision, artifact, actor, and correlation."""
+    correction_identity: JsonObject = {
+        "accepted_story_artifact_id": 91,
+        "accepted_story_artifact_fingerprint": "sha256:" + ("a" * 64),
+    }
+    stored = StartNodeAttempt(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="sha256:" + ("f" * 64),
+        decision_fingerprint="sha256:" + ("b" * 64),
+        idempotency_key="story-set-correction-replay",
+        actor="operator@example.com",
+        correlation_id="story-set-correction-correlation",
+        target_node_id="planning.story.generate",
+        target_instance_key="backlog_item:PBI-000001",
+        normalized_input={"story_set_correction": correction_identity},
+        model_id="fake/model",
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
+        lease_seconds=60,
+    )
+    persisted = TransitionResult(ok=True, applied_node_id=stored.target_node_id)
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=stored.idempotency_key,
+                request_fingerprint=canonical_hash(stored.model_dump(mode="json")),
+                request_json=canonical_json(stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+    service = DurableNodeAttemptReplayService(engine=engine)
+
+    def replay(**changes: object) -> TransitionResult | None:
+        values: dict[str, Any] = {
+            "project_id": stored.project_id,
+            "graph_version": None,
+            "fact_fingerprint": None,
+            "decision_fingerprint": stored.decision_fingerprint,
+            "node_id": stored.target_node_id,
+            "instance_key": stored.target_instance_key,
+            "idempotency_key": stored.idempotency_key,
+            "actor": stored.actor,
+            "correlation_id": stored.correlation_id,
+            "semantic_input": {"story_set_correction": correction_identity},
+            **changes,
+        }
+        return service.replay(NodeAttemptReplayQuery(**values))
+
+    assert replay() == persisted.model_copy(update={"replayed": True})
+    for conflict in (
+        replay(instance_key="backlog_item:PBI-000002"),
+        replay(decision_fingerprint="sha256:" + ("c" * 64)),
+        replay(actor="another@example.com"),
+        replay(
+            semantic_input={
+                "story_set_correction": {
+                    **correction_identity,
+                    "accepted_story_artifact_id": 92,
+                }
+            }
+        ),
     ):
         assert conflict is not None
         assert conflict.error is not None

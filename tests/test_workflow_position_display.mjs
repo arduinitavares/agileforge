@@ -1928,7 +1928,7 @@ test('initial, revision, and correction story actions render distinct intent', (
         node_id: 'planning.story.generate',
         instance_key: 'backlog_item:PBI-000001',
         request_kind: 'record_story_draft',
-        endpoint: 'story/generate',
+        endpoint: 'story/correct',
     };
     const correctionMarkup = context.deliveryPanelMarkup(
         {
@@ -1937,6 +1937,12 @@ test('initial, revision, and correction story actions render distinct intent', (
                 instance_key: correctionAction.instance_key,
                 reason_code: 'STORY_CORRECTION_AVAILABLE',
                 recommendation_kind: 'optional_reentry',
+                decision_fingerprint: `sha256:${'b'.repeat(64)}`,
+                fact_references: [{
+                    fact_type: 'story',
+                    fact_id: '91',
+                    fingerprint: `sha256:${'a'.repeat(64)}`,
+                }],
             }],
         },
         {},
@@ -2073,11 +2079,21 @@ test('delivery generation details provide exact title, description, and intent f
         node_id: 'planning.story.generate',
         instance_key: 'backlog_item:PBI-000001',
         request_kind: 'record_story_draft',
-        endpoint: 'story/generate',
+        endpoint: 'story/correct',
     };
     const corrDetails = context.deliveryGenerationActionDetails(
         corrAction,
-        { decisions: [{ node_id: corrAction.node_id, instance_key: corrAction.instance_key, reason_code: 'STORY_CORRECTION_AVAILABLE' }] },
+        { decisions: [{
+            node_id: corrAction.node_id,
+            instance_key: corrAction.instance_key,
+            reason_code: 'STORY_CORRECTION_AVAILABLE',
+            decision_fingerprint: `sha256:${'b'.repeat(64)}`,
+            fact_references: [{
+                fact_type: 'story',
+                fact_id: '91',
+                fingerprint: `sha256:${'a'.repeat(64)}`,
+            }],
+        }] },
         {},
         appState,
     );

@@ -55,6 +55,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StorySetCorrectionRequest,
     StorySprintSelectionRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
@@ -193,6 +194,16 @@ class StoryDeliveryActionApiRequest(DeliveryActionApiRequest):
     """Story delivery request with one exact caller-owned selector."""
 
     instance_key: SemanticText
+
+
+class StorySetCorrectionApiRequest(MutationApiRequest):
+    """Exact accepted Story-set identity selected from the current graph."""
+
+    instance_key: str = Field(pattern=r"^backlog_item:[^\s:]+$")
+    accepted_story_artifact_id: PositiveStoryId
+    accepted_story_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
 
 
 class SprintPlanningApiRequest(MutationApiRequest):
@@ -477,6 +488,10 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
                         and decision.reason_code
                         == "SPRINT_PLAN_CORRECTION_AVAILABLE"
                     )
+                    or (
+                        decision.request_kind == "record_story_draft"
+                        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+                    )
                 )
             )
         )
@@ -505,7 +520,13 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
             selectable = semantic_counts[request_kind] == 1
         if not selectable:
             continue
-        if request_kind in SEMANTIC_API_PATHS:
+        if (
+            request_kind == "record_story_draft"
+            and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+        ):
+            endpoint = "story/correct"
+            transport = "semantic"
+        elif request_kind in SEMANTIC_API_PATHS:
             endpoint = SEMANTIC_API_PATHS[request_kind]
             transport = "semantic"
         elif request_kind in DELIVERY_API_PATHS:
@@ -1172,6 +1193,36 @@ def generate_project_story(
     """Generate Story drafts from host-prepared durable input."""
     return _result_payload(
         _application().generate_story(_delivery_request(project_id, req))
+    )
+
+
+@app.post("/api/projects/{project_id}/story/correct")
+def correct_project_story_set(
+    project_id: int,
+    req: StorySetCorrectionApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^sha256:[0-9a-f]{64}$",
+        ),
+    ],
+) -> dict[str, object]:
+    """Correct one exact accepted Story set through the current graph decision."""
+    return _result_payload(
+        _application().correct_story_set(
+            StorySetCorrectionRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                expected_decision_fingerprint=expected_decision,
+                accepted_story_artifact_id=req.accepted_story_artifact_id,
+                accepted_story_artifact_fingerprint=(
+                    req.accepted_story_artifact_fingerprint
+                ),
+                **_metadata(req),
+            )
+        )
     )
 
 

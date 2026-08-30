@@ -82,6 +82,9 @@ def _fingerprint(seed: str) -> str:
     return f"sha256:{seed[0].lower() * 64}"
 
 
+_STORY_CORRECTION_ARTIFACT_ID = 91
+
+
 _ACTION_ENDPOINTS = {
     "decide_backlog": "backlog/decide",
     "decide_product_goal_review": "goals/review",
@@ -481,6 +484,7 @@ class FakeLifecycle:
         if suffix in {
             "/backlog/generate",
             "/roadmap/generate",
+            "/story/correct",
             "/story/generate",
             "/sprint/generate",
         }:
@@ -519,6 +523,10 @@ class FakeLifecycle:
             "/sprint/generate": self._generate_sprint_plan,
             "/story/decide": self._decide_story,
             "/story/dependencies/apply": self._apply_story_dependencies,
+            "/story/correct": lambda payload: self._correct_story_set(
+                payload,
+                headers,
+            ),
             "/story/generate": self._generate_story,
             "/story/structural-eligibility/reconcile": (
                 self._reconcile_story_eligibility
@@ -1025,6 +1033,33 @@ class FakeLifecycle:
             "is_complete": True,
             "clarifying_questions": [],
         }
+
+    def _correct_story_set(
+        self,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> None:
+        self._assert_fields(
+            body,
+            {
+                "instance_key",
+                "accepted_story_artifact_id",
+                "accepted_story_artifact_fingerprint",
+            },
+        )
+        assert headers.get("x-agileforge-expected-decision") == _fingerprint("b")
+        assert (
+            body["accepted_story_artifact_id"]
+            == _STORY_CORRECTION_ARTIFACT_ID
+        )
+        assert body["accepted_story_artifact_fingerprint"] == _fingerprint("a")
+        self._generate_story(
+            {
+                "instance_key": body["instance_key"],
+                "idempotency_key": body["idempotency_key"],
+                "actor": body["actor"],
+            }
+        )
 
     def _decide_story(self, body: JsonObject) -> None:
         self._assert_fields(body, {"decision", "rationale"})
@@ -3138,6 +3173,16 @@ def _story_generation_action(instance_key: str) -> JsonObject:
     }
 
 
+def _story_correction_action(instance_key: str) -> JsonObject:
+    return {
+        "node_id": "planning.story.generate",
+        "instance_key": instance_key,
+        "request_kind": "record_story_draft",
+        "endpoint": "story/correct",
+        "transport": "semantic",
+    }
+
+
 def _sprint_generation_action() -> JsonObject:
     return {
         "node_id": "planning.sprint.plan",
@@ -3370,8 +3415,14 @@ def _non_contiguous_story_position(
                 "instance_key": action_pbi4["instance_key"],
                 "reason_code": "STORY_CORRECTION_AVAILABLE",
                 "recommendation_kind": "optional_reentry",
-                "decision_fingerprint": "decision-pbi4",
-                "fact_references": [],
+                "decision_fingerprint": _fingerprint("b"),
+                "fact_references": [
+                    {
+                        "fact_type": "story",
+                        "fact_id": "91",
+                        "fingerprint": _fingerprint("a"),
+                    }
+                ],
             },
         ],
         "terminal": False,
@@ -3424,17 +3475,44 @@ def _verify_dialog_content(
     return dialog
 
 
-def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconciliation(
+def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconciliation(  # noqa: PLR0915
     dashboard_harness: DashboardHarness,
 ) -> None:
     """Verify non-contiguous labels and immediate accept reconciliation."""
     action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
-    action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
+    action_pbi4 = _story_correction_action("backlog_item:PBI-000004")
     actions = [action_pbi2, action_pbi4]
 
     fake = _delivery_ready_fake(actions)
     fake.position_override = _non_contiguous_story_position(action_pbi2, action_pbi4)
     fake.story_pending_override = _non_contiguous_story_pending()
+    binding_invalid_stories: list[JsonValue] = [
+        {
+            "story_id": 104,
+            "source_story_artifact_id": _STORY_CORRECTION_ARTIFACT_ID,
+            "source_story_item_id": "US-004",
+            "backlog_item_id": None,
+            "status": "to_do",
+            "story_points": 3,
+            "rank": "0|hzzzzz:4",
+            "structurally_eligible": False,
+            "structural_eligibility_status": "ineligible",
+            "sprint_selection_state": "unselected",
+            "sprint_selection_state_fingerprint": _fingerprint("c"),
+            "selected_scope_fingerprint": _fingerprint("d"),
+            "dependency_safe": False,
+            "sprint_candidate": False,
+            "content_accepted": True,
+            "readiness_blockers": ["STORY_ITEM_BINDING_INVALID"],
+            "validation_status": "invalid",
+            "validation_failures": [
+                {
+                    "code": "STORY_ITEM_BINDING_INVALID",
+                    "message": "Operational Story binding does not match its artifact.",
+                }
+            ],
+        }
+    ]
     fake.planning_review_overrides["/story/reviews"] = {
         "items": [_story_review("backlog_item:PBI-000003")]
     }
@@ -3469,6 +3547,11 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     expect(pbi4_btn).to_contain_text(
         "Correct Stories for PBI-000004: Provide the installed CLI."
     )
+    expect(
+        page.locator(
+            '[data-delivery-action-instance="backlog_item:PBI-000004"]'
+        )
+    ).to_have_attribute("data-story-correction-priority", "secondary")
 
     # Ensure no array ordinals appear in delivery panel
     delivery_panel = page.locator("#delivery-panel")
@@ -3491,6 +3574,17 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     assert len(fake.delivery_requests) == 0
 
     # 3. Verify Confirmation Modal Submit flow for Correction (PBI-000004)
+    fake.stories = binding_invalid_stories
+    page.reload(wait_until="networkidle")
+    pbi4_btn = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000004"] button'
+    )
+    expect(pbi4_btn).to_contain_text("Correct Stories for PBI-000004")
+    expect(
+        page.locator(
+            '[data-delivery-action-instance="backlog_item:PBI-000004"]'
+        )
+    ).to_have_attribute("data-story-correction-priority", "recovery")
     pbi4_btn.click()
     dialog = _verify_dialog_content(
         page,
@@ -3504,8 +3598,17 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     expect(dialog).not_to_be_visible()
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert len(fake.delivery_requests) == 1
-    assert fake.delivery_requests[0][0] == "/story/generate"
-    assert fake.delivery_requests[0][1]["instance_key"] == "backlog_item:PBI-000004"
+    correction_suffix, correction_body = fake.delivery_requests[0]
+    assert correction_suffix == "/story/correct"
+    assert correction_body["instance_key"] == "backlog_item:PBI-000004"
+    assert (
+        correction_body["accepted_story_artifact_id"]
+        == _STORY_CORRECTION_ARTIFACT_ID
+    )
+    assert correction_body["accepted_story_artifact_fingerprint"] == _fingerprint("a")
+    assert correction_body["actor"] == "dashboard-ui"
+    assert str(correction_body["idempotency_key"]).startswith("dashboard-")
+    assert fake.api_errors == []
 
     # 4. Verify Immediate Post-Decision Reconciliation (Accepting review for PBI-000003)
     accept_review_btn.click()

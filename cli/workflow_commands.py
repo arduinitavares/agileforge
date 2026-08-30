@@ -251,6 +251,38 @@ def _render_semantic_command(
         position: WorkflowPosition,
         decision: NodeDecision,
     ) -> tuple[str, ...]:
+        if (
+            request_kind == "record_story_draft"
+            and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+        ):
+            story_references = tuple(
+                item
+                for item in decision.fact_references
+                if item.fact_type == "story"
+            )
+            if decision.instance_key is None or len(story_references) != 1:
+                message = "Story correction requires one exact artifact reference."
+                raise ValueError(message)
+            story_reference = story_references[0]
+            return (
+                "agileforge",
+                "story",
+                "correct",
+                "--project-id",
+                str(position.project_id),
+                "--instance-key",
+                decision.instance_key,
+                "--expected-decision-fingerprint",
+                decision.decision_fingerprint,
+                "--accepted-story-artifact-id",
+                story_reference.fact_id,
+                "--accepted-story-artifact-fingerprint",
+                story_reference.fingerprint,
+                "--idempotency-key",
+                "<idempotency-key>",
+                "--actor",
+                "<actor>",
+            )
         command = [
             *prefix,
             "--project-id",
@@ -302,7 +334,7 @@ def _decision_payload(
 
 
 def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
-    """Render immediate work plus optional Specification source re-entry."""
+    """Render immediate work plus supported optional re-entry actions."""
     candidates = tuple(
         decision
         for decision in position.decisions
@@ -329,7 +361,13 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
             in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
             or (
                 decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
-                and decision.request_kind == "register_specification_source"
+                and (
+                    decision.request_kind == "register_specification_source"
+                    or (
+                        decision.request_kind == "record_story_draft"
+                        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+                    )
+                )
             )
         )
         and planning_action_decision_is_transportable(position.project_id, decision)

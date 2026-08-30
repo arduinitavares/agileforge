@@ -52,6 +52,7 @@ from services.application import (
     SprintPlanReviewRequest,
     StoryCorrectionRequest,
     StoryReviewRequest,
+    StorySetCorrectionRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -493,6 +494,9 @@ class _FakeApiApplication:
         return self._record_delivery_request(request)
 
     def generate_story(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def correct_story_set(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
     def generate_sprint(self, request: object) -> TransitionResult:
@@ -4918,6 +4922,87 @@ def test_position_omits_ambiguous_unselectable_semantic_actions(
     assert [item["instance_key"] for item in actions] == [
         "backlog_item:PBI-000000",
         "backlog_item:PBI-000001",
+    ]
+
+
+def test_position_advertises_optional_story_set_correction_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the graph correction through its dedicated artifact transport."""
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+    correction = _delivery_decision(
+        node_id="planning.story.generate",
+        request_kind="record_story_draft",
+        instance_key="backlog_item:PBI-000001",
+    ).model_copy(
+        update={
+            "recommendation_kind": RecommendationKind.OPTIONAL_REENTRY,
+            "reason_code": "STORY_CORRECTION_AVAILABLE",
+            "decision_fingerprint": "sha256:" + ("b" * 64),
+            "fact_references": (
+                FactReference(
+                    fact_type="story",
+                    fact_id="91",
+                    fingerprint=artifact_fingerprint,
+                ),
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_vision_position(correction)),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "planning.story.generate",
+            "instance_key": "backlog_item:PBI-000001",
+            "request_kind": "record_story_draft",
+            "endpoint": "story/correct",
+            "transport": "semantic",
+        }
+    ]
+
+
+def test_story_set_correction_api_forwards_exact_graph_and_artifact_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translate one correction request once without operational Story identity."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/story/correct",
+        headers={"X-AgileForge-Expected-Decision": decision_fingerprint},
+        json={
+            "instance_key": "backlog_item:PBI-000001",
+            "accepted_story_artifact_id": 91,
+            "accepted_story_artifact_fingerprint": artifact_fingerprint,
+            "idempotency_key": "story-correct-41",
+            "actor": "operator",
+            "correlation_id": "correction-41",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    assert application.requests == [
+        StorySetCorrectionRequest(
+            project_id=41,
+            instance_key="backlog_item:PBI-000001",
+            expected_decision_fingerprint=decision_fingerprint,
+            accepted_story_artifact_id=91,
+            accepted_story_artifact_fingerprint=artifact_fingerprint,
+            idempotency_key="story-correct-41",
+            actor="operator",
+            correlation_id="correction-41",
+        )
     ]
 
 

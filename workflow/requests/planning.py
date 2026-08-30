@@ -81,6 +81,7 @@ class RecordStoryDraft(_BacklogItemPositionedRequest):
     canonical_content: JsonObject
     content_fingerprint: str = Field(min_length=1)
     supersedes_story_artifact_id: int | None = None
+    identical_successor_authorized: bool = False
 
 
 class DecideStory(_BacklogItemPositionedRequest):

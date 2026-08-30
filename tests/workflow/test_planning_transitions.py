@@ -3061,6 +3061,115 @@ def test_story_input_uses_replacement_roadmap_with_same_chain_prior_story(
     assert prepared["supersedes_story_artifact_id"] == story_a_id
 
 
+def test_story_set_correction_records_identical_authorized_successor(
+    engine: Engine,
+) -> None:
+    """Binding repair may replace an accepted artifact without semantic drift."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    source_artifact_id, _story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+    )
+    position = domain.position(project_id)
+    correction = _decision(
+        position,
+        "planning.story.generate",
+        "backlog_item:PBI-000001",
+    )
+    assert correction.reason_code == "STORY_CORRECTION_AVAILABLE"
+    references = {
+        reference.fact_type: reference for reference in correction.fact_references
+    }
+    content = _story_content()
+    with Session(engine) as session:
+        source = session.get(StoryArtifact, source_artifact_id)
+        assert source is not None
+        source_fingerprint = source.content_fingerprint
+    content["replacement_source"] = {
+        "story_artifact_id": source_artifact_id,
+        "artifact_fingerprint": source_fingerprint,
+    }
+
+    recorded = domain.transition(
+        RecordStoryDraft(
+            **_guards(position, "planning.story.generate", correction.instance_key),
+            idempotency_key="record-identical-story-set-correction",
+            backlog_item_id="PBI-000001",
+            source_backlog_artifact_id=int(references["backlog"].fact_id),
+            source_backlog_artifact_fingerprint=references["backlog"].fingerprint,
+            roadmap_artifact_id=int(references["roadmap"].fact_id),
+            roadmap_artifact_fingerprint=references["roadmap"].fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_story_artifact_id=source_artifact_id,
+            identical_successor_authorized=True,
+        )
+    )
+
+    assert recorded.ok is True
+    with Session(engine) as session:
+        artifacts = session.exec(
+            select(StoryArtifact).order_by(col(StoryArtifact.story_artifact_id))
+        ).all()
+    assert [artifact.version_number for artifact in artifacts] == [1, 2]
+    assert artifacts[0].content_fingerprint != artifacts[1].content_fingerprint
+    assert artifacts[1].supersedes_story_artifact_id == source_artifact_id
+    source_content = CanonicalStoryOutput.model_validate_json(
+        artifacts[0].canonical_content_json
+    )
+    replacement_content = CanonicalStoryOutput.model_validate_json(
+        artifacts[1].canonical_content_json
+    )
+    assert source_content.story_items == replacement_content.story_items
+    assert replacement_content.replacement_source is not None
+    assert (
+        replacement_content.replacement_source.story_artifact_id
+        == source_artifact_id
+    )
+
+
+def test_initial_story_generation_rejects_identical_successor_authorization(
+    engine: Engine,
+) -> None:
+    """Only the exact correction decision may authorize identical lineage."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    position = domain.position(project_id)
+    generate = _decision(
+        position,
+        "planning.story.generate",
+        "backlog_item:PBI-000001",
+    )
+    assert generate.reason_code == "STORY_GENERATION_REQUIRED"
+    references = {
+        reference.fact_type: reference for reference in generate.fact_references
+    }
+    content = _story_content()
+
+    rejected = domain.transition(
+        RecordStoryDraft(
+            **_guards(position, "planning.story.generate", generate.instance_key),
+            idempotency_key="reject-forged-identical-successor-authorization",
+            backlog_item_id="PBI-000001",
+            source_backlog_artifact_id=int(references["backlog"].fact_id),
+            source_backlog_artifact_fingerprint=references["backlog"].fingerprint,
+            roadmap_artifact_id=int(references["roadmap"].fact_id),
+            roadmap_artifact_fingerprint=references["roadmap"].fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            identical_successor_authorized=True,
+        )
+    )
+
+    assert rejected.ok is False
+    with Session(engine) as session:
+        assert session.exec(select(StoryArtifact)).all() == []
+
+
 def test_accepted_story_can_be_replaced_after_same_backlog_roadmap_acceptance(
     engine: Engine,
 ) -> None:

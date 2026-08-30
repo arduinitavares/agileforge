@@ -127,6 +127,7 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
         "cli/main.py",
         "frontend/__init__.py",
         "pyproject.toml",
+        "services/application.py",
         "utils/runtime_controls.py",
         "uv.lock",
     )

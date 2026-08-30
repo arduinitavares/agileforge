@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from adapters.adk.errors import (
     AttemptRevalidationError,
@@ -45,6 +45,7 @@ from services.contracts.sprint import (
 )
 from services.contracts.story import (
     CanonicalStoryOutput,
+    StoryReplacementSource,
     UserStoryAgentItem,
     UserStoryWriterInput,
     UserStoryWriterOutput,
@@ -156,6 +157,16 @@ class _StoryCorrectionRecipeInput(BaseModel):
     source_story_item_fingerprint: str
 
 
+class _StorySetCorrectionRecipeInput(BaseModel):
+    """Exact accepted artifact identity for one complete-set replacement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    accepted_story_artifact_id: int = Field(gt=0)
+    accepted_story_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
 class _StoryRecipePayload(BaseModel):
     """Provider input beside exact immutable Story parent guards."""
 
@@ -168,6 +179,7 @@ class _StoryRecipePayload(BaseModel):
     supersedes_story_artifact_id: int | None = None
     correction: _StoryCorrectionRecipeInput | None = None
     correction_source: CanonicalStoryOutput | None = None
+    story_set_correction: _StorySetCorrectionRecipeInput | None = None
 
 
 class _SprintRecipePayload(BaseModel):
@@ -555,6 +567,7 @@ def _story_output_adapter(
         canonical_content=canonical_content,
         content_fingerprint=canonical_hash(canonical_content),
         supersedes_story_artifact_id=envelope.supersedes_story_artifact_id,
+        identical_successor_authorized=envelope.story_set_correction is not None,
     )
 
 
@@ -872,6 +885,29 @@ def _build_story_workflow(
         else:
             leaf = leaf_agent
         writer_input = envelope.writer_input
+        if envelope.story_set_correction is not None:
+            correction = envelope.story_set_correction
+            if (
+                envelope.supersedes_story_artifact_id
+                != correction.accepted_story_artifact_id
+            ):
+                message = "Story-set correction does not match its accepted artifact."
+                raise ValueError(message)
+            correction_guidance = (
+                "Produce one complete replacement Story set for this PBI. "
+                "Preserve valid semantic content when no content change is required; "
+                "the host will mint replacement bindings from the accepted artifact."
+            )
+            prior_input = writer_input.user_input
+            writer_input = writer_input.model_copy(
+                update={
+                    "user_input": (
+                        correction_guidance
+                        if prior_input is None
+                        else f"{prior_input}\n{correction_guidance}"
+                    )
+                }
+            )
         output = await _run_story_leaf_with_schema_repair(
             context=context,
             leaf=leaf,
@@ -931,6 +967,18 @@ def _build_story_workflow(
             ),
             is_complete=output.is_complete,
             clarifying_questions=output.clarifying_questions,
+            replacement_source=(
+                None
+                if envelope.story_set_correction is None
+                else StoryReplacementSource(
+                    story_artifact_id=(
+                        envelope.story_set_correction.accepted_story_artifact_id
+                    ),
+                    artifact_fingerprint=(
+                        envelope.story_set_correction.accepted_story_artifact_fingerprint
+                    ),
+                )
+            ),
         )
         return RecipeOutput(payload=canonical.model_dump(mode="json"))
 

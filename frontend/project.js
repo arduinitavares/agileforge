@@ -2210,6 +2210,49 @@ function deliveryGenerationActionDetails(action, position = {}, reviews = {}, co
     const isRevision = reasonCode === 'STORY_REVISION_REQUIRED' || decision?.recommendation_kind === 'recovery';
     const isCorrection = reasonCode === 'STORY_CORRECTION_AVAILABLE' || decision?.recommendation_kind === 'optional_reentry';
 
+    let correctionBinding = null;
+    if (isCorrection) {
+        const references = Array.isArray(decision?.fact_references)
+            ? decision.fact_references
+            : [];
+        const storyReferences = references.filter((reference) => reference?.fact_type === 'story');
+        const artifactId = storyReferences.length === 1
+            ? Number.parseInt(storyReferences[0].fact_id, 10)
+            : null;
+        if (
+            action.endpoint !== 'story/correct'
+            || !isSha256Fingerprint(decision?.decision_fingerprint)
+            || !Number.isInteger(artifactId)
+            || artifactId <= 0
+            || !isSha256Fingerprint(storyReferences[0]?.fingerprint)
+        ) return null;
+        correctionBinding = {
+            expectedDecision: decision.decision_fingerprint,
+            acceptedStoryArtifactId: artifactId,
+            acceptedStoryArtifactFingerprint: storyReferences[0].fingerprint,
+        };
+    }
+
+    const acceptedStories = Array.isArray(context?.storyDependencies?.stories)
+        ? context.storyDependencies.stories
+        : [];
+    const isBindingRecovery = isCorrection && acceptedStories.some((story) => (
+        (
+            story?.backlog_item_id === pbiId
+            || Number(story?.source_story_artifact_id)
+                === correctionBinding.acceptedStoryArtifactId
+        )
+        && (
+            (Array.isArray(story?.readiness_blockers)
+                && story.readiness_blockers.includes('STORY_ITEM_BINDING_INVALID'))
+            || (Array.isArray(story?.validation_failures)
+                && story.validation_failures.some(
+                    (failure) => (failure?.code ?? failure?.rule_name)
+                        === 'STORY_ITEM_BINDING_INVALID',
+                ))
+        )
+    ));
+
     let intentVerb = 'Generate';
     let busyVerb = 'Generating';
     let description = config.description;
@@ -2220,7 +2263,9 @@ function deliveryGenerationActionDetails(action, position = {}, reviews = {}, co
     } else if (isCorrection) {
         intentVerb = 'Correct';
         busyVerb = 'Correcting';
-        description = 'Generate replacement User Story drafts for this accepted requirement.';
+        description = isBindingRecovery
+            ? 'Replace the binding-invalid accepted Story set from its exact immutable artifact.'
+            : 'Generate replacement User Story drafts for this accepted requirement.';
     }
 
     let requirement = '';
@@ -2250,6 +2295,8 @@ function deliveryGenerationActionDetails(action, position = {}, reviews = {}, co
         intent: isRevision ? 'revision' : isCorrection ? 'correction' : 'generation',
         intentVerb,
         intentLabel: isRevision ? 'revision' : isCorrection ? 'correction' : 'generation',
+        correctionBinding,
+        isBindingRecovery,
     };
 }
 
@@ -2301,9 +2348,15 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
     }
     const isMissingRequirement = action.request_kind === 'record_story_draft' && !details.requirement;
     const disabledAttr = isMissingRequirement ? ' disabled title="Requirement summary unavailable"' : '';
-    return `<div data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes} class="mt-4">
+    const correctionPriority = details.intent === 'correction'
+        ? ` data-story-correction-priority="${details.isBindingRecovery ? 'recovery' : 'secondary'}"`
+        : '';
+    const buttonClass = details.intent === 'correction' && !details.isBindingRecovery
+        ? BUTTON_SECONDARY
+        : BUTTON_PRIMARY;
+    return `<div data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}${correctionPriority} class="mt-4">
         ${content}
-        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}"${disabledAttr} class="${BUTTON_PRIMARY}">
+        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}"${disabledAttr} class="${buttonClass}">
             <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
             <span data-delivery-action-label="true">${escapeWorkflowText(details.label)}</span>
         </button>
@@ -4052,7 +4105,32 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             if (binding.instance_key !== null && binding.instance_key !== undefined) {
                 deliveryFields.instance_key = binding.instance_key;
             }
-            await postAction(binding, deliveryFields);
+            let deliveryOptions = {};
+            if (requestKind === 'record_story_draft') {
+                const details = deliveryGenerationActionDetails(
+                    binding,
+                    lifecycleState.position,
+                    lifecycleState.planningReviews,
+                    lifecycleState,
+                );
+                if (!details) {
+                    throw new Error(
+                        'This Story action changed. Reload and choose a current action.',
+                    );
+                }
+                if (details.correctionBinding) {
+                    deliveryFields.accepted_story_artifact_id = (
+                        details.correctionBinding.acceptedStoryArtifactId
+                    );
+                    deliveryFields.accepted_story_artifact_fingerprint = (
+                        details.correctionBinding.acceptedStoryArtifactFingerprint
+                    );
+                    deliveryOptions = {
+                        expectedDecision: details.correctionBinding.expectedDecision,
+                    };
+                }
+            }
+            await postAction(binding, deliveryFields, deliveryOptions);
             mutationCompleted = true;
         } else {
             const action = findAction(lifecycleState.actions, requestKind)

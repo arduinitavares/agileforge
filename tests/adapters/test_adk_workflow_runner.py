@@ -1181,6 +1181,52 @@ async def test_delivery_recipe_fakes_use_production_contracts_and_canonicalizers
 
 
 @pytest.mark.asyncio
+async def test_story_set_correction_uses_one_complete_set_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Carry artifact guards while generating one complete replacement set."""
+    model = SequenceStoryLlm(
+        model="provider-free-story-set-correction",
+        response_texts=[json.dumps(_story_provider_output())],
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: model,
+    )
+    registry = _story_registry(story_agents.create_user_story_writer_agent())
+    accepted_artifact_id = 91
+    payload = JSON_OBJECT.validate_python(
+        {
+            **_gold_story_recipe_payload(),
+            "supersedes_story_artifact_id": accepted_artifact_id,
+            "story_set_correction": {
+                "accepted_story_artifact_id": accepted_artifact_id,
+                "accepted_story_artifact_fingerprint": "sha256:" + ("a" * 64),
+            },
+        }
+    )
+
+    result = await _run_provider_free_workflow(
+        registry.require("planning.story.generate").workflow,
+        payload,
+        session_id="story-set-correction-one-call",
+    )
+
+    canonical = CanonicalStoryOutput.model_validate(result.payload)
+    assert len(model.request_texts) == 1
+    assert len(canonical.story_items) == 1
+    assert canonical.is_complete is True
+    assert canonical.replacement_source is not None
+    assert canonical.replacement_source.story_artifact_id == accepted_artifact_id
+    assert canonical.replacement_source.artifact_fingerprint == "sha256:" + (
+        "a" * 64
+    )
+    provider_input = json.loads(model.request_texts[0])
+    assert "complete replacement Story set" in provider_input["user_input"]
+
+
+@pytest.mark.asyncio
 async def test_production_story_recipe_preserves_valid_first_explicit_null(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

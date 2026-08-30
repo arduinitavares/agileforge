@@ -212,6 +212,15 @@ class StoryItemEnvelope(BaseModel):
         return self
 
 
+class StoryReplacementSource(BaseModel):
+    """Exact accepted artifact identity embedded by the host in a replacement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    story_artifact_id: Annotated[int, Field(gt=0)]
+    artifact_fingerprint: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+
+
 class CanonicalStoryOutput(BaseModel):
     """Closed host Story envelope persisted for later review and planning."""
 
@@ -223,6 +232,10 @@ class CanonicalStoryOutput(BaseModel):
     )
     is_complete: bool
     clarifying_questions: tuple[str, ...] = ()
+    replacement_source: StoryReplacementSource | None = Field(
+        default=None,
+        exclude_if=lambda source: source is None,
+    )
 
 
 class UserStoryWriterOutput(BaseModel):
@@ -328,6 +341,7 @@ __all__ = [
     "StoryDependencyCandidate",
     "StoryInvestAssessment",
     "StoryItemEnvelope",
+    "StoryReplacementSource",
     "UserStoryAgentItem",
     "UserStoryWriterInput",
     "UserStoryWriterOutput",

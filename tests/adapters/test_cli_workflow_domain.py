@@ -18,7 +18,10 @@ from cli.main import (
     main,
 )
 from cli.workflow_commands import workflow_next
-from services.application import ExpectedPlanningReviewBinding
+from services.application import (
+    ExpectedPlanningReviewBinding,
+    StorySetCorrectionRequest,
+)
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import TransitionResult, WorkflowPosition
 
@@ -590,6 +593,66 @@ def test_story_generation_requires_exact_instance_selector() -> None:
                 "operator",
             ]
         )
+
+
+class _StorySetCorrectionApplication:
+    def __init__(self) -> None:
+        self.requests: list[StorySetCorrectionRequest] = []
+
+    def correct_story_set(
+        self,
+        request: StorySetCorrectionRequest,
+    ) -> cli_main.TransitionResult:
+        self.requests.append(request)
+        return cli_main.TransitionResult(ok=True)
+
+
+def test_story_set_correction_cli_forwards_exact_binding_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose one guarded full-set correction command without Story-row identity."""
+    application = _StorySetCorrectionApplication()
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+
+    exit_code = cli_main.main(
+        [
+            "story",
+            "correct",
+            "--project-id",
+            "41",
+            "--instance-key",
+            "backlog_item:PBI-000001",
+            "--expected-decision-fingerprint",
+            decision_fingerprint,
+            "--accepted-story-artifact-id",
+            "91",
+            "--accepted-story-artifact-fingerprint",
+            artifact_fingerprint,
+            "--idempotency-key",
+            "story-correct-41",
+            "--actor",
+            "operator",
+            "--correlation-id",
+            "correction-41",
+        ],
+        application=application,
+    )
+
+    assert exit_code == 0
+    assert len(application.requests) == 1
+    request = application.requests[0]
+    assert request.model_dump(mode="json") == {
+        "project_id": 41,
+        "instance_key": "backlog_item:PBI-000001",
+        "expected_decision_fingerprint": decision_fingerprint,
+        "accepted_story_artifact_id": 91,
+        "accepted_story_artifact_fingerprint": artifact_fingerprint,
+        "idempotency_key": "story-correct-41",
+        "actor": "operator",
+        "correlation_id": "correction-41",
+    }
+    assert '"ok": true' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("flag", ["--input-file", "--model-id"])

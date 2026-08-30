@@ -1304,6 +1304,21 @@ class DeliveryActionRequest(FrozenModel):
     correlation_id: str | None = None
 
 
+class StorySetCorrectionRequest(FrozenModel):
+    """Correct one complete accepted Story set through an exact graph decision."""
+
+    project_id: int
+    instance_key: str = Field(pattern=r"^backlog_item:[^\s:]+$")
+    expected_decision_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    accepted_story_artifact_id: int = Field(gt=0)
+    accepted_story_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
 class StoryCorrectionRequest(FrozenModel):
     """Correct one host-selected accepted Story through full artifact review."""
 
@@ -2333,6 +2348,85 @@ class AgileForgeApplication:
         return self._run_delivery_action(
             request,
             node_id="planning.story.generate",
+        )
+
+    def correct_story_set(
+        self,
+        request: StorySetCorrectionRequest,
+    ) -> TransitionResult:
+        """Correct one accepted Story set without trusting operational rows."""
+        input_service = self._delivery_action_input
+        node_id = "planning.story.generate"
+        if input_service is None:
+            return _transition_not_available(None, node_id)
+        correction_identity: JsonObject = {
+            "accepted_story_artifact_id": request.accepted_story_artifact_id,
+            "accepted_story_artifact_fingerprint": (
+                request.accepted_story_artifact_fingerprint
+            ),
+        }
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=request.expected_decision_fingerprint,
+                node_id=node_id,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                semantic_input={"story_set_correction": correction_identity},
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            node_id,
+            instance_key=request.instance_key,
+        )
+        story_reference = (
+            None if decision is None else _single_fact_reference(decision, "story")
+        )
+        if (
+            decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or decision.reason_code != "STORY_CORRECTION_AVAILABLE"
+            or decision.decision_fingerprint
+            != request.expected_decision_fingerprint
+            or story_reference is None
+            or story_reference.fact_id
+            != str(request.accepted_story_artifact_id)
+            or story_reference.fingerprint
+            != request.accepted_story_artifact_fingerprint
+        ):
+            return _transition_not_available(position, node_id)
+        input_payload = input_service.build(
+            project_id=request.project_id,
+            decision=decision,
+            node_id=node_id,
+        )
+        if isinstance(input_payload, WorkflowError):
+            return TransitionResult(ok=False, position=position, error=input_payload)
+        if input_payload is None:
+            return _transition_not_available(position, node_id)
+        input_payload = {**input_payload, "story_set_correction": correction_identity}
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id=node_id,
+                instance_key=decision.instance_key,
+                input_payload=input_payload,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES[node_id]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
         )
 
     def correct_story(self, request: StoryCorrectionRequest) -> TransitionResult:
@@ -5044,6 +5138,14 @@ def planning_action_decision_is_transportable(
     decision: NodeDecision,
 ) -> bool:
     """Return whether one planning decision has the references its route needs."""
+    if (
+        decision.request_kind == "record_story_draft"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    ):
+        return (
+            decision.instance_key is not None
+            and _integer_fact_reference(decision, "story") is not None
+        )
     if decision.request_kind == "apply_story_dependencies":
         reference = _single_fact_reference(decision, "story_dependency_source")
         return reference is not None and reference.fact_id == str(project_id)
@@ -5680,6 +5782,7 @@ __all__ = [
     "StoryReadinessRepair",
     "StoryReadinessRepairRequest",
     "StoryReviewRequest",
+    "StorySetCorrectionRequest",
     "VisionBootstrapRequest",
     "VisionInterviewRequest",
     "VisionResponseRequest",
