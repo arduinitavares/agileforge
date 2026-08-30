@@ -57,6 +57,17 @@ _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
 _PNG_HEIGHT_END = 24
+_ISSUE_213_ACTIVE_STATUS = (
+    "Backlog correction is in progress. The recorded Feedback remains current."
+)
+_ISSUE_213_FAILED_STATUS = (
+    "Backlog correction failed. No corrected candidate was produced; "
+    "the recorded Feedback remains current."
+)
+_ISSUE_213_EXPIRED_STATUS = (
+    "The previous Backlog correction attempt expired. "
+    "The recorded Feedback remains current and can be retried."
+)
 _FORBIDDEN_BODY_FIELDS = {
     "expected_fact_fingerprint",
     "expected_decision_fingerprint",
@@ -1328,6 +1339,322 @@ class FakeLifecycle:
             "data": projection,
             "actions": actions,
         }
+
+
+@dataclass
+class BacklogFeedbackLifecycle(FakeLifecycle):
+    """Durable #213 Backlog correction lifecycle shared by routed pages."""
+
+    correction_state: str = "pending"
+    review_requests: list[JsonObject] = field(default_factory=list)
+    correction_requests: list[JsonObject] = field(default_factory=list)
+    provider_entry_count: int = 0
+    backlog_read_failures: int = 0
+
+    def __post_init__(self) -> None:
+        """Seed the shared project projection required by every routed page."""
+        self.project = {
+            "project_id": _PROJECT_ID,
+            "name": "Issue 213 Backlog Feedback",
+            "description": "Provider-free durable correction lifecycle.",
+            "user_stories_count": 0,
+            "sprint_count": 0,
+        }
+
+    @staticmethod
+    def _lineage() -> JsonObject:
+        return {
+            "specification": {
+                "spec_version_id": 41,
+                "spec_hash": "sha256:issue-213-specification",
+            },
+            "product_goal": {
+                "product_goal_artifact_id": 11,
+                "product_goal_fingerprint": "sha256:issue-213-goal",
+            },
+        }
+
+    @staticmethod
+    def _candidate(
+        artifact_id: int,
+        version: int,
+        *,
+        supersedes: int | None = None,
+    ) -> JsonObject:
+        return {
+            "backlog_artifact_id": artifact_id,
+            "artifact_fingerprint": f"sha256:issue-213-backlog-{artifact_id}",
+            "version_number": version,
+            "supersedes_backlog_artifact_id": supersedes,
+            "backlog_items": [
+                {
+                    "backlog_item_id": "PBI-000001",
+                    "requirement": "Keep the retry boundary visible.",
+                    "priority": "high",
+                    "value_driver": "operator confidence",
+                    "estimated_effort": "small",
+                    "justification": "The correction state must survive reload.",
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+
+    def _decision_fingerprint(self) -> str:
+        return {
+            "pending": "sha256:issue-213-review-v1",
+            "feedback": "sha256:issue-213-feedback-v1",
+            "active": "sha256:issue-213-active-v1",
+            "failed-retry": "sha256:issue-213-failed-v1",
+            "expired-recovery": "sha256:issue-213-expired-v1",
+            "replacement": "sha256:issue-213-replacement-v1",
+            "success": "sha256:issue-213-review-v2",
+        }[self.correction_state]
+
+    def _candidate_for_state(self) -> JsonObject:
+        if self.correction_state == "success":
+            return self._candidate(8, 2, supersedes=7)
+        return self._candidate(7, 1)
+
+    @staticmethod
+    def _correction_action() -> JsonObject:
+        return {
+            "node_id": "backlog.generate",
+            "instance_key": None,
+            "request_kind": "record_backlog_draft",
+            "endpoint": "backlog/generate",
+            "transport": "semantic",
+        }
+
+    def _references(self, *, attempt: bool) -> list[JsonValue]:
+        candidate = self._candidate_for_state()
+        references: list[JsonValue] = [
+            {
+                "fact_type": "backlog",
+                "fact_id": candidate["backlog_artifact_id"],
+                "fingerprint": candidate["artifact_fingerprint"],
+            },
+            {
+                "fact_type": "specification",
+                "fact_id": 41,
+                "fingerprint": "sha256:issue-213-specification",
+            },
+            {
+                "fact_type": "product_goal",
+                "fact_id": 11,
+                "fingerprint": "sha256:issue-213-goal",
+            },
+        ]
+        if attempt:
+            references.append(
+                {
+                    "fact_type": "node_attempt",
+                    "fact_id": 91,
+                    "fingerprint": "sha256:issue-213-attempt",
+                }
+            )
+        return references
+
+    def _planning_review_data(self, suffix: str) -> JsonObject | None:
+        if suffix != "/backlog/review":
+            return super()._planning_review_data(suffix)
+        candidate = self._candidate_for_state()
+        if self.correction_state == "success":
+            return {
+                "binding": {
+                    "decision_fingerprint": self._decision_fingerprint(),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "backlog",
+                    "review": {"state": "pending"},
+                    "candidate": candidate,
+                    "lineage": self._lineage(),
+                },
+            }
+        if self.correction_state == "pending":
+            return {
+                "binding": {
+                    "decision_fingerprint": self._decision_fingerprint(),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "backlog",
+                    "review": {"state": "pending"},
+                    "candidate": candidate,
+                    "lineage": self._lineage(),
+                },
+            }
+        return {
+            "continuation": {
+                "binding": {
+                    "node_id": "backlog.generate",
+                    "decision_fingerprint": self._decision_fingerprint(),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "backlog",
+                    "review": {
+                        "state": "feedback",
+                        "rationale": "Show the retry boundary.",
+                    },
+                    "candidate": candidate,
+                    "lineage": self._lineage(),
+                },
+            }
+        }
+
+    def _planning_review_response(
+        self,
+        suffix: str,
+    ) -> tuple[int, JsonObject] | None:
+        if suffix == "/backlog/review" and self.backlog_read_failures:
+            self.backlog_read_failures -= 1
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "error": {
+                        "code": "BACKLOG_RELOAD_FAILED",
+                        "message": (
+                            "The authoritative Backlog projection is temporarily "
+                            "unavailable."
+                        ),
+                    }
+                }
+            }
+        return super()._planning_review_response(suffix)
+
+    def _position_projection(self) -> JsonObject:
+        if self.correction_state == "success":
+            decision = {
+                "node_id": "backlog.review",
+                "child_graph_id": "backlog",
+                "request_kind": "decide_backlog",
+                "category": "waiting",
+                "recommendation_kind": "required",
+                "instance_key": None,
+                "reason_code": "BACKLOG_REVIEW_REQUIRED",
+                "decision_fingerprint": self._decision_fingerprint(),
+                "fact_references": self._references(attempt=False),
+            }
+            actions: list[JsonValue] = []
+        else:
+            mode = {
+                "pending": ("waiting", "required", "BACKLOG_REVIEW_REQUIRED", False),
+                "feedback": (
+                    "available",
+                    "recovery",
+                    "BACKLOG_REVISION_REQUIRED",
+                    False,
+                ),
+                "active": ("waiting", "required", "BACKLOG_GENERATION_ACTIVE", False),
+                "failed-retry": (
+                    "available",
+                    "recovery",
+                    "BACKLOG_GENERATION_FAILED",
+                    True,
+                ),
+                "expired-recovery": (
+                    "available",
+                    "recovery",
+                    "BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                    True,
+                ),
+                "replacement": (
+                    "available",
+                    "recovery",
+                    "BACKLOG_REVISION_REQUIRED",
+                    False,
+                ),
+            }[self.correction_state]
+            if self.correction_state == "pending":
+                decision = {
+                    "node_id": "backlog.review",
+                    "child_graph_id": "backlog",
+                    "request_kind": "decide_backlog",
+                    "category": mode[0],
+                    "recommendation_kind": mode[1],
+                    "instance_key": None,
+                    "reason_code": mode[2],
+                    "decision_fingerprint": self._decision_fingerprint(),
+                    "fact_references": self._references(attempt=False),
+                }
+                actions = []
+            else:
+                decision = {
+                    "node_id": "backlog.generate",
+                    "child_graph_id": "backlog",
+                    "request_kind": "record_backlog_draft",
+                    "category": mode[0],
+                    "recommendation_kind": mode[1],
+                    "instance_key": None,
+                    "reason_code": mode[2],
+                    "decision_fingerprint": self._decision_fingerprint(),
+                    "fact_references": self._references(attempt=mode[3]),
+                }
+                actions = (
+                    []
+                    if self.correction_state == "active"
+                    else [self._correction_action()]
+                )
+        return cast(
+            "JsonObject",
+            {
+                "graph_version": "agileforge.workflow.hidden",
+                "fact_fingerprint": "sha256:issue-213-facts",
+                "decisions": [decision],
+                "terminal": False,
+                "actions": [],
+                "_actions": actions,
+            },
+        )
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        if suffix == "/backlog/decide":
+            self._assert_fields(body, {"decision", "rationale"})
+            assert body["decision"] == "feedback"
+            assert body["rationale"] == "Show the retry boundary."
+            assert (
+                headers["x-agileforge-expected-decision"]
+                == self._decision_fingerprint()
+            )
+            self.review_requests.append(dict(body))
+            self.correction_state = "feedback"
+            return _HTTP_OK, self._mutation_result()
+        if suffix == "/backlog/generate":
+            self._assert_fields(body, set())
+            self.correction_requests.append(dict(body))
+            if self.correction_state == "active":
+                return _HTTP_CONFLICT, {
+                    "detail": {
+                        "error": {
+                            "code": "TRANSITION_NOT_AVAILABLE",
+                            "message": "A Backlog correction is already active.",
+                        }
+                    }
+                }
+            if self.correction_state == "replacement":
+                return _HTTP_CONFLICT, {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_POSITION",
+                            "message": "The Backlog correction action was replaced.",
+                        }
+                    }
+                }
+            self.provider_entry_count += 1
+            return _HTTP_OK, self._mutation_result()
+        return super()._mutate(suffix, body, headers)
+
+    def begin_correction(self) -> None:
+        """Persist a single simulated provider entry and its active lease."""
+        assert self.correction_state in {"feedback", "failed-retry", "replacement"}
+        self.provider_entry_count += 1
+        self.correction_state = "active"
 
 
 def test_sprint_review_browser_shows_accepted_invest_without_false_gate() -> None:
@@ -3794,4 +4121,314 @@ def test_story_review_disables_acceptance_when_required_evidence_is_malformed(
     )
     expect(reject_btn).to_be_enabled()
 
+    context.close()
+
+
+def _defer_issue_213_correction(page: Page) -> None:
+    """Hold only the Backlog correction POST in the browser, never the route."""
+    page.evaluate(
+        """() => {
+            const originalFetch = window.fetch.bind(window);
+            window.issue213CorrectionRequests = [];
+            window.resolveIssue213Correction = null;
+            window.fetch = (input, init = {}) => {
+                const url = String(input);
+                if (url.endsWith('/backlog/generate') && init.method === 'POST') {
+                    window.issue213CorrectionRequests.push({
+                        headers: Object.fromEntries(new Headers(init.headers)),
+                    });
+                    return new Promise((resolve) => {
+                        window.resolveIssue213Correction = (response) => {
+                            window.resolveIssue213Correction = null;
+                            resolve(new Response(JSON.stringify(response.body), {
+                                status: response.status,
+                                headers: { 'Content-Type': 'application/json' },
+                            }));
+                        };
+                    });
+                }
+                return originalFetch(input, init);
+            };
+        }"""
+    )
+
+
+def _assert_issue_213_feedback(page: Page, *, status: str) -> Locator:
+    continuation = page.locator('[data-backlog-feedback-continuation="true"]')
+    expect(continuation).to_be_visible()
+    expect(continuation).to_contain_text(status)
+    expect(continuation).to_contain_text("Backlog candidate v1 (#7)")
+    expect(continuation).to_contain_text("Keep the retry boundary visible.")
+    expect(continuation).to_contain_text("Show the retry boundary.")
+    return continuation
+
+
+def _request_issue_213_feedback(page: Page) -> None:
+    page.locator(
+        '[data-planning-review="backlog"][data-review-decision="feedback"]'
+    ).click()
+    page.locator("#human-action-rationale").fill("Show the retry boundary.")
+    page.locator("#human-action-submit").dblclick()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+
+
+def _assert_focus(page: Page, selector: str) -> None:
+    assert (
+        page.locator(selector).evaluate("element => element === document.activeElement")
+        is True
+    )
+
+
+def test_issue_213_feedback_context_survives_refresh_and_new_tab(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Rebuild durable Feedback context without leaking initiating-tab focus."""
+    fake = BacklogFeedbackLifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    _request_issue_213_feedback(page)
+    assert len(fake.review_requests) == 1
+    continuation = _assert_issue_213_feedback(
+        page,
+        status="Backlog Feedback recorded",
+    )
+    correction = page.locator('[data-backlog-correction-action="true"]')
+    expect(correction).to_contain_text("Regenerate Backlog from feedback")
+    _assert_focus(page, '[data-backlog-correction-action="true"]')
+
+    page.locator("#refresh-project").click()
+    _assert_issue_213_feedback(page, status="Backlog Feedback recorded")
+
+    second = context.new_page()
+    second.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    _assert_issue_213_feedback(second, status="Backlog Feedback recorded")
+    assert (
+        second.evaluate(
+            """() => !document.activeElement?.matches(
+            '[data-backlog-correction-action="true"], '
+            + '[data-backlog-feedback-continuation="true"]'
+        )"""
+        )
+        is True
+    )
+    assert fake.api_errors == []
+    assert continuation.is_visible()
+    context.close()
+
+
+def _assert_issue_213_active_duplicate(
+    context: BrowserContext,
+    page: Page,
+    fake: BacklogFeedbackLifecycle,
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Verify active state reconstructs and rejects an extra provider entry."""
+    page.locator("#refresh-project").click()
+    _assert_issue_213_feedback(page, status=_ISSUE_213_ACTIVE_STATUS)
+    expect(page.locator('[data-backlog-correction-action="true"]')).not_to_be_attached()
+
+    second = context.new_page()
+    second.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    _assert_issue_213_feedback(second, status=_ISSUE_213_ACTIVE_STATUS)
+    duplicate = second.evaluate(
+        f"""async () => {{
+            const url = '/api/projects/{_PROJECT_ID}/backlog/generate';
+            const response = await fetch(url, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                    actor: 'dashboard-ui', idempotency_key: 'dashboard-duplicate',
+                }}),
+            }});
+            return {{ status: response.status, body: await response.json() }};
+        }}"""
+    )
+    assert duplicate == {
+        "status": _HTTP_CONFLICT,
+        "body": {
+            "detail": {
+                "error": {
+                    "code": "TRANSITION_NOT_AVAILABLE",
+                    "message": "A Backlog correction is already active.",
+                }
+            }
+        },
+    }
+    assert fake.provider_entry_count == 1
+    expect(
+        second.locator('[data-backlog-correction-action="true"]')
+    ).not_to_be_attached()
+
+
+def test_issue_213_active_failure_and_expiry_are_durable(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Retain durable active, failed, and expired Feedback recovery state."""
+    fake = BacklogFeedbackLifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+    _request_issue_213_feedback(page)
+    _defer_issue_213_correction(page)
+
+    original = page.locator('[data-backlog-correction-action="true"] button')
+    original_element = original.element_handle()
+    assert original_element is not None
+    original.click()
+    page.wait_for_function("window.resolveIssue213Correction !== null")
+    expect(original).to_be_disabled()
+    expect(original).to_have_attribute("aria-busy", "true")
+    expect(original).to_contain_text("Regenerating Backlog from feedback...")
+    assert page.evaluate("window.issue213CorrectionRequests.length") == 1
+    fake.begin_correction()
+    assert fake.provider_entry_count == 1
+
+    _assert_issue_213_active_duplicate(context, page, fake, dashboard_harness)
+
+    fake.correction_state = "failed-retry"
+    page.evaluate(
+        """window.resolveIssue213Correction({
+            status: 409,
+            body: { detail: { error: {
+                code: 'EXTERNAL_EXECUTION_FAILED',
+                message: 'The Backlog correction provider failed.',
+            } } },
+        })"""
+    )
+    _assert_issue_213_feedback(
+        page,
+        status=_ISSUE_213_FAILED_STATUS,
+    )
+    retry = page.locator('[data-backlog-correction-action="true"] button')
+    expect(retry).to_be_enabled()
+    _assert_focus(page, '[data-backlog-correction-action="true"]')
+    assert original_element.evaluate("element => element.isConnected") is False
+
+    page.reload(wait_until="networkidle")
+    _assert_issue_213_feedback(
+        page,
+        status=_ISSUE_213_FAILED_STATUS,
+    )
+    third = context.new_page()
+    third.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    _assert_issue_213_feedback(
+        third,
+        status=_ISSUE_213_FAILED_STATUS,
+    )
+    expect(
+        third.locator('[data-backlog-correction-action="true"] button')
+    ).to_be_enabled()
+
+    _defer_issue_213_correction(page)
+    retry = page.locator('[data-backlog-correction-action="true"] button')
+    retry.click()
+    page.wait_for_function("window.resolveIssue213Correction !== null")
+    fake.begin_correction()
+    fake.correction_state = "expired-recovery"
+    page.reload(wait_until="networkidle")
+    _assert_issue_213_feedback(
+        page,
+        status=_ISSUE_213_EXPIRED_STATUS,
+    )
+    fourth = context.new_page()
+    fourth.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    _assert_issue_213_feedback(
+        fourth,
+        status=_ISSUE_213_EXPIRED_STATUS,
+    )
+    expect(
+        fourth.locator('[data-backlog-correction-action="true"] button')
+    ).to_be_enabled()
+    assert fake.api_errors == []
+    context.close()
+
+
+def test_issue_213_correction_reconciles_stale_and_successful_outcomes(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Discard stale actions only after authority and retain success uncertainty."""
+    fake = BacklogFeedbackLifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+    _request_issue_213_feedback(page)
+    _defer_issue_213_correction(page)
+
+    stale = page.locator('[data-backlog-correction-action="true"] button')
+    stale_element = stale.element_handle()
+    assert stale_element is not None
+    stale.click()
+    page.wait_for_function("window.resolveIssue213Correction !== null")
+    fake.correction_state = "replacement"
+    page.evaluate(
+        """window.resolveIssue213Correction({
+            status: 409,
+            body: { detail: { error: {
+                code: 'STALE_POSITION',
+                message: 'The Backlog correction action was replaced.',
+            } } },
+        })"""
+    )
+    replacement = page.locator('[data-backlog-correction-action="true"] button')
+    expect(replacement).to_be_enabled()
+    _assert_focus(page, '[data-backlog-correction-action="true"]')
+    assert stale_element.evaluate("element => element.isConnected") is False
+
+    _defer_issue_213_correction(page)
+    replacement = page.locator('[data-backlog-correction-action="true"] button')
+    replacement.click()
+    page.wait_for_function("window.resolveIssue213Correction !== null")
+    fake.begin_correction()
+    fake.correction_state = "success"
+    fake.backlog_read_failures = 1
+    page.evaluate(
+        """window.resolveIssue213Correction({
+            status: 200,
+            body: { status: 'success', data: { output: { recorded: true } } },
+        })"""
+    )
+    expect(page.locator("#project-error")).to_contain_text(
+        "The authoritative Backlog projection is temporarily unavailable."
+    )
+    expect(
+        page.locator('[data-backlog-correction-action="true"] button')
+    ).not_to_be_attached()
+    expect(replacement).not_to_be_attached()
+
+    page.locator("#refresh-project").click()
+    corrected = page.locator('[data-planning-review-card="backlog"]')
+    expect(corrected).to_contain_text(
+        "Corrected Backlog candidate v2 (#8), replacing #7"
+    )
+    expect(
+        corrected.locator(
+            '[data-planning-review="backlog"][data-review-decision="accepted"]'
+        )
+    ).to_be_enabled()
+    _assert_focus(page, '[data-planning-review-card="backlog"]')
+
+    page.reload(wait_until="networkidle")
+    expect(page.locator('[data-planning-review-card="backlog"]')).to_contain_text(
+        "Corrected Backlog candidate v2 (#8), replacing #7"
+    )
+    second = context.new_page()
+    second.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    expect(second.locator('[data-planning-review-card="backlog"]')).to_contain_text(
+        "Corrected Backlog candidate v2 (#8), replacing #7"
+    )
+    expect(
+        second.locator('[data-backlog-feedback-continuation="true"]')
+    ).not_to_be_attached()
+    assert fake.api_errors == []
     context.close()

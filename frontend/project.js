@@ -132,6 +132,7 @@ let activeStoryMutation = null;
 let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
 let activeBacklogCorrectionMutation = null;
+let backlogFeedbackFocusIntent = false;
 let lifecycleState = {
     project: {},
     position: {},
@@ -2790,6 +2791,7 @@ async function loadDashboard() {
         setProjectError('');
         renderDashboard();
         consumeBacklogCorrectionFocus(backlogFocusMutation);
+        consumeBacklogFeedbackFocus();
         return true;
     } catch (error) {
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
@@ -3091,20 +3093,30 @@ function backlogCorrectionFocusSelector(state) {
     return null;
 }
 
-function consumeBacklogCorrectionFocus(mutation = activeBacklogCorrectionMutation) {
-    if (!mutation?.focusIntent) return;
+function focusBacklogCorrectionTarget() {
     const selector = backlogCorrectionFocusSelector(lifecycleState);
     const target = selector ? document.querySelector(selector) : null;
     const fallback = selector === '[data-backlog-correction-action="true"]:not([disabled])'
         ? document.querySelector('[data-backlog-feedback-continuation="true"]')
         : null;
     (target ?? fallback)?.focus?.();
+}
+
+function consumeBacklogCorrectionFocus(mutation = activeBacklogCorrectionMutation) {
+    if (!mutation?.focusIntent) return;
+    focusBacklogCorrectionTarget();
     if (activeBacklogCorrectionMutation?.token === mutation.token) {
         activeBacklogCorrectionMutation = {
             ...activeBacklogCorrectionMutation,
             focusIntent: false,
         };
     }
+}
+
+function consumeBacklogFeedbackFocus() {
+    if (!backlogFeedbackFocusIntent) return;
+    focusBacklogCorrectionTarget();
+    backlogFeedbackFocusIntent = false;
 }
 
 function reviewCandidateFingerprint(state, scope) {
@@ -3297,6 +3309,9 @@ async function submitHumanAction() {
                     expectedInstance: pending.binding.instance_key,
                 },
             );
+            if (pending.scope === 'backlog' && pending.decision === 'feedback') {
+                backlogFeedbackFocusIntent = true;
+            }
         } catch (error) {
             closeHumanDialog();
             try {
