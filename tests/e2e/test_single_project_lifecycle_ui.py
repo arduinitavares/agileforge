@@ -1712,7 +1712,16 @@ def _assert_issue_204_failure_restores_source_controls(page: Page) -> None:
     expect(status).to_contain_text("The prior candidate and Feedback remain current.")
     expect(page.get_by_text("Prior Feedback candidate", exact=False)).to_be_visible()
     expect(button).to_be_visible()
+    current = page.locator('[data-current-specification-source="true"]')
+    expect(current).to_be_visible()
+    expect(current).to_contain_text("Current registered Specification source")
+    expect(current).to_contain_text("specs/issue-204.md")
     revision = page.locator('[data-specification-revision-registration="true"]')
+    expect(revision).to_be_visible()
+    expect(revision).not_to_have_attribute("open", "")
+    expect(
+        revision.locator('form[data-specification-source-form="true"]')
+    ).not_to_be_visible()
     expect(revision).not_to_have_attribute("aria-disabled", "true")
     assert revision.evaluate("details => !details.hasAttribute('inert')")
     assert (
