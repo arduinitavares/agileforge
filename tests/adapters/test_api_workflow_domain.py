@@ -1,7 +1,7 @@
 """API adapter tests for exact typed workflow requests."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -140,6 +140,7 @@ from workflow.requests import (
     DecideSprintPlan,
     DecideStory,
     FailNodeAttempt,
+    RecordBacklogDraft,
     RecordPostSprintTriage,
     ReviewSprint,
     StartNodeAttempt,
@@ -5975,7 +5976,7 @@ def test_application_backlog_feedback_continuation_position_matrix(
     assert reads.calls == [(41, 7)]
 
 
-def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle(
+def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle(  # noqa: PLR0915
     engine: "Engine",
 ) -> None:
     """Retain one persisted Feedback review throughout real attempt transitions."""
@@ -6046,6 +6047,62 @@ def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle
     )
     assert failed.ok
     assert application.backlog_review(project_id)["ok"] is True
+    second_start = _start_request(domain, project_id, idempotency_key="retry-backlog")
+    second = domain.transition(second_start)
+    second_id, _second_fingerprint = _attempt_identity(second)
+    assert second.ok
+    clock.now_value += timedelta(seconds=60)
+    recovery = domain.position(project_id)
+    recovery_decision = next(
+        item for item in recovery.decisions if item.node_id == "backlog.generate"
+    )
+    attempt_references = [
+        item
+        for item in recovery_decision.fact_references
+        if item.fact_type == "node_attempt"
+    ]
+    assert recovery_decision.reason_code == "BACKLOG_GENERATION_RECOVERY_REQUIRED"
+    assert [item.fact_id for item in attempt_references] == [str(second_id)]
+    assert application.backlog_review(project_id)["ok"] is True
+    replacement_start = _start_request(
+        domain, project_id, idempotency_key="replace-backlog"
+    )
+    replacement = domain.transition(replacement_start)
+    replacement_id, replacement_fingerprint = _attempt_identity(replacement)
+    replacement_base = _completion_request(
+        start_request=replacement_start,
+        attempt_id=replacement_id,
+        attempt_fingerprint=replacement_fingerprint,
+        specification=(spec_id, spec_hash),
+        idempotency_key="replacement-backlog",
+    )
+    replacement_content = replacement_base.canonical_content
+    items = replacement_content["backlog_items"]
+    assert isinstance(items, list)
+    assert isinstance(items[0], dict)
+    replacement_content = {
+        **replacement_content,
+        "backlog_items": [
+            {
+                **items[0],
+                "requirement": "Persist corrected durable node attempts",
+            }
+        ],
+    }
+    replacement_request = RecordBacklogDraft(
+        **(
+            replacement_base.model_dump()
+            | {
+                "canonical_content": replacement_content,
+                "content_fingerprint": canonical_hash(replacement_content),
+                "supersedes_backlog_artifact_id": int(backlog_reference.fact_id),
+            }
+        )
+    )
+    assert domain.transition(replacement_request).ok
+    corrected_pending = application.backlog_review(project_id)
+    assert corrected_pending["ok"] is True
+    assert "binding" in _object(corrected_pending["data"])
 
 
 @pytest.mark.parametrize(
