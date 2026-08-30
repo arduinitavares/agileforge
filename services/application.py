@@ -138,6 +138,7 @@ from workflow.contracts import (
     JsonValue,
     NodeCategory,
     NodeDecision,
+    RecommendationKind,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
@@ -1855,13 +1856,144 @@ class AgileForgeApplication:
         return self._workflow_domain.position(project_id)
 
     def backlog_review(self, project_id: int) -> JsonObject:
-        """Read the graph-selected unique Backlog review and hidden binding."""
-        return self._unique_planning_review(
+        """Read a pending Backlog review or its exact Feedback continuation."""
+        selection = self._delivery_review_selection
+        if selection is None:
+            return _planning_review_read_error(
+                "Planning review selection is unavailable."
+            )
+        position = self.position(project_id=project_id)
+        pending = _available_decisions(position, "backlog.review")
+        continuation = tuple(
+            decision
+            for decision in position.decisions
+            if decision.node_id == "backlog.generate"
+            and decision.reason_code != "BACKLOG_CORRECTION_AVAILABLE"
+            and (
+                any(
+                    reference.fact_type == "backlog"
+                    for reference in decision.fact_references
+                )
+                or decision.reason_code
+                in {
+                    "BACKLOG_REVISION_REQUIRED",
+                    "BACKLOG_GENERATION_ACTIVE",
+                    "BACKLOG_GENERATION_FAILED",
+                    "BACKLOG_GENERATION_RECOVERY_REQUIRED",
+                }
+            )
+        )
+        if pending and continuation:
+            return _planning_review_read_error("Backlog review state is conflicting.")
+        if len(pending) > 1 or len(continuation) > 1:
+            return _planning_review_read_error(
+                "Backlog review selection is not unique."
+            )
+        if pending:
+            return self._backlog_pending_review(
+                project_id=project_id,
+                decision=pending[0],
+                selection=selection,
+            )
+        if not continuation:
+            return _planning_review_read_error(
+                "No planning review is currently available.",
+                code="PLANNING_REVIEW_NOT_AVAILABLE",
+            )
+        return self._backlog_feedback_continuation(
             project_id=project_id,
-            node_id="backlog.review",
+            decision=continuation[0],
+            selection=selection,
+        )
+
+    def _backlog_feedback_continuation(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        selection: _DeliveryReviewSelectionPort,
+    ) -> JsonObject:
+        """Join one current Feedback retry decision to its durable review."""
+        references = _backlog_feedback_continuation_references(decision)
+        if references is None:
+            return _planning_review_read_error(
+                "Backlog Feedback continuation is invalid."
+            )
+        backlog_reference, specification_reference, goal_reference = references
+        identity = selection.review_identity(
+            project_id=project_id,
+            decision=decision,
             fact_type="backlog",
-            projection=self.reads.backlog_review,
-            id_argument="backlog_artifact_id",
+        )
+        if identity is None or identity != (
+            _fact_reference_integer(backlog_reference),
+            backlog_reference.fingerprint,
+        ):
+            return _planning_review_read_error("Backlog Feedback selection is invalid.")
+        result = self.reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=identity[0],
+        )
+        if result.get("ok") is not True:
+            return result
+        review = result.get("data")
+        if _backlog_terminal_review_state(review) == "rejected":
+            return _planning_review_read_error(
+                "No planning review is currently available.",
+                code="PLANNING_REVIEW_NOT_AVAILABLE",
+            )
+        if not _backlog_feedback_projection_matches(
+            review=review,
+            backlog_reference=backlog_reference,
+            specification_reference=specification_reference,
+            goal_reference=goal_reference,
+        ):
+            return _planning_review_read_error(
+                "Backlog Feedback projection is invalid."
+            )
+        return _planning_review_read_success(
+            {
+                "continuation": {
+                    "binding": {
+                        "node_id": decision.node_id,
+                        "decision_fingerprint": decision.decision_fingerprint,
+                        "instance_key": decision.instance_key,
+                    },
+                    "review": review,
+                }
+            }
+        )
+
+    def _backlog_pending_review(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        selection: _DeliveryReviewSelectionPort,
+    ) -> JsonObject:
+        """Preserve the established pending Backlog-review response shape."""
+        identity = selection.review_identity(
+            project_id=project_id,
+            decision=decision,
+            fact_type="backlog",
+        )
+        if identity is None:
+            return _planning_review_read_error("Planning review selection is invalid.")
+        artifact_id, _fingerprint = identity
+        result = self.reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=artifact_id,
+        )
+        if result.get("ok") is not True:
+            return result
+        return _planning_review_read_success(
+            {
+                "binding": {
+                    "decision_fingerprint": decision.decision_fingerprint,
+                    "instance_key": decision.instance_key,
+                },
+                "review": result.get("data"),
+            }
         )
 
     def roadmap_review(self, project_id: int) -> JsonObject:
@@ -5055,6 +5187,128 @@ def _planning_review_binding_matches(
 def _planning_review_read_success(data: JsonObject) -> JsonObject:
     """Return the exact four-field success envelope for a selected review."""
     return {"ok": True, "data": data, "warnings": [], "errors": []}
+
+
+def _backlog_feedback_continuation_references(
+    decision: NodeDecision,
+) -> tuple[FactReference, FactReference, FactReference] | None:
+    """Validate the complete graph tuple that can retain Feedback context."""
+    expected = {
+        "BACKLOG_REVISION_REQUIRED": (
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            False,
+        ),
+        "BACKLOG_GENERATION_ACTIVE": (
+            NodeCategory.WAITING,
+            RecommendationKind.REQUIRED,
+            False,
+        ),
+        "BACKLOG_GENERATION_FAILED": (
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            True,
+        ),
+        "BACKLOG_GENERATION_RECOVERY_REQUIRED": (
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            True,
+        ),
+    }.get(decision.reason_code)
+    if (
+        expected is None
+        or decision.request_kind != "record_backlog_draft"
+        or decision.instance_key is not None
+        or decision.category is not expected[0]
+        or decision.recommendation_kind is not expected[1]
+    ):
+        return None
+    required = ("backlog", "specification", "product_goal")
+    allowed = (*required, "node_attempt") if expected[2] else required
+    counts = Counter(reference.fact_type for reference in decision.fact_references)
+    if (
+        any(
+            reference.fact_type not in allowed for reference in decision.fact_references
+        )
+        or any(counts[fact_type] != 1 for fact_type in required)
+        or counts["node_attempt"] != int(expected[2])
+    ):
+        return None
+    references = {
+        reference.fact_type: reference for reference in decision.fact_references
+    }
+    selected = tuple(references[fact_type] for fact_type in required)
+    if any(_fact_reference_integer(reference) is None for reference in selected):
+        return None
+    return cast("tuple[FactReference, FactReference, FactReference]", selected)
+
+
+def _fact_reference_integer(reference: FactReference) -> int | None:
+    """Accept only positive integer fact identities in durable joins."""
+    try:
+        value = int(reference.fact_id)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _backlog_feedback_projection_matches(
+    *,
+    review: object,
+    backlog_reference: FactReference,
+    specification_reference: FactReference,
+    goal_reference: FactReference,
+) -> bool:
+    """Require durable reviewed content to match every current graph reference."""
+    if not isinstance(review, dict):
+        return False
+    review_data = cast("dict[str, object]", review)
+    candidate = review_data.get("candidate")
+    lineage = review_data.get("lineage")
+    terminal_review = review_data.get("review")
+    if not (
+        isinstance(candidate, dict)
+        and isinstance(lineage, dict)
+        and isinstance(terminal_review, dict)
+    ):
+        return False
+    candidate_data = cast("dict[str, object]", candidate)
+    lineage_data = cast("dict[str, object]", lineage)
+    terminal_review_data = cast("dict[str, object]", terminal_review)
+    specification = lineage_data.get("specification")
+    goal = lineage_data.get("product_goal")
+    rationale = terminal_review_data.get("rationale")
+    if not isinstance(specification, dict) or not isinstance(goal, dict):
+        return False
+    specification_data = cast("dict[str, object]", specification)
+    goal_data = cast("dict[str, object]", goal)
+    return bool(
+        review_data.get("phase") == "backlog"
+        and candidate_data.get("backlog_artifact_id")
+        == _fact_reference_integer(backlog_reference)
+        and candidate_data.get("artifact_fingerprint") == backlog_reference.fingerprint
+        and specification_data.get("spec_version_id")
+        == _fact_reference_integer(specification_reference)
+        and specification_data.get("spec_hash") == specification_reference.fingerprint
+        and goal_data.get("product_goal_artifact_id")
+        == _fact_reference_integer(goal_reference)
+        and goal_data.get("product_goal_fingerprint") == goal_reference.fingerprint
+        and terminal_review_data.get("state") == "feedback"
+        and isinstance(rationale, str)
+        and rationale.strip()
+    )
+
+
+def _backlog_terminal_review_state(review: object) -> object:
+    """Read a terminal state only after the durable candidate was selected."""
+    if not isinstance(review, dict):
+        return None
+    terminal_review = cast("dict[str, object]", review).get("review")
+    return (
+        cast("dict[str, object]", terminal_review).get("state")
+        if isinstance(terminal_review, dict)
+        else None
+    )
 
 
 def _planning_review_read_error(

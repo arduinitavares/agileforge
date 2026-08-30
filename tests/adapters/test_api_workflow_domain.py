@@ -3343,7 +3343,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
             decision=decision,
             selected_story_ids=(completed_story_id, future_story_id),
             selected_scope_fingerprint=story_dependency_source_fingerprint(current_scope),
-        )
+    )
         is None
     )
 
@@ -3362,7 +3362,7 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
                 "idempotency_key": "next-scope-authority-apply",
                 "actor": "operator@example.com",
             },
-    )
+        )
     assert response.status_code == HTTPStatus.OK
     assert response.json()["status"] == "success"
     with Session(engine) as session:
@@ -5186,10 +5186,13 @@ def _items(value: object) -> list[object]:
 
 
 class _FakeApplication:
-    def __init__(self) -> None:
+    def __init__(self, backlog_result: JsonObject | None = None) -> None:
         self.calls: list[tuple[str, object, ExpectedPlanningReviewBinding | None]] = []
+        self.backlog_result = backlog_result
 
     def backlog_review(self, project_id: int) -> JsonObject:
+        if self.backlog_result is not None:
+            return self.backlog_result
         return _review_result("backlog", project_id)
 
     def roadmap_review(self, project_id: int) -> JsonObject:
@@ -5282,6 +5285,40 @@ def test_review_gets_return_application_selected_content(
     selected = data["items"][0] if phase == "story" else data
     assert list(selected) == ["binding", "review"]
     assert selected["review"]["phase"] == phase
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {
+            "binding": {"decision_fingerprint": "pending", "instance_key": None},
+            "review": {"phase": "backlog", "review": {"state": "pending"}},
+        },
+        {
+            "continuation": {
+                "binding": {
+                    "node_id": "backlog.generate",
+                    "decision_fingerprint": "feedback",
+                    "instance_key": None,
+                },
+                "review": {"phase": "backlog", "review": {"state": "feedback"}},
+            }
+        },
+    ],
+)
+def test_backlog_review_route_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    data: JsonObject,
+) -> None:
+    """The route passes both pending and continuation read shapes through unchanged."""
+    result: JsonObject = {"ok": True, "data": data, "warnings": [], "errors": []}
+    monkeypatch.setattr(api_module, "_application", lambda: _FakeApplication(result))
+
+    response = TestClient(api_module.app).get("/api/projects/41/backlog/review")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["status"] == "success"
+    assert response.json()["data"] == data
 
 
 @pytest.mark.parametrize(
@@ -5493,6 +5530,138 @@ class _Reads:
 
     def story_review(self, *, project_id: int, story_artifact_id: int) -> JsonObject:
         return _selected_projection(project_id, story_artifact_id, "story")
+
+
+class _CountingBacklogReads:
+    """Expose one durable Backlog projection and retain its call count."""
+
+    def __init__(self, result: JsonObject) -> None:
+        self.result = result
+        self.calls: list[tuple[int, int]] = []
+
+    def backlog_review(
+        self, *, project_id: int, backlog_artifact_id: int
+    ) -> JsonObject:
+        self.calls.append((project_id, backlog_artifact_id))
+        return self.result
+
+
+class _NullableBacklogSelection:
+    """Return a controlled durable identity after recording the exact selection."""
+
+    def __init__(self, identity: tuple[int, str] | None) -> None:
+        self.identity = identity
+        self.calls: list[tuple[int, NodeDecision, str]] = []
+
+    def replay_transition(self, query: object) -> TransitionResult | None:
+        del query
+        return None
+
+    def review_identity(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        fact_type: str,
+    ) -> tuple[int, str] | None:
+        self.calls.append((project_id, decision, fact_type))
+        return self.identity
+
+
+def _backlog_continuation_projection(  # noqa: PLR0913
+    *,
+    backlog_id: int = 7,
+    backlog_fingerprint: str = "sha256:backlog-7",
+    specification_id: int = 31,
+    specification_hash: str = "sha256:specification-31",
+    goal_id: int = 21,
+    goal_fingerprint: str = "sha256:goal-21",
+    state: str = "feedback",
+    rationale: str = "Show the retry boundary.",
+) -> JsonObject:
+    return {
+        "ok": True,
+        "data": {
+            "phase": "backlog",
+            "candidate": {
+                "backlog_artifact_id": backlog_id,
+                "artifact_fingerprint": backlog_fingerprint,
+                "backlog_items": [{"requirement": "Keep review context."}],
+            },
+            "lineage": {
+                "specification": {
+                    "spec_version_id": specification_id,
+                    "spec_hash": specification_hash,
+                },
+                "product_goal": {
+                    "product_goal_artifact_id": goal_id,
+                    "product_goal_fingerprint": goal_fingerprint,
+                },
+            },
+            "review": {"state": state, "rationale": rationale},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _backlog_continuation_decision(  # noqa: PLR0913
+    *,
+    reason: str = "BACKLOG_REVISION_REQUIRED",
+    category: NodeCategory = NodeCategory.AVAILABLE,
+    recommendation: RecommendationKind = RecommendationKind.RECOVERY,
+    request_kind: str = "record_backlog_draft",
+    instance_key: str | None = None,
+    references: tuple[FactReference, ...] | None = None,
+) -> NodeDecision:
+    return NodeDecision(
+        node_id="backlog.generate",
+        child_graph_id="backlog",
+        request_kind=request_kind,
+        category=category,
+        recommendation_kind=recommendation,
+        reason_code=reason,
+        instance_key=instance_key,
+        decision_fingerprint="continuation-decision",
+        fact_references=(
+            (
+                FactReference(
+                    fact_type="backlog", fact_id="7", fingerprint="sha256:backlog-7"
+                ),
+                FactReference(
+                    fact_type="specification",
+                    fact_id="31",
+                    fingerprint="sha256:specification-31",
+                ),
+                FactReference(
+                    fact_type="product_goal", fact_id="21", fingerprint="sha256:goal-21"
+                ),
+            )
+            if references is None
+            else references
+        ),
+    )
+
+
+def _backlog_continuation_position(*decisions: NodeDecision) -> WorkflowPosition:
+    return WorkflowPosition(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="backlog-continuation-facts",
+        evaluated_at=datetime(2026, 8, 30, tzinfo=UTC),
+        available_nodes=tuple(
+            item.node_id
+            for item in decisions
+            if item.category is NodeCategory.AVAILABLE
+        ),
+        waiting_nodes=tuple(
+            item.node_id for item in decisions if item.category is NodeCategory.WAITING
+        ),
+        blocked_nodes=(),
+        invalid_nodes=(),
+        terminal=False,
+        decisions=decisions,
+    )
 
 
 def _selected_projection(project_id: int, artifact_id: int, phase: str) -> JsonObject:
@@ -5712,6 +5881,140 @@ def test_application_review_read_distinguishes_absence_from_conflict() -> None:
     conflict = conflict_application.backlog_review(41)
     conflict_errors = _items(conflict["errors"])
     assert _object(conflict_errors[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("reason", "category", "recommendation", "attempt_required"),
+    [
+        (
+            "BACKLOG_REVISION_REQUIRED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            False,
+        ),
+        (
+            "BACKLOG_GENERATION_ACTIVE",
+            NodeCategory.WAITING,
+            RecommendationKind.REQUIRED,
+            False,
+        ),
+        (
+            "BACKLOG_GENERATION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            True,
+        ),
+        (
+            "BACKLOG_GENERATION_RECOVERY_REQUIRED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            True,
+        ),
+    ],
+)
+def test_application_backlog_feedback_continuation_tracks_real_attempt_lifecycle(
+    reason: str,
+    category: NodeCategory,
+    recommendation: RecommendationKind,
+    attempt_required: bool,
+) -> None:
+    """Every current Feedback attempt state retains its reviewed Backlog context."""
+    decision = _backlog_continuation_decision(
+        reason=reason,
+        category=category,
+        recommendation=recommendation,
+        references=(
+            *_backlog_continuation_decision().fact_references,
+            *(
+                (
+                    FactReference(
+                        fact_type="node_attempt",
+                        fact_id="17",
+                        fingerprint="sha256:attempt-17",
+                    ),
+                )
+                if attempt_required
+                else ()
+            ),
+        ),
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is True
+    assert result["data"] == {
+        "continuation": {
+            "binding": {
+                "node_id": "backlog.generate",
+                "decision_fingerprint": "continuation-decision",
+                "instance_key": None,
+            },
+            "review": _backlog_continuation_projection()["data"],
+        }
+    }
+    assert reads.calls == [(41, 7)]
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        _backlog_continuation_decision(request_kind="wrong_request"),
+        _backlog_continuation_decision(instance_key="unexpected"),
+        _backlog_continuation_decision(category=NodeCategory.WAITING),
+        _backlog_continuation_decision(recommendation=RecommendationKind.REQUIRED),
+        _backlog_continuation_decision(reason="UNKNOWN_BACKLOG_REASON"),
+        _backlog_continuation_decision(references=()),
+        _backlog_continuation_decision(
+            references=(
+                *_backlog_continuation_decision().fact_references,
+                FactReference(
+                    fact_type="unexpected", fact_id="1", fingerprint="sha256:extra"
+                ),
+            )
+        ),
+    ],
+)
+def test_application_backlog_continuation_position_rejects_malformed_join(
+    decision: NodeDecision,
+) -> None:
+    """Malformed candidate continuation facts fail closed before durable reads."""
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(_backlog_continuation_position(decision)),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert reads.calls == []
+
+
+def test_application_backlog_continuation_position_rejects_torn_projection() -> None:
+    """A selected identity may not diverge from the durable reviewed candidate."""
+    reads = _CountingBacklogReads(_backlog_continuation_projection(backlog_id=8))
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(
+            _backlog_continuation_position(_backlog_continuation_decision())
+        ),
+        read_projection=cast("Any", reads),
+        delivery_review_selection=_NullableBacklogSelection((7, "sha256:backlog-7")),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert reads.calls == [(41, 7)]
 
 
 def test_application_story_review_reads_are_stably_ordered() -> None:
