@@ -45,11 +45,17 @@ from services.contracts.sprint import (
 )
 from services.contracts.story import (
     CanonicalStoryOutput,
+    StoryReferenceContentError,
     StoryReplacementSource,
+    StorySentinelContentError,
     UserStoryAgentItem,
     UserStoryWriterInput,
     UserStoryWriterOutput,
     canonicalize_story_items,
+    safe_story_validation_errors,
+    safe_story_validation_message,
+    story_output_sentinel_fields,
+    story_validation_error_sentinel_fields,
 )
 from services.contracts.vision import (
     VisionAgentInput,
@@ -67,6 +73,7 @@ from services.vision_output_validation import (
     VisionDraftValidationError,
     validate_vision_draft,
 )
+from utils.adk_runner import parse_json_payload
 from utils.agileforge_spec_profile_v2 import SCHEMA_VERSION, SpecificationPayload
 from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
@@ -97,6 +104,7 @@ AGENTIC_NODE_IDS = (
     "planning.sprint.plan",
 )
 _MAX_STORY_SCHEMA_FAILURE_DETAIL_CHARS: int = 1800
+_STORY_SENTINEL_SCAN_KEYS: frozenset[str] = frozenset({"user_stories"})
 
 
 class RecipeInput(BaseModel):
@@ -769,6 +777,22 @@ def _validate_story_writer_output(generated: object) -> UserStoryWriterOutput:
     return UserStoryWriterOutput.model_validate(generated)
 
 
+def _story_leaf_sentinel_fields(generated: object) -> tuple[str, ...]:
+    """Inspect parseable raw leaf output before schema errors can echo its values."""
+    candidate = generated
+    if isinstance(generated, (bytes, bytearray)):
+        try:
+            candidate = bytes(generated).decode()
+        except UnicodeDecodeError:
+            return ()
+    if isinstance(candidate, str):
+        candidate = parse_json_payload(
+            candidate,
+            required_keys=_STORY_SENTINEL_SCAN_KEYS,
+        )
+    return story_output_sentinel_fields(candidate)
+
+
 def _validate_story_leaf_output(
     generated: object,
     *,
@@ -777,6 +801,9 @@ def _validate_story_leaf_output(
     targeted: bool,
 ) -> UserStoryWriterOutput:
     """Validate raw story output, checking schema, cardinality, and references."""
+    sentinel_fields = _story_leaf_sentinel_fields(generated)
+    if sentinel_fields:
+        raise StorySentinelContentError(sentinel_fields)
     output = _validate_story_writer_output(generated)
     if targeted and len(output.user_stories) != 1:
         message = "Targeted Story correction must return exactly one replacement item."
@@ -817,12 +844,39 @@ async def _run_story_leaf_with_schema_repair(
                 targeted=targeted,
             )
         except (ValidationError, SpecificationReferenceError, ValueError) as error:
+            failure_cause: BaseException = error
             if isinstance(error, ValidationError):
-                validation_errors: object = error.errors()
+                raw_validation_errors = error.errors()
+                sentinel_fields = story_validation_error_sentinel_fields(
+                    raw_validation_errors
+                )
+                if sentinel_fields:
+                    failure_cause = StorySentinelContentError(sentinel_fields)
+                    validation_errors: object = [str(failure_cause)]
+                    error_message = str(failure_cause)
+                else:
+                    validation_errors = safe_story_validation_errors(
+                        raw_validation_errors
+                    )
+                    error_message = safe_story_validation_message(
+                        raw_validation_errors
+                    )
+                    failure_cause = ValueError(error_message)
+            elif isinstance(error, StoryReferenceContentError):
+                validation_errors = [
+                    {"path": field, "type": "specification_reference"}
+                    for field in error.fields
+                ]
                 error_message = str(error)
             elif isinstance(error, SpecificationReferenceError):
-                validation_errors = list(error.errors)
-                error_message = str(error)
+                validation_errors = [
+                    {"path": "story_output", "type": "specification_reference"}
+                ]
+                error_message = (
+                    "Story reference validation failed at: story_output "
+                    "(specification_reference)"
+                )
+                failure_cause = ValueError(error_message)
             else:
                 validation_errors = [str(error)]
                 error_message = str(error)
@@ -842,7 +896,7 @@ async def _run_story_leaf_with_schema_repair(
                     f"INITIAL_VALIDATION_ERRORS: {initial}. "
                     f"REPAIR_VALIDATION_ERRORS: {repair}."
                 )[:MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS]
-                raise ValueError(message) from error
+                raise ValueError(message) from failure_cause
             initial_validation_errors = validation_errors
             attempt_payload = with_story_schema_repair_feedback(
                 writer_input,

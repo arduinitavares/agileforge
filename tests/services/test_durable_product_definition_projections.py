@@ -4373,6 +4373,112 @@ def test_story_review_returns_no_partial_candidate_for_corrupt_item_ids(
     }
 
 
+def test_story_review_recovers_persisted_sentinels_with_safe_field_evidence(
+    engine: Engine,
+) -> None:
+    """Hide a pre-fix candidate while naming fields and preserving stored bytes."""
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        record_roadmap_decision_in_session,
+    )
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        RecordStoryDraftInput,
+        record_story_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _story_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=roadmap,
+                decision="accepted",
+                rationale="Accept Roadmap for sentinel Story read.",
+                reviewer="operator@example.com",
+                idempotency_key="projection-sentinel-story-roadmap",
+                decided_at=EVALUATED_AT + timedelta(seconds=3),
+            ),
+        )
+        backlog = session.get(BacklogArtifact, roadmap.backlog_artifact_id)
+        assert backlog is not None
+        valid_content = _story_content(spec_item_id="REQ.delivery")
+        story = record_story_draft_in_session(
+            session,
+            inputs=RecordStoryDraftInput(
+                project_id=project_id,
+                source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+                source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+                backlog_item_id="PBI-000001",
+                roadmap_artifact_id=roadmap_id,
+                roadmap_artifact_fingerprint=roadmap.content_fingerprint,
+                canonical_content=valid_content,
+                content_fingerprint=canonical_hash(valid_content),
+                supersedes_story_artifact_id=None,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=4),
+            ),
+        )
+        session.flush()
+        story_id = int(story.story_artifact_id or 0)
+        content = json.loads(story.canonical_content_json)
+        first_envelope = content["story_items"][0]
+        first_item = first_envelope["item"]
+        first_item["story_title"] = "placeholder"
+        for dimension in first_item["invest_assessment"].values():
+            dimension["rationale"] = "placeholder"
+            dimension["evidence"] = "placeholder"
+        first_envelope["item_fingerprint"] = canonical_hash(first_item)
+        persisted_bytes = canonical_json(content)
+        persisted_fingerprint = canonical_hash(content)
+        story.canonical_content_json = persisted_bytes
+        story.content_fingerprint = persisted_fingerprint
+        session.add(story)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).story_review(
+        project_id=project_id,
+        story_artifact_id=story_id,
+    )
+
+    expected_fields = [
+        "story_items[0].story_title",
+        *[
+            f"story_items[0].invest_assessment.{dimension}.{field_name}"
+            for dimension in (
+                "independent",
+                "negotiable",
+                "valuable",
+                "estimable",
+                "small",
+                "testable",
+            )
+            for field_name in ("rationale", "evidence")
+        ],
+    ]
+    assert result["ok"] is True
+    review = _json_object(result["data"])
+    assert review["candidate_available"] is False
+    assert review["invalid_fields"] == expected_fields
+    candidate = _json_object(review["candidate"])
+    assert candidate["story_artifact_id"] == story_id
+    assert candidate["story_items"] == []
+    assert candidate["is_complete"] is False
+    assert "placeholder" not in json.dumps(result).casefold()
+    with Session(engine) as session:
+        stored = session.get(type(story), story_id)
+        assert stored is not None
+        assert stored.canonical_content_json == persisted_bytes
+        assert stored.content_fingerprint == persisted_fingerprint
+
+
 def test_backlog_review_returns_typed_error_for_corrupt_canonical_content(
     engine: Engine,
 ) -> None:

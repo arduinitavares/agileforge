@@ -14,6 +14,8 @@ from services.contracts.story import (
     InvestDimensionAssessment,
     StoryInvestAssessment,
     StoryItemEnvelope,
+    StoryReferenceContentError,
+    StorySentinelContentError,
     UserStoryAgentItem,
     UserStoryWriterInput,
     canonicalize_story_items,
@@ -129,6 +131,119 @@ def test_story_canonicalization_preserves_provider_order_and_criteria_bytes() ->
     assert items[0].item.acceptance_criteria == (
         "Verify the result.",
         "- Preserve\nUnicode ✓",
+    )
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "placeholder",
+        "  TBD  ",
+        "[TODO]",
+        "to be determined",
+        "N/A",
+        "not applicable",
+        "**placeholder**",
+        "[ `TBD` ]",
+    ],
+)
+def test_story_canonicalization_rejects_exact_authoring_sentinel_title(
+    sentinel: str,
+) -> None:
+    """Reject only a whole-field authoring sentinel before host fingerprinting."""
+    story = _story().model_copy(update={"story_title": sentinel})
+
+    with pytest.raises(ValueError, match=r"story_items\[0\]\.story_title"):
+        canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=(story,),
+        )
+
+
+def test_story_canonicalization_reports_exact_placeholder_invest_fields() -> None:
+    """Name every sentinel INVEST field without exposing its supplied value."""
+    data = _story().model_dump(mode="json")
+    data["story_title"] = "placeholder"
+    assessment = data["invest_assessment"]
+    assert isinstance(assessment, dict)
+    for dimension in assessment.values():
+        assert isinstance(dimension, dict)
+        dimension["rationale"] = "placeholder"
+        dimension["evidence"] = "placeholder"
+    story = UserStoryAgentItem.model_validate(data)
+
+    with pytest.raises(StorySentinelContentError) as captured:
+        canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=(story,),
+        )
+
+    message = str(captured.value)
+    expected_fields = {
+        "story_items[0].story_title",
+        *{
+            f"story_items[0].invest_assessment.{dimension}.{field_name}"
+            for dimension in (
+                "independent",
+                "negotiable",
+                "valuable",
+                "estimable",
+                "small",
+                "testable",
+            )
+            for field_name in ("rationale", "evidence")
+        },
+    }
+    assert all(field in message for field in expected_fields)
+    assert "placeholder" not in message.casefold()
+
+
+def test_story_canonicalization_allows_substantive_placeholder_prose() -> None:
+    """Do not reject useful prose merely because it contains a sentinel word."""
+    data = _story().model_dump(mode="json")
+    data["story_title"] = "Replace placeholder tokens in generated templates"
+    assessment = data["invest_assessment"]
+    assert isinstance(assessment, dict)
+    assessment["independent"] = {
+        "result": "pass",
+        "rationale": "Placeholder replacement is isolated to one renderer.",
+        "evidence": "Tests prove each placeholder token is replaced.",
+    }
+    story = UserStoryAgentItem.model_validate(data)
+
+    items = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(story,),
+    )
+
+    assert items[0].item.story_title == data["story_title"]
+
+
+def test_story_canonicalization_redacts_invalid_reference_values() -> None:
+    """Report every invalid reference field without retaining provider-owned IDs."""
+    private_references = ("PRIVATE.PROVIDER.229.A", "PRIVATE.PROVIDER.229.B")
+    stories = tuple(
+        _story().model_copy(update={"spec_item_ids": (private_reference,)})
+        for private_reference in private_references
+    )
+
+    with pytest.raises(StoryReferenceContentError) as captured:
+        canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=stories,
+        )
+
+    assert captured.value.fields == (
+        "story_items[0].spec_item_ids",
+        "story_items[1].spec_item_ids",
+    )
+    message = str(captured.value)
+    assert all(
+        private_reference not in message for private_reference in private_references
     )
 
 

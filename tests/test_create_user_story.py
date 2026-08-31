@@ -55,6 +55,7 @@ from services.contracts.story import (
     InvestDimensionAssessment,
     StoryInvestAssessment,
     StoryItemEnvelope,
+    StorySentinelContentError,
 )
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
@@ -168,6 +169,26 @@ def _story_content(
         clarifying_questions=(),
     )
     return output.model_dump(mode="json")
+
+
+def _placeholder_story_content() -> JsonObject:
+    """Return a fingerprint-consistent three-item issue #229 candidate."""
+    content = _story_content(item_count=3)
+    raw_items = content["story_items"]
+    assert isinstance(raw_items, list)
+    third_envelope = raw_items[2]
+    assert isinstance(third_envelope, dict)
+    third_item = third_envelope["item"]
+    assert isinstance(third_item, dict)
+    third_item["story_title"] = "placeholder"
+    assessment = third_item["invest_assessment"]
+    assert isinstance(assessment, dict)
+    for dimension in assessment.values():
+        assert isinstance(dimension, dict)
+        dimension["rationale"] = "placeholder"
+        dimension["evidence"] = "placeholder"
+    third_envelope["item_fingerprint"] = canonical_hash(third_item)
+    return content
 
 
 def _legacy_story_content(*, requirement_index: int) -> JsonObject:
@@ -420,6 +441,147 @@ def test_story_draft_persists_only_one_complete_immutable_artifact(
                 recorded_offset=2,
             )
         assert session.exec(select(StoryArtifact)).all() == [artifact]
+
+
+def test_sentinel_successor_validation_preserves_current_accepted_story(
+    engine: Engine,
+) -> None:
+    """Reject an invalid successor before it can replace accepted Story rows."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+
+    with Session(engine) as session:
+        accepted_artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Accepted Story set",
+        )
+        accepted_result = _decide_story(
+            session,
+            accepted_artifact,
+            decision="accepted",
+            offset=2,
+        )
+        session.commit()
+        accepted_artifact_id = int(accepted_artifact.story_artifact_id or 0)
+        accepted_bytes = accepted_artifact.canonical_content_json
+        accepted_fingerprint = accepted_artifact.content_fingerprint
+        accepted_story_ids = accepted_result.activated_story_ids
+
+    invalid_content = _placeholder_story_content()
+    with Session(engine) as session:
+        backlog = session.exec(
+            select(BacklogArtifact).where(BacklogArtifact.project_id == project_id)
+        ).one()
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        with pytest.raises(StorySentinelContentError) as captured:
+            record_story_draft_in_session(
+                session,
+                inputs=RecordStoryDraftInput(
+                    project_id=project_id,
+                    source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+                    source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+                    backlog_item_id="PBI-000001",
+                    roadmap_artifact_id=roadmap_id,
+                    roadmap_artifact_fingerprint=roadmap.content_fingerprint,
+                    canonical_content=invalid_content,
+                    content_fingerprint=canonical_hash(invalid_content),
+                    supersedes_story_artifact_id=accepted_artifact_id,
+                    actor="operator@example.com",
+                    recorded_at=EVALUATED_AT + timedelta(seconds=3),
+                ),
+            )
+
+        assert "story_items[2].story_title" in str(captured.value)
+        assert "placeholder" not in str(captured.value).casefold()
+        artifacts = session.exec(
+            select(StoryArtifact).where(StoryArtifact.project_id == project_id)
+        ).all()
+        assert [artifact.story_artifact_id for artifact in artifacts] == [
+            accepted_artifact_id
+        ]
+        stored_artifact = artifacts[0]
+        assert stored_artifact.canonical_content_json == accepted_bytes
+        assert stored_artifact.content_fingerprint == accepted_fingerprint
+        stories = session.exec(
+            select(UserStory).where(UserStory.project_id == project_id)
+        ).all()
+        assert (
+            tuple(int(story.story_id or 0) for story in stories)
+            == accepted_story_ids
+        )
+        assert all(story.is_superseded is False for story in stories)
+
+
+@pytest.mark.parametrize(
+    ("decision", "allowed"),
+    [("feedback", True), ("rejected", True), ("accepted", False)],
+)
+def test_pre_fix_sentinel_successor_allows_only_non_accepting_decisions(
+    engine: Engine,
+    decision: str,
+    allowed: bool,
+) -> None:
+    """Permit recovery decisions after exact integrity checks, but never activation."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+
+    with Session(engine) as session:
+        accepted_artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Accepted Story set",
+        )
+        accepted = _decide_story(
+            session,
+            accepted_artifact,
+            decision="accepted",
+            offset=2,
+        )
+        successor = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Candidate Story set",
+            supersedes_id=accepted_artifact.story_artifact_id,
+        )
+        content = json.loads(successor.canonical_content_json)
+        envelope = content["story_items"][0]
+        item = envelope["item"]
+        item["story_title"] = "placeholder"
+        for dimension in item["invest_assessment"].values():
+            dimension["rationale"] = "placeholder"
+            dimension["evidence"] = "placeholder"
+        envelope["item_fingerprint"] = canonical_hash(item)
+        successor.canonical_content_json = canonical_json(content)
+        successor.content_fingerprint = canonical_hash(content)
+        session.add(successor)
+        session.flush()
+
+        if allowed:
+            result = _decide_story(
+                session,
+                successor,
+                decision=decision,
+                offset=4,
+            )
+            assert result.activated_story_ids == ()
+        else:
+            with pytest.raises(StorySentinelContentError):
+                _decide_story(
+                    session,
+                    successor,
+                    decision=decision,
+                    offset=4,
+                )
+        active_rows = session.exec(
+            select(UserStory).where(UserStory.project_id == project_id)
+        ).all()
+        assert tuple(
+            int(row.story_id or 0) for row in active_rows
+        ) == accepted.activated_story_ids
+        assert all(row.is_superseded is False for row in active_rows)
 
 
 def test_acceptance_materializes_exact_rows_but_feedback_does_not(

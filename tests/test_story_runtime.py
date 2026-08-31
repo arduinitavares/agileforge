@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from services import story_runtime
-from services.contracts.story import UserStoryWriterInput
+from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
+from utils import failure_artifacts
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 
 GOLD_PATH = (
@@ -150,13 +152,37 @@ def _valid_output(*, story_count: int = 1) -> str:
     )
 
 
+def _placeholder_output() -> str:
+    """Return the exact three-Story malformed correction shape from issue #229."""
+    payload = json.loads(_valid_output(story_count=3))
+    third_story = payload["user_stories"][2]
+    third_story["story_title"] = "placeholder"
+    for dimension in third_story["invest_assessment"].values():
+        dimension["rationale"] = "placeholder"
+        dimension["evidence"] = "placeholder"
+    return json.dumps(payload)
+
+
 def _fake_failure(**kwargs: object) -> dict[str, object]:
     details = cast("story_runtime._FailureDetails", kwargs["details"])
     return {
         "success": False,
+        "output_artifact": None,
         "failure_stage": kwargs["failure_stage"],
         "error": details.message,
     }
+
+
+def _isolate_failure_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(
+        failure_artifacts,
+        "FAILURES_DIR",
+        tmp_path / "logs" / "failures",
+    )
 
 
 def test_story_input_context_preserves_complete_root_and_parent_evidence() -> None:
@@ -214,6 +240,381 @@ async def test_story_runtime_uses_one_provider_call_and_no_automatic_semantic_ca
         encoding="utf-8"
     )
     assert semantic_calls == []
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_rejects_exact_placeholder_correction_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject issue #229 output before it can become reusable canonical content."""
+    calls = 0
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        nonlocal calls
+        calls += 1
+        return _placeholder_output()
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    monkeypatch.setattr(story_runtime, "_failure", _fake_failure)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input="Correct the accepted Story set."
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert result["is_reusable"] is False
+    assert result["output_artifact"] is None
+    assert calls == story_runtime.MAX_STORY_SCHEMA_REPAIR_ATTEMPTS
+    message = str(result["error"])
+    expected_fields = {
+        "story_items[2].story_title",
+        *{
+            f"story_items[2].invest_assessment.{dimension}.{field_name}"
+            for dimension in (
+                "independent",
+                "negotiable",
+                "valuable",
+                "estimable",
+                "small",
+                "testable",
+            )
+            for field_name in ("rationale", "evidence")
+        },
+    }
+    assert all(field in message for field in expected_fields)
+    assert "placeholder" not in message.casefold()
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_sentinel_failure_omits_raw_provider_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Persist safe field evidence without raw sentinel output or a preview."""
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        return _placeholder_output()
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input="Correct the accepted Story set."
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert result["raw_output_preview"] is None
+    artifact_id = cast("str", result["failure_artifact_id"])
+    artifact = failure_artifacts.read_failure_artifact(artifact_id)
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["raw_output_length"] == 0
+    extra = cast("dict[str, object]", artifact["extra"])
+    invalid_fields = cast("list[str]", extra["invalid_fields"])
+    assert invalid_fields[0] == "story_items[2].story_title"
+    assert len(invalid_fields) == 13  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_reference_failure_uses_paths_without_provider_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep invalid provider references out of repair and failure evidence."""
+    private_reference = "PRIVATE.PROVIDER.229"
+    payload = json.loads(_valid_output())
+    payload["user_stories"][0]["spec_item_ids"] = [
+        "DATA.001",
+        private_reference,
+    ]
+    attempt_inputs: list[UserStoryWriterInput] = []
+
+    async def fake_invoke(attempt_payload: UserStoryWriterInput) -> str:
+        attempt_inputs.append(attempt_payload)
+        return json.dumps(payload)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert len(attempt_inputs) == EXPECTED_REPAIR_CALL_COUNT
+    assert result["failure_stage"] == "output_validation"
+    assert result["raw_output_preview"] is None
+    repair_input = attempt_inputs[1].user_input or ""
+    assert "story_items[0].spec_item_ids" in repair_input
+    assert private_reference not in repair_input
+    exposed = f"{result!s}\n{caplog.text}"
+    assert private_reference not in exposed
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert private_reference not in str(artifact)
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] == [
+        {
+            "path": "story_items[0].spec_item_ids",
+            "type": "specification_reference",
+        }
+    ]
+    assert artifact["exception_type"] is None
+    assert artifact["exception_message"] is None
+    assert artifact["traceback"] is None
+    assert artifact["extra"] == {
+        "invalid_fields": ["story_items[0].spec_item_ids"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_redacts_statement_sentinel_before_persona_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pre-scan sentinel prose that Pydantic would otherwise echo as input."""
+    payload = json.loads(_valid_output())
+    payload["user_stories"][0]["statement"] = "[ `TBD` ]"
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(payload)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert result["raw_output_preview"] is None
+    assert "tbd" not in str(result["error"]).casefold()
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] is None
+    assert artifact["exception_type"] is None
+    assert artifact["traceback"] is None
+    assert artifact["extra"] == {"invalid_fields": ["story_items[0].statement"]}
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_redacts_agent_validation_sentinel_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sanitize actual item-level Pydantic errors when no partial text exists."""
+    payload = json.loads(_valid_output())
+    payload["user_stories"][0]["statement"] = "[ `TBD` ]"
+    with pytest.raises(ValidationError) as validation:
+        UserStoryWriterOutput.model_validate(payload)
+    validation_errors = cast(
+        "list[dict[str, object]]",
+        validation.value.errors(),
+    )
+    assert validation_errors[0]["loc"] == ("user_stories", 0)
+    assert isinstance(validation_errors[0]["input"], dict)
+    error_message = "Story agent output validation failed"
+    attempt_inputs: list[UserStoryWriterInput] = []
+
+    async def fake_invoke(attempt_payload: UserStoryWriterInput) -> str:
+        attempt_inputs.append(attempt_payload)
+        raise failure_artifacts.AgentInvocationError(
+            error_message,
+            validation_errors=validation_errors,
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert result["raw_output_preview"] is None
+    assert "tbd" not in str(result["error"]).casefold()
+    assert len(attempt_inputs) == EXPECTED_REPAIR_CALL_COUNT
+    repair_input = attempt_inputs[1].user_input or ""
+    assert "story_items[0].statement" in repair_input
+    assert "tbd" not in repair_input.casefold()
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] is None
+    assert artifact["exception_type"] is None
+    assert artifact["exception_message"] is None
+    assert artifact["traceback"] is None
+    assert artifact["extra"] == {"invalid_fields": ["story_items[0].statement"]}
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_redacts_sentinel_from_wrapped_partial_agent_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pre-scan an incomplete embedded object before retaining partial output."""
+    raw_output = (
+        'prefix {"user_stories":[{"story_title":"placeholder"}]} suffix'
+    )
+    error_message = "Story agent invocation failed after partial output"
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        raise failure_artifacts.AgentInvocationError(
+            error_message,
+            partial_output=raw_output,
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert result["failure_stage"] == "output_validation"
+    assert result["raw_output_preview"] is None
+    assert "placeholder" not in str(result["error"]).casefold()
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] is None
+    assert artifact["exception_type"] is None
+    assert artifact["exception_message"] is None
+    assert artifact["traceback"] is None
+    assert artifact["extra"] == {"invalid_fields": ["story_items[0].story_title"]}
+
+
+@pytest.mark.parametrize(
+    ("raw_output", "private_marker"),
+    [
+        (
+            "prefix {\"user_stories\": []} actual "
+            "{\"user_stories\":[{\"story_title\":\"placeholder\","
+            "\"statement\":\"PRIVATE_RUNTIME_229\"}]}",
+            "private_runtime_229",
+        ),
+        (
+            "{\"user_stories\":[{\"story_title\":\"placeholder\","
+            "\"statement\":\"PRIVATE_RUNTIME_TRUNCATED_229\"}]",
+            "private_runtime_truncated_229",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_story_runtime_invalid_json_never_persists_provider_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_output: str,
+    private_marker: str,
+) -> None:
+    """Omit unclassifiable Story output instead of retaining provider values."""
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        return raw_output
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert result["failure_stage"] == "invalid_json"
+    assert result["raw_output_preview"] is None
+    result_text = str(result).casefold()
+    assert "placeholder" not in result_text
+    assert private_marker not in result_text
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] is None
+    assert artifact["exception_type"] is None
+    assert artifact["traceback"] is None
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_agent_error_omits_unclassified_partial_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Never retain partial provider text or exception detail from agent errors."""
+    raw_output = (
+        '{"user_stories":[{"story_title":"placeholder",'
+        '"statement":"PRIVATE_PARTIAL_229"}]'
+    )
+    private_error = "PRIVATE_AGENT_EXCEPTION_229"
+    calls = 0
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        nonlocal calls
+        calls += 1
+        raise failure_artifacts.AgentInvocationError(
+            private_error,
+            partial_output=raw_output,
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+    _isolate_failure_artifacts(monkeypatch, tmp_path)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert calls == 1
+    assert result["failure_stage"] == "invocation_exception"
+    assert result["raw_output_preview"] is None
+    exposed = f"{result!s}\n{caplog.text}".casefold()
+    assert "placeholder" not in exposed
+    assert "private_partial_229" not in exposed
+    assert "private_agent_exception_229" not in exposed
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", result["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["raw_output"] is None
+    assert artifact["validation_errors"] is None
+    assert artifact["exception_type"] is None
+    assert artifact["exception_message"] is None
+    assert artifact["traceback"] is None
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_allows_substantive_placeholder_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep ordinary valid generation unchanged when prose names placeholders."""
+    payload = json.loads(_valid_output())
+    story = payload["user_stories"][0]
+    story["story_title"] = "Replace placeholder tokens in generated templates"
+    story["invest_assessment"]["testable"] = {
+        "result": "pass",
+        "rationale": "Placeholder replacement has deterministic outcomes.",
+        "evidence": "Tests prove each placeholder token is replaced.",
+    }
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(payload)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+
+    assert result["success"] is True
+    assert result["is_reusable"] is True
 
 
 @pytest.mark.asyncio

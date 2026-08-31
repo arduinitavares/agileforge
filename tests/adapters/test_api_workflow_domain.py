@@ -1,5 +1,6 @@
 """API adapter tests for exact typed workflow requests."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -120,6 +121,7 @@ from workflow.clock import FixedClock
 from workflow.contracts import (
     FactReference,
     JsonObject,
+    JsonValue,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -5521,9 +5523,14 @@ def _items(value: object) -> list[object]:
 
 
 class _FakeApplication:
-    def __init__(self, backlog_result: JsonObject | None = None) -> None:
+    def __init__(
+        self,
+        backlog_result: JsonObject | None = None,
+        story_result: JsonObject | None = None,
+    ) -> None:
         self.calls: list[tuple[str, object, ExpectedPlanningReviewBinding | None]] = []
         self.backlog_result = backlog_result
+        self.story_result = story_result
 
     def backlog_review(self, project_id: int) -> JsonObject:
         if self.backlog_result is not None:
@@ -5534,6 +5541,8 @@ class _FakeApplication:
         return _review_result("roadmap", project_id)
 
     def story_reviews(self, project_id: int) -> JsonObject:
+        if self.story_result is not None:
+            return self.story_result
         result = _review_result("story", project_id)
         data = result["data"]
         assert isinstance(data, dict)
@@ -5620,6 +5629,63 @@ def test_review_gets_return_application_selected_content(
     selected = data["items"][0] if phase == "story" else data
     assert list(selected) == ["binding", "review"]
     assert selected["review"]["phase"] == phase
+
+
+def test_story_review_api_returns_only_safe_sentinel_field_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map an unavailable malformed candidate to 409 without provider values."""
+    invalid_fields: list[JsonValue] = [
+        "story_items[2].story_title",
+        "story_items[2].invest_assessment.independent.rationale",
+        "story_items[2].invest_assessment.independent.evidence",
+    ]
+    review: JsonObject = {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "story",
+        "project_id": 41,
+        "candidate_available": False,
+        "invalid_fields": invalid_fields,
+        "lineage": {"backlog_item": {"backlog_item_id": "PBI-000003"}},
+        "candidate": {
+            "story_artifact_id": 9,
+            "story_items": [],
+            "is_complete": False,
+            "clarifying_questions": [],
+        },
+        "review": {"state": "pending"},
+    }
+    result: JsonObject = {
+        "ok": True,
+        "data": {
+            "items": [
+                {
+                    "binding": {
+                        "decision_fingerprint": "sha256:decision",
+                        "instance_key": "backlog_item:PBI-000003",
+                    },
+                    "review": review,
+                }
+            ]
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApplication(story_result=result),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/story/reviews")
+
+    assert response.status_code == HTTPStatus.OK
+    payload = response.json()
+    projected = payload["data"]["items"][0]["review"]
+    assert projected["candidate_available"] is False
+    assert projected["invalid_fields"] == invalid_fields
+    assert projected["candidate"]["story_items"] == []
+    assert "placeholder" not in json.dumps(payload).casefold()
 
 
 @pytest.mark.parametrize(

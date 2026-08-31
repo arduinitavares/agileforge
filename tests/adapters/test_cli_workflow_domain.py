@@ -20,6 +20,7 @@ from cli.main import (
 from cli.workflow_commands import workflow_next
 from services.application import (
     ExpectedPlanningReviewBinding,
+    StoryReviewRequest,
     StorySetCorrectionRequest,
 )
 from tests.adapters.test_command_renderer import position_fixture
@@ -1496,6 +1497,7 @@ class _Application:
         default_factory=list
     )
     story_review_override: dict[str, object] | None = None
+    story_result_override: dict[str, object] | None = None
 
     def backlog_review(self, _project_id: int) -> dict[str, object]:
         return _unique_review()
@@ -1515,6 +1517,8 @@ class _Application:
         return result
 
     def story_reviews(self, _project_id: int) -> dict[str, object]:
+        if self.story_result_override is not None:
+            return self.story_result_override
         return {
             "ok": True,
             "data": {
@@ -1922,6 +1926,148 @@ def test_story_decide_rejects_acceptance_when_required_evidence_is_malformed(
         "evidence is missing or malformed." in captured.out
     )
     assert len(app.writes) == 0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("is_complete", False),
+        ("clarifying_questions", ["Which account source is authoritative?"]),
+    ],
+)
+def test_story_decide_rejects_explicitly_incomplete_candidate(
+    capsys: pytest.CaptureFixture[str],
+    field_name: str,
+    field_value: object,
+) -> None:
+    """Story acceptance stays unavailable until the candidate is complete."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    candidate[field_name] = field_value
+    app.story_review_override = review
+
+    assert main(_decision_argv("story"), application=app) == ARGUMENT_ERROR_EXIT_CODE
+
+    assert "Story proposal cannot be accepted" in capsys.readouterr().out
+    assert app.writes == []
+
+
+def test_story_review_read_reports_safe_sentinel_field_paths(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI projection returns exact invalid fields and no unavailable candidate."""
+    invalid_fields = [
+        "story_items[2].story_title",
+        "story_items[2].invest_assessment.independent.rationale",
+        "story_items[2].invest_assessment.independent.evidence",
+    ]
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    candidate["story_items"] = []
+    candidate["is_complete"] = False
+    review["candidate_available"] = False
+    review["invalid_fields"] = invalid_fields
+    app = _Application(
+        story_result_override={
+            "ok": True,
+            "data": {
+                "items": [
+                    {
+                        "binding": {
+                            "decision_fingerprint": "sha256:story-review",
+                            "instance_key": "backlog_item:PBI-000001",
+                        },
+                        "review": review,
+                    }
+                ]
+            },
+            "warnings": [],
+            "errors": [],
+        }
+    )
+
+    assert main(["story", "reviews", "--project-id", "41"], application=app) == 0
+
+    output = capsys.readouterr().out
+    assert all(field in output for field in invalid_fields)
+    assert "placeholder" not in output.casefold()
+
+
+@pytest.mark.parametrize("decision", ["feedback", "rejected"])
+def test_story_decide_keeps_recovery_decisions_for_safe_unavailable_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    """Keep non-accepting decisions available without exposing invalid values."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    candidate["story_items"] = []
+    candidate["is_complete"] = False
+    review["candidate_available"] = False
+    review["invalid_fields"] = ["story_items[2].story_title"]
+    app.story_review_override = review
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    argv = _decision_argv("story")
+    argv[argv.index("--decision") + 1] = decision
+
+    assert main(argv, application=app) == 0
+    assert len(app.writes) == 1
+    assert cast("StoryReviewRequest", app.writes[0][0]).decision == decision
+
+
+def test_story_decide_rejects_sentinel_content_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Do not allow nonblank authoring sentinels through the CLI acceptance guard."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    story_items = cast("list[dict[str, object]]", candidate["story_items"])
+    story_items[0]["story_title"] = "placeholder"
+    assessment = cast(
+        "dict[str, dict[str, object]]", story_items[0]["invest_assessment"]
+    )
+    for dimension in assessment.values():
+        dimension["rationale"] = "placeholder"
+        dimension["evidence"] = "placeholder"
+    app.story_review_override = review
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+
+    exit_code = main(_decision_argv("story"), application=app)
+
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+    output = capsys.readouterr().out
+    assert "story_items[0].story_title" in output
+    assert "story_items[0].invest_assessment.testable.evidence" in output
+    assert len(app.writes) == 0
+
+
+def test_story_decide_allows_substantive_placeholder_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep acceptance available when placeholder is part of meaningful prose."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    story_items = cast("list[dict[str, object]]", candidate["story_items"])
+    story_items[0]["story_title"] = "Replace placeholder tokens in templates"
+    assessment = cast(
+        "dict[str, dict[str, object]]", story_items[0]["invest_assessment"]
+    )
+    assessment["testable"]["rationale"] = (
+        "Placeholder replacement has deterministic outcomes."
+    )
+    assessment["testable"]["evidence"] = (
+        "Tests prove every placeholder token is replaced."
+    )
+    app.story_review_override = review
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+
+    assert main(_decision_argv("story"), application=app) == 0
+    assert len(app.writes) == 1
 
 
 def test_story_decide_allows_feedback_and_rejection_for_malformed_invest(

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Annotated, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.contracts.specification_references import (
     AcceptedSpecificationReference,
+    SpecificationReferenceError,
     canonical_spec_item_ids,
     require_nonblank_text,
     validate_accepted_specification_root,
@@ -27,6 +29,62 @@ _PERSONA_PATTERN = re.compile(
 )
 _MAX_PERSONA_LENGTH = 100
 _MAX_STORY_ITEMS = 8
+_STORY_AUTHORING_SENTINELS: frozenset[str] = frozenset(
+    {
+        "n/a",
+        "not applicable",
+        "placeholder",
+        "tbd",
+        "to be determined",
+        "todo",
+    }
+)
+_STORY_SENTINEL_WRAPPER_CHARACTERS = "[]<>{}()'\"`.,:;!?-_*~"
+_STORY_REQUIRED_PROSE_FIELDS: tuple[str, ...] = (
+    "story_title",
+    "statement",
+    "effort_rationale",
+    "order_rationale",
+)
+_STORY_INVEST_DIMENSION_NAMES: tuple[str, ...] = (
+    "independent",
+    "negotiable",
+    "valuable",
+    "estimable",
+    "small",
+    "testable",
+)
+_STORY_VALIDATION_LOCATION_NAMES: frozenset[str] = frozenset(
+    {
+        "acceptance_criteria",
+        "clarifying_questions",
+        "confidence",
+        "dependency_candidates",
+        "effort_rationale",
+        "estimated_effort",
+        "evidence",
+        "independent",
+        "invest_assessment",
+        "is_complete",
+        "negotiable",
+        "order_rationale",
+        "prerequisite_ref",
+        "produced_artifacts",
+        "rationale",
+        "reason",
+        "research_caveats",
+        "result",
+        "small",
+        "spec_item_ids",
+        "statement",
+        "story_item_id",
+        "story_title",
+        "testable",
+        "valuable",
+        "estimable",
+    }
+)
+_STORY_VALIDATION_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 STORY_POINTS_BY_EFFORT: dict[str, int] = {
     "XS": 1,
     "S": 2,
@@ -34,6 +92,234 @@ STORY_POINTS_BY_EFFORT: dict[str, int] = {
     "L": 5,
     "XL": 8,
 }
+
+
+class StorySentinelContentError(ValueError):
+    """Exact Story fields that contain authoring sentinels, never their values."""
+
+    def __init__(self, fields: Iterable[str]) -> None:
+        """Build a safe error message from field paths only."""
+        self.fields: tuple[str, ...] = tuple(fields)
+        message = (
+            "Story content contains authoring sentinels in fields: "
+            + ", ".join(self.fields)
+        )
+        super().__init__(message)
+
+
+class StoryReferenceContentError(ValueError):
+    """Exact Story reference fields that failed without retaining their values."""
+
+    def __init__(self, fields: Iterable[str]) -> None:
+        """Build a safe error message from field paths only."""
+        self.fields: tuple[str, ...] = tuple(fields)
+        message = (
+            "Story references failed validation in fields: " + ", ".join(self.fields)
+        )
+        super().__init__(message)
+
+
+def is_story_sentinel_text(value: object) -> bool:
+    """Match only a normalized whole field, never a word within substantive prose."""
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.casefold().split())
+    prior = None
+    while normalized != prior:
+        prior = normalized
+        normalized = normalized.strip(_STORY_SENTINEL_WRAPPER_CHARACTERS).strip()
+    return normalized in _STORY_AUTHORING_SENTINELS
+
+
+def _story_mapping_sentinel_fields(
+    raw_item: Mapping[str, object],
+    *,
+    index: int,
+) -> tuple[str, ...]:
+    """Inspect one provider item while emitting only fixed-schema field paths."""
+    fields: list[str] = []
+    prefix = f"story_items[{index}]"
+    fields.extend(
+        f"{prefix}.{field_name}"
+        for field_name in _STORY_REQUIRED_PROSE_FIELDS
+        if is_story_sentinel_text(raw_item.get(field_name))
+    )
+    criteria = raw_item.get("acceptance_criteria")
+    if isinstance(criteria, (list, tuple)):
+        fields.extend(
+            f"{prefix}.acceptance_criteria[{criterion_index}]"
+            for criterion_index, criterion in enumerate(criteria)
+            if is_story_sentinel_text(criterion)
+        )
+    assessment = raw_item.get("invest_assessment")
+    if not isinstance(assessment, Mapping):
+        return tuple(fields)
+    assessment_mapping = cast("Mapping[object, object]", assessment)
+    for dimension_name in _STORY_INVEST_DIMENSION_NAMES:
+        dimension = assessment_mapping.get(dimension_name)
+        if isinstance(dimension, Mapping):
+            dimension_mapping = cast("Mapping[object, object]", dimension)
+            fields.extend(
+                f"{prefix}.invest_assessment.{dimension_name}.{field_name}"
+                for field_name in ("rationale", "evidence")
+                if is_story_sentinel_text(dimension_mapping.get(field_name))
+            )
+    return tuple(fields)
+
+
+def story_output_sentinel_fields(value: object) -> tuple[str, ...]:
+    """Inspect an untrusted provider mapping without echoing any field values."""
+    if not isinstance(value, Mapping):
+        return ()
+    value_mapping = cast("Mapping[object, object]", value)
+    raw_items = value_mapping.get("user_stories")
+    if not isinstance(raw_items, (list, tuple)):
+        return ()
+    fields: list[str] = []
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, Mapping):
+            continue
+        fields.extend(
+            _story_mapping_sentinel_fields(
+                cast("Mapping[str, object]", raw_item),
+                index=index,
+            )
+        )
+    return tuple(fields)
+
+
+def _story_sentinel_leaf_validation_path(
+    location: tuple[object, ...],
+    value: object,
+) -> str | None:
+    """Map one leaf validation error to a fixed-schema path when it is sentinel."""
+    if not is_story_sentinel_text(value) or len(location) < 3:  # noqa: PLR2004
+        return None
+    root, item_index, *segments = location
+    if (
+        root not in {"story_items", "user_stories"}
+        or not isinstance(item_index, int)
+        or isinstance(item_index, bool)
+        or item_index < 0
+    ):
+        return None
+    prefix = f"story_items[{item_index}]"
+    if len(segments) == 1 and segments[0] in _STORY_REQUIRED_PROSE_FIELDS:
+        return f"{prefix}.{segments[0]}"
+    if (
+        len(segments) == 2  # noqa: PLR2004
+        and segments[0] == "acceptance_criteria"
+        and isinstance(segments[1], int)
+        and not isinstance(segments[1], bool)
+        and segments[1] >= 0
+    ):
+        return f"{prefix}.acceptance_criteria[{segments[1]}]"
+    if (
+        len(segments) == 3  # noqa: PLR2004
+        and segments[0] == "invest_assessment"
+        and segments[1] in _STORY_INVEST_DIMENSION_NAMES
+        and segments[2] in {"rationale", "evidence"}
+    ):
+        return f"{prefix}.invest_assessment.{segments[1]}.{segments[2]}"
+    return None
+
+
+def story_validation_error_sentinel_fields(errors: object) -> tuple[str, ...]:
+    """Recover safe sentinel paths from leaf, item, or item-list error inputs."""
+    if not isinstance(errors, (list, tuple)):
+        return ()
+    fields: list[str] = []
+    for error in errors:
+        if not isinstance(error, Mapping):
+            continue
+        error_mapping = cast("Mapping[object, object]", error)
+        raw_location = error_mapping.get("loc")
+        if not isinstance(raw_location, (list, tuple)) or not raw_location:
+            continue
+        location = tuple(raw_location)
+        root = location[0]
+        if root not in {"story_items", "user_stories"}:
+            continue
+        raw_input = error_mapping.get("input")
+        if len(location) == 1 and isinstance(raw_input, (list, tuple)):
+            fields.extend(
+                story_output_sentinel_fields({"user_stories": raw_input})
+            )
+            continue
+        if len(location) == 2:  # noqa: PLR2004
+            item_index = location[1]
+            if (
+                isinstance(item_index, int)
+                and not isinstance(item_index, bool)
+                and item_index >= 0
+                and isinstance(raw_input, Mapping)
+            ):
+                fields.extend(
+                    _story_mapping_sentinel_fields(
+                        cast("Mapping[str, object]", raw_input),
+                        index=item_index,
+                    )
+                )
+            continue
+        leaf_path = _story_sentinel_leaf_validation_path(location, raw_input)
+        if leaf_path is not None:
+            fields.append(leaf_path)
+    return tuple(dict.fromkeys(fields))
+
+
+def _safe_story_validation_path(value: object) -> str:
+    """Normalize a Pydantic location without retaining provider-owned names."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return "story_output"
+    segments = tuple(value)
+    root = segments[0]
+    if root in {"story_items", "user_stories"}:
+        path = "story_items"
+    elif isinstance(root, str) and root in _STORY_VALIDATION_LOCATION_NAMES:
+        path = root
+    else:
+        return "story_output"
+    for segment in segments[1:]:
+        if isinstance(segment, int) and not isinstance(segment, bool) and segment >= 0:
+            path = f"{path}[{segment}]"
+        elif isinstance(segment, str) and segment in _STORY_VALIDATION_LOCATION_NAMES:
+            path = f"{path}.{segment}"
+        else:
+            return f"{path}.invalid_field"
+    return path
+
+
+def safe_story_validation_errors(errors: object) -> list[dict[str, object]]:
+    """Retain only fixed schema paths and bounded error codes for diagnostics."""
+    safe_errors: list[dict[str, object]] = []
+    if isinstance(errors, (list, tuple)):
+        for error in errors:
+            if not isinstance(error, Mapping):
+                continue
+            error_mapping = cast("Mapping[object, object]", error)
+            raw_type = error_mapping.get("type")
+            error_type = (
+                raw_type
+                if isinstance(raw_type, str)
+                and _STORY_VALIDATION_TYPE_PATTERN.fullmatch(raw_type)
+                else "validation_error"
+            )
+            safe_error: dict[str, object] = {
+                "path": _safe_story_validation_path(error_mapping.get("loc")),
+                "type": error_type,
+            }
+            if safe_error not in safe_errors:
+                safe_errors.append(safe_error)
+    return safe_errors or [{"path": "story_output", "type": "validation_error"}]
+
+
+def safe_story_validation_message(errors: object) -> str:
+    """Describe Story schema failures without provider input or exception text."""
+    details = ", ".join(
+        f"{error['path']} ({error['type']})"
+        for error in safe_story_validation_errors(errors)
+    )
+    return f"Story output schema validation failed at: {details}"
 
 
 def parse_story_persona(statement: str) -> str:
@@ -462,6 +748,33 @@ class UserStoryWriterInput(BaseModel):
         return self
 
 
+def _story_sentinel_fields(
+    items: Iterable[UserStoryAgentItem],
+) -> tuple[str, ...]:
+    """Return deterministic current-schema field paths with sentinel-only prose."""
+    fields: list[str] = []
+    for index, item in enumerate(items):
+        prefix = f"story_items[{index}]"
+        fields.extend(
+            f"{prefix}.{field_name}"
+            for field_name in _STORY_REQUIRED_PROSE_FIELDS
+            if is_story_sentinel_text(getattr(item, field_name))
+        )
+        fields.extend(
+            f"{prefix}.acceptance_criteria[{criterion_index}]"
+            for criterion_index, criterion in enumerate(item.acceptance_criteria)
+            if is_story_sentinel_text(criterion)
+        )
+        for dimension_name in _STORY_INVEST_DIMENSION_NAMES:
+            dimension = getattr(item.invest_assessment, dimension_name)
+            fields.extend(
+                f"{prefix}.invest_assessment.{dimension_name}.{field_name}"
+                for field_name in ("rationale", "evidence")
+                if is_story_sentinel_text(getattr(dimension, field_name))
+            )
+    return tuple(fields)
+
+
 def canonicalize_story_items(
     specification: AcceptedSpecificationReference,
     *,
@@ -473,34 +786,89 @@ def canonicalize_story_items(
     if not 1 <= len(items) <= _MAX_STORY_ITEMS:
         message = "Story output must contain one through eight items"
         raise ValueError(message)
-    parent_ids = tuple(parent_backlog_spec_item_ids)
-    return tuple(
-        StoryItemEnvelope(
-            item=(
-                canonical_item := CanonicalStoryItem(
-                    story_item_id=f"US-{ordinal:04d}",
-                    story_title=item.story_title,
-                    statement=item.statement,
-                    persona=parse_story_persona(item.statement),
-                    acceptance_criteria=item.acceptance_criteria,
-                    spec_item_ids=canonical_spec_item_ids(
-                        specification,
-                        item.spec_item_ids,
-                        parent_spec_item_ids=parent_ids,
-                    ),
-                    invest_assessment=item.invest_assessment,
-                    estimated_effort=item.estimated_effort,
-                    effort_rationale=item.effort_rationale,
-                    order_rationale=item.order_rationale,
-                    produced_artifacts=item.produced_artifacts,
-                    research_caveats=item.research_caveats,
-                    dependency_candidates=item.dependency_candidates,
-                )
-            ),
-            item_fingerprint=canonical_hash(canonical_item.model_dump(mode="json")),
-        )
-        for ordinal, item in enumerate(items, start=1)
+    sentinel_fields = _story_sentinel_fields(items)
+    if sentinel_fields:
+        raise StorySentinelContentError(sentinel_fields)
+    return _mint_story_items(
+        specification,
+        parent_backlog_spec_item_ids=parent_backlog_spec_item_ids,
+        items=items,
     )
+
+
+def inspect_story_items_for_review(
+    specification: AcceptedSpecificationReference,
+    *,
+    parent_backlog_spec_item_ids: Iterable[str],
+    agent_items: Iterable[UserStoryAgentItem],
+) -> tuple[tuple[StoryItemEnvelope, ...], tuple[str, ...]]:
+    """Validate immutable item structure and return unsafe authoring field paths."""
+    items = tuple(agent_items)
+    if not 1 <= len(items) <= _MAX_STORY_ITEMS:
+        message = "Story output must contain one through eight items"
+        raise ValueError(message)
+    canonical_items = _mint_story_items(
+        specification,
+        parent_backlog_spec_item_ids=parent_backlog_spec_item_ids,
+        items=items,
+    )
+    return canonical_items, _story_sentinel_fields(items)
+
+
+def _mint_story_items(
+    specification: AcceptedSpecificationReference,
+    *,
+    parent_backlog_spec_item_ids: Iterable[str],
+    items: tuple[UserStoryAgentItem, ...],
+) -> tuple[StoryItemEnvelope, ...]:
+    """Mint exact host items after the caller selects an eligibility policy."""
+    parent_ids = tuple(parent_backlog_spec_item_ids)
+    canonical_spec_item_ids(specification, parent_ids)
+    validated_reference_sets: list[tuple[str, ...]] = []
+    invalid_reference_fields: list[str] = []
+    for index, item in enumerate(items):
+        try:
+            validated_reference_sets.append(
+                canonical_spec_item_ids(
+                    specification,
+                    item.spec_item_ids,
+                    parent_spec_item_ids=parent_ids,
+                )
+            )
+        except SpecificationReferenceError:
+            invalid_reference_fields.append(f"story_items[{index}].spec_item_ids")
+    if invalid_reference_fields:
+        raise StoryReferenceContentError(invalid_reference_fields)
+
+    canonical_items: list[StoryItemEnvelope] = []
+    for ordinal, (item, spec_item_ids) in enumerate(
+        zip(items, validated_reference_sets, strict=True),
+        start=1,
+    ):
+        canonical_item = CanonicalStoryItem(
+            story_item_id=f"US-{ordinal:04d}",
+            story_title=item.story_title,
+            statement=item.statement,
+            persona=parse_story_persona(item.statement),
+            acceptance_criteria=item.acceptance_criteria,
+            spec_item_ids=spec_item_ids,
+            invest_assessment=item.invest_assessment,
+            estimated_effort=item.estimated_effort,
+            effort_rationale=item.effort_rationale,
+            order_rationale=item.order_rationale,
+            produced_artifacts=item.produced_artifacts,
+            research_caveats=item.research_caveats,
+            dependency_candidates=item.dependency_candidates,
+        )
+        canonical_items.append(
+            StoryItemEnvelope(
+                item=canonical_item,
+                item_fingerprint=canonical_hash(
+                    canonical_item.model_dump(mode="json")
+                ),
+            )
+        )
+    return tuple(canonical_items)
 
 
 __all__ = [
@@ -511,10 +879,18 @@ __all__ = [
     "StoryDependencyCandidate",
     "StoryInvestAssessment",
     "StoryItemEnvelope",
+    "StoryReferenceContentError",
     "StoryReplacementSource",
+    "StorySentinelContentError",
     "UserStoryAgentItem",
     "UserStoryWriterInput",
     "UserStoryWriterOutput",
     "canonicalize_story_items",
+    "inspect_story_items_for_review",
+    "is_story_sentinel_text",
     "parse_story_persona",
+    "safe_story_validation_errors",
+    "safe_story_validation_message",
+    "story_output_sentinel_fields",
+    "story_validation_error_sentinel_fields",
 ]

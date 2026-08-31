@@ -3177,6 +3177,112 @@ test('planningReviewCardMarkup disables Accept and renders error banner for inva
     assert.notStrictEqual(rejectBinding, null);
 });
 
+test('planningReviewCardMarkup disables Accept for explicitly incomplete story review', () => {
+    const context = loadFrontend();
+    for (const candidateChange of [
+        { is_complete: false },
+        { clarifying_questions: ['Which account source is authoritative?'] },
+    ]) {
+        const item = storyReview('backlog_item:PBI-000003');
+        Object.assign(item.review.candidate, candidateChange);
+
+        const markup = context.planningReviewCardMarkup(
+            'Story review for PBI-000003', item, 'story', 0,
+        );
+
+        assert.ok(markup.includes('data-review-error="invalid-story-evidence"'));
+        assert.ok(markup.includes('data-review-decision="accepted" disabled'));
+        assert.ok(markup.includes('Request changes'));
+        assert.ok(markup.includes('Reject'));
+    }
+});
+
+test('Story sentinel normalization rejects nested authoring wrappers only', () => {
+    const context = loadFrontend();
+    for (const value of [
+        '**placeholder**',
+        '[ `TBD` ]',
+        '__TODO__',
+        '~not applicable~',
+    ]) {
+        assert.strictEqual(context.isStorySentinelText(value), true);
+    }
+    assert.strictEqual(
+        context.isStorySentinelText('Replace **placeholder** tokens in templates'),
+        false,
+    );
+});
+
+test('planningReviewCardMarkup names and blocks exact Story authoring sentinels', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    const sourceStory = item.review.candidate.story_items[0];
+    item.review.candidate.story_items = [1, 2, 3].map(() => (
+        JSON.parse(JSON.stringify(sourceStory))
+    ));
+    const malformed = item.review.candidate.story_items[2];
+    malformed.story_title = 'placeholder';
+    for (const dimension of Object.values(malformed.invest_assessment)) {
+        dimension.rationale = 'placeholder';
+        dimension.evidence = 'placeholder';
+    }
+
+    const markup = context.planningReviewCardMarkup(
+        'Story review for PBI-000003', item, 'story', 0,
+    );
+
+    assert.ok(markup.includes('data-review-error="invalid-story-evidence"'));
+    assert.ok(markup.includes('data-review-decision="accepted" disabled'));
+    assert.ok(markup.includes('story_items[2].story_title'));
+    assert.ok(markup.includes('story_items[2].invest_assessment.independent.rationale'));
+    assert.ok(markup.includes('story_items[2].invest_assessment.testable.evidence'));
+    assert.ok(markup.includes('Request changes'));
+    assert.ok(markup.includes('Reject'));
+});
+
+test('planningReviewCardMarkup keeps recovery decisions for safe unavailable Story candidate', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    item.review.candidate.story_items = [];
+    item.review.candidate.is_complete = false;
+    item.review.candidate_available = false;
+    item.review.invalid_fields = [
+        'story_items[2].story_title',
+        'story_items[2].invest_assessment.testable.evidence',
+    ];
+
+    const markup = context.planningReviewCardMarkup(
+        'Story review for PBI-000003', item, 'story', 0,
+    );
+
+    assert.ok(markup.includes('data-review-error="invalid-story-evidence"'));
+    assert.ok(markup.includes('story_items[2].story_title'));
+    assert.ok(markup.includes('data-review-decision="accepted" disabled'));
+    assert.ok(markup.includes('data-review-decision="feedback"'));
+    assert.ok(markup.includes('data-review-decision="rejected"'));
+});
+
+test('planningReviewCardMarkup allows substantive prose containing placeholder', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    const story = item.review.candidate.story_items[0];
+    story.story_title = 'Replace placeholder tokens in templates';
+    story.invest_assessment.testable.rationale = (
+        'Placeholder replacement has deterministic outcomes.'
+    );
+    story.invest_assessment.testable.evidence = (
+        'Tests prove every placeholder token is replaced.'
+    );
+
+    const markup = context.planningReviewCardMarkup(
+        'Story review for PBI-000003', item, 'story', 0,
+    );
+
+    assert.ok(!markup.includes('data-review-error="invalid-story-evidence"'));
+    assert.ok(markup.includes('data-review-decision="accepted" class='));
+    assert.ok(!markup.includes('data-review-decision="accepted" disabled'));
+});
+
 test('planningReviewCardMarkup names missing rationale evidence when disabling Accept', () => {
     const context = loadFrontend();
     const item = storyReview('backlog_item:PBI-000003');

@@ -4814,6 +4814,57 @@ def test_story_review_disables_acceptance_when_required_evidence_is_malformed(
     context.close()
 
 
+def test_story_review_disables_acceptance_for_exact_authoring_sentinels(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Block the exact three-Story issue #229 candidate in a real browser."""
+    action = _story_generation_action("backlog_item:PBI-000003")
+    fake = _delivery_ready_fake([action])
+    review = _story_review("backlog_item:PBI-000003")
+    review_data = cast("JsonObject", review["review"])
+    candidate = cast("JsonObject", review_data["candidate"])
+    candidate["story_items"] = []
+    candidate["is_complete"] = False
+    review_data["candidate_available"] = False
+    review_data["invalid_fields"] = [
+        "story_items[2].story_title",
+        "story_items[2].invest_assessment.independent.rationale",
+        "story_items[2].invest_assessment.testable.evidence",
+    ]
+    fake.planning_review_overrides["/story/reviews"] = {"items": [review]}
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+    banner = review_card.locator('[data-review-error="invalid-story-evidence"]')
+    expect(banner).to_be_visible()
+    expect(banner).to_contain_text("story_items[2].story_title")
+    expect(banner).to_contain_text(
+        "story_items[2].invest_assessment.independent.rationale"
+    )
+    expect(banner).to_contain_text(
+        "story_items[2].invest_assessment.testable.evidence"
+    )
+    expect(
+        review_card.locator(
+            '[data-planning-review="story"][data-review-decision="accepted"]'
+        )
+    ).to_be_disabled()
+    expect(
+        review_card.locator(
+            '[data-planning-review="story"][data-review-decision="feedback"]'
+        )
+    ).to_be_enabled()
+    expect(
+        review_card.locator(
+            '[data-planning-review="story"][data-review-decision="rejected"]'
+        )
+    ).to_be_enabled()
+
+    context.close()
+
+
 def _defer_issue_213_correction(page: Page) -> None:
     """Hold only the Backlog correction POST in the browser, never the route."""
     page.evaluate(

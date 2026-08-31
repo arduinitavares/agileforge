@@ -874,6 +874,7 @@ class _StoryReviewRecord:
     roadmap: _RoadmapReviewRecord
     backlog_item: BacklogItem
     content: CanonicalStoryOutput
+    invalid_fields: tuple[str, ...]
     decision: StoryArtifactDecision | None
 
 
@@ -1145,7 +1146,7 @@ def _load_story_review_record(
 ) -> _StoryReviewRecord:
     from services.agent_workbench.story_phase import (  # noqa: PLC0415
         _story_lineage_nodes,
-        load_stored_story_planning_content,
+        load_stored_story_planning_content_for_review,
     )
     from services.planning_lineage import (  # noqa: PLC0415
         PlanningLineageError,
@@ -1202,11 +1203,13 @@ def _load_story_review_record(
             "Story artifact Backlog item is missing from its exact Roadmap lineage.",
         )
     try:
-        _canonical_content, content = load_stored_story_planning_content(
-            artifact.canonical_content_json,
-            expected_fingerprint=artifact.content_fingerprint,
-            specification=backlog.specification,
-            backlog_item=backlog_items[0],
+        _canonical_content, content, invalid_fields = (
+            load_stored_story_planning_content_for_review(
+                artifact.canonical_content_json,
+                expected_fingerprint=artifact.content_fingerprint,
+                specification=backlog.specification,
+                backlog_item=backlog_items[0],
+            )
         )
     except (TypeError, ValidationError, ValueError) as error:
         _raise_planning_failure(
@@ -1233,6 +1236,7 @@ def _load_story_review_record(
         roadmap=roadmap,
         backlog_item=backlog_items[0],
         content=content,
+        invalid_fields=invalid_fields,
         decision=_story_terminal_decision(session, artifact=artifact),
     )
 
@@ -1393,26 +1397,29 @@ def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
     backlog = record.roadmap.backlog
     parent_priority = record.backlog_item.priority
     story_items: list[JsonValue] = []
-    for ordinal, envelope in enumerate(record.content.story_items, start=1):
-        item = envelope.item
-        item_data = _validated(
-            item.model_dump(
-                mode="json",
-                exclude={"spec_item_ids"},
+    if not record.invalid_fields:
+        for ordinal, envelope in enumerate(record.content.story_items, start=1):
+            item = envelope.item
+            item_data = _validated(
+                item.model_dump(
+                    mode="json",
+                    exclude={"spec_item_ids"},
+                )
             )
-        )
-        item_data["specification_evidence"] = _specification_evidence(
-            backlog.specification,
-            item.spec_item_ids,
-        )
-        item_data["order"] = ordinal
-        item_data["rank"] = str((parent_priority * 100) + ordinal)
-        item_data["story_points"] = STORY_POINTS_BY_EFFORT[item.estimated_effort]
-        story_items.append(item_data)
+            item_data["specification_evidence"] = _specification_evidence(
+                backlog.specification,
+                item.spec_item_ids,
+            )
+            item_data["order"] = ordinal
+            item_data["rank"] = str((parent_priority * 100) + ordinal)
+            item_data["story_points"] = STORY_POINTS_BY_EFFORT[item.estimated_effort]
+            story_items.append(item_data)
     return {
         "schema_version": "agileforge.planning-artifact-review.v1",
         "phase": "story",
         "project_id": artifact.project_id,
+        "candidate_available": not record.invalid_fields,
+        "invalid_fields": list(record.invalid_fields),
         "lineage": {
             "specification": {
                 "spec_version_id": backlog.specification.spec_version_id,
@@ -1446,8 +1453,12 @@ def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
             "created_by": artifact.created_by,
             "created_at": _iso(artifact.created_at),
             "story_items": story_items,
-            "is_complete": record.content.is_complete,
-            "clarifying_questions": list(record.content.clarifying_questions),
+            "is_complete": record.content.is_complete and not record.invalid_fields,
+            "clarifying_questions": (
+                []
+                if record.invalid_fields
+                else list(record.content.clarifying_questions)
+            ),
         },
         "review": _planning_review_data(record.decision),
     }

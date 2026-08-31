@@ -1295,6 +1295,46 @@ async def test_production_story_recipe_repairs_one_schema_failure(
 
 
 @pytest.mark.asyncio
+async def test_production_story_recipe_repairs_statement_sentinel_with_paths_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep provider Story values out of the production repair request."""
+    sentinel_output = _story_provider_output(
+        title="Private provider draft marker 9f4c"
+    )
+    sentinel_items = sentinel_output["user_stories"]
+    assert isinstance(sentinel_items, list)
+    sentinel_item = sentinel_items[0]
+    assert isinstance(sentinel_item, dict)
+    sentinel_item["statement"] = "[ `TBD` ]"
+    sentinel_item["acceptance_criteria"] = ["Private criterion marker 61ab"]
+    model = SequenceStoryLlm(
+        model="provider-free-story-sentinel-repair",
+        response_texts=[
+            json.dumps(sentinel_output),
+            json.dumps(_story_provider_output()),
+        ],
+    )
+    monkeypatch.setattr(story_agents, "_create_story_writer_model", lambda: model)
+    registry = _story_registry(story_agents.create_user_story_writer_agent())
+
+    result = await _run_provider_free_workflow(
+        registry.require("planning.story.generate").workflow,
+        _gold_story_recipe_payload(),
+        session_id="story-sentinel-repair-production-boundary",
+    )
+
+    canonical = CanonicalStoryOutput.model_validate(result.payload)
+    assert canonical.is_complete is True
+    assert len(model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    repair_input = json.loads(model.request_texts[1])["user_input"]
+    assert "story_items[0].statement" in repair_input
+    assert "tbd" not in repair_input.casefold()
+    assert "Private provider draft marker 9f4c" not in repair_input
+    assert "Private criterion marker 61ab" not in repair_input
+
+
+@pytest.mark.asyncio
 async def test_production_story_recipe_repairs_out_of_parent_spec_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1329,10 +1369,8 @@ async def test_production_story_recipe_repairs_out_of_parent_spec_reference(
     repair_request_payload = json.loads(model.request_texts[1])
     assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
     assert "SYSTEM_FEEDBACK" in model.request_texts[1]
-    assert (
-        "Specification item ID outside the parent boundary: REQ.002"
-        in repair_request_payload["user_input"]
-    )
+    assert "story_items[0].spec_item_ids" in repair_request_payload["user_input"]
+    assert "REQ.002" not in repair_request_payload["user_input"]
     assert (
         'ALLOWED_PARENT_SPEC_ITEM_IDS: ["DATA.001", "REQ.001"]'
         in repair_request_payload["user_input"]
@@ -1642,10 +1680,8 @@ async def test_story_correction_recipe_repairs_out_of_parent_reference(
     repair_request_payload = json.loads(correction_model.request_texts[1])
     assert "SYSTEM_FEEDBACK" not in correction_model.request_texts[0]
     assert "SYSTEM_FEEDBACK" in correction_model.request_texts[1]
-    assert (
-        "Specification item ID outside the parent boundary: REQ.002"
-        in repair_request_payload["user_input"]
-    )
+    assert "story_items[0].spec_item_ids" in repair_request_payload["user_input"]
+    assert "REQ.002" not in repair_request_payload["user_input"]
     assert (
         'ALLOWED_PARENT_SPEC_ITEM_IDS: ["DATA.001", "REQ.001"]'
         in repair_request_payload["user_input"]
@@ -2233,8 +2269,136 @@ def test_story_runner_double_schema_failure_has_zero_partial_persistence(
         assert session.exec(select(UserStory)).all() == []
 
 
+def test_story_runner_sentinel_failure_persists_paths_without_provider_values(
+    engine: Engine,
+) -> None:
+    """Persist only sentinel field paths after both production responses fail."""
+    sentinel = _story_provider_output(
+        spec_item_ids=("REQ.planning-1",),
+        title="Private durable marker c73e",
+    )
+    sentinel_items = sentinel["user_stories"]
+    assert isinstance(sentinel_items, list)
+    sentinel_item = sentinel_items[0]
+    assert isinstance(sentinel_item, dict)
+    sentinel_item["statement"] = "[ `TBD` ]"
+    sentinel_item["acceptance_criteria"] = ["Private durable criterion e201"]
+    leaf = SequenceLeafAgent(
+        name="double_sentinel_story",
+        responses=[sentinel, sentinel],
+        calls=[],
+    )
+    system = _story_runner_system(engine, leaf=leaf)
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(outcomes) == 1
+        failure_message = outcomes[0].failure_message
+        assert failure_message is not None
+        assert "INITIAL_VALIDATION_ERRORS" in failure_message
+        assert "REPAIR_VALIDATION_ERRORS" in failure_message
+        assert "story_items[0].statement" in failure_message
+        assert "tbd" not in failure_message.casefold()
+        assert "Private durable marker c73e" not in failure_message
+        assert "Private durable criterion e201" not in failure_message
+        assert session.exec(select(StoryArtifact)).all() == []
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+
+
+def test_story_runner_wrapped_partial_sentinel_persists_paths_only(
+    engine: Engine,
+) -> None:
+    """Sanitize one truncated embedded Story object on the live runner path."""
+    raw_output = (
+        'private-prefix {"user_stories":[{"story_title":"placeholder"}]} '
+        "private-suffix"
+    )
+    leaf = SequenceLeafAgent(
+        name="double_wrapped_sentinel_story",
+        responses=[raw_output, raw_output],
+        calls=[],
+    )
+    system = _story_runner_system(engine, leaf=leaf)
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        outcome = _node_outcomes(session, "planning.story.generate")[0]
+        failure_message = outcome.failure_message
+        assert failure_message is not None
+        assert "story_items[0].story_title" in failure_message
+        assert "placeholder" not in failure_message.casefold()
+        assert "private-prefix" not in failure_message
+        assert "private-suffix" not in failure_message
+
+
+@pytest.mark.parametrize(
+    ("raw_output", "private_marker"),
+    [
+        (
+            "prefix {\"user_stories\": []} actual "
+            "{\"user_stories\":[{\"story_title\":\"placeholder\","
+            "\"statement\":\"PRIVATE_DURABLE_229\"}]}",
+            "private_durable_229",
+        ),
+        (
+            "{\"user_stories\":[{\"story_title\":\"placeholder\","
+            "\"statement\":\"PRIVATE_TRUNCATED_229\"}]",
+            "private_truncated_229",
+        ),
+    ],
+)
+def test_story_runner_malformed_output_never_persists_or_logs_provider_values(
+    engine: Engine,
+    caplog: pytest.LogCaptureFixture,
+    raw_output: str,
+    private_marker: str,
+) -> None:
+    """Retain safe schema evidence when malformed text cannot be classified."""
+    leaf = SequenceLeafAgent(
+        name="double_malformed_story",
+        responses=[raw_output, raw_output],
+        calls=[],
+    )
+    system = _story_runner_system(engine, leaf=leaf)
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        outcome = _node_outcomes(session, "planning.story.generate")[0]
+        failure_message = (outcome.failure_message or "").casefold()
+        assert "story_output" in failure_message
+        assert "json_invalid" in failure_message
+        assert "placeholder" not in failure_message
+        assert private_marker not in failure_message
+    logged = caplog.text.casefold()
+    assert "placeholder" not in logged
+    assert private_marker not in logged
+
+
 def test_story_runner_double_reference_failure_has_zero_partial_persistence(
     engine: Engine,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Stop after two out-of-parent citation responses and retain one failure only."""
     out_of_parent = _story_provider_output(
@@ -2270,13 +2434,12 @@ def test_story_runner_double_reference_failure_has_zero_partial_persistence(
         assert outcomes[0].failure_message is not None
         assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
         assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
-        assert (
-            "Specification item ID outside the parent boundary"
-            in outcomes[0].failure_message
-        )
+        assert "story_items[0].spec_item_ids" in outcomes[0].failure_message
+        assert "REQ.planning-2" not in outcomes[0].failure_message
         assert session.exec(select(StoryArtifact)).all() == []
         assert session.exec(select(StoryArtifactDecision)).all() == []
         assert session.exec(select(UserStory)).all() == []
+    assert "REQ.planning-2" not in caplog.text
 
 
 def _attempt_16_sanitized_responses(
@@ -2550,6 +2713,7 @@ def _attempt_16_sanitized_responses(
 def test_story_runner_attempt_16_reproduction_fails_closed_without_partial_persistence(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Reproduce Attempt 16 with 3-Story responses and fail-closed persistence.
 
@@ -2596,14 +2760,11 @@ def test_story_runner_attempt_16_reproduction_fails_closed_without_partial_persi
         "SYSTEM_FEEDBACK: Your previous User Story response failed schema or "
         "reference validation." in repair_user_input
     )
-    assert (
-        "ERROR: Specification item ID outside the parent boundary: "
-        "REQ.planning-2" in repair_user_input
-    )
-    assert (
-        'VALIDATION_ERRORS: ["Specification item ID outside the parent boundary: '
-        'REQ.planning-2"]' in repair_user_input
-    )
+    assert "ERROR: Story references failed validation in fields:" in repair_user_input
+    assert "story_items[2].spec_item_ids" in repair_user_input
+    assert '"type": "specification_reference"' in repair_user_input
+    assert "REQ.planning-2" not in repair_user_input
+    assert "REQ.planning-3" not in repair_user_input
     assert 'ALLOWED_PARENT_SPEC_ITEM_IDS: ["REQ.planning-1"]' in repair_user_input
     assert (
         "Every user story spec_item_ids list must contain non-empty IDs selected "
@@ -2627,12 +2788,16 @@ def test_story_runner_attempt_16_reproduction_fails_closed_without_partial_persi
             in outcomes[0].failure_message
         )
         assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
-        assert "REQ.planning-2" in outcomes[0].failure_message
+        assert "story_items[2].spec_item_ids" in outcomes[0].failure_message
+        assert "REQ.planning-2" not in outcomes[0].failure_message
         assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
-        assert "REQ.planning-3" in outcomes[0].failure_message
+        assert "story_items[1].spec_item_ids" in outcomes[0].failure_message
+        assert "REQ.planning-3" not in outcomes[0].failure_message
         assert session.exec(select(StoryArtifact)).all() == []
         assert session.exec(select(StoryArtifactDecision)).all() == []
         assert session.exec(select(UserStory)).all() == []
+    assert "REQ.planning-2" not in caplog.text
+    assert "REQ.planning-3" not in caplog.text
 
 
 def _vision_preflight_runner(

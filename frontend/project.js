@@ -1722,6 +1722,35 @@ const INVEST_DIMENSION_KEYS = [
     'small',
     'testable',
 ];
+const STORY_AUTHORING_SENTINELS = new Set([
+    'n/a',
+    'not applicable',
+    'placeholder',
+    'tbd',
+    'to be determined',
+    'todo',
+]);
+const STORY_SENTINEL_WRAPPER_PATTERN = /^[\[\]<>{}()'"`.,:;!?_\-*~]+|[\[\]<>{}()'"`.,:;!?_\-*~]+$/g;
+
+function isStorySentinelText(value) {
+    if (typeof value !== 'string') return false;
+    let normalized = value.toLowerCase()
+        .trim()
+        .split(/\s+/u)
+        .join(' ');
+    let prior = null;
+    while (normalized !== prior) {
+        prior = normalized;
+        normalized = normalized.replace(STORY_SENTINEL_WRAPPER_PATTERN, '').trim();
+    }
+    return STORY_AUTHORING_SENTINELS.has(normalized);
+}
+
+function isSubstantiveStoryText(value) {
+    return typeof value === 'string'
+        && value.trim().length > 0
+        && !isStorySentinelText(value);
+}
 
 function isWellFormedInvestDimension(rawDim) {
     if (typeof rawDim !== 'object' || rawDim === null || Array.isArray(rawDim)) {
@@ -1736,10 +1765,10 @@ function isWellFormedInvestDimension(rawDim) {
     if (rawDim.result !== 'pass' && rawDim.result !== 'concern' && rawDim.result !== 'fail') {
         return false;
     }
-    if (typeof rawDim.rationale !== 'string' || rawDim.rationale.trim().length === 0) {
+    if (!isSubstantiveStoryText(rawDim.rationale)) {
         return false;
     }
-    if (typeof rawDim.evidence !== 'string' || rawDim.evidence.trim().length === 0) {
+    if (!isSubstantiveStoryText(rawDim.evidence)) {
         return false;
     }
     return true;
@@ -1761,8 +1790,12 @@ function isWellFormedInvestAssessment(rawAssessment) {
 }
 
 function isStoryReviewAcceptable(review) {
+    if (review?.candidate_available === false) return false;
     const candidate = reviewObject(review?.candidate);
     if (!candidate) return false;
+    if (candidate.is_complete !== true) return false;
+    const clarifyingQuestions = reviewItems(candidate.clarifying_questions);
+    if (!clarifyingQuestions || clarifyingQuestions.length !== 0) return false;
     const items = reviewItems(candidate.story_items);
     if (!items || items.length === 0) return false;
     for (const item of items) {
@@ -1770,14 +1803,71 @@ function isStoryReviewAcceptable(review) {
         if (!story || !isWellFormedInvestAssessment(story.invest_assessment)) {
             return false;
         }
-        if (typeof story.effort_rationale !== 'string' || !story.effort_rationale.trim()) {
+        if (!isSubstantiveStoryText(story.story_title)
+                || !isSubstantiveStoryText(story.statement)
+                || !isSubstantiveStoryText(story.effort_rationale)
+                || !isSubstantiveStoryText(story.order_rationale)) {
             return false;
         }
-        if (typeof story.order_rationale !== 'string' || !story.order_rationale.trim()) {
+        const acceptanceCriteria = reviewItems(story.acceptance_criteria);
+        if (!acceptanceCriteria
+                || acceptanceCriteria.length === 0
+                || !acceptanceCriteria.every(isSubstantiveStoryText)) {
             return false;
         }
     }
     return true;
+}
+
+function storyReviewSentinelFields(review) {
+    const projectedFields = reviewItems(review?.invalid_fields);
+    if (projectedFields
+            && projectedFields.every((field) => (
+                typeof field === 'string' && field.startsWith('story_items[')
+            ))) {
+        return [...projectedFields];
+    }
+    const candidate = reviewObject(review?.candidate);
+    const items = reviewItems(candidate?.story_items);
+    if (!items) return [];
+    const fields = [];
+    for (const [index, rawItem] of items.entries()) {
+        const story = reviewObject(rawItem);
+        if (!story) continue;
+        const prefix = `story_items[${index}]`;
+        for (const fieldName of [
+            'story_title',
+            'statement',
+            'effort_rationale',
+            'order_rationale',
+        ]) {
+            if (isStorySentinelText(story[fieldName])) {
+                fields.push(`${prefix}.${fieldName}`);
+            }
+        }
+        const criteria = reviewItems(story.acceptance_criteria);
+        if (criteria) {
+            for (const [criterionIndex, criterion] of criteria.entries()) {
+                if (isStorySentinelText(criterion)) {
+                    fields.push(`${prefix}.acceptance_criteria[${criterionIndex}]`);
+                }
+            }
+        }
+        const assessment = reviewObject(story.invest_assessment);
+        if (!assessment) continue;
+        for (const dimensionName of INVEST_DIMENSION_KEYS) {
+            const dimension = reviewObject(assessment[dimensionName]);
+            if (!dimension) continue;
+            for (const fieldName of ['rationale', 'evidence']) {
+                if (isStorySentinelText(dimension[fieldName])) {
+                    fields.push(
+                        `${prefix}.invest_assessment.${dimensionName}.${fieldName}`,
+                    );
+                }
+            }
+        }
+    }
+    return fields;
 }
 
 function investDimensionResultBadge(result) {
@@ -1820,8 +1910,8 @@ function investAssessmentMarkup(value) {
                         <strong class="font-semibold text-slate-900">${escapeWorkflowText(name)}</strong>
                         ${dimValid ? investDimensionResultBadge(dim.result) : '<span class="inline-flex items-center rounded-full bg-rose-200 px-2 py-0.5 text-xs font-semibold text-rose-900">Missing / Invalid</span>'}
                     </div>
-                    <p class="text-slate-700"><strong>Rationale:</strong> ${typeof dim?.rationale === 'string' && dim.rationale.trim() ? escapeWorkflowText(dim.rationale) : '<em class="text-rose-700">Missing / Invalid rationale</em>'}</p>
-                    <p class="text-slate-600"><strong>Evidence:</strong> ${typeof dim?.evidence === 'string' && dim.evidence.trim() ? escapeWorkflowText(dim.evidence) : '<em class="text-rose-700">Missing / Invalid evidence</em>'}</p>
+                    <p class="text-slate-700"><strong>Rationale:</strong> ${isSubstantiveStoryText(dim?.rationale) ? escapeWorkflowText(dim.rationale) : '<em class="text-rose-700">Missing / Invalid rationale</em>'}</p>
+                    <p class="text-slate-600"><strong>Evidence:</strong> ${isSubstantiveStoryText(dim?.evidence) ? escapeWorkflowText(dim.evidence) : '<em class="text-rose-700">Missing / Invalid evidence</em>'}</p>
                 </div>`;
             }).join('')}
         </div>` : ''}
@@ -1985,6 +2075,10 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
     if (!content) return '';
     const isStory = scope === 'story';
     const isAcceptable = !isStory || isStoryReviewAcceptable(selected.review);
+    const sentinelFields = isStory ? storyReviewSentinelFields(selected.review) : [];
+    const sentinelFieldMarkup = sentinelFields.length > 0
+        ? ` Invalid fields: ${sentinelFields.map(escapeWorkflowText).join(', ')}.`
+        : '';
 
     const candidate = reviewObject(selected.review.candidate);
     const correctedIdentity = scope === 'backlog'
@@ -1997,7 +2091,7 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
 
     return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}"${tabIndex}>
         <h3 class="text-sm font-semibold">${correctedIdentity ? `${correctedIdentity} - ` : ''}${escapeWorkflowText(label)}</h3>
-        ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-story-evidence">Story proposal cannot be accepted: required INVEST, sizing, or ordering evidence is missing or malformed. Acceptance is disabled.</div>` : ''}
+        ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-story-evidence">Story proposal cannot be accepted: required INVEST, sizing, or ordering evidence is missing or malformed. Acceptance is disabled.${sentinelFieldMarkup}</div>` : ''}
         <div class="mt-3 space-y-4">${content}</div>
         <div class="mt-4 flex flex-wrap gap-2">
             ${planningReviewAcceptButtonMarkup(scope, index, isAcceptable)}

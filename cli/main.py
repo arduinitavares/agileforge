@@ -54,6 +54,7 @@ from services.application import (
     VisionRevisionRequest,
     production_application,
 )
+from services.contracts.story import is_story_sentinel_text
 from services.sprint_ownership import SprintOwnerEvidence, sprint_owner_projection
 from utils.logging_config import configure_logging
 from workflow.contracts import (
@@ -1393,6 +1394,14 @@ _INVEST_DIMENSION_NAMES: tuple[str, ...] = (
 )
 
 
+def _is_substantive_story_text(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value.strip()
+        and not is_story_sentinel_text(value)
+    )
+
+
 def _is_well_formed_invest_dimension(dim: object) -> bool:
     if not isinstance(dim, dict):
         return False
@@ -1404,9 +1413,9 @@ def _is_well_formed_invest_dimension(dim: object) -> bool:
     evidence = dim_dict.get("evidence")
     if not isinstance(result, str) or result not in {"pass", "concern", "fail"}:
         return False
-    if not isinstance(rationale, str) or not rationale.strip():
+    if not _is_substantive_story_text(rationale):
         return False
-    return bool(isinstance(evidence, str) and evidence.strip())
+    return _is_substantive_story_text(evidence)
 
 
 def _is_well_formed_invest_assessment(assessment: object) -> bool:
@@ -1421,33 +1430,132 @@ def _is_well_formed_invest_assessment(assessment: object) -> bool:
     )
 
 
+_STORY_REQUIRED_TEXT_FIELDS: tuple[str, ...] = (
+    "story_title",
+    "statement",
+    "effort_rationale",
+    "order_rationale",
+)
+
+
+def _is_story_item_acceptable(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    item_dict = cast("dict[str, object]", item)
+    acceptance_criteria = item_dict.get("acceptance_criteria")
+    return (
+        _is_well_formed_invest_assessment(item_dict.get("invest_assessment"))
+        and all(
+            _is_substantive_story_text(item_dict.get(field_name))
+            for field_name in _STORY_REQUIRED_TEXT_FIELDS
+        )
+        and isinstance(acceptance_criteria, list)
+        and bool(acceptance_criteria)
+        and all(
+            _is_substantive_story_text(criterion)
+            for criterion in acceptance_criteria
+        )
+    )
+
+
 def _is_story_review_acceptable(review: object) -> bool:
     if not isinstance(review, dict):
         return False
     review_dict = cast("dict[str, object]", review)
+    if review_dict.get("candidate_available") is False:
+        return False
     candidate = review_dict.get("candidate")
     if not isinstance(candidate, dict):
         return False
     candidate_dict = cast("dict[str, object]", candidate)
+    clarifying_questions = candidate_dict.get("clarifying_questions")
     story_items = candidate_dict.get("story_items")
-    if not isinstance(story_items, list) or not story_items:
-        return False
-    for item in story_items:
-        if not isinstance(item, dict):
-            return False
-        item_dict = cast("dict[str, object]", item)
-        rationales = (
-            item_dict.get("effort_rationale"),
-            item_dict.get("order_rationale"),
+    return (
+        candidate_dict.get("is_complete") is True
+        and isinstance(clarifying_questions, list)
+        and not clarifying_questions
+        and isinstance(story_items, list)
+        and bool(story_items)
+        and all(_is_story_item_acceptable(item) for item in story_items)
+    )
+
+
+def _sentinel_mapping_fields(
+    value: dict[str, object],
+    *,
+    prefix: str,
+    field_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}.{field_name}"
+        for field_name in field_names
+        if is_story_sentinel_text(value.get(field_name))
+    )
+
+
+def _story_item_sentinel_fields(
+    item: dict[str, object],
+    *,
+    index: int,
+) -> tuple[str, ...]:
+    prefix = f"story_items[{index}]"
+    fields = list(
+        _sentinel_mapping_fields(
+            item,
+            prefix=prefix,
+            field_names=_STORY_REQUIRED_TEXT_FIELDS,
         )
-        if not _is_well_formed_invest_assessment(
-            item_dict.get("invest_assessment")
-        ) or not all(
-            isinstance(rationale, str) and bool(rationale.strip())
-            for rationale in rationales
-        ):
-            return False
-    return True
+    )
+    criteria = item.get("acceptance_criteria")
+    if isinstance(criteria, list):
+        fields.extend(
+            f"{prefix}.acceptance_criteria[{criterion_index}]"
+            for criterion_index, criterion in enumerate(criteria)
+            if is_story_sentinel_text(criterion)
+        )
+    assessment = item.get("invest_assessment")
+    if not isinstance(assessment, dict):
+        return tuple(fields)
+    assessment_dict = cast("dict[str, object]", assessment)
+    for dimension_name in _INVEST_DIMENSION_NAMES:
+        dimension = assessment_dict.get(dimension_name)
+        if isinstance(dimension, dict):
+            fields.extend(
+                _sentinel_mapping_fields(
+                    cast("dict[str, object]", dimension),
+                    prefix=f"{prefix}.invest_assessment.{dimension_name}",
+                    field_names=("rationale", "evidence"),
+                )
+            )
+    return tuple(fields)
+
+
+def _story_review_sentinel_fields(review: object) -> tuple[str, ...]:
+    """Return only projected field paths, never sentinel-bearing values."""
+    if not isinstance(review, dict):
+        return ()
+    review_dict = cast("dict[str, object]", review)
+    projected_fields = review_dict.get("invalid_fields")
+    if isinstance(projected_fields, list) and all(
+        isinstance(field, str) and field.startswith("story_items[")
+        for field in projected_fields
+    ):
+        return tuple(cast("list[str]", projected_fields))
+    candidate = review_dict.get("candidate")
+    if not isinstance(candidate, dict):
+        return ()
+    story_items = cast("dict[str, object]", candidate).get("story_items")
+    if not isinstance(story_items, list):
+        return ()
+    return tuple(
+        field_path
+        for index, item in enumerate(story_items)
+        if isinstance(item, dict)
+        for field_path in _story_item_sentinel_fields(
+            cast("dict[str, object]", item),
+            index=index,
+        )
+    )
 
 
 def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
@@ -1610,6 +1718,10 @@ def _story_review_lines(
             *_list_lines("Clarifying questions", candidate.get("clarifying_questions")),
         ]
     )
+    invalid_fields = _story_review_sentinel_fields(review)
+    if invalid_fields:
+        lines.extend(["", "Invalid fields:"])
+        lines.extend(f"- {field}" for field in invalid_fields)
     return lines
 
 
@@ -1834,10 +1946,14 @@ def _story_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
     binding, review = _story_review_choice(application.story_reviews(args.project_id))
     if decision == "accepted" and not _is_story_review_acceptable(review):
-        raise ValueError(
+        message = (
             "Story proposal cannot be accepted: required INVEST, sizing, or "
             "ordering evidence is missing or malformed."
         )
+        sentinel_fields = _story_review_sentinel_fields(review)
+        if sentinel_fields:
+            message += " Invalid fields: " + ", ".join(sentinel_fields) + "."
+        raise ValueError(message)
     if not _confirm_planning_review(review, decision=decision):
         raise ValueError("Story review cancelled before any write.")
     return _emit_result(

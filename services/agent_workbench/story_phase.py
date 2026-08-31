@@ -27,8 +27,9 @@ from services.contracts.story import (
     STORY_POINTS_BY_EFFORT,
     CanonicalStoryOutput,
     StoryItemEnvelope,
+    StorySentinelContentError,
     UserStoryAgentItem,
-    canonicalize_story_items,
+    inspect_story_items_for_review,
 )
 from services.planning_artifact_content import (
     load_stored_backlog_planning_content,
@@ -283,19 +284,38 @@ def validate_story_planning_content(
     backlog_item: BacklogItem,
 ) -> CanonicalStoryOutput:
     """Validate one complete closed Story artifact against its exact parents."""
-    content = validate_canonical_planning_content(
+    content, sentinel_fields = inspect_story_planning_content(
         canonical_content,
-        content_type=CanonicalStoryOutput,
+        content_fingerprint=content_fingerprint,
+        specification=specification,
+        backlog_item=backlog_item,
     )
-    if canonical_hash(canonical_content) != content_fingerprint:
-        message = "Story content fingerprint does not match canonical content."
-        raise ValueError(message)
     if (
         not content.is_complete
         or not content.story_items
         or content.clarifying_questions
     ):
         message = "Story output is incomplete and cannot enter review."
+        raise ValueError(message)
+    if sentinel_fields:
+        raise StorySentinelContentError(sentinel_fields)
+    return content
+
+
+def inspect_story_planning_content(
+    canonical_content: JsonObject,
+    *,
+    content_fingerprint: str,
+    specification: AcceptedSpecification,
+    backlog_item: BacklogItem,
+) -> tuple[CanonicalStoryOutput, tuple[str, ...]]:
+    """Validate immutable Story structure and report acceptance-only blockers."""
+    content = validate_canonical_planning_content(
+        canonical_content,
+        content_type=CanonicalStoryOutput,
+    )
+    if canonical_hash(canonical_content) != content_fingerprint:
+        message = "Story content fingerprint does not match canonical content."
         raise ValueError(message)
     provider_items = tuple(
         UserStoryAgentItem.model_validate(
@@ -306,7 +326,7 @@ def validate_story_planning_content(
         )
         for envelope in content.story_items
     )
-    canonical_items = canonicalize_story_items(
+    canonical_items, sentinel_fields = inspect_story_items_for_review(
         AcceptedSpecificationReference(
             spec_version_id=specification.spec_version_id,
             spec_hash=specification.spec_hash,
@@ -319,7 +339,7 @@ def validate_story_planning_content(
     if canonical_items != content.story_items:
         message = "Story items do not match the exact host-minted canonical sequence."
         raise ValueError(message)
-    return content
+    return content, sentinel_fields
 
 
 def load_stored_story_planning_content(
@@ -344,6 +364,28 @@ def load_stored_story_planning_content(
     return canonical_content, content
 
 
+def load_stored_story_planning_content_for_review(
+    canonical_content_json: str,
+    *,
+    expected_fingerprint: str,
+    specification: AcceptedSpecification,
+    backlog_item: BacklogItem,
+) -> tuple[JsonObject, CanonicalStoryOutput, tuple[str, ...]]:
+    """Load immutable Story bytes and retain acceptance-only blocker evidence."""
+    canonical_content, _content = load_stored_planning_artifact_content(
+        canonical_content_json,
+        expected_fingerprint=expected_fingerprint,
+        content_type=CanonicalStoryOutput,
+    )
+    content, sentinel_fields = inspect_story_planning_content(
+        canonical_content,
+        content_fingerprint=expected_fingerprint,
+        specification=specification,
+        backlog_item=backlog_item,
+    )
+    return canonical_content, content, sentinel_fields
+
+
 def _load_story_content(
     artifact: StoryArtifact,
     *,
@@ -360,6 +402,27 @@ def _load_story_content(
         message = "Story artifact item IDs are not the exact canonical sequence."
         raise ValueError(message)
     return content
+
+
+def _load_story_content_for_review(
+    artifact: StoryArtifact,
+    *,
+    parent: _StoryParentContext,
+) -> tuple[CanonicalStoryOutput, tuple[str, ...]]:
+    """Load structurally exact content for a non-accepting recovery decision."""
+    _canonical_content, content, sentinel_fields = (
+        load_stored_story_planning_content_for_review(
+            artifact.canonical_content_json,
+            expected_fingerprint=artifact.content_fingerprint,
+            specification=parent.specification,
+            backlog_item=parent.backlog_item,
+        )
+    )
+    item_ids = tuple(envelope.item.story_item_id for envelope in content.story_items)
+    if artifact.story_item_ids_json != canonical_json(list(item_ids)):
+        message = "Story artifact item IDs are not the exact canonical sequence."
+        raise ValueError(message)
+    return content, sentinel_fields
 
 
 def load_story_correction_target_in_session(
@@ -688,7 +751,13 @@ def record_story_decision_in_session(
         roadmap_artifact_id=artifact.roadmap_artifact_id,
         roadmap_artifact_fingerprint=artifact.roadmap_artifact_fingerprint,
     )
-    content = _load_story_content(artifact, parent=parent)
+    if inputs.decision == "accepted":
+        content = _load_story_content(artifact, parent=parent)
+    else:
+        content, _sentinel_fields = _load_story_content_for_review(
+            artifact,
+            parent=parent,
+        )
     chain_key = (
         artifact.project_id,
         artifact.source_backlog_artifact_id,
