@@ -1029,6 +1029,7 @@ function selectedScopeStory(overrides = {}) {
     return {
         story_id: 101,
         source_story_item_id: 'US-001',
+        is_superseded: false,
         structurally_eligible: true,
         structural_eligibility_status: 'eligible',
         sprint_selection_state: 'selected',
@@ -2150,6 +2151,7 @@ test('story readiness keeps structural proof separate from three-state Sprint se
         {
             story_id: 101,
             source_story_item_id: 'US-001',
+            is_superseded: false,
             backlog_item_id: 'PBI-000001',
             story_points: 5,
             rank: '1',
@@ -2201,6 +2203,7 @@ test('story readiness renders selected and deferred intent separately and preser
         {
             story_id: 101,
             source_story_item_id: 'US-001',
+            is_superseded: false,
             backlog_item_id: 'PBI-000001',
             story_points: 5,
             rank: '1',
@@ -2219,6 +2222,7 @@ test('story readiness renders selected and deferred intent separately and preser
         {
             story_id: 102,
             source_story_item_id: 'US-002',
+            is_superseded: false,
             backlog_item_id: 'PBI-000002',
             story_points: 3,
             rank: '2',
@@ -2331,6 +2335,7 @@ test('story readiness shows current rule diagnostics without suggesting another 
         {
             story_id: 101,
             source_story_item_id: 'US-001',
+            is_superseded: false,
             backlog_item_id: 'PBI-000001',
             status: 'accepted',
             story_points: 3,
