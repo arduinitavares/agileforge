@@ -399,8 +399,10 @@ function compareLifecycleDecisions(left, right, actions) {
 }
 
 function isActionableDecision(decision, actions) {
+    const action = findDecisionAction(actions, decision);
     return DASHBOARD_CONTROL_REQUEST_KINDS.has(decision?.request_kind)
-        && findDecisionAction(actions, decision) !== null;
+        && action !== null
+        && action.availability !== 'locked';
 }
 
 function lifecycleCardActions(position, actions, projections) {
@@ -415,6 +417,9 @@ function lifecycleCardActions(position, actions, projections) {
 }
 
 function stageStatus(decision, actions, projections = {}) {
+    if (findDecisionAction(actions, decision)?.availability === 'locked') {
+        return 'Locked';
+    }
     if (
         decision?.request_kind === 'start_sprint'
         && projections?.sprintStatus?.kind === 'ready'
@@ -465,6 +470,9 @@ function waitingReason(decision) {
 }
 
 function stageReason(decision, actions, projections = {}) {
+    if (findDecisionAction(actions, decision)?.availability === 'locked') {
+        return 'Correction input unavailable.';
+    }
     if (
         decision?.request_kind === 'start_sprint'
         && projections?.sprintStatus?.kind === 'ready'
@@ -2345,6 +2353,14 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
             <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
                 class="text-sm leading-6 text-slate-700"></p>
         </form>`;
+    }
+    if (details.intent === 'correction' && action.availability === 'locked') {
+        return `<section role="alert" data-story-correction-input-unavailable="true" ${bindingAttributes}
+            class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+            <p class="mb-2 font-semibold">${escapeWorkflowText(details.label)}</p>
+            ${content}
+            <p><strong>Correction unavailable.</strong> The accepted Story artifact cannot be safely reconstructed as provider input. This action is locked.</p>
+        </section>`;
     }
     const isMissingRequirement = action.request_kind === 'record_story_draft' && !details.requirement;
     const disabledAttr = isMissingRequirement ? ' disabled title="Requirement summary unavailable"' : '';

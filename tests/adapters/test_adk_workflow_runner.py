@@ -98,7 +98,11 @@ from services.contracts.vision import VisionDraftOutput, VisionModelInput
 from services.specs.accepted_specification import (
     require_current_accepted_specification,
 )
-from tests.test_create_user_story import _seed_story_parent
+from tests.test_create_user_story import (
+    _intermediate_story_content,
+    _record_accepted_legacy_story,
+    _seed_story_parent,
+)
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
@@ -1219,9 +1223,7 @@ async def test_story_set_correction_uses_one_complete_set_provider_call(
     assert canonical.is_complete is True
     assert canonical.replacement_source is not None
     assert canonical.replacement_source.story_artifact_id == accepted_artifact_id
-    assert canonical.replacement_source.artifact_fingerprint == "sha256:" + (
-        "a" * 64
-    )
+    assert canonical.replacement_source.artifact_fingerprint == "sha256:" + ("a" * 64)
     provider_input = json.loads(model.request_texts[0])
     assert "complete replacement Story set" in provider_input["user_input"]
 
@@ -1846,6 +1848,82 @@ def test_story_set_correction_runner_completes_with_its_start_authority(
         assert [outcome.status for outcome in outcomes] == ["success", "success"]
 
 
+def test_intermediate_story_set_correction_completes_through_real_runner(
+    engine: Engine,
+) -> None:
+    """Run the PBI-000002-era accepted source through durable ADK execution."""
+    leaf = CountingLeafAgent(
+        name="intermediate_story_set_correction",
+        response=_story_provider_output(spec_item_ids=("REQ.planning-2",)),
+        calls=[],
+    )
+    system = _story_runner_system(
+        engine,
+        leaf=leaf,
+        requirements=("Plan first work", "Plan intermediate work"),
+    )
+    with Session(engine) as session:
+        source = _record_accepted_legacy_story(
+            session,
+            project_id=system.project_id,
+            roadmap_id=system.roadmap_id,
+            backlog_item_id="PBI-000002",
+            requirement_index=2,
+            legacy_content=_intermediate_story_content(requirement_index=2),
+        )
+        session.commit()
+        source_id = int(source.story_artifact_id or 0)
+        source_fingerprint = source.content_fingerprint
+
+    correction_position = system.domain.position(system.project_id)
+    correction_decision = next(
+        decision
+        for decision in correction_position.decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.instance_key == "backlog_item:PBI-000002"
+        and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+    )
+    prepared = DeliveryActionInputService(engine=engine).build(
+        project_id=system.project_id,
+        decision=correction_decision,
+        node_id="planning.story.generate",
+        allow_legacy_story_correction=True,
+    )
+    assert isinstance(prepared, dict)
+    correction_payload = JSON_OBJECT.validate_python(
+        {
+            **prepared,
+            "story_set_correction": {
+                "accepted_story_artifact_id": source_id,
+                "accepted_story_artifact_fingerprint": source_fingerprint,
+            },
+        }
+    )
+
+    result = system.runner.run(
+        correction_decision,
+        correction_payload,
+        guards=AdkRunGuards(
+            position=correction_position,
+            idempotency_key="issue-228-intermediate-story-correction",
+            actor="operator@example.com",
+            correlation_id="issue-228-intermediate-story-correction",
+        ),
+    )
+
+    assert result.ok is True
+    assert leaf.calls == ["provider"]
+    with Session(engine) as session:
+        artifacts = session.exec(
+            select(StoryArtifact).order_by(col(StoryArtifact.story_artifact_id))
+        ).all()
+        assert len(artifacts) == 2  # noqa: PLR2004
+        assert artifacts[1].supersedes_story_artifact_id == source_id
+        attempts = _node_attempts(session, "planning.story.generate")
+        assert len(attempts) == 1
+        assert attempts[0].instance_key == "backlog_item:PBI-000002"
+
+
 def _issue_222_story_item(
     *,
     title: str,
@@ -1899,9 +1977,7 @@ def _assert_issue_222_successor(
             "S",
             "M",
         ]
-        assert all(
-            not item.item.dependency_candidates for item in replacement_items
-        )
+        assert all(not item.item.dependency_candidates for item in replacement_items)
         decisions = session.exec(select(StoryArtifactDecision)).all()
         assert len(decisions) == 1
         assert decisions[0].story_artifact_id == source_artifact_id
@@ -2228,7 +2304,7 @@ def _attempt_16_sanitized_responses(
                         "REQ.python-public-add."
                     ),
                     (
-                        "Calling `add(\"\")` returns integer `0`, as required by "
+                        'Calling `add("")` returns integer `0`, as required by '
                         "REQ.empty-input-zero."
                     ),
                     (

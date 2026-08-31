@@ -3636,6 +3636,56 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     context.close()
 
 
+def test_unbuildable_pbi_000002_correction_is_locked_in_real_browser(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Render the API's unavailable correction without a clickable transport."""
+    action = _story_correction_action("backlog_item:PBI-000002")
+    action["availability"] = "locked"
+    action["reason_code"] = "STORY_CORRECTION_INPUT_UNAVAILABLE"
+    fake = _delivery_ready_fake([action])
+    fake.story_pending_override = _non_contiguous_story_pending()
+    fake.position_override = {
+        "graph_version": "agileforge.workflow.hidden",
+        "fact_fingerprint": "sha256:hidden-facts",
+        "decisions": [
+            {
+                "node_id": action["node_id"],
+                "child_graph_id": "planning",
+                "request_kind": action["request_kind"],
+                "category": "available",
+                "instance_key": action["instance_key"],
+                "reason_code": "STORY_CORRECTION_AVAILABLE",
+                "recommendation_kind": "optional_reentry",
+                "decision_fingerprint": _fingerprint("b"),
+                "fact_references": [
+                    {
+                        "fact_type": "story",
+                        "fact_id": "4",
+                        "fingerprint": _fingerprint("a"),
+                    }
+                ],
+            }
+        ],
+        "terminal": False,
+        "actions": [],
+        "_actions": [dict(action)],
+    }
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    locked = page.locator('[data-story-correction-input-unavailable="true"]')
+    expect(locked).to_be_visible()
+    expect(locked).to_contain_text("Correction unavailable")
+    expect(locked).to_contain_text("Support accepted Number List language")
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000002"] button')
+    ).to_have_count(0)
+    assert fake.delivery_requests == []
+
+    context.close()
+
+
 def test_story_generation_feedback_decision_reconciles_to_revision_intent(
     dashboard_harness: DashboardHarness,
 ) -> None:

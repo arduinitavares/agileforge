@@ -71,6 +71,11 @@ from services.product_goal_interview_input import ProductGoalInterviewInputServi
 from services.read_projections import DurableReadProjectionService
 from services.sprint_ownership import ResolvedSprintOwner
 from tests.adapters.test_command_renderer import position_fixture
+from tests.test_create_user_story import (
+    _intermediate_story_content,
+    _record_accepted_legacy_story,
+    _seed_story_parent,
+)
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_execution_transitions import (
     EVALUATED_AT as EXECUTION_EVALUATED_AT,
@@ -4970,6 +4975,155 @@ def test_position_advertises_optional_story_set_correction_transport(
     ]
 
 
+def test_intermediate_story_set_correction_executes_through_real_api(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconstruct PBI-000002 and cross the HTTP adapter before provider work."""
+    project_id, roadmap_id = _seed_story_parent(
+        engine,
+        requirements=("Plan first work", "Plan intermediate work"),
+    )
+    with Session(engine) as session:
+        artifact = _record_accepted_legacy_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            backlog_item_id="PBI-000002",
+            requirement_index=2,
+            legacy_content=_intermediate_story_content(requirement_index=2),
+        )
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+
+    class CapturingApplication(AgileForgeApplication):
+        calls: list[AgenticActionRequest]
+
+        def run_agentic_action(
+            self,
+            request: AgenticActionRequest,
+        ) -> TransitionResult:
+            self.calls.append(request)
+            return TransitionResult(ok=True, applied_node_id=request.node_id)
+
+    application = CapturingApplication(
+        workflow_domain=planning_domain(engine),
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    application.calls = []
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+
+    position_response = client.get(f"/api/projects/{project_id}/position")
+
+    assert position_response.status_code == HTTPStatus.OK
+    position = position_response.json()["data"]
+    correction = next(
+        decision
+        for decision in position["decisions"]
+        if decision["reason_code"] == "STORY_CORRECTION_AVAILABLE"
+        and decision["instance_key"] == "backlog_item:PBI-000002"
+    )
+    action = next(
+        item
+        for item in position_response.json()["actions"]
+        if item["instance_key"] == "backlog_item:PBI-000002"
+    )
+    assert action["endpoint"] == "story/correct"
+    response = client.post(
+        f"/api/projects/{project_id}/story/correct",
+        headers={"X-AgileForge-Expected-Decision": correction["decision_fingerprint"]},
+        json={
+            "instance_key": "backlog_item:PBI-000002",
+            "accepted_story_artifact_id": artifact_id,
+            "accepted_story_artifact_fingerprint": artifact_fingerprint,
+            "idempotency_key": "api-correct-intermediate-story",
+            "actor": "operator@example.com",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.calls) == 1
+    assert application.calls[0].instance_key == "backlog_item:PBI-000002"
+
+
+def test_position_locks_unbuildable_story_set_correction(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project an honest locked action when accepted content cannot be input."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    malformed = _intermediate_story_content(requirement_index=1)
+    story_items = malformed["story_items"]
+    assert isinstance(story_items, list)
+    envelope = story_items[0]
+    assert isinstance(envelope, dict)
+    item = envelope["item"]
+    assert isinstance(item, dict)
+    assessment = item["invest_assessment"]
+    assert isinstance(assessment, dict)
+    del assessment["testable"]
+    envelope["item_fingerprint"] = canonical_hash(item)
+    with Session(engine) as session:
+        artifact = _record_accepted_legacy_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            backlog_item_id="PBI-000001",
+            requirement_index=1,
+            legacy_content=malformed,
+        )
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+    application = AgileForgeApplication(
+        workflow_domain=planning_domain(engine),
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).get(f"/api/projects/{project_id}/position")
+
+    assert response.status_code == HTTPStatus.OK
+    action = next(
+        item
+        for item in response.json()["actions"]
+        if item["instance_key"] == "backlog_item:PBI-000001"
+    )
+    assert action["availability"] == "locked"
+    assert action["reason_code"] == "STORY_CORRECTION_INPUT_UNAVAILABLE"
+    correction = next(
+        decision
+        for decision in response.json()["data"]["decisions"]
+        if decision["instance_key"] == "backlog_item:PBI-000001"
+        and decision["reason_code"] == "STORY_CORRECTION_AVAILABLE"
+    )
+
+    rejected = TestClient(api_module.app).post(
+        f"/api/projects/{project_id}/story/correct",
+        headers={
+            "X-AgileForge-Expected-Decision": correction["decision_fingerprint"]
+        },
+        json={
+            "instance_key": "backlog_item:PBI-000001",
+            "accepted_story_artifact_id": artifact_id,
+            "accepted_story_artifact_fingerprint": artifact_fingerprint,
+            "idempotency_key": "api-reject-malformed-story",
+            "actor": "operator@example.com",
+        },
+    )
+
+    assert rejected.status_code == HTTPStatus.CONFLICT
+    rejected_action = next(
+        item
+        for item in rejected.json()["detail"]["actions"]
+        if item["instance_key"] == "backlog_item:PBI-000001"
+    )
+    assert rejected_action["availability"] == "locked"
+    assert rejected_action["reason_code"] == "STORY_CORRECTION_INPUT_UNAVAILABLE"
+
+
 def test_story_set_correction_api_forwards_exact_graph_and_artifact_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5925,8 +6079,7 @@ def _backlog_lifecycle_decision(
         for decision in position.decisions
         if decision.node_id == node_id
         and any(
-            reference.fact_type == "backlog"
-            for reference in decision.fact_references
+            reference.fact_type == "backlog" for reference in decision.fact_references
         )
     ]
     assert len(matches) == 1
@@ -6014,9 +6167,7 @@ def _real_backlog_lifecycle_review(  # noqa: PLR0913
                     "priority": 1,
                     "requirement": requirement,
                     "value_driver": "Strategic",
-                    "justification": (
-                        "Execution trace cannot own workflow position."
-                    ),
+                    "justification": ("Execution trace cannot own workflow position."),
                     "estimated_effort": "M",
                     "technical_note": None,
                     "specification_evidence": [

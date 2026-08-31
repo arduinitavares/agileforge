@@ -61,6 +61,7 @@ from services.contracts.sprint import (
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    IntermediateCanonicalStoryOutput,
     LegacyCanonicalStoryOutput,
     UserStoryWriterInput,
 )
@@ -1322,9 +1323,7 @@ class StorySetCorrectionRequest(FrozenModel):
     instance_key: str = Field(pattern=r"^backlog_item:[^\s:]+$")
     expected_decision_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     accepted_story_artifact_id: int = Field(gt=0)
-    accepted_story_artifact_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    accepted_story_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -2405,11 +2404,9 @@ class AgileForgeApplication:
             decision is None
             or decision.category is not NodeCategory.AVAILABLE
             or decision.reason_code != "STORY_CORRECTION_AVAILABLE"
-            or decision.decision_fingerprint
-            != request.expected_decision_fingerprint
+            or decision.decision_fingerprint != request.expected_decision_fingerprint
             or story_reference is None
-            or story_reference.fact_id
-            != str(request.accepted_story_artifact_id)
+            or story_reference.fact_id != str(request.accepted_story_artifact_id)
             or story_reference.fingerprint
             != request.accepted_story_artifact_fingerprint
         ):
@@ -2440,6 +2437,30 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
             )
         )
+
+    def story_set_correction_decision_is_executable(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> bool:
+        """Project correction input availability from the execution contract."""
+        input_service = self._delivery_action_input
+        if (
+            input_service is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or decision.reason_code != "STORY_CORRECTION_AVAILABLE"
+            or decision.instance_key is None
+            or _integer_fact_reference(decision, "story") is None
+        ):
+            return False
+        prepared = input_service.build(
+            project_id=project_id,
+            decision=decision,
+            node_id="planning.story.generate",
+            allow_legacy_story_correction=True,
+        )
+        return isinstance(prepared, dict)
 
     def correct_story(self, request: StoryCorrectionRequest) -> TransitionResult:
         """Correct one accepted Story item through the existing artifact workflow."""
@@ -4718,17 +4739,35 @@ def _validate_prior_story_correction_content(
             raise
     else:
         return
-    try:
-        legacy_output = LegacyCanonicalStoryOutput.model_validate(prior_content)
-    except ValidationError as error:
-        message = "Prior Story content is not a recognized canonical legacy artifact."
-        raise ValueError(message) from error
-    expected_item_ids = canonical_json(
-        [envelope.item.story_item_id for envelope in legacy_output.story_items]
-    )
-    if prior.story_item_ids_json != expected_item_ids:
-        message = "Legacy Story artifact item IDs do not match canonical content."
-        raise ValueError(message)
+    last_error: ValidationError | None = None
+    for historical_type in (
+        IntermediateCanonicalStoryOutput,
+        LegacyCanonicalStoryOutput,
+    ):
+        try:
+            historical_output = historical_type.model_validate(prior_content)
+        except ValidationError as error:
+            last_error = error
+            continue
+        if canonical_json(
+            historical_output.model_dump(
+                mode="json",
+                exclude_unset=True,
+            )
+        ) != canonical_json(prior_content):
+            message = "Historical Story artifact content requires type coercion."
+            raise ValueError(message)
+        expected_item_ids = canonical_json(
+            [envelope.item.story_item_id for envelope in historical_output.story_items]
+        )
+        if prior.story_item_ids_json != expected_item_ids:
+            message = (
+                "Historical Story artifact item IDs do not match canonical content."
+            )
+            raise ValueError(message)
+        return
+    message = "Prior Story content is not a recognized canonical historical artifact."
+    raise ValueError(message) from last_error
 
 
 type _SprintCapacity = tuple[

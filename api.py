@@ -201,9 +201,7 @@ class StorySetCorrectionApiRequest(MutationApiRequest):
 
     instance_key: str = Field(pattern=r"^backlog_item:[^\s:]+$")
     accepted_story_artifact_id: PositiveStoryId
-    accepted_story_artifact_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    accepted_story_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class SprintPlanningApiRequest(MutationApiRequest):
@@ -282,9 +280,7 @@ class StorySprintSelectionApiRequest(MutationApiRequest):
 
     story_id: PositiveStoryId
     intent: Literal["select", "remove", "defer"]
-    expected_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    expected_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     rationale: SemanticText | None = None
 
     @field_validator("actor", "correlation_id", "rationale")
@@ -456,7 +452,10 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
             status = 409
         detail = result.model_dump(mode="json")
         if result.position is not None:
-            detail["actions"] = _workflow_actions(result.position)
+            detail["actions"] = _workflow_actions(
+                result.position,
+                application=_application(),
+            )
         raise HTTPException(
             status_code=status,
             detail=detail,
@@ -464,7 +463,11 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
     return {"status": "success", "data": result.model_dump(mode="json")}
 
 
-def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
+def _workflow_actions(
+    position: WorkflowPosition,
+    *,
+    application: object | None = None,
+) -> list[JsonObject]:
     """Advertise only decisions that their fixed API route can select exactly."""
     candidates = tuple(
         decision
@@ -485,8 +488,7 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
                     decision.request_kind == "register_specification_source"
                     or (
                         decision.request_kind == "record_sprint_plan"
-                        and decision.reason_code
-                        == "SPRINT_PLAN_CORRECTION_AVAILABLE"
+                        and decision.reason_code == "SPRINT_PLAN_CORRECTION_AVAILABLE"
                     )
                     or (
                         decision.request_kind == "record_story_draft"
@@ -534,15 +536,30 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
             transport = "semantic"
         else:
             continue
-        actions.append(
-            {
-                "node_id": decision.node_id,
-                "instance_key": decision.instance_key,
-                "request_kind": request_kind,
-                "endpoint": endpoint,
-                "transport": transport,
-            }
-        )
+        action: JsonObject = {
+            "node_id": decision.node_id,
+            "instance_key": decision.instance_key,
+            "request_kind": request_kind,
+            "endpoint": endpoint,
+            "transport": transport,
+        }
+        actions.append(action)
+        if (
+            request_kind == "record_story_draft"
+            and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+            and application is not None
+        ):
+            checker = getattr(
+                application,
+                "story_set_correction_decision_is_executable",
+                None,
+            )
+            if callable(checker) and not checker(
+                project_id=position.project_id,
+                decision=decision,
+            ):
+                action["availability"] = "locked"
+                action["reason_code"] = "STORY_CORRECTION_INPUT_UNAVAILABLE"
     return actions
 
 
@@ -655,11 +672,12 @@ def delete_project(project_id: int) -> dict[str, str]:
 @app.get("/api/projects/{project_id}/position")
 def get_project_position(project_id: int) -> dict[str, object]:
     """Return the only workflow routing projection."""
-    position = _application().position(project_id=project_id)
+    application = _application()
+    position = application.position(project_id=project_id)
     return {
         "status": "success",
         "data": position.model_dump(mode="json"),
-        "actions": _workflow_actions(position),
+        "actions": _workflow_actions(position, application=application),
     }
 
 

@@ -1953,6 +1953,53 @@ test('initial, revision, and correction story actions render distinct intent', (
     assert.ok(correctionMarkup.includes('Correct Stories for PBI-000001: Provide arithmetic sum.'));
 });
 
+test('unbuildable story correction renders locked state without an action button', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/correct',
+        transport: 'semantic',
+        availability: 'locked',
+        reason_code: 'STORY_CORRECTION_INPUT_UNAVAILABLE',
+    };
+    const position = {
+        decisions: [{
+            node_id: action.node_id,
+            instance_key: action.instance_key,
+            reason_code: 'STORY_CORRECTION_AVAILABLE',
+            recommendation_kind: 'optional_reentry',
+            decision_fingerprint: `sha256:${'b'.repeat(64)}`,
+            fact_references: [{
+                fact_type: 'story',
+                fact_id: '4',
+                fingerprint: `sha256:${'a'.repeat(64)}`,
+            }],
+        }],
+    };
+    const appState = {
+        storyPending: {
+            items: [{
+                backlog_item_id: 'PBI-000002',
+                requirement: 'Support accepted Number List language.',
+            }],
+        },
+    };
+
+    const markup = context.deliveryPanelMarkup(position, {}, [action], appState);
+
+    assert.ok(markup.includes('data-story-correction-input-unavailable="true"'));
+    assert.ok(markup.includes('Correction unavailable'));
+    assert.ok(!markup.includes('data-direct-action="record_story_draft"'));
+
+    const storyCard = context.lifecycleCardProjection(position, [action])
+        .find((card) => card.stage === 'Stories');
+    assert.equal(storyCard.status, 'Locked');
+    assert.equal(storyCard.reason, 'Correction input unavailable.');
+    assert.ok(!storyCard.tone.includes('emerald'));
+});
+
 test('busy state and status preserve exact PBI identity and intent', () => {
     const context = loadFrontend();
     const action = {
