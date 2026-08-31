@@ -398,6 +398,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         (
             StoryFact(
                 story_id=13,
+                is_superseded=False,
                 source_story_artifact_id=1,
                 source_story_artifact_fingerprint="sha256:story-artifact",
                 source_story_item_id="US-0001",

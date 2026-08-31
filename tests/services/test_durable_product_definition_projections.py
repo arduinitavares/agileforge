@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 from pydantic import TypeAdapter
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models.core import Project, Team, UserStory
+from models.core import Project, Team, UserStory, UserStoryDependency
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
@@ -35,6 +35,7 @@ from models.specs import SpecRegistry
 from models.workflow import (
     BacklogArtifact,
     RoadmapArtifact,
+    StoryDependencyReview,
     WorkflowNodeAttempt,
 )
 from repositories.workflow import WorkflowFactRepository
@@ -89,6 +90,8 @@ from workflow.facts import (
     PhaseArtifactFact,
     PlanningArtifactFact,
     ProjectFact,
+    StoryDependencyReviewEdgeFact,
+    StoryDependencyReviewFact,
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import (
@@ -100,15 +103,19 @@ from workflow.fingerprints import (
     workflow_node_attempt_fingerprint,
 )
 from workflow.graph import RuleCategory
+from workflow.planning_integrity import dependency_review_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from sqlalchemy.engine import Engine
 
+    from workflow.domain import WorkflowDomain
+
 
 NOW = datetime(2026, 8, 5, 14, tzinfo=UTC)
 GOLD_SPECIFICATION_ITEM_COUNT = 37
+CORRECTED_ACTIVE_STORY_COUNT = 11
 _JSON_OBJECT = TypeAdapter(JsonObject)
 
 
@@ -471,6 +478,124 @@ def _accepted_story_for_show(engine: Engine) -> int:
     return _record_and_accept_story(engine, domain, project_id)[1]
 
 
+def _record_and_accept_story_set(  # noqa: PLR0913
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    backlog_item_id: str,
+    content: JsonObject,
+    idempotency_suffix: str,
+    supersedes_story_artifact_id: int | None = None,
+) -> tuple[int, tuple[int, ...]]:
+    """Persist and accept one exact Story set through the planning domain."""
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _guards,
+        _output_int,
+    )
+    from workflow.requests import DecideStory, RecordStoryDraft  # noqa: PLC0415
+
+    position = domain.position(project_id)
+    generate = next(
+        decision
+        for decision in position.decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.category is NodeCategory.AVAILABLE
+        and decision.instance_key == f"backlog_item:{backlog_item_id}"
+    )
+    references = {
+        reference.fact_type: reference for reference in generate.fact_references
+    }
+    recorded = domain.transition(
+        RecordStoryDraft(
+            **_guards(position, "planning.story.generate", generate.instance_key),
+            idempotency_key=f"record-story-set-{idempotency_suffix}",
+            backlog_item_id=backlog_item_id,
+            source_backlog_artifact_id=int(references["backlog"].fact_id),
+            source_backlog_artifact_fingerprint=references["backlog"].fingerprint,
+            roadmap_artifact_id=int(references["roadmap"].fact_id),
+            roadmap_artifact_fingerprint=references["roadmap"].fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_story_artifact_id=supersedes_story_artifact_id,
+        )
+    )
+    assert recorded.ok is True
+    artifact_id = _output_int(recorded, "story_artifact_id")
+    fingerprint = recorded.output["content_fingerprint"]
+    assert isinstance(fingerprint, str)
+
+    review_position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideStory(
+            **_guards(
+                review_position,
+                "planning.story.review",
+                generate.instance_key,
+            ),
+            idempotency_key=f"accept-story-set-{idempotency_suffix}",
+            backlog_item_id=backlog_item_id,
+            story_artifact_id=artifact_id,
+            artifact_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Story set is complete and ready for active projection.",
+        )
+    )
+    assert accepted.ok is True
+    activated = accepted.output["activated_story_ids"]
+    assert isinstance(activated, tuple)
+    activated_story_ids = tuple(
+        story_id
+        for story_id in activated
+        if isinstance(story_id, int) and not isinstance(story_id, bool)
+    )
+    assert len(activated_story_ids) == len(activated)
+    return artifact_id, activated_story_ids
+
+
+def _accepted_replacement_story_project(
+    engine: Engine,
+) -> tuple[int, tuple[int, ...], tuple[int, ...]]:
+    """Recreate the accepted 4 + 7 + replacement-4 Story lineage."""
+    from tests.test_create_user_story import _story_content  # noqa: PLC0415
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _domain,
+        _record_and_accept_roadmap,
+        _record_and_accept_story,
+        _seed_accepted_backlog,
+    )
+
+    requirements = tuple(f"Plan active Story {ordinal}" for ordinal in range(1, 9))
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id, requirements=requirements)
+    source_artifact_id, source_story_ids = _record_and_accept_story_set(
+        domain,
+        project_id,
+        backlog_item_id="PBI-000001",
+        content=_story_content(title="Original calculator Story", item_count=4),
+        idempotency_suffix="source",
+    )
+    for ordinal, requirement in enumerate(requirements[1:], start=2):
+        _record_and_accept_story(
+            engine,
+            domain,
+            project_id,
+            requirement=requirement,
+            spec_item_id=f"REQ.planning-{ordinal}",
+            backlog_item_id=f"PBI-{ordinal:06d}",
+            idempotency_suffix=f"-active-{ordinal}",
+        )
+    _replacement_artifact_id, replacement_story_ids = _record_and_accept_story_set(
+        domain,
+        project_id,
+        backlog_item_id="PBI-000001",
+        content=_story_content(title="Corrected calculator Story", item_count=4),
+        idempotency_suffix="replacement",
+        supersedes_story_artifact_id=source_artifact_id,
+    )
+    return project_id, source_story_ids, replacement_story_ids
+
+
 def test_story_show_returns_exact_parsed_canonical_acceptance_criteria(
     engine: Engine,
 ) -> None:
@@ -618,6 +743,209 @@ def test_story_dependencies_inspect_includes_stories_with_backlog_item_id(
     assert first["backlog_item_id"] == "PBI-000001"
     assert first["validation_status"] == "validated"
     assert first["validation_failures"] == []
+
+
+def test_story_facts_retain_superseded_history_with_explicit_identity(
+    engine: Engine,
+) -> None:
+    """Keep accepted ancestor rows available as explicitly historical facts."""
+    project_id, source_story_ids, replacement_story_ids = (
+        _accepted_replacement_story_project(engine)
+    )
+
+    with Session(engine) as session:
+        rows = session.exec(
+            select(UserStory)
+            .where(UserStory.project_id == project_id)
+            .order_by(col(UserStory.story_id))
+        ).all()
+        snapshot = WorkflowFactRepository(session).load(project_id=project_id)
+
+    assert source_story_ids == (1, 2, 3, 4)
+    assert replacement_story_ids == (12, 13, 14, 15)
+    assert [row.story_id for row in rows] == list(range(1, 16))
+    assert [row.is_superseded for row in rows] == [True] * 4 + [False] * 11
+    facts_by_id = sorted(snapshot.stories, key=lambda fact: fact.story_id)
+    assert [fact.story_id for fact in facts_by_id] == list(range(1, 16))
+    assert [fact.is_superseded for fact in facts_by_id] == [True] * 4 + [False] * 11
+    historical = _data(
+        DurableReadProjectionService(engine=engine).story_show(
+            story_id=source_story_ids[0]
+        )
+    )
+    assert historical["story_id"] == source_story_ids[0]
+    assert historical["is_superseded"] is True
+
+
+def test_repository_candidacy_excludes_superseded_selected_fact(
+    engine: Engine,
+) -> None:
+    """Match an active dependency review despite retained historical intent."""
+    project_id, source_story_ids, replacement_story_ids = (
+        _accepted_replacement_story_project(engine)
+    )
+    with Session(engine) as session:
+        repository = WorkflowFactRepository(session)
+        snapshot = repository.load(project_id=project_id)
+        facts_by_id = {fact.story_id: fact for fact in snapshot.stories}
+        scope_fingerprint = facts_by_id[
+            replacement_story_ids[0]
+        ].selected_scope_fingerprint
+        assert scope_fingerprint is not None
+        historical = facts_by_id[source_story_ids[0]].model_copy(
+            update={
+                "structurally_eligible": True,
+                "structural_eligibility_status": "eligible",
+                "sprint_selection_state": "selected",
+                "selected_scope_fingerprint": scope_fingerprint,
+                "validation_status": "validated",
+                "validation_failures": (),
+            }
+        )
+        active = facts_by_id[replacement_story_ids[0]].model_copy(
+            update={
+                "sprint_selection_state": "selected",
+                "selected_scope_fingerprint": scope_fingerprint,
+            }
+        )
+        review = StoryDependencyReviewFact(
+            review_id=1,
+            selected_story_ids=(active.story_id,),
+            reviewed_edges=(),
+            source_fingerprint=scope_fingerprint,
+            dependency_fingerprint=dependency_review_fingerprint(()),
+        )
+
+        projected = repository._derive_story_candidates(
+            (historical, active),
+            (),
+            (review,),
+            completed_sprint_ids=frozenset(),
+        )
+
+    projected_by_id = {fact.story_id: fact for fact in projected}
+    assert projected_by_id[historical.story_id].dependency_safe is False
+    assert projected_by_id[historical.story_id].sprint_candidate is False
+    assert projected_by_id[active.story_id].dependency_safe is True
+    assert projected_by_id[active.story_id].sprint_candidate is True
+
+
+def test_story_dependencies_inspect_returns_only_active_replacement_rows(
+    engine: Engine,
+) -> None:
+    """Exclude durable superseded history from active readiness projection."""
+    project_id, _source_story_ids, _replacement_story_ids = (
+        _accepted_replacement_story_project(engine)
+    )
+
+    result = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    data = _data(result)
+    stories = data["stories"]
+    assert isinstance(stories, list)
+    projected_story_ids = {
+        story["story_id"] for story in stories if isinstance(story, dict)
+    }
+    assert projected_story_ids == set(range(5, 16))
+    assert len(stories) == CORRECTED_ACTIVE_STORY_COUNT
+    assert all(
+        story["is_superseded"] is False
+        for story in stories
+        if isinstance(story, dict)
+    )
+    assert {
+        story["selected_scope_fingerprint"]
+        for story in stories
+        if isinstance(story, dict)
+    } == {data["selected_scope_fingerprint"]}
+    corrected = [
+        story
+        for story in stories
+        if isinstance(story, dict) and story["backlog_item_id"] == "PBI-000001"
+    ]
+    assert {story["story_id"] for story in corrected} == {12, 13, 14, 15}
+    assert all(story["sprint_selection_state"] == "unselected" for story in corrected)
+    assert all(story["dependency_safe"] is False for story in corrected)
+    assert all(story["sprint_candidate"] is False for story in corrected)
+    assert all(story["validation_status"] == "validated" for story in corrected)
+    assert all(story["validation_failures"] == [] for story in corrected)
+    assert data["selected_story_ids"] == []
+
+
+def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
+    engine: Engine,
+) -> None:
+    """Omit historical rows without disguising a retained stale dependency."""
+    project_id, source_story_ids, _replacement_story_ids = (
+        _accepted_replacement_story_project(engine)
+    )
+    historical_story_id = source_story_ids[0]
+    active_story_id = 5
+    reviewed_edge = StoryDependencyReviewEdgeFact(
+        dependent_story_id=active_story_id,
+        prerequisite_story_id=historical_story_id,
+        reason="Current work still points at the superseded prerequisite.",
+    )
+    source_fingerprint = "sha256:" + "e" * 64
+    with Session(engine) as session:
+        session.add(
+            UserStoryDependency(
+                project_id=project_id,
+                dependent_story_id=active_story_id,
+                prerequisite_story_id=historical_story_id,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+                reason=reviewed_edge.reason,
+            )
+        )
+        session.add(
+            StoryDependencyReview(
+                project_id=project_id,
+                selected_story_ids_json=canonical_json([active_story_id]),
+                reviewed_edges_json=canonical_json(
+                    [reviewed_edge.model_dump(mode="json")]
+                ),
+                source_fingerprint=source_fingerprint,
+                dependency_fingerprint=dependency_review_fingerprint(
+                    (reviewed_edge,)
+                ),
+                reviewed_by="issue-228-boundary-reviewer",
+                reviewed_at=NOW,
+            )
+        )
+        session.commit()
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+            project_id=project_id
+        )
+    )
+    stories = data["stories"]
+    edges = data["edges"]
+    reviews = data["reviews"]
+    assert isinstance(stories, list)
+    assert isinstance(edges, list)
+    assert isinstance(reviews, list)
+
+    assert historical_story_id not in {
+        story["story_id"]
+        for story in stories
+        if isinstance(story, dict)
+    }
+    assert [
+        (edge["dependent_story_id"], edge["prerequisite_story_id"])
+        for edge in edges
+        if isinstance(edge, dict)
+    ] == [(active_story_id, historical_story_id)]
+    assert [
+        review["selected_story_ids"]
+        for review in reviews
+        if isinstance(review, dict)
+    ] == [[active_story_id]]
 
 
 def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(

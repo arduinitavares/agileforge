@@ -557,7 +557,8 @@ class PlanningActionSelectionService:
             sorted(
                 item.story_id
                 for item in snapshot.stories
-                if item.sprint_selection_state == "selected"
+                if not item.is_superseded
+                and item.sprint_selection_state == "selected"
                 and (item.story_points is None or not story_rank_is_valid(item.rank))
             )
         )

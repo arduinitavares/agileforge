@@ -437,6 +437,7 @@ class StoryFact(FrozenModel):
     """Story readiness state used for sprint evaluation."""
 
     story_id: int
+    is_superseded: bool
     source_story_artifact_id: int
     source_story_artifact_fingerprint: str
     source_story_item_id: str
@@ -476,7 +477,8 @@ class StoryFact(FrozenModel):
     def require_exact_candidate_intersection(self) -> StoryFact:
         """Fail closed when a projection skips a required candidacy gate."""
         selected_and_eligible = (
-            self.sprint_selection_state == "selected"
+            not self.is_superseded
+            and self.sprint_selection_state == "selected"
             and self.structurally_eligible
             and self.selected_scope_fingerprint is not None
         )

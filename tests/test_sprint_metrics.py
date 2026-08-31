@@ -314,6 +314,7 @@ def test_durable_metrics_recommend_from_completed_story_points() -> None:
         stories=(
             StoryFact(
                 story_id=11,
+                is_superseded=False,
                 source_story_artifact_id=1,
                 source_story_artifact_fingerprint="sha256:story-artifact",
                 source_story_item_id="US-0001",

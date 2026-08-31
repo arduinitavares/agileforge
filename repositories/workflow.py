@@ -3118,6 +3118,7 @@ class WorkflowFactRepository:
 
         return StoryFact(
             story_id=story_id,
+            is_superseded=row.is_superseded,
             source_story_artifact_id=row.source_story_artifact_id,
             source_story_artifact_fingerprint=row.source_story_artifact_fingerprint,
             source_story_item_id=row.source_story_item_id,
@@ -3456,7 +3457,8 @@ class WorkflowFactRepository:
                 (
                     story
                     for story in stories
-                    if story.structurally_eligible
+                    if not story.is_superseded
+                    and story.structurally_eligible
                     and story.sprint_selection_state == "selected"
                     and not any(
                         sprint_id in completed_sprint_ids

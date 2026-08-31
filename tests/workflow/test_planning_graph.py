@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict, Unpack
 
 import pytest
+from pydantic import ValidationError
 
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import (
@@ -18,6 +19,8 @@ from workflow.definitions.planning import (
     _sprint_start_rule,
     candidate_set_fingerprint,
     planning_graph,
+    readiness_fingerprint,
+    selected_scope_stories,
     story_dependency_source_fingerprint,
 )
 from workflow.facts import (
@@ -173,6 +176,7 @@ def _story(
     effective_candidate = candidate and accepted
     return StoryFact(
         story_id=story_id,
+        is_superseded=False,
         source_story_artifact_id=300 + story_id,
         source_story_artifact_fingerprint=f"sha256:story-{story_id}",
         source_story_item_id=f"US-{story_id:06d}",
@@ -590,6 +594,71 @@ def test_backlog_accepted_under_stale_specification_cannot_expose_planning() -> 
 def test_planning_artifacts_bind_exact_source_artifact_identity() -> None:
     """Keep source identity as well as source content in every planning fact."""
     assert "source_artifact_id" in PlanningArtifactFact.model_fields
+
+
+def test_story_fact_requires_explicit_supersession_identity() -> None:
+    """Reject active planning facts whose historical identity is unknown."""
+    payload = _story(1, "req-a").model_dump(exclude={"is_superseded"})
+
+    with pytest.raises(ValidationError, match="is_superseded"):
+        StoryFact.model_validate(payload)
+
+
+def test_superseded_story_cannot_reenter_selected_scope_or_its_fingerprint() -> None:
+    """Keep retained historical intent outside the current planning scope."""
+    historical = _story(1, "req-a").model_copy(
+        update={
+            "is_superseded": True,
+            "selected_scope_fingerprint": "sha256:" + "d" * 64,
+            "dependency_safe": False,
+            "sprint_candidate": False,
+            "readiness_blockers": ("STORY_SUPERSEDED",),
+        }
+    )
+    active = _story(2, "req-b")
+    snapshot = _snapshot(
+        stories=(historical, active),
+        dependency_reviews=(),
+    )
+
+    assert [story.story_id for story in selected_scope_stories(snapshot)] == [2]
+    assert story_dependency_source_fingerprint(snapshot.stories) == (
+        active.selected_scope_fingerprint
+    )
+
+
+def test_story_readiness_repair_fingerprint_excludes_superseded_history() -> None:
+    """Bind repair of active selected Stories independently of retained history."""
+    historical = _story(1, "req-a", points=None).model_copy(
+        update={
+            "is_superseded": True,
+            "selected_scope_fingerprint": "sha256:" + "d" * 64,
+            "dependency_safe": False,
+            "sprint_candidate": False,
+            "readiness_blockers": ("STORY_SUPERSEDED", "STORY_POINTS_MISSING"),
+        }
+    )
+    active = _story(2, "req-b", points=None)
+    snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+        ),
+        stories=(historical, active),
+    )
+
+    readiness = _node(snapshot, "planning.story_readiness")
+    reference = next(
+        item
+        for item in readiness.fact_references
+        if item.fact_type == "story_readiness"
+    )
+
+    assert readiness.category is NodeCategory.AVAILABLE
+    assert reference.fingerprint == readiness_fingerprint((active,))
+    assert readiness_fingerprint(snapshot.stories) == readiness_fingerprint((active,))
 
 
 def test_roadmap_draft_waits_for_exact_review() -> None:

@@ -2352,9 +2352,12 @@ class DurableReadProjectionService:
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
         snapshot = snapshot_or_error
+        active_stories = tuple(
+            item for item in snapshot.stories if not item.is_superseded
+        )
         selected = selected_scope_stories(snapshot)
         scope_fingerprints = {
-            item.selected_scope_fingerprint for item in snapshot.stories
+            item.selected_scope_fingerprint for item in active_stories
         }
         if len(scope_fingerprints) > 1 or None in scope_fingerprints:
             return _error(
@@ -2378,7 +2381,7 @@ class DurableReadProjectionService:
                 ],
                 "stories": [
                     _validated(item.model_dump(mode="json"))
-                    for item in snapshot.stories
+                    for item in active_stories
                 ],
                 "selected_story_ids": [item.story_id for item in selected],
                 "selected_scope_fingerprint": selected_scope_fingerprint,

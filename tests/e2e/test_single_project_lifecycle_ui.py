@@ -53,6 +53,9 @@ _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
 _EXPECTED_REMOVE_SELECTION_REQUESTS = 2
 _EXPECTED_RETRIED_DEPENDENCY_REQUESTS = 2
+_CORRECTED_SUPERSEDED_STORY_COUNT = 4
+_CORRECTED_ACTIVE_STORY_COUNT = 11
+_CORRECTED_REPLACEMENT_FIRST_STORY_ID = 12
 _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
@@ -3495,6 +3498,7 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
             "status": "to_do",
             "story_points": 3,
             "rank": "0|hzzzzz:4",
+            "is_superseded": False,
             "structurally_eligible": False,
             "structural_eligibility_status": "ineligible",
             "sprint_selection_state": "unselected",
@@ -3984,6 +3988,33 @@ def test_sprint_generation_blocks_torn_candidate_dependency_scope(
     context.close()
 
 
+def test_sprint_generation_rejects_superseded_candidate_projection(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Reject a candidate row that contradicts its historical identity."""
+    fake = _delivery_ready_fake([_sprint_generation_action()])
+    _seed_progressive_stories(fake, 101, 102)
+    current = cast("JsonObject", fake.stories[0])
+    current["sprint_selection_state"] = "selected"
+    current["dependency_safe"] = True
+    current["sprint_candidate"] = True
+    superseded_candidate = dict(current)
+    superseded_candidate["is_superseded"] = True
+    fake.sprint_candidates = [superseded_candidate]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    expect(
+        page.locator('[data-sprint-candidate-projection-error="true"]')
+    ).to_be_visible()
+    expect(page.locator('[data-candidate-pool-section="true"]')).not_to_be_attached()
+    expect(
+        page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    ).not_to_be_attached()
+
+    context.close()
+
+
 def _seed_progressive_stories(
     fake: FakeLifecycle,
     story1_id: int,
@@ -4003,6 +4034,7 @@ def _seed_progressive_stories(
         "status": "to_do",
         "story_points": 3,
         "rank": "0|hzzzzz:",
+        "is_superseded": False,
         "structurally_eligible": True,
         "structural_eligibility_status": "eligible",
         "sprint_selection_state": "unselected",
@@ -4022,6 +4054,7 @@ def _seed_progressive_stories(
         "status": "to_do",
         "story_points": 5,
         "rank": "0|hzzzzz:1",
+        "is_superseded": False,
         "structurally_eligible": True,
         "structural_eligibility_status": "eligible",
         "sprint_selection_state": "unselected",
@@ -4047,6 +4080,151 @@ def _seed_progressive_stories(
             "reason": "US-001 requires external US-002 foundation",
         }
     ]
+
+
+def _corrected_story_projection(story_id: int) -> JsonObject:
+    """Build one row from accepted 4 + 7 + replacement-4 Story history."""
+    is_superseded = story_id <= _CORRECTED_SUPERSEDED_STORY_COUNT
+    is_replacement = story_id >= _CORRECTED_REPLACEMENT_FIRST_STORY_ID
+    item_ordinal = ((story_id - 1) % _CORRECTED_SUPERSEDED_STORY_COUNT) + 1
+    backlog_ordinal = 1 if is_superseded or is_replacement else story_id - 3
+    return {
+        "story_id": story_id,
+        "source_story_item_id": f"US-{item_ordinal:03d}",
+        "backlog_item_id": f"PBI-{backlog_ordinal:06d}",
+        "status": "to_do",
+        "story_points": 3,
+        "rank": f"0|hzzzzz:{story_id:02d}",
+        "is_superseded": is_superseded,
+        "structurally_eligible": not is_superseded,
+        "structural_eligibility_status": (
+            "ineligible" if is_superseded else "eligible"
+        ),
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("a"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
+        "sprint_candidate": False,
+        "content_accepted": not is_superseded,
+        "readiness_blockers": ["STORY_SUPERSEDED"] if is_superseded else [],
+        "validation_status": "failed" if is_superseded else "validated",
+        "validation_failures": (
+            [
+                {
+                    "code": "STORY_ITEM_BINDING_INVALID",
+                    "message": "Historical Story item is no longer active.",
+                }
+            ]
+            if is_superseded
+            else []
+        ),
+    }
+
+
+def test_corrected_story_set_dashboard_omits_superseded_history(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Render the 11 active Stories, not four retained historical ancestors."""
+    fake = _delivery_ready_fake([])
+    fake.stories = [
+        _corrected_story_projection(story_id) for story_id in range(1, 16)
+    ]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    readiness = page.locator('[data-story-readiness-section="true"]')
+    expect(readiness).to_be_visible()
+    expect(readiness).to_contain_text("11 accepted stories")
+    assert (
+        readiness.locator('[data-story-readiness-row]').count()
+        == _CORRECTED_ACTIVE_STORY_COUNT
+    )
+    for story_id in range(1, 5):
+        expect(
+            readiness.locator(f'[data-story-readiness-row="{story_id}"]')
+        ).not_to_be_attached()
+    for story_id in range(12, 16):
+        row = readiness.locator(f'[data-story-readiness-row="{story_id}"]')
+        expect(row).to_be_visible()
+        expect(row).to_contain_text("PBI-000001")
+        expect(row).to_contain_text("Unselected")
+        expect(row).to_contain_text("Dependencies not confirmed")
+    expect(readiness).not_to_contain_text("STORY_ITEM_BINDING_INVALID")
+
+    context.close()
+
+
+def test_story_dashboard_locks_row_without_supersession_identity(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Fail closed when an active Story row omits its history discriminator."""
+    fake = _delivery_ready_fake([])
+    malformed = _corrected_story_projection(
+        _CORRECTED_REPLACEMENT_FIRST_STORY_ID
+    )
+    malformed.pop("is_superseded")
+    fake.stories = [malformed]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    row = page.locator(
+        f'[data-story-readiness-row="{_CORRECTED_REPLACEMENT_FIRST_STORY_ID}"]'
+    )
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("Story state unavailable")
+    expect(row.locator("button")).to_be_disabled()
+
+    context.close()
+
+
+def test_story_dashboard_keeps_issue_188_stale_dependency_fail_closed(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Do not turn a retained historical prerequisite into a clean graph."""
+    dependency_action: JsonObject = {
+        "node_id": "planning.story_dependencies",
+        "instance_key": None,
+        "request_kind": "apply_story_dependencies",
+        "endpoint": "story/dependencies/apply",
+        "transport": "semantic",
+    }
+    fake = _delivery_ready_fake([dependency_action])
+    fake.stories = [
+        _corrected_story_projection(story_id) for story_id in range(1, 16)
+    ]
+    active_story = cast("JsonObject", fake.stories[11])
+    active_story["sprint_selection_state"] = "selected"
+    fake.dependency_selected_story_ids = [
+        _CORRECTED_REPLACEMENT_FIRST_STORY_ID
+    ]
+    fake.dependency_selected_scope_fingerprint = _fingerprint("b")
+    fake.story_dependencies = [
+        {
+            "dependency_id": 1,
+            "dependent_story_id": _CORRECTED_REPLACEMENT_FIRST_STORY_ID,
+            "prerequisite_story_id": 1,
+            "status": "active",
+            "source": "manual_review",
+            "confidence": "reviewed",
+            "reason": "Current work still points at historical Story #1.",
+        }
+    ]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    dependency_review = page.locator('[data-dependency-review-section="true"]')
+    expect(dependency_review).to_be_visible()
+    expect(dependency_review).to_contain_text(
+        "Unavailable (current selected scope missing or malformed)"
+    )
+    expect(
+        dependency_review.locator('[data-apply-dependencies="true"]')
+    ).to_be_disabled()
+    expect(
+        page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    ).not_to_be_attached()
+
+    context.close()
 
 
 def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # noqa: PLR0915
@@ -4494,6 +4672,7 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
             "status": "to_do",
             "story_points": 3,
             "rank": "0|hzzzzz:",
+            "is_superseded": False,
             "structurally_eligible": False,
             "structural_eligibility_status": "stale",
             "sprint_selection_state": "selected",

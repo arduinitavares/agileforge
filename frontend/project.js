@@ -2442,7 +2442,8 @@ function parseStoryReadinessProjection(story) {
     const validationStatus = story.validation_status;
     const failures = story.validation_failures;
     if (
-        typeof story.structurally_eligible !== 'boolean'
+        typeof story.is_superseded !== 'boolean'
+        || typeof story.structurally_eligible !== 'boolean'
         || !['eligible', 'ineligible', 'stale'].includes(eligibilityStatus)
         || !['unselected', 'selected', 'deferred'].includes(selectionState)
         || !isSha256Fingerprint(story.sprint_selection_state_fingerprint)
@@ -2462,7 +2463,8 @@ function parseStoryReadinessProjection(story) {
     if (!isEligible && !isCurrentFailure && !isMissingEvidence && !isStaleEvidence) return null;
     if (selectionState === 'selected' && isEligible && !isSha256Fingerprint(story.selected_scope_fingerprint)) return null;
     if (story.dependency_safe && (selectionState !== 'selected' || !isEligible || !isSha256Fingerprint(story.selected_scope_fingerprint))) return null;
-    const expectedCandidate = selectionState === 'selected'
+    const expectedCandidate = !story.is_superseded
+        && selectionState === 'selected'
         && isEligible
         && story.dependency_safe
         && story.selected_scope_fingerprint !== null;
@@ -2489,14 +2491,20 @@ function storySelectionButtons(projection, controlsLocked = false) {
     return `${button('select', 'Select for Sprint', !story.structurally_eligible)}${button('defer', 'Defer')}`;
 }
 
+function activeStoryProjectionRows(stories) {
+    if (!Array.isArray(stories)) return [];
+    return stories.filter((story) => story?.is_superseded !== true);
+}
+
 function storyReadinessMarkup(stories, context = {}) {
-    if (!Array.isArray(stories) || stories.length === 0) return '';
+    const activeStories = activeStoryProjectionRows(stories);
+    if (activeStories.length === 0) return '';
     const pendingItems = Array.isArray(context?.storyPending?.items) ? context.storyPending.items : [];
     const evidenceScope = parseStructuralEvidenceScope(
         context?.storyDependencies?.structural_evidence_scope,
     );
     const controlsLocked = storyMutationLocked() || evidenceScope === null;
-    const storyRows = stories.map((story) => {
+    const storyRows = activeStories.map((story) => {
         const projection = parseStoryReadinessProjection(story);
         const pbiId = story?.backlog_item_id || '';
         const pending = pbiId ? pendingItems.find((item) => item?.backlog_item_id === pbiId) : null;
@@ -2521,7 +2529,7 @@ function storyReadinessMarkup(stories, context = {}) {
             <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection, controlsLocked)}</div>
         </div>`;
     });
-    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span></div>${structuralEvidenceScopeMarkup(evidenceScope)}${storyMutationStatusMarkup()}<div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${activeStories.length} accepted ${activeStories.length === 1 ? 'story' : 'stories'}</span></div>${structuralEvidenceScopeMarkup(evidenceScope)}${storyMutationStatusMarkup()}<div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
 }
 
 function validateCandidateProjection(candidates) {
@@ -2613,7 +2621,8 @@ function selectedScopeDependencies(stories, dependencies) {
         || !isSha256Fingerprint(dependencies.selected_scope_fingerprint)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
-    const dependencyProjections = dependencies.stories.map(parseStoryReadinessProjection);
+    const dependencyStories = activeStoryProjectionRows(dependencies.stories);
+    const dependencyProjections = dependencyStories.map(parseStoryReadinessProjection);
     if (dependencyProjections.some((projection) => projection === null)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
@@ -2688,7 +2697,7 @@ function storyDisplayLabel(story) {
 function buildStoryLookupMap(candidateStories, dependencies) {
     const map = new Map();
     if (Array.isArray(dependencies?.stories)) {
-        for (const s of dependencies.stories) {
+        for (const s of activeStoryProjectionRows(dependencies.stories)) {
             if (s && typeof s === 'object' && s.story_id != null) {
                 map.set(s.story_id, s);
             }

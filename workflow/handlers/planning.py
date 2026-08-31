@@ -571,7 +571,8 @@ def execute_repair_story_readiness(
     missing_ids = tuple(
         item.story_id
         for item in snapshot.stories
-        if item.sprint_selection_state == "selected"
+        if not item.is_superseded
+        and item.sprint_selection_state == "selected"
         and _story_needs_readiness_repair(item)
     )
     expected = readiness_fingerprint(snapshot.stories)

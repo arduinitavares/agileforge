@@ -69,6 +69,7 @@ def _story(
 ) -> StoryFact:
     return StoryFact(
         story_id=story_id,
+        is_superseded=False,
         source_story_artifact_id=100 + story_id,
         source_story_artifact_fingerprint=f"sha256:story-artifact-{story_id}",
         source_story_item_id=f"US-{story_id:06d}",

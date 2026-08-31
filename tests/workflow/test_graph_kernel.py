@@ -196,6 +196,7 @@ def test_join_waits_for_every_required_branch() -> None:
     """Block an all-of join until every required branch is complete."""
     first = StoryFact(
         story_id=1,
+        is_superseded=False,
         source_story_artifact_id=101,
         source_story_artifact_fingerprint="sha256:story-artifact-1",
         source_story_item_id="US-000001",
@@ -213,6 +214,7 @@ def test_join_waits_for_every_required_branch() -> None:
     )
     second = StoryFact(
         story_id=2,
+        is_superseded=False,
         source_story_artifact_id=102,
         source_story_artifact_fingerprint="sha256:story-artifact-2",
         source_story_item_id="US-000002",

@@ -601,6 +601,7 @@ def test_sprint_projection_uses_exact_story_item_and_spec_evidence() -> None:
     )
     candidate = StoryFact(
         story_id=42,
+        is_superseded=False,
         source_story_artifact_id=31,
         source_story_artifact_fingerprint="sha256:story-artifact",
         source_story_item_id="US-0001",
@@ -871,6 +872,7 @@ def test_sprint_projection_rejects_operational_story_drift_from_artifact(
     )
     candidate = StoryFact(
         story_id=42,
+        is_superseded=False,
         source_story_artifact_id=31,
         source_story_artifact_fingerprint=content_fingerprint,
         source_story_item_id="US-0001",
@@ -995,6 +997,7 @@ def test_sprint_projection_requires_exact_accepted_story_decision(
     )
     candidate = StoryFact(
         story_id=42,
+        is_superseded=False,
         source_story_artifact_id=31,
         source_story_artifact_fingerprint=content_fingerprint,
         source_story_item_id="US-0001",
@@ -1075,6 +1078,7 @@ def test_sprint_projection_rejects_candidate_from_prior_specification_root() -> 
     )
     candidate = StoryFact(
         story_id=42,
+        is_superseded=False,
         source_story_artifact_id=31,
         source_story_artifact_fingerprint="sha256:story-artifact",
         source_story_item_id="US-0001",
@@ -1263,6 +1267,7 @@ def test_story_fact_rejects_candidate_without_dependency_safe_scope() -> None:
     """Reject a projection that skips the dependency-confirmation intersection."""
     payload = {
         "story_id": 42,
+        "is_superseded": False,
         "source_story_artifact_id": 31,
         "source_story_artifact_fingerprint": "sha256:" + ("1" * 64),
         "source_story_item_id": "US-0001",

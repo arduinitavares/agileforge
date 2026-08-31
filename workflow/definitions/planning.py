@@ -109,7 +109,9 @@ def story_dependency_source_fingerprint(stories: tuple[StoryFact, ...]) -> str:
     selected = tuple(
         item
         for item in stories
-        if item.structurally_eligible and item.sprint_selection_state == "selected"
+        if not item.is_superseded
+        and item.structurally_eligible
+        and item.sprint_selection_state == "selected"
     )
     fingerprints = {item.selected_scope_fingerprint for item in selected}
     if not selected or None in fingerprints or len(fingerprints) != 1:
@@ -130,6 +132,7 @@ def readiness_fingerprint(stories: tuple[StoryFact, ...]) -> str:
                 "readiness_blockers": item.readiness_blockers,
             }
             for item in sorted(stories, key=lambda story: story.story_id)
+            if not item.is_superseded
         ]
     )
 
@@ -816,7 +819,11 @@ def _story_review_rule(
 def _candidate_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
     return tuple(
         sorted(
-            (item for item in snapshot.stories if item.sprint_candidate),
+            (
+                item
+                for item in snapshot.stories
+                if not item.is_superseded and item.sprint_candidate
+            ),
             key=lambda item: item.story_id,
         )
     )
@@ -840,7 +847,8 @@ def selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, .
             (
                 item
                 for item in snapshot.stories
-                if item.structurally_eligible
+                if not item.is_superseded
+                and item.structurally_eligible
                 and item.sprint_selection_state == "selected"
                 and _is_current_planning_story(snapshot, item)
             ),
@@ -878,7 +886,8 @@ def _selected_intent_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact,
             (
                 item
                 for item in snapshot.stories
-                if item.sprint_selection_state == "selected"
+                if not item.is_superseded
+                and item.sprint_selection_state == "selected"
                 and "STORY_SUPERSEDED" not in item.readiness_blockers
                 and _is_current_planning_story(snapshot, item)
             ),
