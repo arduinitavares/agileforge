@@ -480,6 +480,10 @@ When a finding is approved, add one row:
 
 | Issue | Classification | Lifecycle step | Blocks campaign | Fix SHA | Acceptance status |
 | --- | --- | --- | --- | --- | --- |
+| [#230](https://github.com/arduinitavares/agileforge/issues/230) | Non-blocking improvement | `vision.bootstrap` / `backlog.generate` | No | Pending | Open |
+| [#231](https://github.com/arduinitavares/agileforge/issues/231) | Non-blocking improvement | `planning.sprint.plan` | No | Pending | Open |
+| [#232](https://github.com/arduinitavares/agileforge/issues/232) | Non-blocking UI/UX improvement | `planning.story_dependencies` / UI | No | Pending | Open |
+| [#233](https://github.com/arduinitavares/agileforge/issues/233) | Non-blocking CLI ergonomics | `execution.task.complete` / `execution.post_sprint_triage` | No | Pending | Open |
 
 Do not add unconfirmed suspicions or findings imported from another run.
 
