@@ -14,10 +14,10 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 BOOLEAN_TAG = "tag:yaml.org,2002:bool"
 PYREPO_CHECK_REVISION = "40119c00d4efc469655dec16b1a976e1b3298d7d"
 PYREPO_CHECK_SOURCE = (
-    "git+https://github.com/arduinitavares/pyrepo-check.git@"
-    f"{PYREPO_CHECK_REVISION}"
+    f"git+https://github.com/arduinitavares/pyrepo-check.git@{PYREPO_CHECK_REVISION}"
 )
 CANONICAL_PYTHON = "3.13.15"
+CI_UV_VERSION = "0.12.8"
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -124,6 +124,38 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
     assert _job(workflow, "frontend")["runs-on"] == "ubuntu-latest"
 
 
+def test_python_jobs_install_canonical_python_before_use(
+    workflow: dict[str, object],
+) -> None:
+    """Provision the exact Python before controller or repository execution."""
+    first_consumers = {
+        "python-313": "Install pyrepo-check controller",
+        "macos-smoke": "Exercise launcher lifecycle",
+    }
+    install_command = f"uv python install {CANONICAL_PYTHON}"
+
+    for job_name, consumer_name in first_consumers.items():
+        steps = _steps(_job(workflow, job_name))
+        setup_index = next(
+            index
+            for index, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+        )
+        install_indices = [
+            index
+            for index, step in enumerate(steps)
+            if step.get("run") == install_command
+        ]
+        consumer_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name") == consumer_name
+        )
+
+        assert len(install_indices) == 1
+        assert setup_index < install_indices[0] < consumer_index
+
+
 def test_python_jobs_install_playwright_chromium_before_gate(
     workflow: dict[str, object],
 ) -> None:
@@ -189,7 +221,7 @@ def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
             assert FULL_SHA.fullmatch(revision), uses
             observed_actions.setdefault(action, set()).add(revision)
             if action == "astral-sh/setup-uv":
-                assert _mapping(step["with"])["version"] == "0.10.12"
+                assert _mapping(step["with"])["version"] == CI_UV_VERSION
 
     assert observed_actions == {
         action: {revision} for action, revision in expected_actions.items()
@@ -216,15 +248,20 @@ def test_macos_smoke_delegates_to_exact_repository_command(
     workflow: dict[str, object],
 ) -> None:
     """Keep lifecycle policy in one tested repository command."""
-    smoke = _runs(_job(workflow, "macos-smoke"))
-    normalized = " ".join(smoke.split())
+    commands = [
+        " ".join(run.split())
+        for step in _steps(_job(workflow, "macos-smoke"))
+        if isinstance((run := step.get("run")), str)
+        and "scripts/ci_launcher_smoke.py" in run
+    ]
     expected = (
         "uv run --locked python scripts/ci_launcher_smoke.py "
         "--profile ci-macos-${{ github.run_id }}-${{ github.run_attempt }} "
         "--expect-sha ${{ github.sha }}"
     )
 
-    assert normalized == expected
+    assert commands == [expected]
+    smoke = commands[0]
     for policy_token in (
         "./agileforge-dev",
         "kill",
