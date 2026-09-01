@@ -24,6 +24,7 @@ from services.vision_evidence_windows import (
     _WindowsApi,
     _WindowsCapabilityError,
 )
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,7 +76,16 @@ def _bind_repository(engine: Engine, project_id: int, repository: Path) -> None:
             detached_head=observed.detached_head,
             dirty=observed.dirty,
             status_fingerprint=observed.status_fingerprint,
-            remotes_json="[]",
+            status_entries_json=canonical_json(
+                [entry.model_dump(mode="json") for entry in observed.status_entries]
+            ),
+            remotes_json=canonical_json(list(observed.remotes)),
+            warnings_json=canonical_json(
+                [warning.model_dump(mode="json") for warning in observed.warnings]
+            ),
+            probe_version=observed.probe_version,
+            inspected_at=observed.inspected_at,
+            recorded_by="windows-evidence@example.com",
         )
         session.add(binding)
         session.commit()
@@ -445,4 +455,4 @@ def test_windows_capability_probes_directory_relative_open(
     capability = WindowsRepositoryEvidenceReader().capability(windows_repository)
 
     assert capability.available is True
-    assert observed == [(".", True)]
+    assert observed == [("", True)]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from typing import TYPE_CHECKING, cast
 
@@ -11,7 +12,7 @@ import services.vision_evidence_reader as reader_module
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Never
+    from typing import Any, Never
 
     from services.vision_evidence_reader import RepositoryEvidenceCapabilityCode
 
@@ -122,6 +123,50 @@ def test_windows_root_object_identity_ignores_child_entry_timestamps() -> None:
     )
 
     assert _same_file_object(before, after_child_change)
+
+
+def test_windows_api_accepts_empty_name_for_retained_root_reopen() -> None:
+    """Pass an empty relative name to NtCreateFile when reopening its root."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _ObjectAttributes,
+        _WindowsApi,
+        _WindowsNativeError,
+    )
+
+    observed_names: list[str] = []
+
+    def unavailable_native(*args: object) -> int:
+        del args
+        return 1
+
+    def record_relative_name(*args: object) -> int:
+        attributes = ctypes.cast(
+            args[2],
+            ctypes.POINTER(_ObjectAttributes),
+        ).contents
+        observed_names.append(attributes.ObjectName.contents.Buffer)
+        return -1
+
+    native = cast("Any", unavailable_native)
+    api = _WindowsApi(
+        _create_file=native,
+        _close_handle=native,
+        _get_file_information=native,
+        _get_final_path=native,
+        _get_volume_information=native,
+        _read_file=native,
+        _nt_create_file=cast("Any", record_relative_name),
+        _nt_close=native,
+        _rtl_status_to_error=native,
+        _get_last_error=lambda: 1,
+    )
+
+    with pytest.raises(_WindowsNativeError):
+        api.open_relative(17, "", directory=True)
+    with pytest.raises(_WindowsNativeError):
+        api.open_relative(17, ".", directory=True)
+
+    assert observed_names == [""]
 
 
 def test_windows_bound_source_disappearance_is_reported_as_change(

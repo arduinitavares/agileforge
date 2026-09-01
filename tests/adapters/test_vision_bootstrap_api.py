@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from pytest_socket import SocketConnectBlockedError
 
 import api as api_module
 from services.application import (
@@ -31,6 +33,8 @@ from workflow.contracts import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from services.node_attempt_replay import (
         NodeAttemptReplayQuery,
         TransitionReplayQuery,
@@ -38,6 +42,25 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 PROJECT_ID = 41
+pytestmark = pytest.mark.allow_hosts(["127.0.0.1"])
+
+
+def test_testclient_transport_policy_allows_only_loopback() -> None:
+    """Permit Windows event-loop plumbing without permitting external connects."""
+    loopback_socketpair = cast(
+        "Callable[[], tuple[socket.socket, socket.socket]]",
+        socket._fallback_socketpair,  # ty: ignore[unresolved-attribute]
+    )
+    left, right = loopback_socketpair()
+    left.close()
+    right.close()
+
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as external_socket,
+        pytest.warns(UserWarning, match="192\\.0\\.2\\.1"),
+        pytest.raises(SocketConnectBlockedError),
+    ):
+        external_socket.connect(("192.0.2.1", 80))
 
 
 def _bootstrap_decision() -> NodeDecision:

@@ -365,9 +365,8 @@ class _WindowsApi:
     ) -> int:
         """Open one component relative to a retained directory handle."""
         if (
-            not component
-            or component == ".."
-            or (component == "." and not directory)
+            component in {".", ".."}
+            or (not component and not directory)
             or "\\" in component
             or "/" in component
         ):
@@ -741,7 +740,7 @@ class WindowsRepositoryEvidenceReader:
     ) -> None:
         relative_root = _OwnedHandle(
             api=api,
-            value=api.open_relative(root_handle, ".", directory=True),
+            value=api.open_relative(root_handle, "", directory=True),
             native=True,
         )
         try:
