@@ -152,4 +152,6 @@ See [CONTEXT.md](CONTEXT.md) for domain language,
 [docs/agent-cli-manual.md](docs/agent-cli-manual.md) for the command contract,
 and
 [docs/testing/workflow-graph-acceptance-checklist.md](docs/testing/workflow-graph-acceptance-checklist.md)
-for operator acceptance evidence.
+for operator acceptance evidence. The active synthetic String Calculator
+dogfooding campaign follows
+[docs/testing/string-calculator-dogfooding-plan.md](docs/testing/string-calculator-dogfooding-plan.md).
