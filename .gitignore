@@ -53,6 +53,10 @@ entities.json
 mempalace.yaml
 
 # Local agent skill caches
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/using-agileforge/
+!.agents/skills/using-agileforge/**
 agent/
 skills-lock.json

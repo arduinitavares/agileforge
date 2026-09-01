@@ -1,0 +1,6 @@
+interface:
+  display_name: "Using AgileForge"
+  short_description: "Guide a repository through AgileForge"
+  default_prompt: "Use $using-agileforge to start or continue this repository through AgileForge, stopping for my product decisions and protected actions."
+policy:
+  allow_implicit_invocation: true
