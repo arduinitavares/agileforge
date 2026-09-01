@@ -176,3 +176,56 @@ def test_windows_bound_source_disappearance_is_reported_as_change(
             byte_limit=1024,
             binding=binding,
         )
+
+
+def test_windows_bound_source_access_denied_remains_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep stable ACL denial distinct from a source replacement race."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        WindowsRepositoryEvidenceReader,
+        _FileIdentity,
+        _WindowsApi,
+        _WindowsNativeError,
+        _WindowsSourceBinding,
+    )
+
+    identity = _FileIdentity(
+        volume_serial=1,
+        file_id=b"source-id",
+        size=7,
+        creation_time=10,
+        last_write_time=20,
+        change_time=30,
+        attributes=0,
+    )
+    binding = _WindowsSourceBinding(
+        state="open",
+        identity=identity,
+        final_path=r"\\?\C:\repo\README.md",
+    )
+    reader = WindowsRepositoryEvidenceReader(api=cast("_WindowsApi", object()))
+
+    def deny_content_read(*args: object, **kwargs: object) -> Never:
+        del args, kwargs
+        raise _WindowsNativeError(5)
+
+    monkeypatch.setattr(
+        WindowsRepositoryEvidenceReader,
+        "_open_approved_leaf",
+        deny_content_read,
+    )
+    warnings = []
+
+    content = reader._read_relative(
+        root_handle=1,
+        root_final_path=r"\\?\C:\repo",
+        resolved_path="README.md",
+        source_path="README.md",
+        warnings=warnings,
+        byte_limit=1024,
+        binding=binding,
+    )
+
+    assert content is None
+    assert [warning.code for warning in warnings] == ["EVIDENCE_UNREADABLE"]
