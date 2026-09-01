@@ -469,9 +469,17 @@ function waitingReason(decision) {
     return `${sentence[0].toUpperCase()}${sentence.slice(1)}.`;
 }
 
+function lockedActionReason(action) {
+    if (action?.request_kind === 'generate_vision_bootstrap') {
+        return 'Vision generation unavailable.';
+    }
+    return 'Correction input unavailable.';
+}
+
 function stageReason(decision, actions, projections = {}) {
-    if (findDecisionAction(actions, decision)?.availability === 'locked') {
-        return 'Correction input unavailable.';
+    const decisionAction = findDecisionAction(actions, decision);
+    if (decisionAction?.availability === 'locked') {
+        return lockedActionReason(decisionAction);
     }
     if (
         decision?.request_kind === 'start_sprint'
@@ -3311,24 +3319,30 @@ function findPrimaryWorkflowAction(actions = [], position = {}) {
         const found = actionList.find((a) => a?.request_kind === kind);
         if (found) {
             const config = DELIVERY_ACTION_CONFIG[kind] || {};
+            const locked = found.availability === 'locked';
             return {
                 request_kind: kind,
                 action: found,
                 label: config.label || humanizeKey(kind),
-                description: config.description || 'Current authoritative action for project stage.',
-                kind: 'Available',
+                description: locked
+                    ? lockedActionReason(found)
+                    : config.description || 'Current authoritative action for project stage.',
+                kind: locked ? 'Locked' : 'Available',
             };
         }
     }
 
     if (actionList.length > 0) {
         const first = actionList[0];
+        const locked = first.availability === 'locked';
         return {
             request_kind: first.request_kind,
             action: first,
             label: humanizeKey(first.request_kind || 'Action'),
-            description: 'Action available for current state.',
-            kind: 'Available',
+            description: locked
+                ? lockedActionReason(first)
+                : 'Action available for current state.',
+            kind: locked ? 'Locked' : 'Available',
         };
     }
     return null;
@@ -3448,12 +3462,18 @@ function renderTopCockpit() {
     const actionBtn = document.getElementById('cockpit-primary-action-btn');
 
     if (primaryAction) {
-        setText('cockpit-primary-action-label', 'Execute Stage Action');
+        const primaryLocked = primaryAction.action?.availability === 'locked';
+        setText(
+            'cockpit-primary-action-label',
+            primaryLocked ? 'Action Unavailable' : 'Execute Stage Action',
+        );
         setText('cockpit-action-stage-chip', primaryAction.kind || 'Available');
         setText('cockpit-action-description', primaryAction.description || primaryAction.label || 'Proceed with current stage');
         if (actionBtn) {
-            actionBtn.disabled = false;
-            actionBtn.onclick = () => handlePrimaryCockpitAction(primaryAction);
+            actionBtn.disabled = primaryLocked;
+            actionBtn.onclick = primaryLocked
+                ? null
+                : () => handlePrimaryCockpitAction(primaryAction);
         }
     } else {
         setText('cockpit-primary-action-label', 'No Action Required');

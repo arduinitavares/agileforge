@@ -130,10 +130,22 @@ test('initial Vision state offers one generation action without fallback input',
 
 test('locked Vision generation renders disabled and cannot execute from a stale control', async () => {
     let fetchCalls = 0;
-    const context = loadFrontend({ fetchImpl: async () => {
-        fetchCalls += 1;
-        return { ok: true, text: async () => '{}' };
-    } });
+    const cockpitButton = { disabled: false, onclick: null };
+    const cockpitLabel = { textContent: '' };
+    const cockpitChip = { textContent: '' };
+    const cockpitDescription = { textContent: '' };
+    const context = loadFrontend({
+        fetchImpl: async () => {
+            fetchCalls += 1;
+            return { ok: true, text: async () => '{}' };
+        },
+        elements: {
+            'cockpit-primary-action-btn': cockpitButton,
+            'cockpit-primary-action-label': cockpitLabel,
+            'cockpit-action-stage-chip': cockpitChip,
+            'cockpit-action-description': cockpitDescription,
+        },
+    });
     const lockedAction = {
         ...bootstrapAction,
         availability: 'locked',
@@ -160,6 +172,20 @@ test('locked Vision generation renders disabled and cannot execute from a stale 
         selectedProjectId = 7;
         lifecycleState.actions = [${JSON.stringify(lockedAction)}];
     `, context);
+    context.renderTopCockpit();
+
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.onclick, null);
+    assert.equal(cockpitLabel.textContent, 'Action Unavailable');
+    assert.equal(cockpitChip.textContent, 'Locked');
+    assert.equal(cockpitDescription.textContent, 'Vision generation unavailable.');
+    assert.equal(
+        context.stageReason(
+            { request_kind: 'generate_vision_bootstrap' },
+            [lockedAction],
+        ),
+        'Vision generation unavailable.',
+    );
     const staleButton = { disabled: false };
 
     const submitted = await context.runDirectAction(
