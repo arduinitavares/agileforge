@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
     from types import TracebackType
-    from typing import ClassVar
+    from typing import ClassVar, Literal
+
+    from services.vision_evidence_reader import RepositoryEvidenceBinding
 
 _ULONG = ctypes.c_uint32
 _DWORD = ctypes.c_uint32
@@ -57,9 +59,13 @@ _OBJ_DONT_REPARSE = 0x00001000
 _FILE_BASIC_INFO_CLASS = 0
 _FILE_STANDARD_INFO_CLASS = 1
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+_FILE_REMOTE_PROTOCOL_INFO_CLASS = 13
 _FILE_ID_INFO_CLASS = 18
+_ERROR_INVALID_FUNCTION = 1
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
+_ERROR_NOT_SUPPORTED = 50
+_ERROR_INVALID_PARAMETER = 87
 _SUPPORTED_FILESYSTEMS = frozenset({"NTFS", "REFS"})
 _EXPECTED_POINTER_SIZE = 8
 _CHANGED_DURING_READ = "Approved evidence file changed while it was read."
@@ -147,6 +153,22 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_: ClassVar[list[tuple[str, object]]] = [
         ("FileAttributes", _DWORD),
         ("ReparseTag", _DWORD),
+    ]
+
+
+class _FileRemoteProtocolInfo(ctypes.Structure):
+    _fields_: ClassVar[list[tuple[str, object]]] = [
+        ("StructureVersion", _USHORT),
+        ("StructureSize", _USHORT),
+        ("Protocol", _ULONG),
+        ("ProtocolMajorVersion", _USHORT),
+        ("ProtocolMinorVersion", _USHORT),
+        ("ProtocolRevision", _USHORT),
+        ("Reserved", _USHORT),
+        ("Flags", _ULONG),
+        ("GenericReserved", _ULONG * 8),
+        ("ProtocolSpecificReserved", _ULONG * 16),
+        ("ProtocolSpecific", _ULONG * 16),
     ]
 
 
@@ -322,13 +344,30 @@ class _WindowsApi:
             raise _WindowsNativeError(self._get_last_error())
         return handle
 
+    def open_source_sentinel(self, path: str) -> int:
+        """Follow one logical source into a retained metadata-only sentinel."""
+        raw_handle = self._create_file(
+            path,
+            _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        handle = _handle_value(raw_handle)
+        if handle in {None, _INVALID_HANDLE_VALUE}:
+            raise _WindowsNativeError(self._get_last_error())
+        return handle
+
     def open_relative(
         self, parent_handle: int, component: str, *, directory: bool
     ) -> int:
         """Open one component relative to a retained directory handle."""
         if (
             not component
-            or component in {".", ".."}
+            or component == ".."
+            or (component == "." and not directory)
             or "\\" in component
             or "/" in component
         ):
@@ -442,6 +481,27 @@ class _WindowsApi:
             raise _WindowsCapabilityError(message)
         return filesystem_name.value.upper()
 
+    def is_remote(self, handle: int) -> bool:
+        """Return whether Windows identifies the retained handle as remote."""
+        value = _FileRemoteProtocolInfo()
+        ok = self._get_file_information(
+            _HANDLE(handle),
+            _FILE_REMOTE_PROTOCOL_INFO_CLASS,
+            ctypes.byref(value),
+            ctypes.sizeof(value),
+        )
+        if ok:
+            return bool(value.Protocol)
+        error_code = self._get_last_error()
+        if error_code in {
+            _ERROR_INVALID_FUNCTION,
+            _ERROR_NOT_SUPPORTED,
+            _ERROR_INVALID_PARAMETER,
+        }:
+            return False
+        message = "Remote filesystem capability query failed."
+        raise _WindowsCapabilityError(message)
+
     def read(self, handle: int, byte_limit: int) -> bytes:
         """Read a bounded number of bytes from one synchronous file handle."""
         content = bytearray()
@@ -500,6 +560,34 @@ class _OwnedHandle:
 
 
 @dataclass
+class _OpenedEvidenceLeaf:
+    leaf: _OwnedHandle
+    parent_handle: int
+    owned_parent: _OwnedHandle | None
+    identity: _FileIdentity
+    final_path: str
+
+    def close(self) -> None:
+        """Close every handle retained for one evidence read."""
+        self.leaf.close()
+        if self.owned_parent is not None:
+            self.owned_parent.close()
+
+
+@dataclass
+class _WindowsSourceBinding:
+    state: Literal["open", "missing", "unreadable"]
+    sentinel: _OwnedHandle | None = None
+    identity: _FileIdentity | None = None
+    final_path: str | None = None
+
+    def close(self) -> None:
+        """Close the logical-source sentinel when one was retained."""
+        if self.sentinel is not None:
+            self.sentinel.close()
+
+
+@dataclass
 class _WindowsEvidenceWorktree:
     reader: WindowsRepositoryEvidenceReader
     worktree: Path
@@ -533,7 +621,11 @@ class _WindowsEvidenceWorktree:
         source_path: str,
         warnings: list[VisionEvidenceWarning],
         byte_limit: int,
+        binding: RepositoryEvidenceBinding,
     ) -> bytes | None:
+        if not isinstance(binding, _WindowsSourceBinding):
+            message = "Windows evidence read received an incompatible binding."
+            raise RepositoryEvidenceCapabilityError(message)
         return self.reader._read_relative(
             root_handle=self.root.value,
             root_final_path=self.root_final_path,
@@ -541,6 +633,19 @@ class _WindowsEvidenceWorktree:
             source_path=source_path,
             warnings=warnings,
             byte_limit=byte_limit,
+            binding=binding,
+        )
+
+    def bind(
+        self,
+        source_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> RepositoryEvidenceBinding:
+        """Bind a logical source before its compatible target is resolved."""
+        return self.reader._bind_source(
+            root_final_path=self.root_final_path,
+            source_path=source_path,
+            warnings=warnings,
         )
 
 
@@ -558,7 +663,13 @@ class WindowsRepositoryEvidenceReader:
             api = self._api()
             root = _OwnedHandle(api=api, value=api.open_root(worktree), native=False)
             try:
-                self._validate_root(api, root.value)
+                identity, final_path = self._validate_root(api, root.value)
+                self._probe_relative_root(
+                    api,
+                    root.value,
+                    identity,
+                    final_path,
+                )
             finally:
                 root.close()
         except (_WindowsCapabilityError, _WindowsNativeError, OSError):
@@ -574,23 +685,17 @@ class WindowsRepositoryEvidenceReader:
 
     def open(self, worktree: Path) -> _WindowsEvidenceWorktree:
         """Open and retain one validated Windows worktree root."""
-        capability = self.capability(worktree)
-        if not capability.available:
-            raise RepositoryEvidenceCapabilityError(
-                capability.message or "Repository evidence is unavailable."
-            )
         api = self._api()
         try:
             root = _OwnedHandle(api=api, value=api.open_root(worktree), native=False)
-            try:
-                identity, final_path = self._validate_root(api, root.value)
-            except BaseException:
-                root.close()
-                raise
-        except _WindowsCapabilityError as exc:
-            raise RepositoryEvidenceCapabilityError(str(exc)) from exc
         except _WindowsNativeError as exc:
             raise RepositoryEvidenceChangedError(_WORKTREE_CHANGED_BEFORE_READ) from exc
+        try:
+            identity, final_path = self._validate_root(api, root.value)
+            self._probe_relative_root(api, root.value, identity, final_path)
+        except (_WindowsCapabilityError, _WindowsNativeError) as exc:
+            root.close()
+            raise RepositoryEvidenceCapabilityError(str(exc)) from exc
         return _WindowsEvidenceWorktree(
             reader=self,
             worktree=worktree,
@@ -622,7 +727,35 @@ class WindowsRepositoryEvidenceReader:
             raise _WindowsCapabilityError(message)
         identity = api.identity(handle)
         final_path = api.final_path(handle)
+        if api.is_remote(handle) or _is_unc_path(final_path):
+            message = "Remote repository worktrees are unsupported."
+            raise _WindowsCapabilityError(message)
         return identity, final_path
+
+    def _probe_relative_root(
+        self,
+        api: _WindowsApi,
+        root_handle: int,
+        identity: _FileIdentity,
+        final_path: str,
+    ) -> None:
+        relative_root = _OwnedHandle(
+            api=api,
+            value=api.open_relative(root_handle, ".", directory=True),
+            native=True,
+        )
+        try:
+            self._validate_component(api, relative_root.value, directory=True)
+            relative_identity = api.identity(relative_root.value)
+            relative_final_path = api.final_path(relative_root.value)
+        finally:
+            relative_root.close()
+        if not _same_file_object(identity, relative_identity) or (
+            _normalized_windows_path(final_path)
+            != _normalized_windows_path(relative_final_path)
+        ):
+            message = "Directory-relative root probe changed identity."
+            raise _WindowsCapabilityError(message)
 
     def _open_relative(
         self,
@@ -640,6 +773,63 @@ class WindowsRepositoryEvidenceReader:
     def _read_handle(self, handle: int, byte_limit: int) -> bytes:
         return self._api().read(handle, byte_limit)
 
+    def _bind_source(
+        self,
+        *,
+        root_final_path: str,
+        source_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> _WindowsSourceBinding:
+        relative = PurePosixPath(source_path)
+        parts = relative.parts
+        if (
+            relative.is_absolute()
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            warnings.append(
+                _warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Approved evidence path is not repository-relative.",
+                )
+            )
+            return _WindowsSourceBinding(state="unreadable")
+        api = self._api()
+        sentinel: _OwnedHandle | None = None
+        try:
+            sentinel = _OwnedHandle(
+                api=api,
+                value=api.open_source_sentinel(ntpath.join(root_final_path, *parts)),
+                native=False,
+            )
+            self._validate_component(api, sentinel.value, directory=False)
+            identity = api.identity(sentinel.value)
+            final_path = api.final_path(sentinel.value)
+        except _WindowsNativeError as exc:
+            if sentinel is not None:
+                sentinel.close()
+            if exc.error_code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
+                return _WindowsSourceBinding(state="missing")
+            warnings.append(
+                _warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Approved evidence file could not be bound.",
+                )
+            )
+            return _WindowsSourceBinding(state="unreadable")
+        except _WindowsCapabilityError as exc:
+            if sentinel is not None:
+                sentinel.close()
+            raise RepositoryEvidenceCapabilityError(str(exc)) from exc
+        return _WindowsSourceBinding(
+            state="open",
+            sentinel=sentinel,
+            identity=identity,
+            final_path=final_path,
+        )
+
     def _read_relative(  # noqa: PLR0913
         self,
         *,
@@ -649,6 +839,7 @@ class WindowsRepositoryEvidenceReader:
         source_path: str,
         warnings: list[VisionEvidenceWarning],
         byte_limit: int,
+        binding: _WindowsSourceBinding,
     ) -> bytes | None:
         relative = PurePosixPath(resolved_path)
         parts = relative.parts
@@ -665,79 +856,165 @@ class WindowsRepositoryEvidenceReader:
                 )
             )
             return None
+        if binding.state == "unreadable":
+            return None
         api = self._api()
-        parent_handle = root_handle
-        owned_parent: _OwnedHandle | None = None
-        leaf: _OwnedHandle | None = None
+        try:
+            opened = self._open_approved_leaf(
+                api=api,
+                root_handle=root_handle,
+                root_final_path=root_final_path,
+                parts=parts,
+                binding=binding,
+            )
+        except _WindowsNativeError as exc:
+            if exc.error_code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
+                return None
+            warnings.append(
+                _warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Approved evidence file could not be opened.",
+                )
+            )
+            return None
+        except _WindowsCapabilityError as exc:
+            raise RepositoryEvidenceCapabilityError(str(exc)) from exc
         try:
             try:
-                for component in parts[:-1]:
-                    next_parent = _OwnedHandle(
-                        api=api,
-                        value=self._open_relative(
-                            parent_handle,
-                            component,
-                            directory=True,
-                        ),
-                        native=True,
-                    )
-                    if owned_parent is not None:
-                        owned_parent.close()
-                    owned_parent = next_parent
-                    parent_handle = next_parent.value
-                    self._validate_component(api, parent_handle, directory=True)
-                leaf = _OwnedHandle(
-                    api=api,
-                    value=self._open_relative(
-                        parent_handle,
-                        parts[-1],
-                        directory=False,
-                    ),
-                    native=True,
-                )
-                self._validate_component(api, leaf.value, directory=False)
-                before = api.identity(leaf.value)
-                self._require_internal_final_path(
-                    root_final_path,
-                    api.final_path(leaf.value),
-                )
-                content = self._read_handle(leaf.value, byte_limit)
-                after = api.identity(leaf.value)
-                current = _OwnedHandle(
-                    api=api,
-                    value=self._open_relative(
-                        parent_handle,
-                        parts[-1],
-                        directory=False,
-                    ),
-                    native=True,
-                )
-                try:
-                    self._validate_component(api, current.value, directory=False)
-                    current_identity = api.identity(current.value)
-                finally:
-                    current.close()
-            except _WindowsNativeError as exc:
-                if exc.error_code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
-                    return None
+                content = self._read_handle(opened.leaf.value, byte_limit)
+            except _WindowsNativeError:
                 warnings.append(
                     _warning(
                         code="EVIDENCE_UNREADABLE",
                         source=source_path,
-                        message="Approved evidence file could not be opened.",
+                        message="Approved evidence file could not be read.",
                     )
                 )
                 return None
+            try:
+                self._verify_leaf_after_read(
+                    api=api,
+                    opened=opened,
+                    root_final_path=root_final_path,
+                    parts=parts,
+                )
+            except _WindowsNativeError as exc:
+                raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ) from exc
             except _WindowsCapabilityError as exc:
                 raise RepositoryEvidenceCapabilityError(str(exc)) from exc
-            if before != after or before != current_identity:
-                raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ)
             return content
         finally:
+            opened.close()
+
+    def _open_approved_leaf(
+        self,
+        *,
+        api: _WindowsApi,
+        root_handle: int,
+        root_final_path: str,
+        parts: tuple[str, ...],
+        binding: _WindowsSourceBinding,
+    ) -> _OpenedEvidenceLeaf:
+        if (
+            binding.state == "missing"
+            or binding.identity is None
+            or binding.final_path is None
+        ):
+            raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ)
+        owned_parent: _OwnedHandle | None = None
+        leaf: _OwnedHandle | None = None
+        try:
+            parent_handle = root_handle
+            for component in parts[:-1]:
+                next_parent = _OwnedHandle(
+                    api=api,
+                    value=self._open_relative(
+                        parent_handle,
+                        component,
+                        directory=True,
+                    ),
+                    native=True,
+                )
+                if owned_parent is not None:
+                    owned_parent.close()
+                owned_parent = next_parent
+                parent_handle = next_parent.value
+                self._validate_component(api, parent_handle, directory=True)
+            leaf = _OwnedHandle(
+                api=api,
+                value=self._open_relative(
+                    parent_handle,
+                    parts[-1],
+                    directory=False,
+                ),
+                native=True,
+            )
+            self._validate_component(api, leaf.value, directory=False)
+            identity = api.identity(leaf.value)
+            final_path = api.final_path(leaf.value)
+            self._require_expected_final_path(root_final_path, parts, final_path)
+            _require_same_leaf(
+                binding.identity,
+                identity,
+                binding.final_path,
+                final_path,
+            )
+            return _OpenedEvidenceLeaf(
+                leaf=leaf,
+                parent_handle=parent_handle,
+                owned_parent=owned_parent,
+                identity=identity,
+                final_path=final_path,
+            )
+        except BaseException:
             if leaf is not None:
                 leaf.close()
             if owned_parent is not None:
                 owned_parent.close()
+            raise
+
+    def _verify_leaf_after_read(
+        self,
+        *,
+        api: _WindowsApi,
+        opened: _OpenedEvidenceLeaf,
+        root_final_path: str,
+        parts: tuple[str, ...],
+    ) -> None:
+        after = api.identity(opened.leaf.value)
+        current = _OwnedHandle(
+            api=api,
+            value=self._open_relative(
+                opened.parent_handle,
+                parts[-1],
+                directory=False,
+            ),
+            native=True,
+        )
+        try:
+            self._validate_component(api, current.value, directory=False)
+            current_identity = api.identity(current.value)
+            current_final_path = api.final_path(current.value)
+            self._require_expected_final_path(
+                root_final_path,
+                parts,
+                current_final_path,
+            )
+        finally:
+            current.close()
+        _require_same_leaf(
+            opened.identity,
+            after,
+            opened.final_path,
+            opened.final_path,
+        )
+        _require_same_leaf(
+            opened.identity,
+            current_identity,
+            opened.final_path,
+            current_final_path,
+        )
 
     @staticmethod
     def _validate_component(api: _WindowsApi, handle: int, *, directory: bool) -> None:
@@ -749,14 +1026,13 @@ class WindowsRepositoryEvidenceReader:
             raise _WindowsNativeError(_ERROR_PATH_NOT_FOUND)
 
     @staticmethod
-    def _require_internal_final_path(root_path: str, leaf_path: str) -> None:
-        normalized_root = _normalized_windows_path(root_path)
-        normalized_leaf = _normalized_windows_path(leaf_path)
-        try:
-            common = ntpath.commonpath((normalized_root, normalized_leaf))
-        except ValueError as exc:
-            raise _WindowsNativeError(_ERROR_PATH_NOT_FOUND) from exc
-        if ntpath.normcase(common) != ntpath.normcase(normalized_root):
+    def _require_expected_final_path(
+        root_path: str,
+        parts: tuple[str, ...],
+        leaf_path: str,
+    ) -> None:
+        expected = _normalized_windows_path(ntpath.join(root_path, *parts))
+        if _normalized_windows_path(leaf_path) != expected:
             raise _WindowsNativeError(_ERROR_PATH_NOT_FOUND)
 
     def _verify_root_unchanged(
@@ -780,9 +1056,11 @@ class WindowsRepositoryEvidenceReader:
             raise RepositoryEvidenceChangedError(
                 _WORKTREE_CHANGED_DURING_COLLECTION
             ) from exc
-        if identity != expected_identity or _normalized_windows_path(
-            final_path
-        ) != _normalized_windows_path(expected_final_path):
+        if not _same_file_object(
+            identity, expected_identity
+        ) or _normalized_windows_path(final_path) != _normalized_windows_path(
+            expected_final_path
+        ):
             raise RepositoryEvidenceChangedError(_WORKTREE_CHANGED_DURING_COLLECTION)
 
 
@@ -806,6 +1084,31 @@ def _normalized_windows_path(value: str) -> str:
     elif path.startswith("\\\\?\\"):
         path = path[4:]
     return ntpath.normcase(ntpath.normpath(path))
+
+
+def _is_unc_path(value: str) -> bool:
+    return _normalized_windows_path(value).startswith("\\\\")
+
+
+def _same_file_object(left: _FileIdentity, right: _FileIdentity) -> bool:
+    return (
+        left.volume_serial == right.volume_serial
+        and left.file_id == right.file_id
+        and left.creation_time == right.creation_time
+        and left.attributes == right.attributes
+    )
+
+
+def _require_same_leaf(
+    expected_identity: _FileIdentity,
+    observed_identity: _FileIdentity,
+    expected_path: str,
+    observed_path: str,
+) -> None:
+    if expected_identity != observed_identity or _normalized_windows_path(
+        expected_path
+    ) != _normalized_windows_path(observed_path):
+        raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ)
 
 
 def _warning(*, code: str, source: str, message: str) -> VisionEvidenceWarning:

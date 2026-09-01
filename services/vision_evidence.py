@@ -142,7 +142,7 @@ class VisionEvidenceCollector:
         except OSError:
             return RepositoryEvidenceCapability(
                 available=False,
-                code=VisionEvidenceErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE,
+                code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
                 message="Repository evidence worktree is unavailable.",
             )
         reader = self.evidence_reader or repository_evidence_reader()
@@ -615,19 +615,24 @@ class VisionEvidenceCollector:
         structured: bool,
     ) -> tuple[str, bool] | None:
         """Read one optional source safely and reject changed or escaping files."""
-        resolved_path = self._resolve_internal_path(
-            worktree,
-            relative_path,
-            warnings,
-        )
-        if resolved_path is None:
-            return None
-        content = evidence_worktree.read(
-            resolved_path,
-            relative_path,
-            warnings,
-            MAX_EVIDENCE_ITEM_BYTES + 1,
-        )
+        binding = evidence_worktree.bind(relative_path, warnings)
+        try:
+            resolved_path = self._resolve_internal_path(
+                worktree,
+                relative_path,
+                warnings,
+            )
+            if resolved_path is None:
+                return None
+            content = evidence_worktree.read(
+                resolved_path,
+                relative_path,
+                warnings,
+                MAX_EVIDENCE_ITEM_BYTES + 1,
+                binding,
+            )
+        finally:
+            binding.close()
         if content is None:
             return None
         truncated = len(content) > MAX_EVIDENCE_ITEM_BYTES

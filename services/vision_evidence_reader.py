@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -13,17 +13,44 @@ if TYPE_CHECKING:
     from services.contracts.vision_evidence import VisionEvidenceWarning
 
 
+type RepositoryEvidenceCapabilityCode = Literal[
+    "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+]
+
+
 @dataclass(frozen=True)
 class RepositoryEvidenceCapability:
     """Closed provider-free capability result for one repository worktree."""
 
     available: bool
-    code: str | None = None
+    code: RepositoryEvidenceCapabilityCode | None = None
     message: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject contradictory or open-ended capability projections."""
+        if self.available:
+            if self.code is not None or self.message is not None:
+                message = "Available repository capability cannot carry an error."
+                raise ValueError(message)
+            return
+        if (
+            self.code != "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+            or not self.message
+        ):
+            message = "Unavailable repository capability requires its closed reason."
+            raise ValueError(message)
 
 
 class RepositoryEvidenceWorktree(Protocol):
     """Retain one trusted worktree anchor across all approved reads."""
+
+    def bind(
+        self,
+        source_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> RepositoryEvidenceBinding:
+        """Bind one logical source before resolving its compatible target."""
+        ...
 
     def read(
         self,
@@ -31,8 +58,17 @@ class RepositoryEvidenceWorktree(Protocol):
         source_path: str,
         warnings: list[VisionEvidenceWarning],
         byte_limit: int,
+        binding: RepositoryEvidenceBinding,
     ) -> bytes | None:
         """Read one approved target or append an optional-source warning."""
+        ...
+
+
+class RepositoryEvidenceBinding(Protocol):
+    """Retain a source identity across policy resolution and target opening."""
+
+    def close(self) -> None:
+        """Release the retained source identity exactly once."""
         ...
 
 
@@ -75,7 +111,9 @@ def repository_evidence_reader() -> RepositoryEvidenceReader:
 
 
 __all__ = [
+    "RepositoryEvidenceBinding",
     "RepositoryEvidenceCapability",
+    "RepositoryEvidenceCapabilityCode",
     "RepositoryEvidenceCapabilityError",
     "RepositoryEvidenceChangedError",
     "RepositoryEvidenceReader",

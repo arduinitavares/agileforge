@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import pytest
 
 import services.vision_evidence_reader as reader_module
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
+    from services.vision_evidence_reader import RepositoryEvidenceCapabilityCode
 
 
 def test_reader_factory_selects_posix_without_loading_windows(
@@ -68,3 +70,54 @@ def test_windows_reader_reports_native_loader_failure_as_unavailable(
 
     assert capability.available is False
     assert capability.code == "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("available", "code", "message"),
+    [
+        (True, "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE", "contradiction"),
+        (False, None, "missing code"),
+        (False, "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE", None),
+    ],
+)
+def test_capability_result_rejects_contradictory_or_incomplete_states(
+    available: bool,
+    code: str | None,
+    message: str | None,
+) -> None:
+    """Keep capability projection finite and internally consistent."""
+    with pytest.raises(ValueError, match="capability"):
+        reader_module.RepositoryEvidenceCapability(
+            available=available,
+            code=cast("RepositoryEvidenceCapabilityCode | None", code),
+            message=message,
+        )
+
+
+def test_windows_root_object_identity_ignores_child_entry_timestamps() -> None:
+    """Retained-parent traversal may change root content without replacing root."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _FileIdentity,
+        _same_file_object,
+    )
+
+    before = _FileIdentity(
+        volume_serial=1,
+        file_id=b"root-id",
+        size=0,
+        creation_time=10,
+        last_write_time=20,
+        change_time=30,
+        attributes=16,
+    )
+    after_child_change = _FileIdentity(
+        volume_serial=1,
+        file_id=b"root-id",
+        size=4096,
+        creation_time=10,
+        last_write_time=21,
+        change_time=31,
+        attributes=16,
+    )
+
+    assert _same_file_object(before, after_child_change)

@@ -18,6 +18,8 @@ from services.vision_evidence_reader import (
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from services.vision_evidence_reader import RepositoryEvidenceBinding
+
 _OPEN_SUPPORTS_DIR_FD: bool = os.open in os.supports_dir_fd
 _STAT_SUPPORTS_DIR_FD: bool = os.stat in os.supports_dir_fd
 _O_NOFOLLOW: object = getattr(os, "O_NOFOLLOW", None)
@@ -27,6 +29,14 @@ _CHANGED_DURING_READ = "Approved evidence file changed while it was read."
 _WORKTREE_CHANGED_BEFORE_READ = (
     "Repository worktree changed before evidence files were read."
 )
+
+
+@dataclass(frozen=True)
+class _PosixEvidenceBinding:
+    """No-op token preserving the shared bind-before-resolve contract."""
+
+    def close(self) -> None:
+        """POSIX already binds identity during descriptor traversal."""
 
 
 @dataclass
@@ -54,14 +64,25 @@ class _PosixEvidenceWorktree:
             os.close(self.root_descriptor)
             self._closed = True
 
+    def bind(
+        self,
+        source_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> RepositoryEvidenceBinding:
+        """Return a no-op binding without changing POSIX traversal semantics."""
+        del source_path, warnings
+        return _PosixEvidenceBinding()
+
     def read(
         self,
         resolved_path: str,
         source_path: str,
         warnings: list[VisionEvidenceWarning],
         byte_limit: int,
+        binding: RepositoryEvidenceBinding,
     ) -> bytes | None:
         """Read one approved source through descriptor-relative traversal."""
+        del binding
         opened = PosixRepositoryEvidenceReader._open_descriptor(
             self.root_descriptor,
             resolved_path,

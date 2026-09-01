@@ -12,6 +12,7 @@ from services.application import (
     execution_action_decision_is_transportable,
     planning_action_decision_is_transportable,
 )
+from services.vision_evidence import VisionEvidenceCollectionError
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -393,7 +394,17 @@ def render_workflow_next(
         ):
             checker = getattr(application, "vision_bootstrap_capability", None)
             if callable(checker):
-                capability = checker(project_id=position.project_id)
+                try:
+                    capability = checker(project_id=position.project_id)
+                except VisionEvidenceCollectionError as error:
+                    blocked_commands.append(
+                        {
+                            "node_id": decision.node_id,
+                            "reason_code": error.code.value,
+                            "message": str(error),
+                        }
+                    )
+                    continue
                 if not capability.available:
                     blocked_commands.append(
                         {

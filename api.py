@@ -65,6 +65,7 @@ from services.application import (
     planning_action_decision_is_transportable,
     production_application,
 )
+from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
@@ -567,7 +568,12 @@ def _project_action_availability(
     if decision.request_kind == "generate_vision_bootstrap":
         checker = getattr(application, "vision_bootstrap_capability", None)
         if callable(checker):
-            capability = checker(project_id=project_id)
+            try:
+                capability = checker(project_id=project_id)
+            except VisionEvidenceCollectionError as error:
+                action["availability"] = "locked"
+                action["reason_code"] = error.code.value
+                return
             if not capability.available:
                 action["availability"] = "locked"
                 action["reason_code"] = (

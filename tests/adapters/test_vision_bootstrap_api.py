@@ -100,16 +100,23 @@ class _VisionInput:
         *,
         replay_after_first: bool = False,
         failure_code: VisionEvidenceErrorCode | None = None,
+        capability_failure_code: VisionEvidenceErrorCode | None = None,
         capability_available: bool = True,
     ) -> None:
         self.replay_after_first = replay_after_first
         self.failure_code = failure_code
+        self.capability_failure_code = capability_failure_code
         self.capability_available = capability_available
         self.replay_queries: list[NodeAttemptReplayQuery] = []
         self.build_calls = 0
 
     def bootstrap_capability(self, project_id: int) -> RepositoryEvidenceCapability:
         del project_id
+        if self.capability_failure_code is not None:
+            raise VisionEvidenceCollectionError(
+                self.capability_failure_code,
+                "Repository capability context is invalid.",
+            )
         if self.capability_available:
             return RepositoryEvidenceCapability(available=True)
         return RepositoryEvidenceCapability(
@@ -217,6 +224,19 @@ class _LockedPureReadApplication(_PureReadApplication):
             available=False,
             code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
             message="Repository evidence is unavailable.",
+        )
+
+
+class _InvalidCapabilityPureReadApplication(_PureReadApplication):
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        del project_id
+        raise VisionEvidenceCollectionError(
+            VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID,
+            "Repository capability context is invalid.",
         )
 
 
@@ -405,6 +425,30 @@ def test_bootstrap_capability_failure_stops_before_input_and_execution(
     assert application.execution_calls == []
 
 
+def test_bootstrap_capability_context_failure_uses_typed_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep capability context failures inside the existing error boundary."""
+    domain = _BoundaryDomain(_position(_bootstrap_decision()))
+    vision_input = _VisionInput(
+        capability_failure_code=VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID
+    )
+    application = _BootstrapApplication(domain, vision_input)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        f"/api/projects/{PROJECT_ID}/vision/bootstrap",
+        json={"idempotency_key": "capability-context-41", "actor": "operator"},
+    )
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["detail"]["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_BINDING_INVALID.value
+    )
+    assert vision_input.build_calls == 0
+    assert application.execution_calls == []
+
+
 def test_bootstrap_get_is_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep Vision bootstrap unavailable through a read HTTP method."""
     application = _CapturingApplication()
@@ -466,6 +510,21 @@ def test_position_locks_bootstrap_when_evidence_capability_is_unavailable(
             "reason_code": "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
         }
     ]
+
+
+def test_position_locks_bootstrap_when_capability_context_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep context failures visible and non-executable on the read projection."""
+    application = _InvalidCapabilityPureReadApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).get(f"/api/projects/{PROJECT_ID}/position")
+
+    assert response.status_code == HTTPStatus.OK
+    action = response.json()["actions"][0]
+    assert action["availability"] == "locked"
+    assert action["reason_code"] == "REPOSITORY_BINDING_INVALID"
 
 
 def test_bootstrap_openapi_body_is_strict_mutation_metadata() -> None:

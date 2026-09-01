@@ -108,6 +108,7 @@ The adapter requires:
 - stable `FILE_ID_INFO` values for root, directories, and files;
 - `FILE_BASIC_INFO`, `FILE_STANDARD_INFO`, and
   `FILE_ATTRIBUTE_TAG_INFO` queries;
+- `FILE_REMOTE_PROTOCOL_INFO` rejection plus UNC final-path rejection;
 - normalized final paths for retained handles;
 - directory-relative `NtCreateFile` opens;
 - read, write, and delete sharing so ordinary Git operations do not create an
@@ -121,11 +122,12 @@ does not claim that the repository changed.
 
 The logical evidence allowlist remains unchanged. For each logical source:
 
-1. Resolve it strictly to determine its current target.
-2. Require the resolved target to stay inside the resolved worktree.
-3. Require the resolved repository-relative target to have the same declared
+1. Open the logical source into a retained metadata-only identity sentinel.
+2. Resolve it strictly while that sentinel remains open to determine its target.
+3. Require the resolved target to stay inside the resolved worktree.
+4. Require the resolved repository-relative target to have the same declared
    source policy as the logical source.
-4. Traverse the resolved target from the retained root handle. Never traverse
+5. Traverse the resolved target from the retained root handle. Never traverse
    the logical reparse point again.
 
 This preserves the approved behavior where, for example,
@@ -146,21 +148,31 @@ The Windows reader performs these operations:
 1. Open the strictly resolved worktree path with `CreateFileW`, directory backup
    semantics, open-reparse-point behavior, and read/write/delete sharing.
 2. Reject a root handle that is not a directory, is itself a reparse point, has
-   no usable file identity, or cannot return a normalized final path.
-3. Duplicate traversal logically by retaining the root handle and opening each
+   no usable file identity, is remote, or cannot return a normalized final path.
+3. Exercise a directory-relative `NtCreateFile` reopen of the retained root as
+   part of capability probing and require the same object identity and final
+   path.
+4. Before path-policy resolution, open the logical allowlisted source once with
+   `CreateFileW` as a retained metadata-only identity sentinel. Follow its
+   existing compatible internal link, but never read bytes through this
+   absolute handle.
+5. Duplicate traversal logically by retaining the root handle and opening each
    intermediate component with `NtCreateFile` relative to the current parent
    handle. Use `OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE`,
    `FILE_OPEN_REPARSE_POINT`, and `FILE_DIRECTORY_FILE`.
-4. Open the leaf relative to the retained parent with the same no-reparse
+6. Open the leaf relative to the retained parent with the same no-reparse
    contract plus `FILE_NON_DIRECTORY_FILE` and read-data access.
-5. Reject non-regular/device-like leaves using handle attributes and standard
+7. Require the handle-anchored leaf to have the same complete identity and exact
+   final path as the retained sentinel.
+8. Reject non-regular/device-like leaves using handle attributes and standard
    information before reading.
-6. Read at most `MAX_EVIDENCE_ITEM_BYTES + 1` through the retained leaf handle.
+9. Read at most `MAX_EVIDENCE_ITEM_BYTES + 1` through the retained leaf handle.
 
 An intermediate directory rename or replacement after its handle is retained
 cannot redirect the subsequent child open. A reparse point introduced before a
-component is retained is rejected by the native open. No absolute child path is
-rebuilt for the read.
+component is retained is rejected by the native open. The absolute leaf handle
+is an identity sentinel only; all evidence bytes still come from the
+handle-anchored traversal.
 
 ## Identity And Change Detection
 
@@ -173,16 +185,23 @@ One Windows identity snapshot contains:
 
 The reader compares:
 
-1. leaf identity immediately before and after the bounded read;
-2. the original leaf identity with a fresh no-reparse reopen relative to the
+1. the absolute sentinel identity and exact final path with the first
+   handle-anchored leaf open;
+2. leaf identity immediately before and after the bounded read;
+3. the original leaf identity with a fresh no-reparse reopen relative to the
    retained parent;
-3. root identity with a fresh open of the resolved worktree path before closing
-   the retained root.
+4. root object identity and final path with a fresh open of the resolved
+   worktree path before closing the retained root. Root content timestamps are
+   intentionally excluded so retained-parent traversal survives child entry
+   changes.
 
 Identity, size, timestamp, type, or path changes return
 `REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION`. Capability/API failures return
 `REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE`. Optional absent or unreadable
 allowlisted files keep their existing warning behavior.
+Absence is optional only before the first retained leaf open. Disappearance,
+type change, reparse replacement, or reopen failure after a successful read is
+a repository-change error.
 
 The existing repository probe still runs before and after all reads and the
 active repository binding is still rechecked after bundle construction.
@@ -213,6 +232,11 @@ When capability is unavailable:
 Supported Windows repositories continue to advertise and execute the same
 `vision.bootstrap` action used by Linux and macOS.
 
+Project or repository-binding errors raised while deriving capability remain
+their existing closed workflow errors in direct execution, API action
+projection, and CLI blocked-command projection; they never escape as transport
+exceptions.
+
 ## Provider And Data Boundary
 
 Capability checks, repository probes, path resolution, handle opens, file reads,
@@ -242,13 +266,14 @@ Windows-only coverage on a real GitHub-hosted Windows runner:
 - ordinary repository evidence succeeds;
 - external junction/reparse escape is rejected without reading outside bytes;
 - a leaf replaced after resolution is never followed;
+- a leaf deleted or changed to a reparse point after reading fails as changed;
 - an intermediate directory replaced after its handle is retained cannot
   redirect the read;
 - modification during a bounded read returns the changed-during-collection
   error;
 - a stable internal compatible link works when link creation is supported;
-- missing native capability and unsupported filesystem behavior fail with the
-  capability-unavailable code;
+- missing native capability, remote worktrees, and unsupported filesystem
+  behavior fail with the capability-unavailable code;
 - no provider call occurs on preflight failure.
 
 GitHub Actions gains a required `windows-vision-evidence` job on
@@ -266,6 +291,7 @@ report Windows execution as pending until the new job runs on GitHub Actions.
 - [Microsoft `NtCreateFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile)
 - [Microsoft `CreateFileW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
 - [Microsoft `GetFileInformationByHandleEx`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)
+- [Microsoft `FILE_REMOTE_PROTOCOL_INFO`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_remote_protocol_info)
 - [Microsoft `FILE_ID_INFO`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
 - [Microsoft reparse points](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points)
 - [Microsoft ReFS feature comparison](https://learn.microsoft.com/en-us/windows-server/storage/refs/refs-overview)

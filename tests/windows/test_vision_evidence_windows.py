@@ -164,6 +164,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
     replacement.write_text("replacement sentinel\n", encoding="utf-8")
     project_id = _add_project(engine)
     _bind_repository(engine, project_id, windows_repository)
+    observed = GitPythonRepositoryProbe().inspect(windows_repository)
     original = WindowsRepositoryEvidenceReader._open_relative
     swapped = False
 
@@ -189,7 +190,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         VisionEvidenceCollector(
             engine=engine,
-            repository_probe=GitPythonRepositoryProbe(),
+            repository_probe=_StableProbe(observed),
         ).collect(project_id)
 
     assert (
@@ -294,6 +295,50 @@ def test_windows_reader_detects_change_during_bounded_read(
     )
 
 
+def test_windows_reader_detects_leaf_deletion_after_read(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Treat post-read disappearance as a repository change, not optional absence."""
+    readme = windows_repository / "README.md"
+    readme.write_text("inside\n", encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id, windows_repository)
+    observed = GitPythonRepositoryProbe().inspect(windows_repository)
+    original = WindowsRepositoryEvidenceReader._read_handle
+    deleted = False
+
+    def delete_after_read(
+        self: WindowsRepositoryEvidenceReader,
+        handle: int,
+        byte_limit: int,
+    ) -> bytes:
+        nonlocal deleted
+        content = original(self, handle, byte_limit)
+        if content and not deleted:
+            readme.unlink()
+            deleted = True
+        return content
+
+    monkeypatch.setattr(
+        WindowsRepositoryEvidenceReader,
+        "_read_handle",
+        delete_after_read,
+    )
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        VisionEvidenceCollector(
+            engine=engine,
+            repository_probe=_StableProbe(observed),
+        ).collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
+
+
 def test_windows_reader_allows_compatible_internal_junction(
     engine: Engine,
     windows_repository: Path,
@@ -335,3 +380,69 @@ def test_windows_reader_reports_unusable_file_identity_as_capability_unavailable
 
     assert capability.available is False
     assert capability.code == "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+
+
+def test_windows_reader_reports_unsupported_filesystem_as_capability_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Reject a stable handle when its filesystem is outside NTFS and ReFS."""
+
+    def unsupported_filesystem(self: _WindowsApi, handle: int) -> str:
+        del self, handle
+        return "FAT32"
+
+    monkeypatch.setattr(_WindowsApi, "filesystem_name", unsupported_filesystem)
+
+    capability = WindowsRepositoryEvidenceReader().capability(windows_repository)
+
+    assert capability.available is False
+    assert capability.code == "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+
+
+def test_windows_reader_reports_remote_worktree_as_capability_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Reject UNC-backed handles even when a server reports NTFS semantics."""
+
+    def remote_path(self: _WindowsApi, handle: int) -> str:
+        del self, handle
+        return r"\\?\UNC\server\share\repository"
+
+    monkeypatch.setattr(
+        _WindowsApi,
+        "final_path",
+        remote_path,
+    )
+
+    capability = WindowsRepositoryEvidenceReader().capability(windows_repository)
+
+    assert capability.available is False
+    assert capability.code == "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+
+
+def test_windows_capability_probes_directory_relative_open(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Do not advertise capability without exercising retained-root traversal."""
+    original = _WindowsApi.open_relative
+    observed: list[tuple[str, bool]] = []
+
+    def record_relative_open(
+        self: _WindowsApi,
+        parent_handle: int,
+        component: str,
+        *,
+        directory: bool,
+    ) -> int:
+        observed.append((component, directory))
+        return original(self, parent_handle, component, directory=directory)
+
+    monkeypatch.setattr(_WindowsApi, "open_relative", record_relative_open)
+
+    capability = WindowsRepositoryEvidenceReader().capability(windows_repository)
+
+    assert capability.available is True
+    assert observed == [(".", True)]

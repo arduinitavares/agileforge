@@ -23,6 +23,10 @@ from services.application import (
     StoryReviewRequest,
     StorySetCorrectionRequest,
 )
+from services.vision_evidence import (
+    VisionEvidenceCollectionError,
+    VisionEvidenceErrorCode,
+)
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import (
@@ -1319,6 +1323,19 @@ class _UnavailableVisionApplication(_FakeApplication):
         )
 
 
+class _InvalidVisionCapabilityApplication(_FakeApplication):
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        del project_id
+        raise VisionEvidenceCollectionError(
+            VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID,
+            "Repository capability context is invalid.",
+        )
+
+
 def test_workflow_next_reads_position_once() -> None:
     """Render workflow-next from exactly one domain position query."""
     application = _FakeApplication(position_fixture())
@@ -1364,6 +1381,42 @@ def test_workflow_next_blocks_unavailable_vision_evidence_without_a_command() ->
             "node_id": "vision.bootstrap",
             "reason_code": "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
             "message": "Repository evidence is unavailable.",
+        }
+    ]
+
+
+def test_workflow_next_blocks_invalid_capability_context() -> None:
+    """Project a typed blocker instead of raising from the read-only CLI path."""
+    decision = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_BOOTSTRAP_REQUIRED",
+        decision_fingerprint="vision-bootstrap-invalid-context",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+            "decisions": (decision,),
+        }
+    )
+
+    payload = workflow_next(
+        application=_InvalidVisionCapabilityApplication(position),
+        project_id=41,
+    )
+
+    assert payload["commands"] == []
+    assert payload["blocked_commands"] == [
+        {
+            "node_id": "vision.bootstrap",
+            "reason_code": "REPOSITORY_BINDING_INVALID",
+            "message": "Repository capability context is invalid.",
         }
     ]
 

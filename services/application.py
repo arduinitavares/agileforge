@@ -3694,20 +3694,22 @@ class AgileForgeApplication:
         decision = _unique_available_decision(position, "vision.bootstrap")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "vision.bootstrap")
-        capability = self.vision_bootstrap_capability(project_id=request.project_id)
-        if not capability.available:
-            return TransitionResult(
-                ok=False,
-                position=position,
-                error=WorkflowError(
-                    code=WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE,
-                    message=(
-                        capability.message
-                        or "Repository evidence collection is unavailable."
-                    ),
-                ),
-            )
         try:
+            capability = self.vision_bootstrap_capability(project_id=request.project_id)
+            if not capability.available:
+                return TransitionResult(
+                    ok=False,
+                    position=position,
+                    error=WorkflowError(
+                        code=(
+                            WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE
+                        ),
+                        message=(
+                            capability.message
+                            or "Repository evidence collection is unavailable."
+                        ),
+                    ),
+                )
             input_payload = input_service.build_bootstrap(request.project_id, decision)
         except VisionEvidenceCollectionError as error:
             return TransitionResult(
