@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full bg-slate-50">
 
 <head>
     <meta charset="utf-8" />
@@ -7,7 +7,7 @@
     <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
         rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0"
         rel="stylesheet" />
@@ -16,165 +16,336 @@
             theme: {
                 extend: {
                     colors: {
-                        ink: '#17202a',
-                        paper: '#f7f8fa',
-                        accent: '#087f5b',
+                        ink: '#191c1e',
+                        paper: '#f8fafc',
+                        surface: '#ffffff',
+                        border: '#e2e8f0',
+                        accent: '#2563eb',
+                        'accent-hover': '#1d4ed8',
+                        success: '#059669',
+                        warning: '#d97706',
+                        danger: '#dc2626',
                     },
-                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
                 },
             },
         };
     </script>
     <style>
-        html { overflow-x: hidden; }
-        body { min-width: 0; }
-        .material-symbols-outlined { font-size: 20px; line-height: 1; }
+        html { overflow-x: hidden; height: 100%; }
+        body { min-width: 0; min-height: 100%; display: flex; flex-direction: column; }
+        .material-symbols-outlined { font-size: 18px; line-height: 1; vertical-align: middle; }
         .break-anywhere { overflow-wrap: anywhere; word-break: break-word; }
-        dialog::backdrop { background: rgb(15 23 42 / 0.55); }
+        dialog::backdrop { background: rgb(15 23 42 / 0.55); backdrop-filter: blur(2px); }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
     <title>Project | AgileForge</title>
 </head>
 
-<body class="min-h-screen bg-paper font-sans text-ink">
-    <header class="sticky top-0 z-40 border-b border-slate-300 bg-white">
-        <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
-            <div class="flex min-w-0 items-center gap-3">
-                <a href="/dashboard" title="Back to projects"
-                    class="grid size-9 shrink-0 place-items-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">
-                    <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
-                    <span class="sr-only">Back to projects</span>
-                </a>
-                <div class="min-w-0">
-                    <p class="text-xs font-semibold uppercase text-accent">AgileForge</p>
-                    <h1 id="project-page-title" class="truncate text-lg font-bold">Project</h1>
-                </div>
+<body class="bg-slate-50 font-sans text-ink antialiased">
+    <!-- Top Control Bar -->
+    <header class="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-6">
+        <div class="flex min-w-0 items-center gap-3">
+            <a href="/dashboard" title="Back to projects"
+                class="grid size-8 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
+                <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
+                <span class="sr-only">Back to projects</span>
+            </a>
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="grid size-6 shrink-0 place-items-center rounded bg-blue-50 text-blue-600 font-mono text-xs font-bold">AF</span>
+                <h1 id="project-page-title" class="truncate text-sm font-semibold text-slate-900">Project</h1>
+                <span id="project-repo-badge" class="hidden md:inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600">
+                    <span class="material-symbols-outlined text-[14px]">terminal</span>
+                    <span id="project-repo-path" class="truncate max-w-[200px]">repo</span>
+                </span>
             </div>
+        </div>
+        <div class="flex items-center gap-2">
+            <span id="dashboard-refresh-time" class="hidden md:inline text-xs text-slate-500 font-mono">Live</span>
             <button id="refresh-project" type="button" title="Refresh project"
-                class="grid size-9 shrink-0 place-items-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50">
+                class="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-wait disabled:opacity-50 transition-colors">
                 <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
-                <span class="sr-only">Refresh project</span>
+                <span>Refresh</span>
             </button>
         </div>
     </header>
 
-    <main class="min-w-0">
-        <section class="border-b border-slate-300 bg-white">
-            <div id="project-summary" class="mx-auto grid max-w-7xl gap-5 px-4 py-6 sm:grid-cols-3 sm:px-6 lg:px-8">
-                <div class="min-w-0">
-                    <p class="text-xs font-semibold uppercase text-slate-500">Description</p>
-                    <p id="project-description" class="mt-1 break-words text-sm font-medium">Loading</p>
+    <!-- Top Command Cockpit (4-Tile Analytical Matrix) -->
+    <section id="top-cockpit" class="shrink-0 border-b border-slate-200 bg-slate-100/70 px-4 py-3 lg:px-6 hidden sm:block">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <!-- Tile 1: Governing Outcome -->
+            <div class="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-3 shadow-xs">
+                <div class="flex items-center justify-between gap-1">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Governing Outcome</span>
+                    <span id="cockpit-goal-status" class="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">Active</span>
                 </div>
-                <div class="min-w-0">
-                    <p class="text-xs font-semibold uppercase text-slate-500">Product Goal</p>
-                    <p id="project-goal-summary" class="mt-1 break-words text-sm font-medium">Loading</p>
-                </div>
-                <div class="min-w-0">
-                    <p class="text-xs font-semibold uppercase text-slate-500">Repository</p>
-                    <p id="project-repository-summary" class="mt-1 break-anywhere text-sm font-medium">Loading</p>
-                </div>
-            </div>
-        </section>
-
-        <section class="border-b border-slate-300 bg-slate-100">
-            <div class="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
-                <div id="lifecycle-stage-strip" aria-label="Project lifecycle" aria-live="polite">
-                    <p class="text-sm text-slate-500">Loading lifecycle.</p>
+                <p id="cockpit-goal-statement" class="mt-1 line-clamp-2 text-xs font-medium text-slate-900 leading-snug">Loading Product Goal...</p>
+                <div class="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                    <span id="cockpit-vision-anchor" class="truncate text-slate-600">Vision: Loading...</span>
+                    <span id="cockpit-cycle-progress" class="font-mono text-slate-700 shrink-0 font-medium">Cycle 1</span>
                 </div>
             </div>
-        </section>
 
-        <div class="mx-auto max-w-7xl px-4 pt-5 sm:px-6 lg:px-8">
-            <p id="project-error" class="hidden rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
-                role="alert"></p>
+            <!-- Tile 2: Lifecycle Radar -->
+            <div class="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-3 shadow-xs">
+                <div class="flex items-center justify-between gap-1">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Lifecycle Radar</span>
+                    <span id="cockpit-radar-badge" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">Framing: 100%</span>
+                </div>
+                <div class="mt-1 space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span class="text-slate-600">Current Phase:</span>
+                        <span id="cockpit-active-stage-label" class="font-semibold text-slate-900">Sprint Planning</span>
+                    </div>
+                    <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div id="cockpit-progress-bar" class="h-full rounded-full bg-blue-600 transition-all duration-300" style="width: 70%"></div>
+                    </div>
+                </div>
+                <p id="cockpit-phase-detail" class="mt-1 text-[11px] text-slate-500 truncate">Delivery Loop Active</p>
+            </div>
+
+            <!-- Tile 3: Blockers & Gaps -->
+            <div class="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-3 shadow-xs">
+                <div class="flex items-center justify-between gap-1">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Blockers & Gaps</span>
+                    <span id="cockpit-health-badge" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">Healthy</span>
+                </div>
+                <div id="cockpit-blocker-content" class="mt-1 text-xs">
+                    <p id="cockpit-blocker-text" class="text-slate-700 font-medium truncate">No active blockers</p>
+                    <p id="cockpit-gap-text" class="text-[11px] text-slate-500 mt-0.5 truncate">All PBIs mapped</p>
+                </div>
+                <div class="mt-2 flex items-center justify-between text-[11px]">
+                    <span id="cockpit-blocker-action-hint" class="text-slate-500">Zero active dependencies</span>
+                    <button id="cockpit-view-blockers-btn" type="button" class="hidden text-blue-600 hover:underline font-medium text-[11px]">View</button>
+                </div>
+            </div>
+
+            <!-- Tile 4: Authoritative Primary Action -->
+            <div id="cockpit-action-tile" class="flex flex-col justify-between rounded-lg border border-blue-200 bg-blue-50/40 p-3 shadow-xs">
+                <div class="flex items-center justify-between gap-1">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-blue-800">Authoritative Action</span>
+                    <span id="cockpit-action-stage-chip" class="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-blue-800">Available</span>
+                </div>
+                <p id="cockpit-action-description" class="mt-1 line-clamp-1 text-xs text-slate-700">Generate next plan</p>
+                <div id="cockpit-primary-action-container" class="mt-2">
+                    <button id="cockpit-primary-action-btn" type="button"
+                        class="w-full inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-blue-600 px-3 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-1 disabled:cursor-wait disabled:opacity-50 transition-colors">
+                        <span class="material-symbols-outlined text-[16px]">play_arrow</span>
+                        <span id="cockpit-primary-action-label">Run Action</span>
+                    </button>
+                </div>
+            </div>
         </div>
+    </section>
 
-        <section class="border-b border-slate-300 bg-white" aria-labelledby="vision-heading">
-            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
-                <div class="mb-5 flex items-center gap-3">
-                    <span class="grid size-9 shrink-0 place-items-center rounded-lg bg-emerald-100 text-emerald-800">
-                        <span class="material-symbols-outlined" aria-hidden="true">visibility</span>
-                    </span>
-                    <div>
-                        <p class="text-xs font-semibold uppercase text-accent">Product direction</p>
-                        <h2 id="vision-heading" class="text-lg font-bold">Project Vision</h2>
-                    </div>
+    <!-- Error Alert Strip -->
+    <div id="project-error-container" class="px-4 pt-3 lg:px-6">
+        <p id="project-error" class="hidden rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-medium text-red-800" role="alert"></p>
+    </div>
+
+    <!-- Main 3-Pane Body -->
+    <div class="flex flex-1 min-h-0 overflow-hidden">
+        <!-- Pane 1: Left Master Stage Navigator -->
+        <nav id="master-stage-nav" aria-label="Lifecycle Master Navigation"
+            class="w-64 shrink-0 hidden md:flex flex-col border-r border-slate-200 bg-white overflow-y-auto">
+            <!-- Framing Group -->
+            <div class="p-3 border-b border-slate-100">
+                <div class="flex items-center justify-between mb-1 px-2">
+                    <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">1. Project Framing</span>
+                    <span class="text-[10px] font-mono text-slate-400">Linear</span>
                 </div>
-                <div id="vision-panel" aria-live="polite"><p class="text-sm text-slate-500">Loading Vision.</p></div>
-            </div>
-        </section>
-
-        <section class="border-b border-slate-300 bg-paper" aria-labelledby="goal-heading">
-            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
-                <div class="mb-5 flex items-center gap-3">
-                    <span class="grid size-9 shrink-0 place-items-center rounded-lg bg-sky-100 text-sky-800">
-                        <span class="material-symbols-outlined" aria-hidden="true">flag</span>
-                    </span>
-                    <div>
-                        <p class="text-xs font-semibold uppercase text-sky-800">Valuable outcome</p>
-                        <h2 id="goal-heading" class="text-lg font-bold">Product Goal</h2>
-                    </div>
+                <div class="space-y-0.5" id="nav-framing-list">
+                    <button type="button" data-stage="Vision"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">visibility</span>
+                            <span class="font-medium">Vision</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Complete</span>
+                    </button>
+                    <button type="button" data-stage="Product Goal"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">flag</span>
+                            <span class="font-medium">Product Goal</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Active</span>
+                    </button>
+                    <button type="button" data-stage="Specification"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">description</span>
+                            <span class="font-medium">Specification</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                    </button>
+                    <button type="button" data-stage="Backlog"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">list_alt</span>
+                            <span class="font-medium">Backlog</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                    </button>
+                    <button type="button" data-stage="Roadmap"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">alt_route</span>
+                            <span class="font-medium">Roadmap</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                    </button>
                 </div>
-                <div id="goal-panel" aria-live="polite"><p class="text-sm text-slate-500">Loading Product Goal.</p></div>
             </div>
-        </section>
 
-        <section class="border-b border-slate-300 bg-paper" aria-labelledby="specification-heading">
-            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
-                <h2 id="specification-heading" class="text-lg font-bold">Specification</h2>
-                <div id="specification-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading specification.</p></div>
+            <!-- Delivery Loop Group -->
+            <div class="p-3 flex-1">
+                <div class="flex items-center justify-between mb-1 px-2">
+                    <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">2. Delivery Loop</span>
+                    <span class="text-[10px] font-mono text-blue-600 font-semibold" id="nav-cycle-badge">Cycle 1</span>
+                </div>
+                <div class="space-y-0.5" id="nav-delivery-list">
+                    <button type="button" data-stage="Stories"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">auto_stories</span>
+                            <span class="font-medium">Stories & Readiness</span>
+                        </span>
+                        <span id="nav-stories-count" class="stage-status-badge text-[10px] font-mono font-medium rounded bg-slate-100 px-1.5 py-0.2">0</span>
+                    </button>
+                    <button type="button" data-stage="Sprint"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">timeline</span>
+                            <span class="font-medium">Sprint Planning</span>
+                        </span>
+                        <span id="nav-sprint-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Pending</span>
+                    </button>
+                    <button type="button" data-stage="Execution"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">terminal</span>
+                            <span class="font-medium">Execution & TDD</span>
+                        </span>
+                        <span id="nav-execution-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Idle</span>
+                    </button>
+                    <button type="button" data-stage="Review"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400 stage-status-icon">rate_review</span>
+                            <span class="font-medium">Review & Retro</span>
+                        </span>
+                        <span id="nav-review-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Idle</span>
+                    </button>
+                </div>
+
+                <div class="mt-4 pt-3 border-t border-slate-100">
+                    <button type="button" data-stage="Repository"
+                        class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors text-left">
+                        <span class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-slate-400">folder_open</span>
+                            <span>Repository Binding</span>
+                        </span>
+                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Settings</span>
+                    </button>
+                </div>
             </div>
-        </section>
+        </nav>
 
-        <section class="border-b border-slate-300 bg-paper" aria-labelledby="repository-heading">
-            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
-                <h2 id="repository-heading" class="text-lg font-bold">Repository</h2>
-                <div id="repository-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading repository.</p></div>
+        <!-- Pane 2: Center Stage Detail Canvas -->
+        <main id="stage-workbench" class="flex-1 min-w-0 overflow-y-auto bg-slate-50/60 p-4 lg:p-6 space-y-4">
+            <!-- Hidden original elements preserved for test compatibility & binding -->
+            <div id="lifecycle-stage-strip" class="hidden"></div>
+            <div id="project-summary" class="hidden">
+                <span id="project-description"></span>
+                <span id="project-goal-summary"></span>
+                <span id="project-repository-summary"></span>
             </div>
-        </section>
 
-        <section class="bg-white" aria-labelledby="delivery-heading">
-            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
-                <h2 id="delivery-heading" class="text-lg font-bold">Delivery</h2>
-                <div id="delivery-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading delivery state.</p></div>
+            <!-- Workbench Header & Active Stage Indicator -->
+            <div class="flex items-center justify-between border-b border-slate-200 pb-3">
+                <div class="min-w-0">
+                    <span id="workbench-stage-kicker" class="text-[11px] font-semibold uppercase tracking-wider text-blue-600">Active Workspace</span>
+                    <h2 id="workbench-stage-title" class="text-base font-bold text-slate-900 truncate">Delivery Workbench</h2>
+                </div>
+                <div id="workbench-stage-actions" class="flex items-center gap-2 shrink-0"></div>
             </div>
-        </section>
-    </main>
 
+            <!-- Dedicated Stage Container Panels -->
+            <section id="vision-panel" class="stage-panel bg-white rounded-lg border border-slate-200 p-5 shadow-xs"></section>
+            <section id="goal-panel" class="stage-panel bg-white rounded-lg border border-slate-200 p-5 shadow-xs"></section>
+            <section id="specification-panel" class="stage-panel bg-white rounded-lg border border-slate-200 p-5 shadow-xs"></section>
+            <section id="repository-panel" class="stage-panel bg-white rounded-lg border border-slate-200 p-5 shadow-xs"></section>
+            <section id="delivery-panel" class="stage-panel bg-white rounded-lg border border-slate-200 p-5 shadow-xs"></section>
+        </main>
+
+        <!-- Pane 3: Right Context & Traceability Drawer -->
+        <aside id="context-drawer" aria-label="Context and Traceability Inspector"
+            class="w-72 shrink-0 hidden xl:flex flex-col border-l border-slate-200 bg-white p-4 overflow-y-auto space-y-4">
+            <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+                <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Context Inspector</span>
+                <span class="material-symbols-outlined text-slate-400 text-sm">info</span>
+            </div>
+            <div id="context-inspector-content" class="space-y-3 text-xs text-slate-600">
+                <div class="rounded border border-slate-100 bg-slate-50/80 p-2.5">
+                    <span class="font-semibold text-slate-800">Project Lineage</span>
+                    <p id="inspector-lineage-text" class="mt-1 font-mono text-[11px] text-slate-600 truncate">Active Goal Lineage</p>
+                </div>
+                <div class="rounded border border-slate-100 bg-slate-50/80 p-2.5">
+                    <span class="font-semibold text-slate-800">Specification Provenance</span>
+                    <p id="inspector-spec-provenance" class="mt-1 font-mono text-[11px] text-slate-600 truncate">sha256:verified</p>
+                </div>
+                <div id="inspector-selected-item" class="rounded border border-blue-100 bg-blue-50/30 p-2.5">
+                    <span class="font-semibold text-blue-900">Active Traceability</span>
+                    <p id="inspector-traceability-text" class="mt-1 text-[11px] text-slate-700">Select any story or task to inspect acceptance criteria and spec clause links.</p>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Human Action Dialog (Preserved) -->
     <dialog id="human-action-dialog" aria-labelledby="human-action-title"
         aria-describedby="human-action-description"
-        class="w-[min(36rem,calc(100%-2rem))] rounded-lg border border-slate-300 bg-white p-0 shadow-xl">
+        class="w-[min(38rem,calc(100%-2rem))] rounded-xl border border-slate-200 bg-white p-0 shadow-2xl">
         <form id="human-action-form" method="dialog">
-            <header class="flex items-start justify-between gap-4 border-b border-slate-300 px-5 py-4">
+            <header class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 bg-slate-50/80">
                 <div class="min-w-0">
-                    <p id="human-action-kicker" class="text-xs font-semibold uppercase text-accent">Human decision</p>
-                    <h2 id="human-action-title" class="mt-1 break-words text-base font-bold">Confirm action</h2>
+                    <p id="human-action-kicker" class="text-xs font-semibold uppercase text-blue-600">Human Decision Required</p>
+                    <h2 id="human-action-title" class="mt-1 break-words text-base font-bold text-slate-900">Confirm action</h2>
                 </div>
                 <button id="human-action-close" type="button" title="Close"
-                    class="grid size-9 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100">
+                    class="grid size-8 shrink-0 place-items-center rounded-md text-slate-400 hover:bg-slate-200/60 hover:text-slate-700 transition-colors">
                     <span class="material-symbols-outlined" aria-hidden="true">close</span>
                     <span class="sr-only">Close</span>
                 </button>
             </header>
-            <div class="space-y-4 px-5 py-5">
-                <p id="human-action-description" class="text-sm leading-6 text-slate-600"></p>
+            <div class="space-y-4 px-5 py-5 text-sm">
+                <p id="human-action-description" class="leading-relaxed text-slate-600"></p>
                 <div id="human-action-rationale-group">
-                    <label id="human-action-rationale-label" for="human-action-rationale" class="text-sm font-semibold">Rationale</label>
+                    <label id="human-action-rationale-label" for="human-action-rationale" class="font-semibold text-slate-800">Review Rationale</label>
                     <textarea id="human-action-rationale" rows="4"
-                        class="mt-1.5 w-full resize-y rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent"></textarea>
+                        placeholder="Provide clear rationale for this lifecycle decision..."
+                        class="mt-1.5 w-full resize-y rounded-md border-slate-300 text-sm focus:border-blue-600 focus:ring-blue-600"></textarea>
                 </div>
                 <div id="human-action-path-group" class="hidden">
-                    <label for="human-action-path" class="text-sm font-semibold">Local repository path</label>
+                    <label for="human-action-path" class="font-semibold text-slate-800">Local repository path</label>
                     <input id="human-action-path" type="text" autocomplete="off"
-                        class="mt-1.5 w-full rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent" />
+                        placeholder="/Users/name/projects/repo"
+                        class="mt-1.5 w-full rounded-md border-slate-300 font-mono text-sm focus:border-blue-600 focus:ring-blue-600" />
                 </div>
-                <p id="human-action-error" class="hidden rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800"
-                    role="alert"></p>
+                <p id="human-action-error" class="hidden rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800" role="alert"></p>
             </div>
-            <footer class="flex justify-end gap-3 border-t border-slate-300 bg-slate-50 px-5 py-4">
+            <footer class="flex justify-end gap-2.5 border-t border-slate-200 bg-slate-50 px-5 py-3.5">
                 <button id="human-action-cancel" type="button"
-                    class="min-h-10 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100">Cancel</button>
+                    class="min-h-9 rounded-md border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors">Cancel</button>
                 <button id="human-action-submit" type="submit"
-                    class="min-h-10 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">Confirm</button>
+                    class="min-h-9 rounded-md bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60 transition-colors">Confirm decision</button>
             </footer>
         </form>
     </dialog>

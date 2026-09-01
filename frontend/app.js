@@ -10,7 +10,7 @@ function escapeText(value) {
 function projectCountText(project) {
     const stories = Number(project.user_stories_count ?? 0);
     const sprints = Number(project.sprint_count ?? 0);
-    return `${stories} ${stories === 1 ? 'story' : 'stories'} / ${sprints} ${sprints === 1 ? 'sprint' : 'sprints'}`;
+    return `${stories} ${stories === 1 ? 'story' : 'stories'} · ${sprints} ${sprints === 1 ? 'sprint' : 'sprints'}`;
 }
 
 function renderProjects() {
@@ -18,24 +18,33 @@ function renderProjects() {
     if (!container) return;
     if (projects.length === 0) {
         container.innerHTML = `
-            <div class="col-span-full border-y border-slate-300 py-12 text-center">
+            <div class="col-span-full rounded-xl border border-dashed border-slate-300 bg-white py-12 text-center">
                 <span class="material-symbols-outlined text-3xl text-slate-400" aria-hidden="true">folder_open</span>
-                <p class="mt-3 text-sm font-semibold">No projects yet</p>
+                <p class="mt-2 text-sm font-semibold text-slate-800">No project workspaces yet</p>
+                <p class="mt-1 text-xs text-slate-500">Create your first project to begin product framing and sprint delivery.</p>
             </div>
         `;
         return;
     }
     container.innerHTML = projects.map((project) => `
         <a href="/dashboard/project.html?id=${encodeURIComponent(project.project_id ?? project.id)}"
-            class="block min-w-0 rounded-lg border border-slate-300 bg-white p-5 hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-accent">
-            <div class="flex min-w-0 items-start justify-between gap-3">
-                <div class="min-w-0">
-                    <h2 class="break-words text-base font-bold">${escapeText(project.name)}</h2>
-                    <p class="mt-1 line-clamp-2 break-words text-sm leading-5 text-slate-600">${escapeText(project.description || 'No description')}</p>
+            class="group flex flex-col justify-between min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-blue-400 hover:shadow-md transition-all">
+            <div>
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="grid size-5 shrink-0 place-items-center rounded bg-blue-50 text-blue-600 font-mono text-[10px] font-bold">#${escapeText(project.project_id ?? project.id)}</span>
+                            <h2 class="truncate text-sm font-bold text-slate-900 group-hover:text-blue-600 transition-colors">${escapeText(project.name)}</h2>
+                        </div>
+                        <p class="mt-1.5 line-clamp-2 text-xs leading-relaxed text-slate-600">${escapeText(project.description || 'No description provided')}</p>
+                    </div>
+                    <span class="material-symbols-outlined shrink-0 text-slate-300 group-hover:text-blue-600 group-hover:translate-x-0.5 transition-all text-[18px]" aria-hidden="true">arrow_forward</span>
                 </div>
-                <span class="material-symbols-outlined shrink-0 text-slate-400" aria-hidden="true">arrow_forward</span>
             </div>
-            <p class="mt-4 text-xs font-medium text-slate-500">${escapeText(projectCountText(project))}</p>
+            <div class="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-[11px] text-slate-500 font-medium">
+                <span class="font-mono">${escapeText(projectCountText(project))}</span>
+                <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 font-mono">Workspace</span>
+            </div>
         </a>
     `).join('');
 }
@@ -82,7 +91,7 @@ async function fetchProjects() {
         renderProjects();
     } catch (error) {
         if (container) {
-            container.innerHTML = `<p class="col-span-full border-y border-red-300 bg-red-50 px-4 py-5 text-sm text-red-800">${escapeText(error.message)}</p>`;
+            container.innerHTML = `<p class="col-span-full rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 font-mono">${escapeText(error.message)}</p>`;
         }
     }
 }

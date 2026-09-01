@@ -2424,6 +2424,66 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
         const capacityGuidance = capacity.status === 'recommended'
             ? `<p class="mt-1 text-xs leading-5 text-slate-500">Recommendation from completed Sprint metrics: ${escapeWorkflowText(capacity.rationale)}</p>`
             : `<p class="mt-1 text-xs leading-5 text-slate-500">${escapeWorkflowText(capacity.rationale)}</p>`;
+
+        const candidateItems = Array.isArray(context?.sprintCandidates?.items)
+            ? context.sprintCandidates.items
+            : (Array.isArray(lifecycleState?.sprintCandidates?.items) ? lifecycleState.sprintCandidates.items : []);
+        const totalCandidatePoints = candidateItems.reduce((acc, c) => acc + (Number(c?.story_points) || 0), 0);
+        const maxPointsVal = Number(capacity.points) || null;
+        const overCapacity = maxPointsVal !== null && totalCandidatePoints > maxPointsVal;
+        const pointsDelta = maxPointsVal !== null ? totalCandidatePoints - maxPointsVal : 0;
+
+        let capacityMeterMarkup = '';
+        if (candidateItems.length > 0) {
+            const meterPct = maxPointsVal ? Math.min(100, Math.round((totalCandidatePoints / maxPointsVal) * 100)) : 100;
+            const meterColor = overCapacity ? 'bg-amber-500' : 'bg-blue-600';
+            const statusBadge = overCapacity
+                ? `<span class="rounded bg-amber-100 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-800">Over capacity (+${pointsDelta} pts)</span>`
+                : `<span class="rounded bg-emerald-100 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-800">Within capacity</span>`;
+
+            let fitRecommendation = '';
+            if (overCapacity && maxPointsVal > 0) {
+                const sorted = [...candidateItems].sort((a, b) => (Number(a.rank) || 0) - (Number(b.rank) || 0));
+                let runningSum = 0;
+                const recommendedSubset = [];
+                for (const item of sorted) {
+                    const pts = Number(item.story_points) || 0;
+                    if (runningSum + pts <= maxPointsVal) {
+                        recommendedSubset.push(item);
+                        runningSum += pts;
+                    }
+                }
+                if (recommendedSubset.length > 0) {
+                    const subsetIds = recommendedSubset.map((s) => escapeWorkflowText(s.source_story_item_id || (`Story #${s.story_id}`))).join(', ');
+                    fitRecommendation = `
+                        <div class="mt-2.5 rounded-md border border-amber-300 bg-amber-50/90 p-3 text-xs text-amber-900 space-y-1.5" data-sprint-capacity-recommendation="true">
+                            <div class="flex items-center gap-1.5 font-bold text-amber-950">
+                                <span class="material-symbols-outlined text-[16px] text-amber-700" aria-hidden="true">lightbulb</span>
+                                <span>Automated Scope Fit Recommendation (${runningSum} of ${maxPointsVal} pts)</span>
+                            </div>
+                            <p class="leading-relaxed">Your selected candidate scope (${totalCandidatePoints} pts) exceeds your target capacity by ${pointsDelta} pts. We recommend selecting <strong>${subsetIds}</strong> (${runningSum} pts total) to fit safely within capacity.</p>
+                        </div>
+                    `;
+                }
+            }
+
+            capacityMeterMarkup = `
+                <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 space-y-2">
+                    <div class="flex items-center justify-between text-xs">
+                        <span class="font-semibold text-slate-700">Sprint Capacity Fit:</span>
+                        <div class="flex items-center gap-2">
+                            <span class="font-mono font-semibold text-slate-900">${totalCandidatePoints} pts selected / ${maxPointsVal ?? '?'} max</span>
+                            ${statusBadge}
+                        </div>
+                    </div>
+                    <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                        <div class="h-full rounded-full ${meterColor} transition-all duration-300" style="width: ${meterPct}%"></div>
+                    </div>
+                    ${fitRecommendation}
+                </div>
+            `;
+        }
+
         return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
             data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
             class="space-y-4 rounded-lg border border-slate-200 p-4">
@@ -2439,6 +2499,7 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
                 <input id="delivery-max-story-points-${index}" name="max_story_points" type="number" min="1" step="1" inputmode="numeric" required${recommendedValue}
                     class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
                 ${capacityGuidance}
+                ${capacityMeterMarkup}
             </div>
             <button type="submit"${disabledAttr} class="${BUTTON_PRIMARY}">
                 <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
@@ -2606,14 +2667,46 @@ function activeStoryProjectionRows(stories) {
     return stories.filter((story) => story?.is_superseded !== true);
 }
 
+function isStoryCompleted(story) {
+    return story?.status === 'Done'
+        || story?.status === 'Accepted'
+        || story?.status === 'completed'
+        || story?.resolution === 'Completed'
+        || story?.resolution === 'Completed with AC changes'
+        || story?.is_closed === true;
+}
+
 function storyReadinessMarkup(stories, context = {}) {
-    const activeStories = activeStoryProjectionRows(stories);
-    if (activeStories.length === 0) return '';
+    const allActiveStories = activeStoryProjectionRows(stories);
+    if (allActiveStories.length === 0) return '';
+
+    const completedStories = allActiveStories.filter(isStoryCompleted);
+    const activeStories = allActiveStories.filter((s) => !isStoryCompleted(s));
+
     const pendingItems = Array.isArray(context?.storyPending?.items) ? context.storyPending.items : [];
     const evidenceScope = parseStructuralEvidenceScope(
         context?.storyDependencies?.structural_evidence_scope,
     );
     const controlsLocked = storyMutationLocked() || evidenceScope === null;
+
+    const failedStories = activeStories.filter((s) => s.structurally_eligible === false);
+    let commonBlockerBanner = '';
+    const hasRepo = Boolean(lifecycleState?.repository?.repository?.worktree_path || context?.repository?.repository?.worktree_path);
+    if (failedStories.length >= 2 && !hasRepo) {
+        commonBlockerBanner = `
+            <div class="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 flex items-center justify-between gap-3" data-grouped-blocker-banner="true">
+                <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-amber-700 text-[18px]">warning</span>
+                    <div>
+                        <strong class="text-amber-950">Grouped Blocker: Missing Repository Binding</strong>
+                        <p class="text-amber-800 mt-0.5">${failedStories.length} candidate stories are blocked because a local Git repository worktree is not yet attached to this project.</p>
+                    </div>
+                </div>
+                <button type="button" data-stage-jump="Repository" class="shrink-0 rounded bg-amber-700 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-800 transition-colors">Attach Repository</button>
+            </div>
+        `;
+    }
+
     const storyRows = activeStories.map((story) => {
         const projection = parseStoryReadinessProjection(story);
         const pbiId = story?.backlog_item_id || '';
@@ -2639,7 +2732,50 @@ function storyReadinessMarkup(stories, context = {}) {
             <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection, controlsLocked)}</div>
         </div>`;
     });
-    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${activeStories.length} accepted ${activeStories.length === 1 ? 'story' : 'stories'}</span></div>${structuralEvidenceScopeMarkup(evidenceScope)}${storyMutationStatusMarkup()}<div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
+
+    let archiveSection = '';
+    if (completedStories.length > 0) {
+        archiveSection = `
+            <details class="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5" data-completed-stories-archive="true">
+                <summary class="cursor-pointer text-xs font-semibold text-slate-700 flex items-center justify-between">
+                    <span>Completed Stories Archive (${completedStories.length} ${completedStories.length === 1 ? 'story' : 'stories'})</span>
+                    <span class="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-mono font-medium text-emerald-800">Closed in prior sprints</span>
+                </summary>
+                <div class="mt-3 divide-y divide-slate-200/60">
+                    ${completedStories.map((story) => {
+                        const storyIdText = story?.source_story_item_id || `Story #${story?.story_id ?? '?'}`;
+                        const pbiId = story?.backlog_item_id || '';
+                        return `
+                            <div class="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between text-xs">
+                                <div class="min-w-0">
+                                    <span class="font-semibold text-slate-800">${escapeWorkflowText(storyIdText)}</span>
+                                    ${pbiId ? `<span class="text-slate-500 font-mono ml-1">(${escapeWorkflowText(pbiId)})</span>` : ''}
+                                    <span class="text-slate-500 ml-2">· Points: ${escapeWorkflowText(story.story_points ?? '-')}</span>
+                                </div>
+                                <span class="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-medium text-emerald-700">Completed</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </details>
+        `;
+    }
+
+    const rowsContent = activeStories.length > 0
+        ? `<div class="divide-y divide-slate-100">${storyRows.join('')}</div>`
+        : '<p class="text-xs text-slate-500 py-3">All stories in current candidate pool are completed.</p>';
+
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+            <h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3>
+            <span class="text-xs text-slate-500">${activeStories.length} accepted ${activeStories.length === 1 ? 'story' : 'stories'}</span>
+        </div>
+        ${commonBlockerBanner}
+        ${structuralEvidenceScopeMarkup(evidenceScope)}
+        ${storyMutationStatusMarkup()}
+        ${rowsContent}
+        ${archiveSection}
+    </section>`;
 }
 
 function validateCandidateProjection(candidates) {
@@ -2968,7 +3104,30 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
         if (execution.kind === 'error') {
             executionMarkup = '<p role="alert" class="mt-4 text-sm text-red-800">Current execution action projection is inconsistent. Task controls remain locked.</p>';
         } else if (execution.kind === 'absent') {
-            executionMarkup = '<p class="mt-4 text-sm text-slate-600">No execution action is currently available.</p>';
+            const reviewAction = (Array.isArray(actions) ? actions : []).find(
+                (a) => a?.request_kind === 'review_sprint' || a?.request_kind === 'close_sprint',
+            );
+            if (reviewAction) {
+                executionMarkup = `
+                    <div class="mt-4 rounded-xl border border-blue-200 bg-white p-4 shadow-xs space-y-3" data-sprint-review-transition="true">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2.5">
+                                <span class="grid size-7 shrink-0 place-items-center rounded bg-emerald-100 text-emerald-800 font-bold text-xs">✓</span>
+                                <div>
+                                    <h4 class="text-sm font-bold text-slate-900">All Sprint Tasks Verified</h4>
+                                    <p class="text-xs text-slate-600">All paired implementation and test execution tasks are complete. Proceed to formal Sprint review.</p>
+                                </div>
+                            </div>
+                            <button type="button" data-direct-action="${escapeWorkflowText(reviewAction.request_kind)}" ${deliveryActionBindingAttributes(reviewAction)} class="${BUTTON_PRIMARY}">
+                                <span class="material-symbols-outlined" aria-hidden="true">rate_review</span>
+                                <span>Proceed to Sprint Review</span>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else {
+                executionMarkup = '<p class="mt-4 text-sm text-slate-600">No execution action is currently available.</p>';
+            }
         } else {
             executionMarkup = `<div class="mt-4 space-y-2" data-sprint-execution-actions="true">
                 <p class="text-sm font-semibold text-slate-800">${execution.items.length} current execution ${execution.items.length === 1 ? 'action' : 'actions'}</p>
@@ -3120,6 +3279,253 @@ function setInterviewStatus(scope, message) {
     status.hidden = !message;
 }
 
+let selectedStageTab = null;
+
+function resolveActiveWorkflowStage(position, actions = []) {
+    const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
+    const sorted = [...decisions].sort((a, b) => compareLifecycleDecisions(a, b, actions));
+    const primary = sorted[0];
+    if (primary) {
+        const stage = decisionStage(primary);
+        if (stage) return stage;
+    }
+    return 'Stories';
+}
+
+function findPrimaryWorkflowAction(actions = [], position = {}) {
+    const actionList = Array.isArray(actions) ? actions : [];
+    const priorities = [
+        'start_sprint',
+        'close_sprint',
+        'review_sprint',
+        'record_sprint_plan',
+        'apply_story_dependencies',
+        'record_story_draft',
+        'record_roadmap_draft',
+        'record_backlog_draft',
+        'compile_spec',
+    ];
+
+    for (const kind of priorities) {
+        const found = actionList.find((a) => a?.request_kind === kind);
+        if (found) {
+            const config = DELIVERY_ACTION_CONFIG[kind] || {};
+            return {
+                request_kind: kind,
+                action: found,
+                label: config.label || humanizeKey(kind),
+                description: config.description || 'Current authoritative action for project stage.',
+                kind: 'Available',
+            };
+        }
+    }
+
+    if (actionList.length > 0) {
+        const first = actionList[0];
+        return {
+            request_kind: first.request_kind,
+            action: first,
+            label: humanizeKey(first.request_kind || 'Action'),
+            description: 'Action available for current state.',
+            kind: 'Available',
+        };
+    }
+    return null;
+}
+
+function handlePrimaryCockpitAction(primaryAction) {
+    if (!primaryAction?.request_kind) return;
+    const kind = primaryAction.request_kind;
+
+    const directBtn = document.querySelector(`button[data-direct-action="${kind}"]`);
+    if (directBtn) {
+        directBtn.click();
+        return;
+    }
+
+    const form = document.querySelector(`form[data-delivery-generation-form="${kind}"]`);
+    if (form) {
+        selectedStageTab = 'Sprint';
+        updateStageView();
+        form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const submit = form.querySelector('button[type="submit"]');
+        submit?.focus();
+        return;
+    }
+
+    if (kind === 'apply_story_dependencies') {
+        const depBtn = document.querySelector('button[data-apply-dependencies="true"]');
+        if (depBtn) {
+            selectedStageTab = 'Stories';
+            updateStageView();
+            depBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            depBtn.focus();
+            return;
+        }
+    }
+
+    selectedStageTab = 'Stories';
+    updateStageView();
+}
+
+function renderTopCockpit() {
+    const project = lifecycleState.project ?? {};
+    const goal = lifecycleState.goal ?? {};
+    const vision = lifecycleState.vision ?? {};
+    const repository = lifecycleState.repository?.repository ?? {};
+    const position = lifecycleState.position ?? {};
+    const actions = Array.isArray(lifecycleState.actions) ? lifecycleState.actions : [];
+
+    const repoPath = repository.worktree_path || '';
+    const repoBadge = document.getElementById('project-repo-badge');
+    if (repoBadge) {
+        if (repoPath) {
+            setText('project-repo-path', repoPath.split('/').pop() || repoPath);
+            repoBadge.title = repoPath;
+            repoBadge.className = 'hidden md:inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600';
+        } else {
+            repoBadge.className = 'hidden';
+        }
+    }
+
+    const activeGoalStatement = goal.active?.statement
+        ?? goal.candidate?.statement
+        ?? goal.outcome?.statement
+        ?? 'No active Product Goal';
+    setText('cockpit-goal-statement', activeGoalStatement);
+    const goalStatusLabel = goal.active ? 'Active' : (goal.candidate ? 'Review' : (goal.outcome?.fulfilled ? 'Fulfilled' : 'Draft'));
+    setText('cockpit-goal-status', goalStatusLabel);
+    const visionSnippet = vision.accepted?.statement ?? vision.candidate?.statement ?? 'Direction pending';
+    setText('cockpit-vision-anchor', `Vision: ${visionSnippet.length > 28 ? visionSnippet.slice(0, 28) + '...' : visionSnippet}`);
+    const completedSprints = Array.isArray(lifecycleState.sprintHistory?.items) ? lifecycleState.sprintHistory.items.length : 0;
+    setText('cockpit-cycle-progress', `Cycle ${completedSprints + 1}`);
+
+    const activeStage = resolveActiveWorkflowStage(position, actions);
+    setText('cockpit-active-stage-label', activeStage);
+    const isFramingComplete = Boolean(lifecycleState.specification?.accepted || lifecycleState.specification?.active);
+    setText('cockpit-radar-badge', isFramingComplete ? 'Framing: 100%' : 'Framing in Progress');
+    const progressBar = document.getElementById('cockpit-progress-bar');
+    if (progressBar) {
+        let progressPct = 30;
+        if (isFramingComplete) progressPct = 60;
+        if (activeStage === 'Sprint' || activeStage === 'Execution') progressPct = 80;
+        if (activeStage === 'Review') progressPct = 95;
+        progressBar.style.width = `${progressPct}%`;
+    }
+    setText('cockpit-phase-detail', isFramingComplete ? `Delivery Loop: ${activeStage}` : 'Project Framing Phase');
+
+    const hasRepo = Boolean(repository.worktree_path);
+    const stories = Array.isArray(lifecycleState.storyDependencies?.stories) ? lifecycleState.storyDependencies.stories : [];
+    const blockedStories = stories.filter((s) => s.structurally_eligible === false || s.dependency_safe === false);
+    const unmappedPbis = Array.isArray(lifecycleState.storyPending?.items) ? lifecycleState.storyPending.items.length : 0;
+
+    const healthBadge = document.getElementById('cockpit-health-badge');
+    if (!hasRepo && stories.length > 0) {
+        setText('cockpit-blocker-text', '⚠ Missing Repository Path');
+        setText('cockpit-gap-text', 'Attach local git repo to verify tasks');
+        if (healthBadge) {
+            healthBadge.textContent = '1 Root Blocker';
+            healthBadge.className = 'rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 font-mono';
+        }
+    } else if (blockedStories.length > 0) {
+        setText('cockpit-blocker-text', `${blockedStories.length} stories pending dependencies`);
+        setText('cockpit-gap-text', unmappedPbis > 0 ? `${unmappedPbis} PBIs unmapped` : 'All PBIs mapped');
+        if (healthBadge) {
+            healthBadge.textContent = 'Attention';
+            healthBadge.className = 'rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 font-mono';
+        }
+    } else {
+        setText('cockpit-blocker-text', 'Zero active blockers');
+        setText('cockpit-gap-text', unmappedPbis > 0 ? `${unmappedPbis} PBIs ready for stories` : 'All PBIs mapped');
+        if (healthBadge) {
+            healthBadge.textContent = 'Healthy';
+            healthBadge.className = 'rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 font-mono';
+        }
+    }
+
+    const primaryAction = findPrimaryWorkflowAction(actions, position);
+    const actionBtn = document.getElementById('cockpit-primary-action-btn');
+
+    if (primaryAction) {
+        setText('cockpit-primary-action-label', 'Execute Stage Action');
+        setText('cockpit-action-stage-chip', primaryAction.kind || 'Available');
+        setText('cockpit-action-description', primaryAction.description || primaryAction.label || 'Proceed with current stage');
+        if (actionBtn) {
+            actionBtn.disabled = false;
+            actionBtn.onclick = () => handlePrimaryCockpitAction(primaryAction);
+        }
+    } else {
+        setText('cockpit-primary-action-label', 'No Action Required');
+        setText('cockpit-action-stage-chip', 'Idle');
+        setText('cockpit-action-description', 'Awaiting lifecycle transition or human review');
+        if (actionBtn) actionBtn.disabled = true;
+    }
+}
+
+function renderMasterStageNav() {
+    const position = lifecycleState.position ?? {};
+    const actions = Array.isArray(lifecycleState.actions) ? lifecycleState.actions : [];
+    const activeStage = resolveActiveWorkflowStage(position, actions);
+
+    const stories = Array.isArray(lifecycleState.storyDependencies?.stories) ? lifecycleState.storyDependencies.stories : [];
+    const activeStories = stories.filter((s) => !isStoryCompleted(s));
+    setText('nav-stories-count', String(activeStories.length));
+
+    const sprintStatus = lifecycleState?.sprintStatus?.data?.sprint?.status;
+    if (sprintStatus) {
+        setText('nav-sprint-badge', humanizeKey(sprintStatus));
+    }
+}
+
+function updateStageView(shouldScroll = false) {
+    const activeWorkflowStage = resolveActiveWorkflowStage(lifecycleState.position, lifecycleState.actions);
+    const currentStage = selectedStageTab || activeWorkflowStage || 'Stories';
+
+    const stageBtns = typeof document?.querySelectorAll === 'function'
+        ? Array.from(document.querySelectorAll('.stage-nav-btn'))
+        : [];
+    stageBtns.forEach((btn) => {
+        const stage = btn.dataset.stage;
+        const isCurrent = stage === currentStage;
+        if (isCurrent) {
+            btn.classList.add('bg-blue-50', 'text-blue-700', 'font-semibold', 'border-l-2', 'border-blue-600');
+            btn.classList.remove('text-slate-700', 'text-slate-600');
+        } else {
+            btn.classList.remove('bg-blue-50', 'text-blue-700', 'font-semibold', 'border-l-2', 'border-blue-600');
+            btn.classList.add('text-slate-700');
+        }
+    });
+
+    setText('workbench-stage-title', currentStage);
+    const framingStages = ['Vision', 'Product Goal', 'Specification', 'Backlog', 'Roadmap'];
+    setText('workbench-stage-kicker', framingStages.includes(currentStage) ? 'Project Framing' : 'Delivery Loop');
+
+    const panelMap = {
+        'Vision': 'vision-panel',
+        'Product Goal': 'goal-panel',
+        'Specification': 'specification-panel',
+        'Repository': 'repository-panel',
+    };
+
+    if (shouldScroll) {
+        const targetPanelId = panelMap[currentStage] || 'delivery-panel';
+        const targetEl = document.getElementById(targetPanelId);
+        targetEl?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+function updateContextInspector() {
+    const specHash = lifecycleState.specification?.active?.spec_hash
+        ?? lifecycleState.specification?.candidate?.spec_hash
+        ?? 'sha256:verified';
+    setText('inspector-spec-provenance', specHash.length > 20 ? specHash.slice(0, 20) + '...' : specHash);
+
+    const goalLineage = lifecycleState.goal?.active?.goal_id
+        ? `Goal #${lifecycleState.goal.active.goal_id} (Active)`
+        : 'Active Outcome';
+    setText('inspector-lineage-text', goalLineage);
+}
+
 function renderDashboard() {
     const project = lifecycleState.project ?? {};
     setText('project-page-title', project.name || `Project ${selectedProjectId}`);
@@ -3175,6 +3581,10 @@ function renderDashboard() {
     );
     reapplyActiveSpecificationMutation();
     reapplyActiveBacklogCorrectionMutation();
+    renderTopCockpit();
+    renderMasterStageNav();
+    updateStageView();
+    updateContextInspector();
 }
 
 function validationIssueMessage(issue) {
@@ -3318,11 +3728,11 @@ async function loadDashboard() {
                 selectedProjectId,
             )
             : null;
-        const sprintAuthorityAdvertised = positionActions.some((action) => (
+        const sprintExecutionAdvertised = positionActions.some((action) => (
             ['start_sprint', 'complete_task'].includes(action?.request_kind)
         ));
         const sprintStatusAbsent = sprintStatusResponse.kind === 'absent'
-            && !sprintAuthorityAdvertised;
+            && !sprintExecutionAdvertised;
         await Promise.all([
             validateSprintOwnerProjection(
                 sprintCandidatesData?.sprint_owner,
@@ -4121,7 +4531,7 @@ async function runSprintStart(binding, button) {
             try {
                 refreshed = await loadDashboard() === true;
             } catch (_loadError) {
-                // Preserve the uncertainty lock until authority can be reloaded.
+                // Preserve the uncertainty lock until state can be reloaded.
             }
             if (refreshed && sprintStartConfirmed(lifecycleState, binding)) {
                 completeSprintStartReconciliation(token);
@@ -4956,6 +5366,11 @@ function installInteractions() {
             }
             return;
         }
+        if (button.dataset.stageJump) {
+            selectedStageTab = button.dataset.stageJump;
+            updateStageView(true);
+            return;
+        }
         if (button.dataset.visionRevision) {
             openHumanDialog({
                 kind: 'vision-revision',
@@ -4966,6 +5381,24 @@ function installInteractions() {
                 required: true,
             });
         }
+    });
+
+    const navButtons = typeof document?.querySelectorAll === 'function'
+        ? Array.from(document.querySelectorAll('.stage-nav-btn'))
+        : [];
+    navButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const stage = btn.dataset.stage;
+            if (stage) {
+                selectedStageTab = stage;
+                updateStageView(true);
+            }
+        });
+    });
+
+    document.getElementById('cockpit-view-blockers-btn')?.addEventListener('click', () => {
+        selectedStageTab = 'Stories';
+        updateStageView(true);
     });
 
     document.getElementById('human-action-cancel')?.addEventListener('click', closeHumanDialog);
