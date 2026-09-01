@@ -89,8 +89,10 @@ async def _build_wheel(repository_root: Path, wheel_dir: Path) -> None:
         repository_root,
         source_root,
         ignore=shutil.ignore_patterns(
+            ".codegraph",
             ".git",
             ".venv",
+            ".worktrees",
             ".pytest_cache",
             "*.egg-info",
             "__pycache__",
