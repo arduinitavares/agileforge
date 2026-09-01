@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import socket
+import sys
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from pytest_socket import SocketConnectBlockedError
+from pytest_socket import SocketBlockedError
 
 import api as api_module
 from services.application import (
@@ -33,8 +35,6 @@ from workflow.contracts import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from services.node_attempt_replay import (
         NodeAttemptReplayQuery,
         TransitionReplayQuery,
@@ -42,25 +42,62 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 PROJECT_ID = 41
-pytestmark = pytest.mark.allow_hosts(["127.0.0.1"])
+_ORIGINAL_SOCKET: type[socket.socket] = socket.socket
+
+
+def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
+    """Create only the loopback pair required by Windows ProactorEventLoop."""
+    with _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        address = listener.getsockname()
+        with ExitStack() as sockets:
+            client = _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.callback(client.close)
+            client.setblocking(False)
+            with suppress(BlockingIOError, InterruptedError):
+                client.connect(address)
+            client.setblocking(True)
+            accepted_fd, _ = listener._accept()  # ty: ignore[unresolved-attribute]
+            server = _ORIGINAL_SOCKET(
+                listener.family,
+                listener.type,
+                listener.proto,
+                fileno=accepted_fd,
+            )
+            sockets.callback(server.close)
+            assert server.getsockname() == client.getpeername()
+            assert client.getsockname() == server.getpeername()
+            sockets.pop_all()
+            return server, client
+
+
+@pytest.fixture(autouse=True)
+def _permit_windows_testclient_socketpair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permit only Proactor's internal pair while pytest-socket blocks sockets."""
+    if sys.platform == "win32":
+        monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
 
 def test_testclient_transport_policy_allows_only_loopback() -> None:
     """Permit Windows event-loop plumbing without permitting external connects."""
-    loopback_socketpair = cast(
-        "Callable[[], tuple[socket.socket, socket.socket]]",
-        socket._fallback_socketpair,  # ty: ignore[unresolved-attribute]
-    )
-    left, right = loopback_socketpair()
-    left.close()
-    right.close()
+    left, right = _windows_testclient_socketpair()
+    try:
+        assert left.getsockname()[0] == "127.0.0.1"
+        assert right.getsockname()[0] == "127.0.0.1"
+    finally:
+        left.close()
+        right.close()
 
-    with (
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as external_socket,
-        pytest.warns(UserWarning, match="192\\.0\\.2\\.1"),
-        pytest.raises(SocketConnectBlockedError),
-    ):
-        external_socket.connect(("192.0.2.1", 80))
+    with TestClient(api_module.app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == HTTPStatus.OK
+
+    with pytest.raises(SocketBlockedError):
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 
 def _bootstrap_decision() -> NodeDecision:

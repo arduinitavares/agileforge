@@ -139,9 +139,15 @@ def test_windows_api_accepts_empty_name_for_retained_root_reopen() -> None:
         del args
         return 1
 
-    def record_relative_name(*args: object) -> int:
+    def record_relative_name(
+        file_handle: object,
+        desired_access: object,
+        attributes_pointer: ctypes.c_void_p,
+        *args: object,
+    ) -> int:
+        del file_handle, desired_access, args
         attributes = ctypes.cast(
-            args[2],
+            attributes_pointer,
             ctypes.POINTER(_ObjectAttributes),
         ).contents
         observed_names.append(attributes.ObjectName.contents.Buffer)
