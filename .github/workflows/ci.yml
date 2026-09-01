@@ -51,6 +51,7 @@ jobs:
         run: >-
           node --test tests/test_workflow_position_display.mjs
           tests/test_create_project_modal_required_fields.mjs
+          tests/test_vision_interview_ui.mjs
 
   macos-smoke:
     name: macOS launcher smoke

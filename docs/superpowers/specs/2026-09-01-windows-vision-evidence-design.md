@@ -55,9 +55,10 @@ directory is replaced.
 ### Path resolution and `lstat`
 
 Resolving and inspecting a path before reopening it leaves a replacement window
-between validation and use. Path resolution remains useful only for choosing
-which compatible allowlisted target a stable internal link denotes. It is not
-trusted as the read safety mechanism.
+between validation and use. Windows instead decodes retained reparse metadata,
+normalizes the target lexically, and traverses approved internal targets from
+the retained root. General path resolution is not trusted as a Windows read or
+containment mechanism.
 
 ### Disable repository evidence on Windows
 
@@ -80,6 +81,7 @@ The adapter loads and validates these functions at runtime:
 - `kernel32.GetFileInformationByHandleEx`
 - `kernel32.GetFinalPathNameByHandleW`
 - `kernel32.GetVolumeInformationByHandleW`
+- `kernel32.DeviceIoControl`
 - `kernel32.ReadFile`
 - `ntdll.NtCreateFile`
 - `ntdll.NtClose`
@@ -122,13 +124,17 @@ does not claim that the repository changed.
 
 The logical evidence allowlist remains unchanged. For each logical source:
 
-1. Open the logical source into a retained metadata-only identity sentinel.
-2. Resolve it strictly while that sentinel remains open to determine its target.
-3. Require the resolved target to stay inside the resolved worktree.
-4. Require the resolved repository-relative target to have the same declared
-   source policy as the logical source.
-5. Traverse the resolved target from the retained root handle. Never traverse
-   the logical reparse point again.
+1. Open each logical-path component relative to the retained worktree root with
+   no-reparse semantics.
+2. When a component is a symlink or junction, inspect its retained handle with
+   `FSCTL_GET_REPARSE_POINT`; do not open the target path.
+3. Decode only supported symlink and mount-point targets. Reject UNC, device,
+   external, malformed, unsupported, or overlong chains, and require the
+   lexical target to remain inside the retained worktree before target contact.
+4. Restart root-relative traversal at the approved internal target and retain
+   the final ordinary leaf as the source identity sentinel.
+5. Require the resolved repository-relative target to have the same declared
+   source policy as the logical source before reading it.
 
 This preserves the approved behavior where, for example,
 `docs/spec/spec.md` may link to `specs/spec.md` while retaining the logical
@@ -137,9 +143,9 @@ unapproved targets remain warnings and never become evidence.
 
 Windows symbolic links and junctions are reparse points. Stable internal links
 are allowed only through the resolution-and-compatible-target rule above.
-Traversal rejects any reparse point encountered in the resolved target path,
-including unknown third-party tags, mount points, junctions, and symbolic links.
-No reparse data is sent to a provider.
+Each nested target is subjected to the same root-relative inspection. Unknown
+third-party tags and targets outside the worktree are rejected without target
+contact. No reparse data is sent to a provider.
 
 ## Handle-Anchored Traversal
 
@@ -152,27 +158,27 @@ The Windows reader performs these operations:
 3. Exercise a directory-relative `NtCreateFile` reopen of the retained root as
    part of capability probing and require the same object identity and final
    path.
-4. Before path-policy resolution, open the logical allowlisted source once with
-   `CreateFileW` as a retained metadata-only identity sentinel. Follow its
-   existing compatible internal link, but never read bytes through this
-   absolute handle.
-5. Duplicate traversal logically by retaining the root handle and opening each
-   intermediate component with `NtCreateFile` relative to the current parent
-   handle. Use `OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE`,
-   `FILE_OPEN_REPARSE_POINT`, and `FILE_DIRECTORY_FILE`.
-6. Open the leaf relative to the retained parent with the same no-reparse
-   contract plus `FILE_NON_DIRECTORY_FILE` and read-data access.
-7. Require the handle-anchored leaf to have the same complete identity and exact
-   final path as the retained sentinel.
+4. Retain the root handle and open each logical component with `NtCreateFile`
+   relative to the current parent. Use
+   `OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE`, `FILE_OPEN_REPARSE_POINT`, and the
+   matching directory/file constraint.
+5. For a retained reparse component, call `DeviceIoControl` with
+   `FSCTL_GET_REPARSE_POINT`, validate the decoded target lexically, then restart
+   from the retained root only for an approved internal target.
+6. Retain the final ordinary leaf as the metadata-only source sentinel. Open it
+   relative to the retained parent with the no-reparse contract plus
+   `FILE_NON_DIRECTORY_FILE` and read-data access.
+7. Require the later read leaf to have the same complete identity and exact
+   final path as that retained sentinel.
 8. Reject non-regular/device-like leaves using handle attributes and standard
    information before reading.
 9. Read at most `MAX_EVIDENCE_ITEM_BYTES + 1` through the retained leaf handle.
 
 An intermediate directory rename or replacement after its handle is retained
 cannot redirect the subsequent child open. A reparse point introduced before a
-component is retained is rejected by the native open. The absolute leaf handle
-is an identity sentinel only; all evidence bytes still come from the
-handle-anchored traversal.
+component is retained is opened without target processing and inspected first.
+The bound leaf handle is an identity sentinel only; all evidence bytes still
+come from the later handle-anchored traversal.
 
 ## Identity And Change Detection
 
@@ -185,7 +191,7 @@ One Windows identity snapshot contains:
 
 The reader compares:
 
-1. the absolute sentinel identity and exact final path with the first
+1. the root-relative bound sentinel identity and exact final path with the later
    handle-anchored leaf open;
 2. leaf identity immediately before and after the bounded read;
 3. the original leaf identity with a fresh no-reparse reopen relative to the
@@ -214,6 +220,10 @@ Capability is project-specific:
   metadata only.
 - Attached repositories require the selected platform reader and a successful
   root capability probe.
+- An unavailable reader result triggers a second repository-provenance probe;
+  disappearance or binding drift remains `REPOSITORY_PROVENANCE_STALE`, while
+  a stable local checkout with missing native/filesystem support remains
+  `REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE`.
 
 `VisionInputService` exposes the provider-free capability result.
 `AgileForgeApplication` uses that same result for execution and transport
@@ -259,7 +269,9 @@ Platform-neutral coverage:
 - omitted CLI executable plus explicit blocked reason;
 - identical API/CLI mutation failure;
 - zero input-builder, runner, and provider calls after capability failure;
-- unchanged POSIX evidence suite.
+- unchanged POSIX evidence suite;
+- fake-native reparse payload decoding, pre-contact UNC rejection, and retained
+  root-relative internal-target traversal.
 
 Windows-only coverage on a real GitHub-hosted Windows runner:
 

@@ -146,7 +146,10 @@ class VisionEvidenceCollector:
                 "Repository provenance could not be refreshed.",
             ) from exc
         reader = self.evidence_reader or repository_evidence_reader()
-        return reader.capability(worktree)
+        capability = reader.capability(worktree)
+        if not capability.available:
+            self._verify_binding(context.binding)
+        return capability
 
     def collect_with_provenance(self, project_id: int) -> VisionEvidenceCollection:
         """Collect evidence and return binding identity from the same context."""

@@ -189,12 +189,10 @@ def test_windows_native_opens_preserve_read_write_delete_sharing(
     )
 
     observed_share_modes: list[int] = []
-    observed_path_flags: list[int] = []
     test_handle = 17
 
     def record_path_open(*args: object) -> int:
         observed_share_modes.append(int(cast("Any", args[2])))
-        observed_path_flags.append(int(cast("Any", args[5])))
         return test_handle
 
     def record_relative_open(*args: object) -> int:
@@ -220,17 +218,11 @@ def test_windows_native_opens_preserve_read_write_delete_sharing(
     )
 
     assert api.open_root(tmp_path) == test_handle
-    assert api.open_source_sentinel(str(tmp_path / "README.md")) == test_handle
     with pytest.raises(_WindowsNativeError):
         api.open_relative(test_handle, "README.md", directory=False)
 
     expected = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
-    assert observed_share_modes == [expected, expected, expected]
-    from services.vision_evidence_windows import (  # noqa: PLC0415
-        _FILE_FLAG_OPEN_REPARSE_POINT,
-    )
-
-    assert observed_path_flags[1] & _FILE_FLAG_OPEN_REPARSE_POINT
+    assert observed_share_modes == [expected, expected]
 
 
 def test_windows_bind_rejects_unc_reparse_before_opening_its_target() -> None:

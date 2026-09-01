@@ -380,22 +380,6 @@ class _WindowsApi:
             raise _WindowsNativeError(self._get_last_error())
         return handle
 
-    def open_source_sentinel(self, path: str) -> int:
-        """Open a logical source without processing its final reparse point."""
-        raw_handle = self._create_file(
-            path,
-            _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
-            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
-            None,
-            _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-        handle = _handle_value(raw_handle)
-        if handle in {None, _INVALID_HANDLE_VALUE}:
-            raise _WindowsNativeError(self._get_last_error())
-        return handle
-
     def reparse_target(self, handle: int) -> _ReparseTarget:
         """Decode a symlink or junction target without opening that target."""
         device_io_control = self._device_io_control

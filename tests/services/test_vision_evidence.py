@@ -26,11 +26,15 @@ from services.vision_evidence import (
     VisionEvidenceErrorCode,
 )
 from services.vision_evidence_posix import PosixRepositoryEvidenceReader
-from services.vision_evidence_reader import RepositoryEvidenceChangedError
+from services.vision_evidence_reader import (
+    RepositoryEvidenceCapability,
+    RepositoryEvidenceChangedError,
+)
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Never
 
     from sqlalchemy.engine import Engine
 
@@ -831,6 +835,40 @@ def test_capability_preserves_stale_provenance_when_bound_worktree_is_lost(
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
     repository.rename(tmp_path / "removed-repository")
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        collector.capability(project_id)
+
+    assert caught.value.code is VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE
+
+
+def test_capability_rechecks_provenance_after_reader_reports_unavailable(
+    engine: Engine,
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Preserve stale provenance when the worktree vanishes during probing."""
+
+    class LosingCapabilityReader:
+        def capability(self, worktree: Path) -> RepositoryEvidenceCapability:
+            worktree.rename(tmp_path / "lost-during-capability")
+            return RepositoryEvidenceCapability(
+                available=False,
+                code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+                message="Repository evidence worktree is unavailable.",
+            )
+
+        def open(self, worktree: Path) -> Never:
+            del worktree
+            raise AssertionError
+
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    collector = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+        evidence_reader=LosingCapabilityReader(),  # type: ignore[arg-type]
+    )
 
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         collector.capability(project_id)

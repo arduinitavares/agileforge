@@ -43,6 +43,7 @@ CHECK_STAGES: tuple[CheckStage, ...] = (
             "--test",
             "tests/test_workflow_position_display.mjs",
             "tests/test_create_project_modal_required_fields.mjs",
+            "tests/test_vision_interview_ui.mjs",
         ),
     ),
     CheckStage(name="whitespace", command=("git", "diff", "--check")),
