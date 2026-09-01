@@ -311,6 +311,21 @@ def test_windows_decodes_retained_symlink_payload_without_target_open() -> None:
     assert decoded.relative is False
 
 
+def test_windows_rejects_unknown_reparse_tag_before_parsing_guid_payload() -> None:
+    """Treat third-party GUID bytes as opaque, not symlink path offsets."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _decode_reparse_target,
+        _WindowsReparseError,
+    )
+
+    unknown_tag = 0x00000001
+    opaque_guid = b"\x00\x00\x01\x00" + (b"\x00" * 12)
+    content = struct.pack("<IHH", unknown_tag, len(opaque_guid), 0) + opaque_guid
+
+    with pytest.raises(_WindowsReparseError, match="Unsupported"):
+        _decode_reparse_target(content)
+
+
 def test_windows_bind_resolves_compatible_internal_reparse_by_root_handle() -> None:
     """Preserve internal-link semantics without an absolute target open."""
     from services.vision_evidence_windows import (  # noqa: PLC0415
@@ -465,10 +480,15 @@ def test_windows_bound_source_disappearance_is_reported_as_change(
         )
 
 
-def test_windows_bound_source_access_denied_remains_unreadable(
+@pytest.mark.parametrize("error_code", [5, 267])
+def test_windows_bound_source_reopen_failure_reports_repository_change(
     monkeypatch: pytest.MonkeyPatch,
+    error_code: int,
 ) -> None:
-    """Keep stable ACL denial distinct from a source replacement race."""
+    """Treat every failure after a successful bind as a source race."""
+    from services.vision_evidence_reader import (  # noqa: PLC0415
+        RepositoryEvidenceChangedError,
+    )
     from services.vision_evidence_windows import (  # noqa: PLC0415
         WindowsRepositoryEvidenceReader,
         _FileIdentity,
@@ -495,24 +515,20 @@ def test_windows_bound_source_access_denied_remains_unreadable(
 
     def deny_content_read(*args: object, **kwargs: object) -> Never:
         del args, kwargs
-        raise _WindowsNativeError(5)
+        raise _WindowsNativeError(error_code)
 
     monkeypatch.setattr(
         WindowsRepositoryEvidenceReader,
         "_open_approved_leaf",
         deny_content_read,
     )
-    warnings = []
-
-    content = reader._read_relative(
-        root_handle=1,
-        root_final_path=r"\\?\C:\repo",
-        resolved_path="README.md",
-        source_path="README.md",
-        warnings=warnings,
-        byte_limit=1024,
-        binding=binding,
-    )
-
-    assert content is None
-    assert [warning.code for warning in warnings] == ["EVIDENCE_UNREADABLE"]
+    with pytest.raises(RepositoryEvidenceChangedError):
+        reader._read_relative(
+            root_handle=1,
+            root_final_path=r"\\?\C:\repo",
+            resolved_path="README.md",
+            source_path="README.md",
+            warnings=[],
+            byte_limit=1024,
+            binding=binding,
+        )

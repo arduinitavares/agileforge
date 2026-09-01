@@ -39,7 +39,8 @@ pytestmark = pytest.mark.skipif(
     reason="requires real Windows file-handle semantics",
 )
 _WINDOWS_ERROR_ACCESS_DENIED = 5
-_POST_BIND_OPEN_COUNT = 2
+_POST_BIND_LEAF_OPEN_COUNT = 2
+_POST_BIND_INTERMEDIATE_OPEN_COUNT = 3
 
 
 @pytest.fixture
@@ -197,7 +198,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
         nonlocal leaf_opens, replacement_blocked, swapped
         if not directory and component == "README.md":
             leaf_opens += 1
-        if leaf_opens == _POST_BIND_OPEN_COUNT and not swapped:
+        if leaf_opens == _POST_BIND_LEAF_OPEN_COUNT and not swapped:
             swapped = True
             try:
                 replacement.replace(readme)
@@ -238,7 +239,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
         )
 
     assert swapped
-    assert leaf_opens >= _POST_BIND_OPEN_COUNT
+    assert leaf_opens >= _POST_BIND_LEAF_OPEN_COUNT
 
 
 def test_windows_reader_retains_parent_or_blocks_intermediate_replacement(
@@ -275,7 +276,7 @@ def test_windows_reader_retains_parent_or_blocks_intermediate_replacement(
         nonlocal replacement_blocked, spec_opens, swapped
         if directory and component == "spec":
             spec_opens += 1
-        if spec_opens == _POST_BIND_OPEN_COUNT and not swapped:
+        if spec_opens == _POST_BIND_INTERMEDIATE_OPEN_COUNT and not swapped:
             swapped = True
             try:
                 (windows_repository / "docs").rename(
@@ -306,7 +307,7 @@ def test_windows_reader_retains_parent_or_blocks_intermediate_replacement(
     assert "outside sentinel" not in bundle.model_dump_json()
     assert replacement_blocked is not None
     assert swapped
-    assert spec_opens >= _POST_BIND_OPEN_COUNT
+    assert spec_opens >= _POST_BIND_INTERMEDIATE_OPEN_COUNT
 
 
 def test_windows_reader_detects_change_during_bounded_read(

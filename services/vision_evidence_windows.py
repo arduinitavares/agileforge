@@ -1013,16 +1013,7 @@ class WindowsRepositoryEvidenceReader:
                 binding=binding,
             )
         except _WindowsNativeError as exc:
-            if exc.error_code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
-                raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ) from exc
-            warnings.append(
-                _warning(
-                    code="EVIDENCE_UNREADABLE",
-                    source=source_path,
-                    message="Approved evidence file could not be opened.",
-                )
-            )
-            return None
+            raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ) from exc
         except _WindowsCapabilityError as exc:
             raise RepositoryEvidenceCapabilityError(str(exc)) from exc
         try:
@@ -1244,13 +1235,13 @@ def _decode_reparse_target(content: bytes) -> _ReparseTarget:
     if data_length + _REPARSE_DATA_HEADER_SIZE > len(content):
         message = "Windows returned truncated reparse-point data."
         raise _WindowsCapabilityError(message)
+    tag = int.from_bytes(content[0:4], "little")
+    path_base, relative = _reparse_path_layout(tag, content)
     substitute_offset = int.from_bytes(content[8:10], "little")
     substitute_length = int.from_bytes(content[10:12], "little")
     if substitute_length % 2:
         message = "Windows returned malformed reparse-point text."
         raise _WindowsCapabilityError(message)
-    tag = int.from_bytes(content[0:4], "little")
-    path_base, relative = _reparse_path_layout(tag, content)
     path_offset = path_base + substitute_offset
     path_end = path_offset + substitute_length
     if path_end > data_length + _REPARSE_DATA_HEADER_SIZE:
