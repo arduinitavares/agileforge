@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import struct
 import sys
 from typing import TYPE_CHECKING, cast
 
@@ -188,10 +189,12 @@ def test_windows_native_opens_preserve_read_write_delete_sharing(
     )
 
     observed_share_modes: list[int] = []
+    observed_path_flags: list[int] = []
     test_handle = 17
 
     def record_path_open(*args: object) -> int:
         observed_share_modes.append(int(cast("Any", args[2])))
+        observed_path_flags.append(int(cast("Any", args[5])))
         return test_handle
 
     def record_relative_open(*args: object) -> int:
@@ -223,6 +226,197 @@ def test_windows_native_opens_preserve_read_write_delete_sharing(
 
     expected = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
     assert observed_share_modes == [expected, expected, expected]
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+
+    assert observed_path_flags[1] & _FILE_FLAG_OPEN_REPARSE_POINT
+
+
+def test_windows_bind_rejects_unc_reparse_before_opening_its_target() -> None:
+    """Inspect a reparse point by root handle and never open its UNC target."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _FILE_ATTRIBUTE_REPARSE_POINT,
+        WindowsRepositoryEvidenceReader,
+        _FileAttributeTagInfo,
+        _ReparseTarget,
+        _WindowsSourceBinding,
+    )
+
+    reparse_handle = 19
+
+    class ReparseApi:
+        def __init__(self) -> None:
+            self.relative_opens: list[tuple[int, str, bool]] = []
+            self.closed: list[tuple[int, bool]] = []
+
+        def open_relative(
+            self,
+            parent_handle: int,
+            component: str,
+            *,
+            directory: bool,
+        ) -> int:
+            self.relative_opens.append((parent_handle, component, directory))
+            return reparse_handle
+
+        def attributes(self, handle: int) -> _FileAttributeTagInfo:
+            assert handle == reparse_handle
+            return _FileAttributeTagInfo(
+                FileAttributes=_FILE_ATTRIBUTE_REPARSE_POINT,
+                ReparseTag=0xA000000C,
+            )
+
+        def reparse_target(self, handle: int) -> _ReparseTarget:
+            assert handle == reparse_handle
+            return _ReparseTarget(
+                path=r"\??\UNC\server\share\README.md",
+                relative=False,
+            )
+
+        def close(self, handle: int, *, native: bool) -> None:
+            self.closed.append((handle, native))
+
+    api = ReparseApi()
+    reader = WindowsRepositoryEvidenceReader(api=cast("Any", api))
+    warnings = []
+
+    binding = reader._bind_source(
+        root_handle=11,
+        root_final_path=r"\\?\C:\repo",
+        source_path="README.md",
+        warnings=warnings,
+    )
+
+    assert isinstance(binding, _WindowsSourceBinding)
+    assert binding.state == "unreadable"
+    assert api.relative_opens == [(11, "README.md", False)]
+    assert api.closed == [(reparse_handle, True)]
+    assert [warning.code for warning in warnings] == ["SYMLINK_ESCAPE"]
+
+
+def test_windows_decodes_retained_symlink_payload_without_target_open() -> None:
+    """Decode the substitute name returned by FSCTL_GET_REPARSE_POINT."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _IO_REPARSE_TAG_SYMLINK,
+        _decode_reparse_target,
+    )
+
+    target = r"\??\UNC\server\share\README.md"
+    encoded_target = target.encode("utf-16-le")
+    reparse_data_length = 12 + len(encoded_target)
+    content = b"".join(
+        (
+            struct.pack("<IHH", _IO_REPARSE_TAG_SYMLINK, reparse_data_length, 0),
+            struct.pack("<HHHHI", 0, len(encoded_target), 0, 0, 0),
+            encoded_target,
+        )
+    )
+
+    decoded = _decode_reparse_target(content)
+
+    assert decoded.path == target
+    assert decoded.relative is False
+
+
+def test_windows_bind_resolves_compatible_internal_reparse_by_root_handle() -> None:
+    """Preserve internal-link semantics without an absolute target open."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _FILE_ATTRIBUTE_DIRECTORY,
+        _FILE_ATTRIBUTE_REPARSE_POINT,
+        WindowsRepositoryEvidenceReader,
+        _FileAttributeTagInfo,
+        _FileIdentity,
+        _ReparseTarget,
+    )
+
+    docs_handle = 20
+    link_handle = 21
+    target_parent_handle = 22
+    leaf_handle = 23
+
+    identity = _FileIdentity(
+        volume_serial=1,
+        file_id=b"internal-spec",
+        size=12,
+        creation_time=10,
+        last_write_time=20,
+        change_time=30,
+        attributes=0,
+    )
+
+    class InternalReparseApi:
+        def __init__(self) -> None:
+            self.opens: list[tuple[int, str, bool]] = []
+            self.closed: list[tuple[int, bool]] = []
+            self._handles = iter(
+                (docs_handle, link_handle, target_parent_handle, leaf_handle)
+            )
+
+        def open_relative(
+            self,
+            parent_handle: int,
+            component: str,
+            *,
+            directory: bool,
+        ) -> int:
+            self.opens.append((parent_handle, component, directory))
+            return next(self._handles)
+
+        def attributes(self, handle: int) -> _FileAttributeTagInfo:
+            values = {
+                docs_handle: _FILE_ATTRIBUTE_DIRECTORY,
+                link_handle: (
+                    _FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT
+                ),
+                target_parent_handle: _FILE_ATTRIBUTE_DIRECTORY,
+                leaf_handle: 0,
+            }
+            return _FileAttributeTagInfo(
+                FileAttributes=values[handle],
+                ReparseTag=0xA0000003 if handle == link_handle else 0,
+            )
+
+        def reparse_target(self, handle: int) -> _ReparseTarget:
+            assert handle == link_handle
+            return _ReparseTarget(path=r"\??\C:\repo\specs", relative=False)
+
+        def identity(self, handle: int) -> _FileIdentity:
+            assert handle == leaf_handle
+            return identity
+
+        def final_path(self, handle: int) -> str:
+            assert handle == leaf_handle
+            return r"\\?\C:\repo\specs\spec.md"
+
+        def close(self, handle: int, *, native: bool) -> None:
+            self.closed.append((handle, native))
+
+    api = InternalReparseApi()
+    reader = WindowsRepositoryEvidenceReader(api=cast("Any", api))
+
+    binding = reader._bind_source(
+        root_handle=11,
+        root_final_path=r"\\?\C:\repo",
+        source_path="docs/spec/spec.md",
+        warnings=[],
+    )
+
+    assert binding.state == "open"
+    assert binding.resolved_path == "specs/spec.md"
+    assert api.opens == [
+        (11, "docs", True),
+        (docs_handle, "spec", True),
+        (11, "specs", True),
+        (target_parent_handle, "spec.md", False),
+    ]
+    assert api.closed == [
+        (link_handle, True),
+        (docs_handle, True),
+        (target_parent_handle, True),
+    ]
+    binding.close()
+    assert api.closed[-1] == (leaf_handle, True)
 
 
 def test_windows_bound_source_disappearance_is_reported_as_change(

@@ -811,6 +811,7 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
 
     const bootstrapAction = findAction(actions, 'generate_vision_bootstrap');
     if (bootstrapAction) {
+        const bootstrapLocked = bootstrapAction.availability === 'locked';
         const current = projection?.current
             ? `<div class="mb-5 border-l-4 border-emerald-500 pl-4">
                 <p class="text-xs font-semibold uppercase text-emerald-700">Accepted Vision</p>
@@ -819,8 +820,8 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
             : '';
         return `${current}<p class="mb-4 text-sm leading-6 text-slate-600">Draft from available Project context.</p>
             ${visionBootstrapContextMarkup(context)}
-            <button type="button" data-direct-action="generate_vision_bootstrap" class="mt-5 ${BUTTON_PRIMARY}">
-                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>Generate Vision draft</span>
+            <button type="button" data-direct-action="generate_vision_bootstrap" data-action-availability="${bootstrapLocked ? 'locked' : 'available'}" class="mt-5 ${BUTTON_PRIMARY}"${bootstrapLocked ? ' disabled aria-disabled="true"' : ''}>
+                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>${bootstrapLocked ? 'Vision generation unavailable' : 'Generate Vision draft'}</span>
             </button>`;
     }
 
@@ -4561,6 +4562,12 @@ async function runSprintStart(binding, button) {
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
     if (button.disabled) return false;
+    const projectedAction = findAction(lifecycleState.actions, requestKind);
+    if (projectedAction?.availability === 'locked') {
+        button.disabled = true;
+        setProjectError('This action is currently unavailable. Reload after its requirements are satisfied.');
+        return false;
+    }
     if (requestKind === 'record_backlog_draft' && activeBacklogCorrectionMutation) return false;
     const backlogCorrection = requestKind === 'record_backlog_draft'
         ? captureBacklogCorrectionBinding(lifecycleState, button)

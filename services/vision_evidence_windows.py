@@ -54,6 +54,15 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+_IO_REPARSE_TAG_SYMLINK = 0xA000000C
+_SYMLINK_FLAG_RELATIVE = 0x00000001
+_REPARSE_DATA_HEADER_SIZE = 8
+_MOUNT_POINT_HEADER_SIZE = 16
+_SYMLINK_HEADER_SIZE = 20
+_MAX_REPARSE_HOPS = 32
 _OBJ_CASE_INSENSITIVE = 0x00000040
 _OBJ_DONT_REPARSE = 0x00001000
 _FILE_BASIC_INFO_CLASS = 0
@@ -197,6 +206,18 @@ class _WindowsNativeError(OSError):
         super().__init__(error_code, "Windows file operation failed")
 
 
+class _WindowsReparseError(RuntimeError):
+    """Raised when a reparse target cannot be safely resolved inside the root."""
+
+
+@dataclass(frozen=True)
+class _ReparseTarget:
+    """One target decoded from a retained reparse-point handle."""
+
+    path: str
+    relative: bool
+
+
 @dataclass(frozen=True)
 class _WindowsApi:
     """Validated Win32 and NT native API table used only by the Windows adapter."""
@@ -211,6 +232,7 @@ class _WindowsApi:
     _nt_close: _NativeFunction
     _rtl_status_to_error: _NativeFunction
     _get_last_error: Callable[[], int]
+    _device_io_control: _NativeFunction | None = None
 
     @classmethod
     def load(cls) -> _WindowsApi:
@@ -291,6 +313,19 @@ class _WindowsApi:
         ]
         read_file.restype = ctypes.c_int
 
+        device_io_control = _function(kernel32, "DeviceIoControl")
+        device_io_control.argtypes = [
+            _HANDLE,
+            _DWORD,
+            _PVOID,
+            _DWORD,
+            _PVOID,
+            _DWORD,
+            ctypes.POINTER(_DWORD),
+            _PVOID,
+        ]
+        device_io_control.restype = ctypes.c_int
+
         nt_create_file = _function(ntdll, "NtCreateFile")
         nt_create_file.argtypes = [
             ctypes.POINTER(_HANDLE),
@@ -326,6 +361,7 @@ class _WindowsApi:
             _nt_close=nt_close,
             _rtl_status_to_error=rtl_status_to_error,
             _get_last_error=cast("Callable[[], int]", get_last_error),
+            _device_io_control=device_io_control,
         )
 
     def open_root(self, worktree: Path) -> int:
@@ -345,20 +381,43 @@ class _WindowsApi:
         return handle
 
     def open_source_sentinel(self, path: str) -> int:
-        """Follow one logical source into a retained metadata-only sentinel."""
+        """Open a logical source without processing its final reparse point."""
         raw_handle = self._create_file(
             path,
             _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
             _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
             None,
             _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS,
+            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         handle = _handle_value(raw_handle)
         if handle in {None, _INVALID_HANDLE_VALUE}:
             raise _WindowsNativeError(self._get_last_error())
         return handle
+
+    def reparse_target(self, handle: int) -> _ReparseTarget:
+        """Decode a symlink or junction target without opening that target."""
+        device_io_control = self._device_io_control
+        if device_io_control is None:
+            message = "Windows reparse-point inspection is unavailable."
+            raise _WindowsCapabilityError(message)
+        buffer = ctypes.create_string_buffer(_MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
+        returned = _DWORD()
+        ok = device_io_control(
+            _HANDLE(handle),
+            _FSCTL_GET_REPARSE_POINT,
+            None,
+            0,
+            buffer,
+            len(buffer),
+            ctypes.byref(returned),
+            None,
+        )
+        if not ok:
+            raise _WindowsNativeError(self._get_last_error())
+        content = bytes(buffer.raw[: int(returned.value)])
+        return _decode_reparse_target(content)
 
     def open_relative(
         self, parent_handle: int, component: str, *, directory: bool
@@ -579,6 +638,17 @@ class _WindowsSourceBinding:
     sentinel: _OwnedHandle | None = None
     identity: _FileIdentity | None = None
     final_path: str | None = None
+    resolved_path: str | None = None
+
+    @property
+    def resolution_bound(self) -> bool:
+        """Windows resolves every source through the retained root handle."""
+        return True
+
+    @property
+    def present_at_bind(self) -> bool:
+        """Return whether Windows retained the logical source identity."""
+        return self.state == "open"
 
     def close(self) -> None:
         """Close the logical-source sentinel when one was retained."""
@@ -642,6 +712,7 @@ class _WindowsEvidenceWorktree:
     ) -> RepositoryEvidenceBinding:
         """Bind a logical source before its compatible target is resolved."""
         return self.reader._bind_source(
+            root_handle=self.root.value,
             root_final_path=self.root_final_path,
             source_path=source_path,
             warnings=warnings,
@@ -775,6 +846,7 @@ class WindowsRepositoryEvidenceReader:
     def _bind_source(
         self,
         *,
+        root_handle: int,
         root_final_path: str,
         source_path: str,
         warnings: list[VisionEvidenceWarning],
@@ -797,14 +869,12 @@ class WindowsRepositoryEvidenceReader:
         api = self._api()
         sentinel: _OwnedHandle | None = None
         try:
-            sentinel = _OwnedHandle(
+            sentinel, identity, final_path, resolved_path = self._open_bound_source(
                 api=api,
-                value=api.open_source_sentinel(ntpath.join(root_final_path, *parts)),
-                native=False,
+                root_handle=root_handle,
+                root_final_path=root_final_path,
+                parts=parts,
             )
-            self._validate_component(api, sentinel.value, directory=False)
-            identity = api.identity(sentinel.value)
-            final_path = api.final_path(sentinel.value)
         except _WindowsNativeError as exc:
             if sentinel is not None:
                 sentinel.close()
@@ -818,6 +888,19 @@ class WindowsRepositoryEvidenceReader:
                 )
             )
             return _WindowsSourceBinding(state="unreadable")
+        except _WindowsReparseError:
+            if sentinel is not None:
+                sentinel.close()
+            warnings.append(
+                _warning(
+                    code="SYMLINK_ESCAPE",
+                    source=source_path,
+                    message=(
+                        "Approved evidence path resolves outside the worktree."
+                    ),
+                )
+            )
+            return _WindowsSourceBinding(state="unreadable")
         except _WindowsCapabilityError as exc:
             if sentinel is not None:
                 sentinel.close()
@@ -827,7 +910,86 @@ class WindowsRepositoryEvidenceReader:
             sentinel=sentinel,
             identity=identity,
             final_path=final_path,
+            resolved_path=resolved_path,
         )
+
+    def _open_bound_source(  # noqa: PLR0915
+        self,
+        *,
+        api: _WindowsApi,
+        root_handle: int,
+        root_final_path: str,
+        parts: tuple[str, ...],
+    ) -> tuple[_OwnedHandle, _FileIdentity, str, str]:
+        """Resolve reparse points lexically and retain the approved final leaf."""
+        pending = list(parts)
+        resolved: list[str] = []
+        parent_handle = root_handle
+        owned_parent: _OwnedHandle | None = None
+        opened: _OwnedHandle | None = None
+        reparse_hops = 0
+        try:
+            while pending:
+                component = pending.pop(0)
+                directory = bool(pending)
+                opened = _OwnedHandle(
+                    api=api,
+                    value=self._open_relative(
+                        parent_handle,
+                        component,
+                        directory=directory,
+                    ),
+                    native=True,
+                )
+                attributes = api.attributes(opened.value)
+                if attributes.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    try:
+                        target = api.reparse_target(opened.value)
+                    finally:
+                        opened.close()
+                        opened = None
+                    reparse_hops = _next_reparse_hop(reparse_hops)
+                    target_parts = _internal_reparse_target_parts(
+                        root_final_path,
+                        tuple(resolved),
+                        target,
+                    )
+                    if owned_parent is not None:
+                        owned_parent.close()
+                        owned_parent = None
+                    pending = [*target_parts, *pending]
+                    resolved = []
+                    parent_handle = root_handle
+                    continue
+                self._validate_component(api, opened.value, directory=directory)
+                resolved.append(component)
+                if directory:
+                    if owned_parent is not None:
+                        owned_parent.close()
+                    owned_parent = opened
+                    parent_handle = opened.value
+                    opened = None
+                    continue
+                leaf = opened
+                identity = api.identity(leaf.value)
+                final_path = api.final_path(leaf.value)
+                resolved_parts = tuple(resolved)
+                self._require_expected_final_path(
+                    root_final_path,
+                    resolved_parts,
+                    final_path,
+                )
+                if owned_parent is not None:
+                    owned_parent.close()
+                    owned_parent = None
+                return leaf, identity, final_path, "/".join(resolved_parts)
+        except BaseException:
+            if opened is not None:
+                opened.close()
+            if owned_parent is not None:
+                owned_parent.close()
+            raise
+        raise _WindowsNativeError(_ERROR_PATH_NOT_FOUND)
 
     def _read_relative(  # noqa: PLR0913
         self,
@@ -1087,6 +1249,122 @@ def _normalized_windows_path(value: str) -> str:
 
 def _is_unc_path(value: str) -> bool:
     return _normalized_windows_path(value).startswith("\\\\")
+
+
+def _decode_reparse_target(content: bytes) -> _ReparseTarget:
+    """Decode the bounded payload returned by FSCTL_GET_REPARSE_POINT."""
+    if len(content) < _MOUNT_POINT_HEADER_SIZE:
+        message = "Windows returned malformed reparse-point data."
+        raise _WindowsCapabilityError(message)
+    data_length = int.from_bytes(content[4:6], "little")
+    if data_length + _REPARSE_DATA_HEADER_SIZE > len(content):
+        message = "Windows returned truncated reparse-point data."
+        raise _WindowsCapabilityError(message)
+    substitute_offset = int.from_bytes(content[8:10], "little")
+    substitute_length = int.from_bytes(content[10:12], "little")
+    if substitute_length % 2:
+        message = "Windows returned malformed reparse-point text."
+        raise _WindowsCapabilityError(message)
+    tag = int.from_bytes(content[0:4], "little")
+    path_base, relative = _reparse_path_layout(tag, content)
+    path_offset = path_base + substitute_offset
+    path_end = path_offset + substitute_length
+    if path_end > data_length + _REPARSE_DATA_HEADER_SIZE:
+        message = "Windows returned out-of-bounds reparse-point text."
+        raise _WindowsCapabilityError(message)
+    try:
+        path = content[path_offset:path_end].decode("utf-16-le")
+    except UnicodeDecodeError as exc:
+        message = "Windows returned invalid reparse-point text."
+        raise _WindowsCapabilityError(message) from exc
+    if not path:
+        message = "Windows reparse target is empty."
+        raise _WindowsReparseError(message)
+    return _ReparseTarget(path=path, relative=relative)
+
+
+def _reparse_path_layout(tag: int, content: bytes) -> tuple[int, bool]:
+    """Return the path-buffer offset and relative flag for a supported tag."""
+    if tag == _IO_REPARSE_TAG_MOUNT_POINT:
+        return _MOUNT_POINT_HEADER_SIZE, False
+    if tag == _IO_REPARSE_TAG_SYMLINK:
+        if len(content) < _SYMLINK_HEADER_SIZE:
+            message = "Windows returned malformed symlink data."
+            raise _WindowsCapabilityError(message)
+        flags = int.from_bytes(content[16:20], "little")
+        return _SYMLINK_HEADER_SIZE, bool(flags & _SYMLINK_FLAG_RELATIVE)
+    message = "Unsupported Windows reparse-point tag."
+    raise _WindowsReparseError(message)
+
+
+def _next_reparse_hop(current: int) -> int:
+    """Increment the bounded reparse traversal or reject a cyclic chain."""
+    observed = current + 1
+    if observed > _MAX_REPARSE_HOPS:
+        message = "Windows reparse chain is cyclic."
+        raise _WindowsReparseError(message)
+    return observed
+
+
+def _internal_reparse_target_parts(
+    root_path: str,
+    parent_parts: tuple[str, ...],
+    target: _ReparseTarget,
+) -> tuple[str, ...]:
+    """Return an internal lexical target without opening the target namespace."""
+    raw_target = target.path.replace("/", "\\")
+    if target.relative:
+        candidate = ntpath.normpath(
+            ntpath.join(root_path, *parent_parts, raw_target)
+        )
+    else:
+        if raw_target.startswith("\\??\\UNC\\"):
+            message = "Remote reparse targets are unsupported."
+            raise _WindowsReparseError(message)
+        if raw_target.startswith("\\??\\"):
+            raw_target = raw_target[4:]
+        elif raw_target.startswith("\\\\?\\UNC\\"):
+            message = "Remote reparse targets are unsupported."
+            raise _WindowsReparseError(message)
+        elif raw_target.startswith("\\\\?\\"):
+            raw_target = raw_target[4:]
+        if raw_target.startswith("\\Device\\") or _is_unc_path(raw_target):
+            message = "Device reparse targets are unsupported."
+            raise _WindowsReparseError(message)
+        candidate = ntpath.normpath(raw_target)
+    normalized_root = _normalized_windows_path(root_path).rstrip("\\")
+    normalized_candidate = _normalized_windows_path(candidate)
+    if normalized_candidate == normalized_root:
+        return ()
+    if not normalized_candidate.startswith(f"{normalized_root}\\"):
+        message = "Reparse target leaves the repository root."
+        raise _WindowsReparseError(message)
+    relative = ntpath.relpath(
+        _without_extended_path_prefix(candidate),
+        _without_extended_path_prefix(root_path),
+    )
+    parts = tuple(
+        part
+        for part in relative.replace("\\", "/").split("/")
+        if part not in {"", "."}
+    )
+    if not parts or any(part == ".." for part in parts):
+        message = "Reparse target is not a repository file."
+        raise _WindowsReparseError(message)
+    return parts
+
+
+def _without_extended_path_prefix(value: str) -> str:
+    """Return a DOS/UNC spelling suitable for lexical path operations."""
+    if value.startswith("\\\\?\\UNC\\"):
+        return f"\\\\{value[8:]}"
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    if value.startswith("\\??\\UNC\\"):
+        return f"\\\\{value[8:]}"
+    if value.startswith("\\??\\"):
+        return value[4:]
+    return value
 
 
 def _same_file_object(left: _FileIdentity, right: _FileIdentity) -> bool:

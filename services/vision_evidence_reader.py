@@ -67,6 +67,21 @@ class RepositoryEvidenceWorktree(Protocol):
 class RepositoryEvidenceBinding(Protocol):
     """Retain a source identity across policy resolution and target opening."""
 
+    @property
+    def present_at_bind(self) -> bool:
+        """Return whether the logical source existed when binding completed."""
+        ...
+
+    @property
+    def resolution_bound(self) -> bool:
+        """Return whether resolved_path came from the retained reader boundary."""
+        ...
+
+    @property
+    def resolved_path(self) -> str | None:
+        """Return the safely resolved repository-relative target when available."""
+        ...
+
     def close(self) -> None:
         """Release the retained source identity exactly once."""
         ...

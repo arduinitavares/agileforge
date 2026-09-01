@@ -137,14 +137,14 @@ class VisionEvidenceCollector:
         context = self._load_context(project_id)
         if context.binding is None:
             return RepositoryEvidenceCapability(available=True)
+        observed = self._verify_binding(context.binding)
         try:
-            worktree = Path(context.binding.worktree_path).resolve(strict=True)
-        except OSError:
-            return RepositoryEvidenceCapability(
-                available=False,
-                code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
-                message="Repository evidence worktree is unavailable.",
-            )
+            worktree = Path(observed.worktree_path).resolve(strict=True)
+        except OSError as exc:
+            raise VisionEvidenceCollectionError(
+                VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE,
+                "Repository provenance could not be refreshed.",
+            ) from exc
         reader = self.evidence_reader or repository_evidence_reader()
         return reader.capability(worktree)
 
@@ -617,12 +617,25 @@ class VisionEvidenceCollector:
         """Read one optional source safely and reject changed or escaping files."""
         binding = evidence_worktree.bind(relative_path, warnings)
         try:
-            resolved_path = self._resolve_internal_path(
-                worktree,
-                relative_path,
-                warnings,
-            )
+            warning_count = len(warnings)
+            if binding.resolution_bound:
+                resolved_path = self._validate_bound_internal_path(
+                    relative_path,
+                    binding.resolved_path,
+                    warnings,
+                )
+            else:
+                resolved_path = self._resolve_internal_path(
+                    worktree,
+                    relative_path,
+                    warnings,
+                )
             if resolved_path is None:
+                if binding.present_at_bind and len(warnings) == warning_count:
+                    message = (
+                        "Approved evidence file changed before its path was resolved."
+                    )
+                    raise RepositoryEvidenceChangedError(message)
                 return None
             content = evidence_worktree.read(
                 resolved_path,
@@ -667,6 +680,39 @@ class VisionEvidenceCollector:
                 )
             )
         return text, truncated
+
+    @staticmethod
+    def _validate_bound_internal_path(
+        source_path: str,
+        resolved_path: str | None,
+        warnings: list[VisionEvidenceWarning],
+    ) -> str | None:
+        """Apply source compatibility policy to a handle-resolved target."""
+        if resolved_path is None:
+            return None
+        canonical_path = next(
+            (
+                candidate
+                for candidate in _SOURCE_POLICIES
+                if candidate.casefold() == resolved_path.casefold()
+            ),
+            None,
+        )
+        if (
+            canonical_path is None
+            or _SOURCE_POLICIES[canonical_path] != _SOURCE_POLICIES[source_path]
+        ):
+            warnings.append(
+                VisionEvidenceCollector._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message=(
+                        "Approved evidence path resolves to an incompatible source."
+                    ),
+                )
+            )
+            return None
+        return canonical_path
 
     @staticmethod
     def _resolve_internal_path(

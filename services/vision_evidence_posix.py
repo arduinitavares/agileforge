@@ -35,6 +35,10 @@ _WORKTREE_CHANGED_BEFORE_READ = (
 class _PosixEvidenceBinding:
     """No-op token preserving the shared bind-before-resolve contract."""
 
+    present_at_bind: bool
+    resolution_bound: bool = False
+    resolved_path: str | None = None
+
     def close(self) -> None:
         """POSIX already binds identity during descriptor traversal."""
 
@@ -69,9 +73,17 @@ class _PosixEvidenceWorktree:
         source_path: str,
         warnings: list[VisionEvidenceWarning],
     ) -> RepositoryEvidenceBinding:
-        """Return a no-op binding without changing POSIX traversal semantics."""
-        del source_path, warnings
-        return _PosixEvidenceBinding()
+        """Record optional-source presence before generic policy resolution."""
+        del warnings
+        try:
+            os.stat(source_path, dir_fd=self.root_descriptor, follow_symlinks=True)
+        except (FileNotFoundError, NotADirectoryError):
+            present = False
+        except OSError:
+            present = False
+        else:
+            present = True
+        return _PosixEvidenceBinding(present_at_bind=present)
 
     def read(
         self,

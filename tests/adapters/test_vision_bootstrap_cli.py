@@ -57,6 +57,18 @@ class _CapabilityFailureApplication:
         )
 
 
+class _LostWorktreeApplication:
+    def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
+        del request
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE,
+                message="Repository provenance could not be refreshed.",
+            ),
+        )
+
+
 class _PureReads:
     def project_show(self, *, project_id: int) -> JsonObject:
         return {"ok": True, "data": {"project_id": project_id}}
@@ -139,6 +151,31 @@ def test_vision_bootstrap_cli_returns_the_closed_capability_error(
     assert exit_code == 1
     assert payload["error"]["code"] == (
         WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE.value
+    )
+
+
+def test_vision_bootstrap_cli_preserves_lost_worktree_provenance_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Do not relabel a lost bound checkout as capability unavailable."""
+    exit_code = cli_main.main(
+        [
+            "vision",
+            "bootstrap",
+            "--project-id",
+            str(PROJECT_ID),
+            "--idempotency-key",
+            "lost-worktree-41",
+            "--actor",
+            "operator",
+        ],
+        application=_LostWorktreeApplication(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE.value
     )
 
 

@@ -509,6 +509,30 @@ def test_bootstrap_capability_context_failure_uses_typed_transport_error(
     assert application.execution_calls == []
 
 
+def test_bootstrap_lost_worktree_preserves_provenance_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep lost bound-checkout provenance distinct from capability support."""
+    domain = _BoundaryDomain(_position(_bootstrap_decision()))
+    vision_input = _VisionInput(
+        capability_failure_code=VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE
+    )
+    application = _BootstrapApplication(domain, vision_input)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        f"/api/projects/{PROJECT_ID}/vision/bootstrap",
+        json={"idempotency_key": "lost-worktree-41", "actor": "operator"},
+    )
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["detail"]["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE.value
+    )
+    assert vision_input.build_calls == 0
+    assert application.execution_calls == []
+
+
 def test_bootstrap_get_is_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep Vision bootstrap unavailable through a read HTTP method."""
     application = _CapturingApplication()

@@ -26,6 +26,7 @@ from services.vision_evidence import (
     VisionEvidenceErrorCode,
 )
 from services.vision_evidence_posix import PosixRepositoryEvidenceReader
+from services.vision_evidence_reader import RepositoryEvidenceChangedError
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -820,6 +821,23 @@ def test_stale_binding_and_project_lookup_fail_closed(
     assert stale.value.code is VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE
 
 
+def test_capability_preserves_stale_provenance_when_bound_worktree_is_lost(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Do not relabel a disappeared bound checkout as platform capability loss."""
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    repository.rename(tmp_path / "removed-repository")
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        collector.capability(project_id)
+
+    assert caught.value.code is VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE
+
+
 def test_invalid_active_binding_fails_closed(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -1073,3 +1091,56 @@ def test_post_open_races_fail_with_the_closed_repository_changed_error(
         caught.value.code
         is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
     )
+
+
+def test_bound_source_disappearance_before_resolution_is_not_optional(
+    collector: VisionEvidenceCollector,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject a source that existed at bind but vanished before resolution."""
+
+    class PresentBinding:
+        present_at_bind = True
+        resolution_bound = False
+        resolved_path = None
+
+        def close(self) -> None:
+            pass
+
+    class BoundWorktree:
+        def bind(
+            self,
+            source_path: str,
+            warnings: list[VisionEvidenceWarning],
+        ) -> PresentBinding:
+            del source_path, warnings
+            return PresentBinding()
+
+        def read(self, *args: object, **kwargs: object) -> bytes | None:
+            del args, kwargs
+            pytest.fail(
+                "A disappeared bound source must not reach read()."  # ty: ignore[invalid-argument-type]
+            )
+
+    def disappear(
+        _worktree: Path,
+        _relative_path: str,
+        _warnings: list[VisionEvidenceWarning],
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        VisionEvidenceCollector,
+        "_resolve_internal_path",
+        staticmethod(disappear),
+    )
+
+    with pytest.raises(RepositoryEvidenceChangedError):
+        collector._read_text(
+            BoundWorktree(),  # type: ignore[arg-type]
+            tmp_path,
+            "README.md",
+            [],
+            structured=False,
+        )
