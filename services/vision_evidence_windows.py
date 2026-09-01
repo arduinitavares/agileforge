@@ -868,16 +868,7 @@ class WindowsRepositoryEvidenceReader:
                 binding=binding,
             )
         except _WindowsNativeError as exc:
-            if exc.error_code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
-                return None
-            warnings.append(
-                _warning(
-                    code="EVIDENCE_UNREADABLE",
-                    source=source_path,
-                    message="Approved evidence file could not be opened.",
-                )
-            )
-            return None
+            raise RepositoryEvidenceChangedError(_CHANGED_DURING_READ) from exc
         except _WindowsCapabilityError as exc:
             raise RepositoryEvidenceCapabilityError(str(exc)) from exc
         try:

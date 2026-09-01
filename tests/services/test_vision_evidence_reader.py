@@ -11,6 +11,7 @@ import services.vision_evidence_reader as reader_module
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Never
 
     from services.vision_evidence_reader import RepositoryEvidenceCapabilityCode
 
@@ -121,3 +122,57 @@ def test_windows_root_object_identity_ignores_child_entry_timestamps() -> None:
     )
 
     assert _same_file_object(before, after_child_change)
+
+
+def test_windows_bound_source_disappearance_is_reported_as_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not downgrade a bound source race to optional-file absence."""
+    from services.vision_evidence_reader import (  # noqa: PLC0415
+        RepositoryEvidenceChangedError,
+    )
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _ERROR_PATH_NOT_FOUND,
+        WindowsRepositoryEvidenceReader,
+        _FileIdentity,
+        _WindowsApi,
+        _WindowsNativeError,
+        _WindowsSourceBinding,
+    )
+
+    identity = _FileIdentity(
+        volume_serial=1,
+        file_id=b"source-id",
+        size=7,
+        creation_time=10,
+        last_write_time=20,
+        change_time=30,
+        attributes=0,
+    )
+    binding = _WindowsSourceBinding(
+        state="open",
+        identity=identity,
+        final_path=r"\\?\C:\repo\README.md",
+    )
+    reader = WindowsRepositoryEvidenceReader(api=cast("_WindowsApi", object()))
+
+    def disappear_after_binding(*args: object, **kwargs: object) -> Never:
+        del args, kwargs
+        raise _WindowsNativeError(_ERROR_PATH_NOT_FOUND)
+
+    monkeypatch.setattr(
+        WindowsRepositoryEvidenceReader,
+        "_open_approved_leaf",
+        disappear_after_binding,
+    )
+
+    with pytest.raises(RepositoryEvidenceChangedError):
+        reader._read_relative(
+            root_handle=1,
+            root_final_path=r"\\?\C:\repo",
+            resolved_path="README.md",
+            source_path="README.md",
+            warnings=[],
+            byte_limit=1024,
+            binding=binding,
+        )
