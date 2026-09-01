@@ -10,6 +10,7 @@ from git import Repo
 from sqlmodel import Session
 
 import services.vision_evidence as vision_evidence_module
+import services.vision_evidence_posix as posix_reader_module
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.repository import RepositoryBinding
@@ -24,6 +25,7 @@ from services.vision_evidence import (
     VisionEvidenceCollector,
     VisionEvidenceErrorCode,
 )
+from services.vision_evidence_posix import PosixRepositoryEvidenceReader
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -417,9 +419,7 @@ def test_json_spec_symlink_rejects_approved_markdown_target(
 
     bundle = collector.collect(project_id)
 
-    assert "file:docs/spec/spec.json" not in {
-        item.evidence_id for item in bundle.items
-    }
+    assert "file:docs/spec/spec.json" not in {item.evidence_id for item in bundle.items}
     assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
 
 
@@ -435,18 +435,18 @@ def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
     identity = (readme.stat().st_dev, readme.stat().st_ino)
-    original_read = vision_evidence_module.os.read
+    original_read = posix_reader_module.os.read
     bytes_read = 0
 
     def counting_read(descriptor: int, size: int) -> bytes:
         nonlocal bytes_read
         content = original_read(descriptor, size)
-        observed = vision_evidence_module.os.fstat(descriptor)
+        observed = posix_reader_module.os.fstat(descriptor)
         if (observed.st_dev, observed.st_ino) == identity:
             bytes_read += len(content)
         return content
 
-    monkeypatch.setattr(vision_evidence_module.os, "read", counting_read)
+    monkeypatch.setattr(posix_reader_module.os, "read", counting_read)
 
     bundle = collector.collect(project_id)
 
@@ -468,14 +468,14 @@ def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
     identity = (readme.stat().st_dev, readme.stat().st_ino)
-    original_read = vision_evidence_module.os.read
+    original_read = posix_reader_module.os.read
     bytes_read = 0
     grew = False
 
     def grow_after_read(descriptor: int, size: int) -> bytes:
         nonlocal bytes_read, grew
         content = original_read(descriptor, size)
-        observed = vision_evidence_module.os.fstat(descriptor)
+        observed = posix_reader_module.os.fstat(descriptor)
         if (observed.st_dev, observed.st_ino) == identity:
             bytes_read += len(content)
             if content and not grew:
@@ -484,7 +484,7 @@ def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
                 grew = True
         return content
 
-    monkeypatch.setattr(vision_evidence_module.os, "read", grow_after_read)
+    monkeypatch.setattr(posix_reader_module.os, "read", grow_after_read)
 
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         collector.collect(project_id)
@@ -503,20 +503,20 @@ def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
     repository: Path,
 ) -> None:
     """Open a special leaf nonblocking and reject it before any read."""
-    if not hasattr(vision_evidence_module.os, "mkfifo"):
+    if not hasattr(posix_reader_module.os, "mkfifo"):
         pytest.skip(
             "FIFO creation is unavailable on this platform."  # ty: ignore[too-many-positional-arguments]
         )
-    nonblock = getattr(vision_evidence_module.os, "O_NONBLOCK", None)
+    nonblock = getattr(posix_reader_module.os, "O_NONBLOCK", None)
     if not isinstance(nonblock, int):
         pytest.skip(
             "Nonblocking file opens are unavailable on this platform."  # ty: ignore[too-many-positional-arguments]
         )
     fifo = repository / "README.md"
-    vision_evidence_module.os.mkfifo(fifo)
+    posix_reader_module.os.mkfifo(fifo)
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
-    original_open = vision_evidence_module.os.open
+    original_open = posix_reader_module.os.open
 
     def require_nonblocking_leaf(
         path: Path | str,
@@ -529,7 +529,7 @@ def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
             assert flags & nonblock
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(vision_evidence_module.os, "open", require_nonblocking_leaf)
+    monkeypatch.setattr(posix_reader_module.os, "open", require_nonblocking_leaf)
 
     bundle = collector.collect(project_id)
 
@@ -538,7 +538,6 @@ def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
 
 
 def test_missing_nonblocking_open_capability_fails_before_leaf_open(
-    collector: VisionEvidenceCollector,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fail closed without opening a leaf when O_NONBLOCK is unavailable."""
@@ -550,10 +549,10 @@ def test_missing_nonblocking_open_capability_fails_before_leaf_open(
         message = "os.open must not run without O_NONBLOCK"
         raise AssertionError(message)
 
-    monkeypatch.delattr(vision_evidence_module.os, "O_NONBLOCK", raising=False)
-    monkeypatch.setattr(vision_evidence_module.os, "open", unexpected_open)
+    monkeypatch.delattr(posix_reader_module.os, "O_NONBLOCK", raising=False)
+    monkeypatch.setattr(posix_reader_module.os, "open", unexpected_open)
 
-    descriptor = collector._open_regular_leaf(
+    descriptor = PosixRepositoryEvidenceReader()._open_regular_leaf(
         parent_descriptor=0,
         leaf_name="README.md",
         source_path="README.md",
@@ -580,7 +579,7 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     outside.write_text("outside\n", encoding="utf-8")
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
-    original_open = vision_evidence_module.os.open
+    original_open = posix_reader_module.os.open
 
     def swap_then_open(
         path: Path | str,
@@ -594,7 +593,7 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
             readme.symlink_to(outside)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(vision_evidence_module.os, "open", swap_then_open)
+    monkeypatch.setattr(posix_reader_module.os, "open", swap_then_open)
 
     bundle = collector.collect(project_id)
 
@@ -622,7 +621,7 @@ def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
         engine=engine,
         repository_probe=_ChangingProbe(observed, observed),
     )
-    original_open = vision_evidence_module.os.open
+    original_open = posix_reader_module.os.open
     swapped = False
 
     def swap_then_open(
@@ -639,7 +638,7 @@ def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
             (repository / "docs").symlink_to(outside_docs, target_is_directory=True)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(vision_evidence_module.os, "open", swap_then_open)
+    monkeypatch.setattr(posix_reader_module.os, "open", swap_then_open)
 
     bundle = collector.collect(project_id)
 
@@ -717,16 +716,19 @@ def test_total_byte_limit_truncates_late_text_without_exceeding_96_kib(
 
     bundle = collector.collect(project_id)
 
-    assert sum(
-        len(
-            (
-                item.content
-                if isinstance(item.content, str)
-                else canonical_json(item.content)
-            ).encode("utf-8")
+    assert (
+        sum(
+            len(
+                (
+                    item.content
+                    if isinstance(item.content, str)
+                    else canonical_json(item.content)
+                ).encode("utf-8")
+            )
+            for item in bundle.items
         )
-        for item in bundle.items
-    ) == MAX_EVIDENCE_TOTAL_BYTES
+        == MAX_EVIDENCE_TOTAL_BYTES
+    )
     assert bundle.items[-1].evidence_id == "file:docs/spec/spec.md"
     assert bundle.items[-1].truncated is True
     assert [warning.code for warning in bundle.warnings] == ["TEXT_EVIDENCE_TRUNCATED"]
@@ -1049,9 +1051,9 @@ def test_post_open_races_fail_with_the_closed_repository_changed_error(
             del descriptor, size
             raise OSError
 
-        monkeypatch.setattr(vision_evidence_module.os, "read", failed_read)
+        monkeypatch.setattr(posix_reader_module.os, "read", failed_read)
     else:
-        original_read = vision_evidence_module.os.read
+        original_read = posix_reader_module.os.read
         deleted = False
 
         def delete_after_read(descriptor: int, size: int) -> bytes:
@@ -1062,7 +1064,7 @@ def test_post_open_races_fail_with_the_closed_repository_changed_error(
                 deleted = True
             return content
 
-        monkeypatch.setattr(vision_evidence_module.os, "read", delete_after_read)
+        monkeypatch.setattr(posix_reader_module.os, "read", delete_after_read)
 
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         collector.collect(project_id)

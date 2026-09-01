@@ -41,6 +41,10 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from services.repository_probe import RepositoryProbe
+    from services.vision_evidence_reader import (
+        RepositoryEvidenceCapability,
+        RepositoryEvidenceReader,
+    )
     from workflow.contracts import JsonObject, NodeDecision, TransitionResult
 
 
@@ -50,6 +54,15 @@ class VisionInputService:
 
     engine: Engine
     repository_probe: RepositoryProbe
+    evidence_reader: RepositoryEvidenceReader | None = None
+
+    def bootstrap_capability(self, project_id: int) -> RepositoryEvidenceCapability:
+        """Return the provider-free repository evidence capability for bootstrap."""
+        return VisionEvidenceCollector(
+            engine=self.engine,
+            repository_probe=self.repository_probe,
+            evidence_reader=self.evidence_reader,
+        ).capability(project_id)
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         """Recover a persisted attempt before deriving current Vision state."""
@@ -151,8 +164,7 @@ class VisionInputService:
         """Prepare clarification from the current draft and stored snapshot."""
         if decision.node_id != "vision.interview":
             message = (
-                "Vision clarification input requires the vision.interview "
-                "decision."
+                "Vision clarification input requires the vision.interview decision."
             )
             raise ValueError(message)
         try:
@@ -214,6 +226,7 @@ class VisionInputService:
             return VisionEvidenceCollector(
                 engine=self.engine,
                 repository_probe=self.repository_probe,
+                evidence_reader=self.evidence_reader,
             ).collect_with_provenance(project_id)
         except (ValidationError, json.JSONDecodeError) as error:
             raise ValueError(str(error)) from error

@@ -110,6 +110,7 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
     expected = {
         "python-313": ("ubuntu-latest", CANONICAL_PYTHON),
         "macos-smoke": ("macos-latest", CANONICAL_PYTHON),
+        "windows-vision-evidence": ("windows-latest", CANONICAL_PYTHON),
     }
     for name, (runner, python_version) in expected.items():
         job = _job(workflow, name)
@@ -131,6 +132,7 @@ def test_python_jobs_install_canonical_python_before_use(
     first_consumers = {
         "python-313": "Install pyrepo-check controller",
         "macos-smoke": "Exercise launcher lifecycle",
+        "windows-vision-evidence": "Run secure Windows evidence suites",
     }
     install_command = f"uv python install {CANONICAL_PYTHON}"
 
@@ -275,6 +277,36 @@ def test_macos_smoke_delegates_to_exact_repository_command(
         "--reload",
     ):
         assert policy_token not in smoke
+
+
+def test_windows_job_runs_only_provider_free_evidence_contracts(
+    workflow: dict[str, object],
+) -> None:
+    """Exercise real Windows handle semantics without profiles or providers."""
+    commands = [
+        " ".join(run.split())
+        for step in _steps(_job(workflow, "windows-vision-evidence"))
+        if isinstance((run := step.get("run")), str) and "pytest" in run
+    ]
+    expected = (
+        "uv run --locked pytest "
+        "tests/windows/test_vision_evidence_windows.py "
+        "tests/services/test_vision_evidence_reader.py "
+        "tests/adapters/test_vision_bootstrap_api.py "
+        "tests/adapters/test_cli_workflow_domain.py -q"
+    )
+
+    assert commands == [expected]
+    source = _runs(_job(workflow, "windows-vision-evidence")).lower()
+    for forbidden in (
+        "secrets.",
+        "openrouter",
+        "open_router",
+        "agileforge-dev init",
+        "--profile",
+        "--live",
+    ):
+        assert forbidden not in source
 
 
 def test_workflow_has_no_provider_secrets_or_live_markers() -> None:

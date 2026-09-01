@@ -19,12 +19,14 @@ from services.vision_evidence import (
     VisionEvidenceCollectionError,
     VisionEvidenceErrorCode,
 )
+from services.vision_evidence_reader import RepositoryEvidenceCapability
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
     TransitionResult,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
 
@@ -98,10 +100,23 @@ class _VisionInput:
         *,
         replay_after_first: bool = False,
         failure_code: VisionEvidenceErrorCode | None = None,
+        capability_available: bool = True,
     ) -> None:
         self.replay_after_first = replay_after_first
         self.failure_code = failure_code
+        self.capability_available = capability_available
         self.replay_queries: list[NodeAttemptReplayQuery] = []
+        self.build_calls = 0
+
+    def bootstrap_capability(self, project_id: int) -> RepositoryEvidenceCapability:
+        del project_id
+        if self.capability_available:
+            return RepositoryEvidenceCapability(available=True)
+        return RepositoryEvidenceCapability(
+            available=False,
+            code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+            message="Repository evidence is unavailable.",
+        )
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         self.replay_queries.append(query)
@@ -126,6 +141,7 @@ class _VisionInput:
         decision: NodeDecision,
     ) -> JsonObject:
         del project_id, decision
+        self.build_calls += 1
         if self.failure_code is not None:
             raise VisionEvidenceCollectionError(
                 self.failure_code,
@@ -187,6 +203,20 @@ class _PureReadApplication:
         self.bootstrap_calls += 1
         pytest.fail(
             "read route invoked Vision bootstrap"  # ty: ignore[invalid-argument-type]
+        )
+
+
+class _LockedPureReadApplication(_PureReadApplication):
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        del project_id
+        return RepositoryEvidenceCapability(
+            available=False,
+            code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+            message="Repository evidence is unavailable.",
         )
 
 
@@ -353,6 +383,28 @@ def test_bootstrap_preflight_failure_uses_transport_error_without_execution(
     assert application.execution_calls == []
 
 
+def test_bootstrap_capability_failure_stops_before_input_and_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject unsupported evidence collection before input or provider work."""
+    domain = _BoundaryDomain(_position(_bootstrap_decision()))
+    vision_input = _VisionInput(capability_available=False)
+    application = _BootstrapApplication(domain, vision_input)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        f"/api/projects/{PROJECT_ID}/vision/bootstrap",
+        json={"idempotency_key": "capability-41", "actor": "operator"},
+    )
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["detail"]["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE.value
+    )
+    assert vision_input.build_calls == 0
+    assert application.execution_calls == []
+
+
 def test_bootstrap_get_is_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep Vision bootstrap unavailable through a read HTTP method."""
     application = _CapturingApplication()
@@ -389,6 +441,29 @@ def test_project_vision_reads_and_position_do_not_invoke_bootstrap(
             "request_kind": "generate_vision_bootstrap",
             "endpoint": "vision/bootstrap",
             "transport": "semantic",
+        }
+    ]
+
+
+def test_position_locks_bootstrap_when_evidence_capability_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose a visible but non-executable UI action with the closed reason."""
+    application = _LockedPureReadApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).get(f"/api/projects/{PROJECT_ID}/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "vision.bootstrap",
+            "instance_key": None,
+            "request_kind": "generate_vision_bootstrap",
+            "endpoint": "vision/bootstrap",
+            "transport": "semantic",
+            "availability": "locked",
+            "reason_code": "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
         }
     ]
 

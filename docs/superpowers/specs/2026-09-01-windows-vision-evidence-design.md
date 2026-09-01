@@ -79,8 +79,10 @@ The adapter loads and validates these functions at runtime:
 - `kernel32.CloseHandle`
 - `kernel32.GetFileInformationByHandleEx`
 - `kernel32.GetFinalPathNameByHandleW`
+- `kernel32.GetVolumeInformationByHandleW`
 - `kernel32.ReadFile`
 - `ntdll.NtCreateFile`
+- `ntdll.NtClose`
 - `ntdll.RtlNtStatusToDosError`
 
 Every function receives explicit `argtypes` and `restype`. The required
@@ -97,8 +99,9 @@ selected on `sys.platform == "win32"`.
 ## Supported Windows Filesystems
 
 The supported contract is a local NTFS or ReFS worktree on a supported
-64-bit Python 3.13 Windows runtime. The actual capability decision is based on
-successful handle operations, not a string-only filesystem-name check.
+64-bit Python 3.13 Windows runtime. The capability decision requires both an
+NTFS/ReFS filesystem-name check and successful handle-based identity,
+final-path, relative-open, and query operations.
 
 The adapter requires:
 

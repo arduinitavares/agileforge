@@ -71,6 +71,7 @@ from services.node_attempt_replay import (
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.read_projections import DurableReadProjectionService
 from services.sprint_ownership import ResolvedSprintOwner
+from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.test_command_renderer import position_fixture
 from tests.test_create_user_story import (
     _intermediate_story_content,
@@ -642,6 +643,10 @@ class _VisionInput:
 
     def replay_transition(self, query: TransitionReplayQuery) -> None:
         del query
+
+    def bootstrap_capability(self, project_id: int) -> RepositoryEvidenceCapability:
+        del project_id
+        return RepositoryEvidenceCapability(available=True)
 
     def build_bootstrap(
         self,
@@ -5104,9 +5109,7 @@ def test_position_locks_unbuildable_story_set_correction(
 
     rejected = TestClient(api_module.app).post(
         f"/api/projects/{project_id}/story/correct",
-        headers={
-            "X-AgileForge-Expected-Decision": correction["decision_fingerprint"]
-        },
+        headers={"X-AgileForge-Expected-Decision": correction["decision_fingerprint"]},
         json={
             "instance_key": "backlog_item:PBI-000001",
             "accepted_story_artifact_id": artifact_id,
