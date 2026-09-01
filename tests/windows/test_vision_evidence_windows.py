@@ -38,6 +38,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
     reason="requires real Windows file-handle semantics",
 )
+_WINDOWS_ERROR_ACCESS_DENIED = 5
 
 
 @pytest.fixture
@@ -120,6 +121,11 @@ class _StableProbe:
         return self.observed
 
 
+def _require_retained_handle_denial(exc: PermissionError) -> None:
+    if getattr(exc, "winerror", None) != _WINDOWS_ERROR_ACCESS_DENIED:
+        raise exc
+
+
 def test_windows_reader_collects_ordinary_repository_evidence(
     engine: Engine,
     windows_repository: Path,
@@ -167,7 +173,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
     monkeypatch: pytest.MonkeyPatch,
     windows_repository: Path,
 ) -> None:
-    """Discard collection when an approved leaf is replaced before its open."""
+    """Never consume replacement bytes, whether Windows blocks or permits it."""
     readme = windows_repository / "README.md"
     readme.write_text("inside\n", encoding="utf-8")
     replacement = windows_repository / "replacement.md"
@@ -177,6 +183,7 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
     observed = GitPythonRepositoryProbe().inspect(windows_repository)
     original = WindowsRepositoryEvidenceReader._open_relative
     swapped = False
+    replacement_blocked: bool | None = None
 
     def swap_then_open(
         self: WindowsRepositoryEvidenceReader,
@@ -185,10 +192,16 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
         *,
         directory: bool,
     ) -> int:
-        nonlocal swapped
+        nonlocal replacement_blocked, swapped
         if not directory and component == "README.md" and not swapped:
             swapped = True
-            replacement.replace(readme)
+            try:
+                replacement.replace(readme)
+            except PermissionError as exc:
+                _require_retained_handle_denial(exc)
+                replacement_blocked = True
+            else:
+                replacement_blocked = False
         return original(self, parent_handle, component, directory=directory)
 
     monkeypatch.setattr(
@@ -197,25 +210,39 @@ def test_windows_reader_rejects_leaf_replacement_after_resolution(
         swap_then_open,
     )
 
-    with pytest.raises(VisionEvidenceCollectionError) as caught:
-        VisionEvidenceCollector(
+    bundle = None
+    collection_error = None
+    try:
+        bundle = VisionEvidenceCollector(
             engine=engine,
             repository_probe=_StableProbe(observed),
         ).collect(project_id)
+    except VisionEvidenceCollectionError as exc:
+        collection_error = exc
 
-    assert (
-        caught.value.code
-        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
-    )
+    assert replacement_blocked is not None
+    if replacement_blocked:
+        assert bundle is not None
+        item = next(item for item in bundle.items if item.relative_path == "README.md")
+        assert item.content == "inside"
+        assert "replacement sentinel" not in bundle.model_dump_json()
+    else:
+        assert collection_error is not None
+        assert (
+            collection_error.code
+            is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+        )
+
+    assert swapped
 
 
-def test_windows_reader_retains_parent_when_intermediate_is_replaced(
+def test_windows_reader_retains_parent_or_blocks_intermediate_replacement(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     windows_repository: Path,
 ) -> None:
-    """Keep traversal on a retained directory handle after path replacement."""
+    """Never leave the retained parent, whether replacement blocks or succeeds."""
     inside = windows_repository / "docs/spec/spec.md"
     inside.parent.mkdir(parents=True)
     inside.write_text("inside retained parent\n", encoding="utf-8")
@@ -230,6 +257,7 @@ def test_windows_reader_retains_parent_when_intermediate_is_replaced(
     observed = GitPythonRepositoryProbe().inspect(windows_repository)
     original = WindowsRepositoryEvidenceReader._open_relative
     swapped = False
+    replacement_blocked: bool | None = None
 
     def swap_then_open(
         self: WindowsRepositoryEvidenceReader,
@@ -238,11 +266,19 @@ def test_windows_reader_retains_parent_when_intermediate_is_replaced(
         *,
         directory: bool,
     ) -> int:
-        nonlocal swapped
+        nonlocal replacement_blocked, swapped
         if directory and component == "spec" and not swapped:
             swapped = True
-            (windows_repository / "docs").rename(windows_repository / "docs-original")
-            _junction(windows_repository / "docs", outside_docs)
+            try:
+                (windows_repository / "docs").rename(
+                    windows_repository / "docs-original"
+                )
+            except PermissionError as exc:
+                _require_retained_handle_denial(exc)
+                replacement_blocked = True
+            else:
+                replacement_blocked = False
+                _junction(windows_repository / "docs", outside_docs)
         return original(self, parent_handle, component, directory=directory)
 
     monkeypatch.setattr(
@@ -260,6 +296,8 @@ def test_windows_reader_retains_parent_when_intermediate_is_replaced(
     )
     assert spec.content == "inside retained parent"
     assert "outside sentinel" not in bundle.model_dump_json()
+    assert replacement_blocked is not None
+    assert swapped
 
 
 def test_windows_reader_detects_change_during_bounded_read(

@@ -175,6 +175,56 @@ def test_windows_api_accepts_empty_name_for_retained_root_reopen() -> None:
     assert observed_names == [""]
 
 
+def test_windows_native_opens_preserve_read_write_delete_sharing(
+    tmp_path: Path,
+) -> None:
+    """Keep ordinary Git operations compatible with every retained handle."""
+    from services.vision_evidence_windows import (  # noqa: PLC0415
+        _FILE_SHARE_DELETE,
+        _FILE_SHARE_READ,
+        _FILE_SHARE_WRITE,
+        _WindowsApi,
+        _WindowsNativeError,
+    )
+
+    observed_share_modes: list[int] = []
+    test_handle = 17
+
+    def record_path_open(*args: object) -> int:
+        observed_share_modes.append(int(cast("Any", args[2])))
+        return test_handle
+
+    def record_relative_open(*args: object) -> int:
+        observed_share_modes.append(int(cast("Any", args[6])))
+        return -1
+
+    def unavailable_native(*args: object) -> int:
+        del args
+        return 1
+
+    native = cast("Any", unavailable_native)
+    api = _WindowsApi(
+        _create_file=cast("Any", record_path_open),
+        _close_handle=native,
+        _get_file_information=native,
+        _get_final_path=native,
+        _get_volume_information=native,
+        _read_file=native,
+        _nt_create_file=cast("Any", record_relative_open),
+        _nt_close=native,
+        _rtl_status_to_error=native,
+        _get_last_error=lambda: 1,
+    )
+
+    assert api.open_root(tmp_path) == test_handle
+    assert api.open_source_sentinel(str(tmp_path / "README.md")) == test_handle
+    with pytest.raises(_WindowsNativeError):
+        api.open_relative(test_handle, "README.md", directory=False)
+
+    expected = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+    assert observed_share_modes == [expected, expected, expected]
+
+
 def test_windows_bound_source_disappearance_is_reported_as_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
