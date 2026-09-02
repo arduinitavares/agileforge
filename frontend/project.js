@@ -128,12 +128,21 @@ const BUTTON_DANGER = 'inline-flex min-h-10 items-center justify-center gap-2 ro
 let selectedProjectId = null;
 let pendingHumanAction = null;
 let dashboardLoadSequence = 0;
+let lastSuccessfulDashboardLoadSequence = 0;
 let activeDashboardLoadController = null;
+
+function isDashboardReconciled(requiredSequence) {
+    return Number.isInteger(requiredSequence)
+        && requiredSequence > 0
+        && lastSuccessfulDashboardLoadSequence >= requiredSequence;
+}
 let activeStoryMutation = null;
 let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
 let activeBacklogCorrectionMutation = null;
 let activeSprintMutation = null;
+let activeCockpitAction = null;
+let activeDeliveryUnreconciled = false;
 let sprintStartRetry = null;
 let backlogFeedbackFocusIntent = false;
 let lifecycleState = {
@@ -3361,12 +3370,58 @@ function findPrimaryWorkflowAction(actions = [], position = {}) {
     return null;
 }
 
+function setCockpitActionBusy(busy, requestKind = null, options = {}) {
+    const actionBtn = document.getElementById('cockpit-primary-action-btn');
+    const label = document.getElementById('cockpit-primary-action-label');
+    const chip = document.getElementById('cockpit-action-stage-chip');
+    const description = document.getElementById('cockpit-action-description');
+
+    if (busy) {
+        const config = DELIVERY_ACTION_CONFIG[requestKind];
+        const busyText = options.busyLabel || config?.busyLabel || 'Executing...';
+        const token = options.token || crypto.randomUUID();
+        activeCockpitAction = {
+            requestKind,
+            token,
+            busyLabel: busyText,
+        };
+        if (actionBtn) {
+            actionBtn.disabled = true;
+            actionBtn.setAttribute('aria-busy', 'true');
+        }
+        if (label) {
+            label.textContent = busyText;
+        }
+        if (chip) {
+            chip.textContent = 'Executing';
+        }
+        if (options.description && description) {
+            description.textContent = options.description;
+        }
+        return token;
+    }
+
+    if (activeCockpitAction) {
+        if (!options.token || activeCockpitAction.token !== options.token) {
+            return null;
+        }
+    }
+    activeCockpitAction = null;
+    renderTopCockpit();
+    return null;
+}
+
 function handlePrimaryCockpitAction(primaryAction) {
     if (!primaryAction?.request_kind) return;
+    if (activeCockpitAction || activeDeliveryUnreconciled) return;
+    const actionBtn = document.getElementById('cockpit-primary-action-btn');
+    if (actionBtn?.disabled) return;
+
     const kind = primaryAction.request_kind;
 
     const directBtn = document.querySelector(`button[data-direct-action="${kind}"]`);
     if (directBtn) {
+        if (directBtn.disabled) return;
         directBtn.click();
         return;
     }
@@ -3474,6 +3529,28 @@ function renderTopCockpit() {
     const primaryAction = findPrimaryWorkflowAction(actions, position);
     const actionBtn = document.getElementById('cockpit-primary-action-btn');
 
+    if (activeCockpitAction) {
+        setText('cockpit-primary-action-label', activeCockpitAction.busyLabel || 'Executing...');
+        setText('cockpit-action-stage-chip', 'Executing');
+        if (actionBtn) {
+            actionBtn.disabled = true;
+            actionBtn.setAttribute('aria-busy', 'true');
+        }
+        return;
+    }
+
+    if (activeDeliveryUnreconciled) {
+        setText('cockpit-primary-action-label', 'Action Unavailable');
+        setText('cockpit-action-stage-chip', 'Locked');
+        setText('cockpit-action-description', 'Dashboard reload required to confirm current action.');
+        if (actionBtn) {
+            actionBtn.removeAttribute?.('aria-busy');
+            actionBtn.disabled = true;
+            actionBtn.onclick = null;
+        }
+        return;
+    }
+
     if (primaryAction) {
         const primaryLocked = primaryAction.action?.availability === 'locked';
         setText(
@@ -3483,6 +3560,7 @@ function renderTopCockpit() {
         setText('cockpit-action-stage-chip', primaryAction.kind || 'Available');
         setText('cockpit-action-description', primaryAction.description || primaryAction.label || 'Proceed with current stage');
         if (actionBtn) {
+            actionBtn.removeAttribute?.('aria-busy');
             actionBtn.disabled = primaryLocked;
             actionBtn.onclick = primaryLocked
                 ? null
@@ -3492,7 +3570,10 @@ function renderTopCockpit() {
         setText('cockpit-primary-action-label', 'No Action Required');
         setText('cockpit-action-stage-chip', 'Idle');
         setText('cockpit-action-description', 'Awaiting lifecycle transition or human review');
-        if (actionBtn) actionBtn.disabled = true;
+        if (actionBtn) {
+            actionBtn.removeAttribute?.('aria-busy');
+            actionBtn.disabled = true;
+        }
     }
 }
 
@@ -3826,6 +3907,8 @@ async function loadDashboard() {
         ) {
             activeDependencyMutation = null;
         }
+        lastSuccessfulDashboardLoadSequence = sequence;
+        activeDeliveryUnreconciled = false;
         setProjectError('');
         renderDashboard();
         consumeBacklogCorrectionFocus(backlogFocusMutation);
@@ -4370,6 +4453,9 @@ async function readPositionActions() {
 
 async function submitHumanAction() {
     if (!pendingHumanAction) return;
+    if (activeCockpitAction || activeDeliveryUnreconciled) {
+        throw new Error('An action is currently executing or awaiting reload. Wait for it to complete.');
+    }
     const rationale = document.getElementById('human-action-rationale')?.value.trim() ?? '';
     const path = document.getElementById('human-action-path')?.value.trim() ?? '';
     const pending = pendingHumanAction;
@@ -4381,70 +4467,108 @@ async function submitHumanAction() {
         throw new Error('Enter a local repository path.');
     }
 
-    if (pending.kind === 'review') {
-        const submission = reviewSubmission(pending, rationale);
-        await postAction(submission.action, submission.fields, {
-            expectedCandidate: submission.expectedCandidate,
-        });
-    } else if (pending.kind === 'planning-review') {
-        document.querySelectorAll('[data-planning-review]').forEach((button) => {
-            button.disabled = true;
-        });
-        try {
-            await postAction(
-                { endpoint: pending.endpoint },
-                {
-                    decision: pending.decision,
-                    rationale: rationale || 'Accepted in the dashboard.',
-                },
-                {
-                    expectedDecision: pending.binding.decision_fingerprint,
-                    expectedInstance: pending.binding.instance_key,
-                },
-            );
-            if (pending.scope === 'backlog' && pending.decision === 'feedback') {
-                backlogFeedbackFocusIntent = true;
-            }
-        } catch (error) {
-            closeHumanDialog();
-            try {
-                await loadDashboard();
-            } catch (_loadError) {
-                // Old controls remain disabled when refresh also fails.
-            }
-            setProjectError(`This review changed. Review the current evidence again. ${error.message}`);
-            return;
-        }
-    } else if (pending.kind === 'delivery-generation') {
-        closeHumanDialog();
-        await runDirectAction(
-            pending.requestKind,
-            pending.button,
-            null,
-            pending.fields ?? {},
-        );
-        return;
-    } else if (pending.kind === 'sprint-start') {
-        await runSprintStart(pending.binding, pending.button);
-        return;
-    } else if (pending.kind === 'goal-outcome') {
-        const requestKind = pending.outcome === 'fulfilled'
-            ? 'fulfill_product_goal'
-            : 'abandon_product_goal';
-        await postAction(findAction(lifecycleState.actions, requestKind), { rationale });
-    } else if (pending.kind === 'repository') {
-        await postAction({ endpoint: 'repository' }, { path });
-    } else if (pending.kind === 'vision-revision') {
-        await postAction(findAction(lifecycleState.actions, 'begin_vision_revision'), { reason: rationale });
+    const isDelegatedAction = pending.kind === 'delivery-generation' || pending.kind === 'sprint-start';
+    const humanToken = isDelegatedAction ? null : crypto.randomUUID();
+    if (!isDelegatedAction) {
+        setCockpitActionBusy(true, pending.kind, { token: humanToken });
     }
-    closeHumanDialog();
-    await loadDashboard();
+    let mutationCompleted = false;
+    let loadSequence = 0;
+    try {
+        if (pending.kind === 'review') {
+            const submission = reviewSubmission(pending, rationale);
+            await postAction(submission.action, submission.fields, {
+                expectedCandidate: submission.expectedCandidate,
+            });
+            mutationCompleted = true;
+        } else if (pending.kind === 'planning-review') {
+            document.querySelectorAll('[data-planning-review]').forEach((button) => {
+                button.disabled = true;
+            });
+            try {
+                await postAction(
+                    { endpoint: pending.endpoint },
+                    {
+                        decision: pending.decision,
+                        rationale: rationale || 'Accepted in the dashboard.',
+                    },
+                    {
+                        expectedDecision: pending.binding.decision_fingerprint,
+                        expectedInstance: pending.binding.instance_key,
+                    },
+                );
+                mutationCompleted = true;
+                if (pending.scope === 'backlog' && pending.decision === 'feedback') {
+                    backlogFeedbackFocusIntent = true;
+                }
+            } catch (error) {
+                closeHumanDialog();
+                let refreshed = false;
+                const planningRecoverySequence = dashboardLoadSequence + 1;
+                try {
+                    refreshed = await loadDashboard() === true;
+                } catch (_loadError) {
+                    refreshed = false;
+                }
+                if (!refreshed && !isDashboardReconciled(planningRecoverySequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
+                setProjectError(`This review changed. Review the current evidence again. ${error.message}`);
+                return;
+            }
+        } else if (pending.kind === 'delivery-generation') {
+            closeHumanDialog();
+            await runDirectAction(
+                pending.requestKind,
+                pending.button,
+                null,
+                pending.fields ?? {},
+            );
+            return;
+        } else if (pending.kind === 'sprint-start') {
+            await runSprintStart(pending.binding, pending.button);
+            return;
+        } else if (pending.kind === 'goal-outcome') {
+            const requestKind = pending.outcome === 'fulfilled'
+                ? 'fulfill_product_goal'
+                : 'abandon_product_goal';
+            await postAction(findAction(lifecycleState.actions, requestKind), { rationale });
+            mutationCompleted = true;
+        } else if (pending.kind === 'repository') {
+            await postAction({ endpoint: 'repository' }, { path });
+            mutationCompleted = true;
+        } else if (pending.kind === 'vision-revision') {
+            await postAction(findAction(lifecycleState.actions, 'begin_vision_revision'), { reason: rationale });
+            mutationCompleted = true;
+        }
+        closeHumanDialog();
+        loadSequence = dashboardLoadSequence + 1;
+        let refreshed = false;
+        try {
+            refreshed = await loadDashboard() === true;
+        } catch (_loadError) {
+            refreshed = false;
+        }
+        if (!refreshed && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
+    } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
+        throw error;
+    } finally {
+        if (!isDelegatedAction) {
+            setCockpitActionBusy(false, pending.kind, { token: humanToken });
+        }
+    }
 }
 
 async function runBacklogCorrection(binding, button) {
-    if (activeBacklogCorrectionMutation) return false;
+    if (activeBacklogCorrectionMutation || activeCockpitAction || activeDeliveryUnreconciled) return false;
     const token = crypto.randomUUID();
     let mutationCompleted = false;
+    let loadSequence = 0;
     activeBacklogCorrectionMutation = {
         token,
         phase: 'submitting',
@@ -4454,6 +4578,7 @@ async function runBacklogCorrection(binding, button) {
         focusIntent: true,
     };
     setDeliveryActionBusy(button, true, 'record_backlog_draft', true);
+    setCockpitActionBusy(true, 'record_backlog_draft', { token, busyLabel: 'Correcting Backlog...' });
     setProjectError('');
     try {
         await postAction(binding.action);
@@ -4466,18 +4591,24 @@ async function runBacklogCorrection(binding, button) {
             };
             renderDashboard();
         }
+        loadSequence = dashboardLoadSequence + 1;
         const refreshed = await loadDashboard();
-        if (refreshed !== true) {
+        if (refreshed !== true && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
             throw new Error(
                 'The Backlog correction was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.',
             );
         }
         if (activeBacklogCorrectionMutation?.token === token) {
+            activeDeliveryUnreconciled = true;
             throw new Error(
                 'The Backlog correction was accepted, but the current project projection did not confirm the result. Controls remain locked until a successful refresh.',
             );
         }
     } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
         if (!mutationCompleted
             && activeBacklogCorrectionMutation?.token === token
             && activeBacklogCorrectionMutation.phase === 'submitting') {
@@ -4486,10 +4617,15 @@ async function runBacklogCorrection(binding, button) {
                 phase: 'recovering_failure',
             };
             renderDashboard();
+            let recovered = false;
+            const recoverySequence = dashboardLoadSequence + 1;
             try {
-                await loadDashboard();
+                recovered = await loadDashboard() === true;
             } catch (_loadError) {
-                // Keep correction controls locked until a current projection arrives.
+                recovered = false;
+            }
+            if (!recovered && !isDashboardReconciled(recoverySequence)) {
+                activeDeliveryUnreconciled = true;
             }
         }
         const localMessage = error.message;
@@ -4505,6 +4641,7 @@ async function runBacklogCorrection(binding, button) {
         if (activeBacklogCorrectionMutation?.token === token) {
             reapplyActiveBacklogCorrectionMutation();
         }
+        setCockpitActionBusy(false, 'record_backlog_draft', { token });
     }
     return true;
 }
@@ -4530,12 +4667,13 @@ function completeSprintStartReconciliation(token) {
 }
 
 async function runSprintStart(binding, button) {
-    if (activeSprintMutation) return false;
+    if (activeSprintMutation || activeCockpitAction || activeDeliveryUnreconciled) return false;
     const token = sprintStartBindingsMatch(sprintStartRetry?.binding, binding)
         ? sprintStartRetry.token
         : `dashboard-${crypto.randomUUID()}`;
     sprintStartRetry = null;
     let mutationCompleted = false;
+    let loadSequence = 0;
     activeSprintMutation = { token, binding, phase: 'submitting' };
     button.disabled = true;
     button.setAttribute('aria-disabled', 'true');
@@ -4543,6 +4681,7 @@ async function runSprintStart(binding, button) {
     const label = button.querySelector?.('[data-sprint-start-label="true"]');
     if (label) label.textContent = 'Starting Sprint...';
     setProjectError('');
+    setCockpitActionBusy(true, 'start_sprint', { token, busyLabel: 'Starting Sprint...' });
     try {
         await postAction(
             binding.action,
@@ -4553,8 +4692,10 @@ async function runSprintStart(binding, button) {
         if (activeSprintMutation?.token === token) {
             activeSprintMutation = { ...activeSprintMutation, phase: 'awaiting_authority' };
         }
+        loadSequence = dashboardLoadSequence + 1;
         const refreshed = await loadDashboard();
-        if (refreshed !== true || !sprintStartConfirmed(lifecycleState, binding)) {
+        if ((refreshed !== true && !isDashboardReconciled(loadSequence)) || !sprintStartConfirmed(lifecycleState, binding)) {
+            activeDeliveryUnreconciled = true;
             throw new Error(
                 'Sprint start was accepted, but the authoritative status did not confirm the same Sprint as active. Controls remain locked until a successful refresh.',
             );
@@ -4562,13 +4703,20 @@ async function runSprintStart(binding, button) {
         completeSprintStartReconciliation(token);
         return true;
     } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
         if (!mutationCompleted && activeSprintMutation?.token === token) {
             activeSprintMutation = { ...activeSprintMutation, phase: 'reconciling' };
             let refreshed = false;
+            const recoverySequence = dashboardLoadSequence + 1;
             try {
                 refreshed = await loadDashboard() === true;
             } catch (_loadError) {
-                // Preserve the uncertainty lock until state can be reloaded.
+                refreshed = false;
+            }
+            if (!refreshed && !isDashboardReconciled(recoverySequence)) {
+                activeDeliveryUnreconciled = true;
             }
             if (refreshed && sprintStartConfirmed(lifecycleState, binding)) {
                 completeSprintStartReconciliation(token);
@@ -4593,11 +4741,13 @@ async function runSprintStart(binding, button) {
             }
         }
         throw error;
+    } finally {
+        setCockpitActionBusy(false, 'start_sprint', { token });
     }
 }
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
-    if (button.disabled) return false;
+    if (button.disabled || activeCockpitAction || activeDeliveryUnreconciled) return false;
     const projectedAction = findAction(lifecycleState.actions, requestKind);
     if (projectedAction?.availability === 'locked') {
         button.disabled = true;
@@ -4612,6 +4762,7 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
     const isSpecificationStructuring = requestKind === 'structure_specification';
     if (isSpecificationStructuring && activeSpecificationMutation) return false;
     const isDeliveryGeneration = Boolean(DELIVERY_ACTION_CONFIG[requestKind]);
+    const actionToken = crypto.randomUUID();
     const setBusy = (targetButton, busy) => {
         if (isSpecificationStructuring) {
             setSpecificationStructuringBusy(targetButton, busy);
@@ -4620,12 +4771,14 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
         } else {
             setSpecificationContinuationBusy(targetButton, busy);
         }
+        setCockpitActionBusy(busy, requestKind, { token: actionToken });
     };
     let specificationBinding = null;
     let specificationMutationToken = null;
     let deliveryBinding = null;
     let deliveryReconciled = false;
     let mutationCompleted = false;
+    let loadSequence = 0;
     setBusy(button, true);
     setProjectError('');
     try {
@@ -4708,24 +4861,43 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             const action = findAction(lifecycleState.actions, requestKind)
                 ?? (fallbackEndpoint ? { endpoint: fallbackEndpoint } : null);
             await postAction(action);
+            mutationCompleted = true;
         }
-        const refreshed = await loadDashboard();
+        loadSequence = dashboardLoadSequence + 1;
+        let refreshed = false;
+        try {
+            refreshed = await loadDashboard() === true;
+        } catch (loadError) {
+            refreshed = false;
+            throw loadError;
+        }
+        if (!refreshed && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
         if (isDeliveryGeneration) {
-            deliveryReconciled = refreshed === true;
+            deliveryReconciled = refreshed || isDashboardReconciled(loadSequence);
             if (!deliveryReconciled) {
+                activeDeliveryUnreconciled = true;
                 throw new Error(
                     'The dashboard reload was superseded before current delivery actions were confirmed.',
                 );
             }
         }
     } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+            activeDeliveryUnreconciled = true;
+        }
         if (isSpecificationStructuring) {
             let refreshed = false;
             if (!mutationCompleted) {
+                const recoverySequence = dashboardLoadSequence + 1;
                 try {
-                    refreshed = await loadDashboard();
+                    refreshed = await loadDashboard() === true;
                 } catch (_loadError) {
-                    // Keep the captured action visible when reconciliation also fails.
+                    refreshed = false;
+                }
+                if (!refreshed && !isDashboardReconciled(recoverySequence)) {
+                    activeDeliveryUnreconciled = true;
                 }
             }
             const currentButton = document.querySelector?.(
@@ -4742,11 +4914,17 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             setSpecificationStructuringStatus(currentButton, localMessage);
         } else if (isDeliveryGeneration) {
             if (!mutationCompleted) {
+                const recoverySequence = dashboardLoadSequence + 1;
                 try {
                     deliveryReconciled = await loadDashboard() === true;
                 } catch (_loadError) {
-                    // Keep the captured action visible when reconciliation also fails.
+                    deliveryReconciled = false;
                 }
+                if (!deliveryReconciled && !isDashboardReconciled(recoverySequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
+            } else if (!deliveryReconciled && !isDashboardReconciled(loadSequence)) {
+                activeDeliveryUnreconciled = true;
             }
             const localMessage = mutationCompleted
                 ? `Delivery generation completed, but the dashboard could not reload. ${error.message}`
@@ -4774,12 +4952,19 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
             const currentButton = document.querySelector?.(
                 '[data-direct-action="structure_specification"]',
             ) ?? button;
-            setSpecificationStructuringBusy(currentButton, false);
+            if (activeDeliveryUnreconciled) {
+                currentButton.disabled = true;
+            } else {
+                setSpecificationStructuringBusy(currentButton, false);
+            }
         } else if (isDeliveryGeneration && !deliveryReconciled) {
             setDeliveryActionBusy(button, false, requestKind, true);
+        } else if (activeDeliveryUnreconciled) {
+            button.disabled = true;
         } else {
             setBusy(button, false);
         }
+        setCockpitActionBusy(false, requestKind, { token: actionToken });
     }
     return true;
 }
@@ -5048,6 +5233,10 @@ function installInteractions() {
         const form = event.target;
         if (form?.id === 'human-action-form') {
             event.preventDefault();
+            if (activeCockpitAction || activeDeliveryUnreconciled) {
+                setDialogError('An action is currently executing or awaiting reload. Wait for it to complete.');
+                return;
+            }
             const submit = document.getElementById('human-action-submit');
             if (submit) submit.disabled = true;
             try {
@@ -5061,7 +5250,7 @@ function installInteractions() {
         }
         if (form?.dataset?.specificationSourceForm === 'true') {
             event.preventDefault();
-            if (form.dataset.submitting === 'true' || activeSpecificationMutation) return;
+            if (form.dataset.submitting === 'true' || activeSpecificationMutation || activeCockpitAction || activeDeliveryUnreconciled) return;
             const binding = captureSpecificationSourceRegistrationBinding(
                 lifecycleState,
             );
@@ -5112,7 +5301,14 @@ function installInteractions() {
                 form,
                 'Registering the checked source package. No provider run is performed.',
             );
+            setCockpitActionBusy(
+                true,
+                'register_specification_source',
+                { token: specificationMutationToken, busyLabel: 'Registering source...' },
+            );
             setProjectError('');
+            let mutationCompleted = false;
+            let loadSequence = 0;
             try {
                 await postAction(
                     submission.action,
@@ -5122,8 +5318,21 @@ function installInteractions() {
                         expectedSource: form.dataset.previewFingerprint,
                     },
                 );
-                await loadDashboard();
+                mutationCompleted = true;
+                loadSequence = dashboardLoadSequence + 1;
+                let refreshed = false;
+                try {
+                    refreshed = await loadDashboard() === true;
+                } catch (_loadError) {
+                    refreshed = false;
+                }
+                if (!refreshed && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
             } catch (error) {
+                if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
                 setProjectError(error.message);
                 setSpecificationSourceRegistrationStatus(form, error.message, true);
             } finally {
@@ -5134,8 +5343,18 @@ function installInteractions() {
                 const currentForm = document.querySelector(
                     'form[data-specification-source-form="true"]',
                 ) ?? form;
-                setSpecificationSourceRegistrationBusy(currentForm, false);
-                if (submit && currentForm === form) submit.disabled = false;
+                if (activeDeliveryUnreconciled) {
+                    setSpecificationSourceRegistrationBusy(currentForm, true);
+                    if (submit) submit.disabled = true;
+                } else {
+                    setSpecificationSourceRegistrationBusy(currentForm, false);
+                    if (submit && currentForm === form) submit.disabled = false;
+                }
+                setCockpitActionBusy(
+                    false,
+                    'register_specification_source',
+                    { token: specificationMutationToken },
+                );
             }
             return;
         }
@@ -5177,7 +5396,7 @@ function installInteractions() {
         const scope = form?.dataset?.interviewScope;
         if (!scope) return;
         event.preventDefault();
-        if (form.dataset.submitting === 'true') return;
+        if (form.dataset.submitting === 'true' || activeCockpitAction || activeDeliveryUnreconciled) return;
         const textarea = document.getElementById(`${scope}-response`);
         const text = textarea?.value.trim() ?? '';
         if (!text) return;
@@ -5194,18 +5413,41 @@ function installInteractions() {
         if (textarea) textarea.disabled = true;
         setProjectError('');
         setInterviewStatus(scope, '');
+        const interviewToken = crypto.randomUUID();
+        setCockpitActionBusy(true, requestKind, { token: interviewToken, busyLabel: 'Sending...' });
+        let mutationCompleted = false;
+        let loadSequence = 0;
         try {
             await postAction(findAction(lifecycleState.actions, requestKind), { text });
-            await loadDashboard();
+            mutationCompleted = true;
+            loadSequence = dashboardLoadSequence + 1;
+            let refreshed = false;
+            try {
+                refreshed = await loadDashboard() === true;
+            } catch (_loadError) {
+                refreshed = false;
+            }
+            if (!refreshed && !isDashboardReconciled(loadSequence)) {
+                activeDeliveryUnreconciled = true;
+            }
         } catch (error) {
+            if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+                activeDeliveryUnreconciled = true;
+            }
             setProjectError(error.message);
             setInterviewStatus(scope, `Response was not sent. ${error.message}`);
         } finally {
             delete form.dataset.submitting;
-            if (submit) submit.disabled = false;
+            if (activeDeliveryUnreconciled) {
+                if (submit) submit.disabled = true;
+                if (textarea) textarea.disabled = true;
+            } else {
+                if (submit) submit.disabled = false;
+                if (textarea) textarea.disabled = false;
+            }
             submit?.removeAttribute?.('aria-busy');
             if (submitLabel) submitLabel.textContent = idleLabel;
-            if (textarea) textarea.disabled = false;
+            setCockpitActionBusy(false, requestKind, { token: interviewToken });
         }
     });
 
@@ -5218,6 +5460,7 @@ function installInteractions() {
         const button = event.target.closest('button');
         if (!button) return;
         if (button.dataset.reviewScope) {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             const copy = reviewDialogCopy(button.dataset.reviewScope, button.dataset.reviewDecision);
             const binding = captureReviewBinding(
                 lifecycleState,
@@ -5235,6 +5478,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.planningReview) {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             const binding = capturePlanningReview(
                 button.dataset.planningReview,
                 Number.parseInt(button.dataset.reviewIndex ?? '0', 10),
@@ -5248,6 +5492,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.goalOutcome) {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             const fulfilled = button.dataset.goalOutcome === 'fulfilled';
             openHumanDialog({
                 kind: 'goal-outcome',
@@ -5263,6 +5508,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.repositoryAction === 'attach') {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             openHumanDialog({
                 kind: 'repository',
                 field: 'path',
@@ -5278,6 +5524,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.directAction === 'record_story_draft') {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             const binding = captureDeliveryActionBinding(
                 lifecycleState,
                 button,
@@ -5312,6 +5559,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.directAction === 'start_sprint') {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             const binding = captureSprintStartControlBinding(lifecycleState, button);
             if (!binding) {
                 setProjectError(
@@ -5337,7 +5585,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.storyStructuralReconcileId || button.dataset.storySelectionIntent) {
-            if (activeStoryMutation) return;
+            if (activeStoryMutation || activeCockpitAction || activeDeliveryUnreconciled) return;
             const storyId = Number.parseInt(
                 button.dataset.storyStructuralReconcileId || button.dataset.storySelectionId,
                 10,
@@ -5371,6 +5619,12 @@ function installInteractions() {
             };
             let refreshed = false;
             let mutationCompleted = false;
+            let loadSequence = 0;
+            setCockpitActionBusy(
+                true,
+                'story_mutation',
+                { token, busyLabel: intent ? 'Saving selection...' : 'Running checks...' },
+            );
             setProjectError('');
             try {
                 if (intent) {
@@ -5406,12 +5660,21 @@ function installInteractions() {
                     };
                     renderDashboard();
                 }
-                refreshed = await loadDashboard() === true;
-                if (!refreshed) {
+                loadSequence = dashboardLoadSequence + 1;
+                try {
+                    refreshed = await loadDashboard() === true;
+                } catch (_loadError) {
+                    refreshed = false;
+                }
+                if (!refreshed && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
                     throw new Error('The update was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
                 focusStoryReadiness(storyId);
             } catch (error) {
+                if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
                 setProjectError(error.message);
             } finally {
                 if (!mutationCompleted && activeStoryMutation?.token === token) {
@@ -5419,15 +5682,17 @@ function installInteractions() {
                     restoreStoryControlStates(controlStates);
                     if (label) label.textContent = idleLabel;
                 }
+                setCockpitActionBusy(false, 'story_mutation', { token });
             }
             return;
         }
         if (button.dataset.applyDependencies) {
-            if (activeDependencyMutation) return;
+            if (activeDependencyMutation || activeCockpitAction || activeDeliveryUnreconciled) return;
             const label = button.querySelector('[data-delivery-action-label="true"]');
             const idleLabel = label?.textContent ?? 'Confirm dependencies';
             const status = button.closest('[data-dependency-review-section]')?.querySelector('[data-delivery-action-status="true"]');
             let mutationCompleted = false;
+            let loadSequence = 0;
             let refreshed = false;
             setProjectError('');
             const {
@@ -5472,6 +5737,11 @@ function installInteractions() {
                 payload,
                 button,
             };
+            setCockpitActionBusy(
+                true,
+                'apply_story_dependencies',
+                { token, busyLabel: 'Submitting...' },
+            );
             try {
                 await postStoryDependencyMutation(
                     selectedProjectId,
@@ -5491,18 +5761,27 @@ function installInteractions() {
                     };
                     renderDashboard();
                 }
-                refreshed = await loadDashboard() === true;
-                if (!refreshed) {
+                loadSequence = dashboardLoadSequence + 1;
+                try {
+                    refreshed = await loadDashboard() === true;
+                } catch (_loadError) {
+                    refreshed = false;
+                }
+                if (!refreshed && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
                     throw new Error('The dependency review was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
             } catch (error) {
+                if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
+                    activeDeliveryUnreconciled = true;
+                }
                 setProjectError(error.message);
                 if (status) {
                     status.textContent = error.message;
                     status.hidden = false;
                 }
             } finally {
-                if (shouldUnlockDependencyMutation(mutationCompleted, refreshed)) {
+                if (shouldUnlockDependencyMutation(mutationCompleted, refreshed || isDashboardReconciled(loadSequence))) {
                     restoreStoryControlStates(controlState);
                     if (label) label.textContent = idleLabel;
                     if (activeDependencyMutation?.token === token) {
@@ -5510,6 +5789,7 @@ function installInteractions() {
                         renderDashboard();
                     }
                 }
+                setCockpitActionBusy(false, 'apply_story_dependencies', { token });
             }
             return;
         }
@@ -5519,6 +5799,7 @@ function installInteractions() {
             return;
         }
         if (button.dataset.visionRevision) {
+            if (activeCockpitAction || activeDeliveryUnreconciled) return;
             openHumanDialog({
                 kind: 'vision-revision',
                 title: 'Revise Project Vision',
