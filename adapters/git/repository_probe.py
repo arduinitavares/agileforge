@@ -100,44 +100,48 @@ class GitPythonRepositoryProbe:
     def _inspect_worktree(self, normalized_path: Path) -> RepositoryProbeResult:
         """Collect a stable observation from one opened Git worktree."""
         repo = Repo(normalized_path, search_parent_directories=False)
-        if repo.bare:
-            raise _error(RepositoryProbeErrorCode.NOT_GIT_WORKTREE, normalized_path)
-        if not repo.head.is_valid():
-            raise _error(RepositoryProbeErrorCode.UNBORN_HEAD, normalized_path)
-        first_head_sha = self._read_head_sha(repo)
-        entries = _status_entries(repo)
-        detached_head = repo.head.is_detached
-        branch_name = (
-            None if detached_head else _normalize_text(repo.active_branch.name)
-        )
-        remote_urls: list[str] = []
-        remote_omitted = False
-        for remote in repo.remotes:
-            for url in remote.urls:
-                identity = _remote_identity(url)
-                if identity is None:
-                    remote_omitted = True
-                else:
-                    remote_urls.append(identity)
-        remotes: tuple[str, ...] = tuple(sorted(remote_urls))
-        second_head_sha = self._read_head_sha(repo)
-        if first_head_sha != second_head_sha:
-            raise _error(
-                RepositoryProbeErrorCode.REPOSITORY_CHANGED_DURING_PROBE,
-                normalized_path,
+        try:
+            if repo.bare:
+                raise _error(RepositoryProbeErrorCode.NOT_GIT_WORKTREE, normalized_path)
+            if not repo.head.is_valid():
+                raise _error(RepositoryProbeErrorCode.UNBORN_HEAD, normalized_path)
+            first_head_sha = self._read_head_sha(repo)
+            entries = _status_entries(repo)
+            detached_head = repo.head.is_detached
+            branch_name = (
+                None if detached_head else _normalize_text(repo.active_branch.name)
             )
-        return _result(
-            repo,
-            _ProbeState(
-                normalized_path=normalized_path,
-                head_sha=first_head_sha,
-                branch_name=branch_name,
-                detached_head=detached_head,
-                entries=entries,
-                remotes=remotes,
-                remote_omitted=remote_omitted,
-            ),
-        )
+            remote_urls: list[str] = []
+            remote_omitted = False
+            for remote in repo.remotes:
+                for url in remote.urls:
+                    identity = _remote_identity(url)
+                    if identity is None:
+                        remote_omitted = True
+                    else:
+                        remote_urls.append(identity)
+            remotes: tuple[str, ...] = tuple(sorted(remote_urls))
+            second_head_sha = self._read_head_sha(repo)
+            if first_head_sha != second_head_sha:
+                raise _error(
+                    RepositoryProbeErrorCode.REPOSITORY_CHANGED_DURING_PROBE,
+                    normalized_path,
+                )
+            return _result(
+                repo,
+                _ProbeState(
+                    normalized_path=normalized_path,
+                    head_sha=first_head_sha,
+                    branch_name=branch_name,
+                    detached_head=detached_head,
+                    entries=entries,
+                    remotes=remotes,
+                    remote_omitted=remote_omitted,
+                ),
+            )
+        finally:
+            # Clear subprocesses now; Repo.close() forces global GC on Windows.
+            repo.git.clear_cache()
 
 
 def _error(code: RepositoryProbeErrorCode, path: Path) -> RepositoryProbeError:
