@@ -80,7 +80,7 @@ class _RegistrationService:
         request: SpecificationSourceRegistrationRequest,
     ) -> SpecificationSourceCapturePreview:
         self.requests.append(request)
-        return SpecificationSourceCapturePreview.from_bundle(self.prepared.bundle)
+        return SpecificationSourceCapturePreview.from_prepared(self.prepared)
 
 
 class _Domain:

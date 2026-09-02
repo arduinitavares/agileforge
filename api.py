@@ -72,6 +72,7 @@ from services.contracts.specification_source import (
 )
 from services.specification_source_registration import (
     SpecificationSourceRegistrationError,
+    SpecificationSourceRegistrationErrorCode,
 )
 from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
@@ -651,12 +652,14 @@ def _specification_source_request(
     selection: SpecificationSourceApiRequest | SpecificationSourcePreviewApiRequest,
     metadata: MutationMetadata,
     expected_decision_fingerprint: str | None,
+    expected_source_fingerprint: str | None,
 ) -> SpecificationSourceRegistrationRequest:
     """Validate source semantics before any application or capture call."""
     try:
         return SpecificationSourceRegistrationRequest(
             project_id=project_id,
             expected_decision_fingerprint=expected_decision_fingerprint,
+            expected_source_fingerprint=expected_source_fingerprint,
             source_path=selection.source_path,
             adr_paths=selection.adr_paths,
             preparation_capability=selection.preparation_capability,
@@ -687,8 +690,13 @@ def _specification_source_request(
 
 def _source_preview_error(error: SpecificationSourceRegistrationError) -> HTTPException:
     """Expose a bounded capture failure without hiding its configured limits."""
+    status_code = (
+        404
+        if error.code is SpecificationSourceRegistrationErrorCode.PROJECT_NOT_FOUND
+        else 422
+    )
     return HTTPException(
-        status_code=422,
+        status_code=status_code,
         detail={
             "error": {"code": error.code.value, "message": str(error)},
             "limits": {
@@ -965,11 +973,16 @@ def register_specification_source(
         str,
         Header(alias="X-AgileForge-Expected-Decision", include_in_schema=False),
     ],
+    expected_source_fingerprint: Annotated[
+        str,
+        Header(alias="X-AgileForge-Expected-Source", include_in_schema=False),
+    ],
 ) -> dict[str, object]:
     """Capture one exact external to-spec source from semantic paths."""
     request = _specification_source_request(
         project_id=project_id,
         expected_decision_fingerprint=expected_decision_fingerprint,
+        expected_source_fingerprint=expected_source_fingerprint,
         selection=req,
         metadata=_metadata(req),
     )
@@ -985,6 +998,7 @@ def preview_specification_source(
     request = _specification_source_request(
         project_id=project_id,
         expected_decision_fingerprint=None,
+        expected_source_fingerprint=None,
         selection=req,
         metadata={
             "idempotency_key": "specification-source-preview",

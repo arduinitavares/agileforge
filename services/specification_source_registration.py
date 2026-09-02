@@ -77,6 +77,7 @@ class SpecificationSourceRegistrationErrorCode(StrEnum):
     EMPTY_SOURCE = "EMPTY_SOURCE"
     SOURCE_TOO_LARGE = "SOURCE_TOO_LARGE"
     SOURCE_CHANGED_DURING_CAPTURE = "SOURCE_CHANGED_DURING_CAPTURE"
+    SOURCE_PREVIEW_STALE = "SOURCE_PREVIEW_STALE"
     DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
 
 
@@ -99,15 +100,17 @@ class SpecificationSourceCapturePreview:
 
     documents: tuple[tuple[str, int], ...]
     total_bytes: int
+    source_fingerprint: str
     document_limit_bytes: int = MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
     package_limit_bytes: int = MAX_SPECIFICATION_SOURCE_TOTAL_BYTES
 
     @classmethod
-    def from_bundle(
+    def from_prepared(
         cls,
-        bundle: SpecificationSourceBundle,
+        prepared: PreparedSpecificationSourceRegistration,
     ) -> SpecificationSourceCapturePreview:
         """Build a disclosure that contains paths and sizes, never source bytes."""
+        bundle = prepared.bundle
         documents = [bundle.source]
         if bundle.context.document is not None:
             documents.append(bundle.context.document)
@@ -118,6 +121,7 @@ class SpecificationSourceCapturePreview:
         return cls(
             documents=sizes,
             total_bytes=sum(byte_length for _, byte_length in sizes),
+            source_fingerprint=prepared.source_fingerprint,
         )
 
     def payload(self) -> dict[str, object]:
@@ -130,6 +134,7 @@ class SpecificationSourceCapturePreview:
             "total_bytes": self.total_bytes,
             "document_limit_bytes": self.document_limit_bytes,
             "package_limit_bytes": self.package_limit_bytes,
+            "source_fingerprint": self.source_fingerprint,
             "provider_run_performed": False,
         }
 
@@ -161,6 +166,12 @@ class SpecificationSourceRegistrationRequest(FrozenModel):
     expected_decision_fingerprint: str | None = Field(
         default=None,
         min_length=1,
+        exclude=True,
+        repr=False,
+    )
+    expected_source_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
         exclude=True,
         repr=False,
     )
@@ -434,7 +445,7 @@ class SpecificationSourceRegistrationService:
             accepted_vision_fingerprint=context.vision_fingerprint,
             accepted_product_goal_fingerprint=context.product_goal_fingerprint,
         )
-        return PreparedSpecificationSourceRegistration(
+        prepared = PreparedSpecificationSourceRegistration(
             project_id=request.project_id,
             accepted_vision_artifact_id=context.vision_artifact_id,
             accepted_product_goal_artifact_id=context.product_goal_artifact_id,
@@ -444,6 +455,16 @@ class SpecificationSourceRegistrationService:
             source_fingerprint=source_bundle_fingerprint(bundle),
             bundle=bundle,
         )
+        if (
+            request.expected_source_fingerprint is not None
+            and request.expected_source_fingerprint != prepared.source_fingerprint
+        ):
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.SOURCE_PREVIEW_STALE,
+                "The checked Specification source changed. "
+                "Check the package again before registration.",
+            )
+        return prepared
 
     def preview(
         self,
@@ -451,7 +472,7 @@ class SpecificationSourceRegistrationService:
     ) -> SpecificationSourceCapturePreview:
         """Safely read and size an exact selection without changing workflow state."""
         prepared = self.prepare(request)
-        return SpecificationSourceCapturePreview.from_bundle(prepared.bundle)
+        return SpecificationSourceCapturePreview.from_prepared(prepared)
 
     def _load_context(self, project_id: int) -> _DurableSourceContext:
         try:

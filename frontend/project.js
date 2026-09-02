@@ -3866,6 +3866,9 @@ async function postAction(action, fields = {}, options = {}) {
     if (options.expectedInstance) {
         headers['X-AgileForge-Expected-Instance'] = options.expectedInstance;
     }
+    if (options.expectedSource) {
+        headers['X-AgileForge-Expected-Source'] = options.expectedSource;
+    }
     return requestJson(`/api/projects/${selectedProjectId}/${action.endpoint}`, {
         method: 'POST',
         headers,
@@ -5024,12 +5027,17 @@ function installInteractions() {
                 },
             );
             form.dataset.previewKey = specificationSourcePreviewKey(submission.fields);
+            if (!isSha256Fingerprint(response.data?.source_fingerprint)) {
+                throw new Error('The secure host did not return a checked source identity. Check the package again.');
+            }
+            form.dataset.previewFingerprint = response.data.source_fingerprint;
             setSpecificationSourceRegistrationStatus(
                 form,
                 specificationSourcePreviewMessage(response.data),
             );
         } catch (error) {
             delete form.dataset.previewKey;
+            delete form.dataset.previewFingerprint;
             setSpecificationSourceRegistrationStatus(form, error.message, true);
         } finally {
             delete form.dataset.previewing;
@@ -5083,6 +5091,7 @@ function installInteractions() {
             if (
                 form.dataset.previewKey
                 !== specificationSourcePreviewKey(submission.fields)
+                || !isSha256Fingerprint(form.dataset.previewFingerprint)
             ) {
                 setSpecificationSourceRegistrationStatus(
                     form,
@@ -5108,7 +5117,10 @@ function installInteractions() {
                 await postAction(
                     submission.action,
                     submission.fields,
-                    { expectedDecision: binding.expectedDecision },
+                    {
+                        expectedDecision: binding.expectedDecision,
+                        expectedSource: form.dataset.previewFingerprint,
+                    },
                 );
                 await loadDashboard();
             } catch (error) {

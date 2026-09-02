@@ -515,10 +515,15 @@ class FakeLifecycle:
                     "total_bytes": 1_024 + (512 * len(adr_document_paths)),
                     "document_limit_bytes": 98_304,
                     "package_limit_bytes": 196_608,
+                    "source_fingerprint": "sha256:" + ("a" * 64),
                     "provider_run_performed": False,
                 },
             )
             return _HTTP_OK, self._success(preview)
+        if suffix == "/specifications/source":
+            assert headers.get("x-agileforge-expected-source") == "sha256:" + (
+                "a" * 64
+            )
         if suffix in {
             "/backlog/generate",
             "/roadmap/generate",

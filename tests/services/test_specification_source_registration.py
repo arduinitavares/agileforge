@@ -173,12 +173,14 @@ def _request(
         "docs/adr/0002-second.md",
         "docs/adr/0001-first.md",
     ),
+    expected_source_fingerprint: str | None = None,
 ) -> SpecificationSourceRegistrationRequest:
     return SpecificationSourceRegistrationRequest(
         project_id=project_id,
         source_path=source_path,
         preparation_capability="grill-with-docs",
         adr_paths=adr_paths,
+        expected_source_fingerprint=expected_source_fingerprint,
         idempotency_key="register-source-1",
         actor="operator@example.test",
         correlation_id="source-correlation-1",
@@ -229,6 +231,34 @@ def test_prepare_preserves_exact_utf8_bytes_and_canonicalizes_adrs(
         "agileforge.repository-probe.v1"
     )
     assert probe.calls == _EXPECTED_PROBE_CALLS
+
+
+def test_prepare_requires_the_exact_package_checked_by_preview(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A preview fingerprint binds registration to the exact captured bytes."""
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    service = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
+
+    preview = service.preview(_request())
+    prepared = service.prepare(
+        _request(expected_source_fingerprint=preview.source_fingerprint)
+    )
+
+    assert prepared.source_fingerprint == preview.source_fingerprint
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        service.prepare(
+            _request(expected_source_fingerprint="sha256:" + ("0" * 64))
+        )
+    assert (
+        caught.value.code
+        is SpecificationSourceRegistrationErrorCode.SOURCE_PREVIEW_STALE
+    )
 
 
 def test_prepare_records_context_absence(engine: Engine, tmp_path: Path) -> None:
