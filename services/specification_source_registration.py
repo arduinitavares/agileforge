@@ -20,6 +20,7 @@ from models.repository import RepositoryBinding, repository_binding_fingerprint
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_source import (
     SPECIFICATION_SOURCE_CONTEXT_ID,
+    SPECIFICATION_SOURCE_MAX_ADR_COUNT,
     SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
     SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
     SPECIFICATION_SOURCE_PRIMARY_ID,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
 
 MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES: int = SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES
 MAX_SPECIFICATION_SOURCE_TOTAL_BYTES: int = SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES
+MAX_SPECIFICATION_SOURCE_ADR_COUNT: int = SPECIFICATION_SOURCE_MAX_ADR_COUNT
 _CONTEXT_PATH = "CONTEXT.md"
 
 
@@ -162,7 +164,10 @@ class SpecificationSourceRegistrationRequest(FrozenModel):
     project_id: int = Field(gt=0)
     source_path: str = Field(min_length=1)
     preparation_capability: Literal["grill-with-docs"]
-    adr_paths: tuple[str, ...] = ()
+    adr_paths: tuple[str, ...] = Field(
+        default=(),
+        max_length=SPECIFICATION_SOURCE_MAX_ADR_COUNT,
+    )
     expected_decision_fingerprint: str | None = Field(
         default=None,
         min_length=1,
@@ -996,6 +1001,7 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 __all__ = [
+    "MAX_SPECIFICATION_SOURCE_ADR_COUNT",
     "MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES",
     "MAX_SPECIFICATION_SOURCE_TOTAL_BYTES",
     "PreparedSpecificationSourceRegistration",

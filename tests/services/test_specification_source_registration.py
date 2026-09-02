@@ -24,6 +24,7 @@ from services.repository_probe import (
     RepositoryProbeErrorCode,
 )
 from services.specification_source_registration import (
+    MAX_SPECIFICATION_SOURCE_ADR_COUNT,
     MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES,
     MAX_SPECIFICATION_SOURCE_TOTAL_BYTES,
     SpecificationSourceRegistrationError,
@@ -336,6 +337,17 @@ def test_request_rejects_duplicate_or_reserved_paths(
     """A physical source may have only one semantic role."""
     with pytest.raises(ValidationError):
         _request(adr_paths=adr_paths)
+
+
+def test_request_rejects_an_unbounded_adr_selection() -> None:
+    """Empty ADR files must not bypass the bounded capture work contract."""
+    with pytest.raises(ValidationError):
+        _request(
+            adr_paths=tuple(
+                f"docs/adr/{index:04}-decision.md"
+                for index in range(MAX_SPECIFICATION_SOURCE_ADR_COUNT + 1)
+            )
+        )
 
 
 def test_prepare_rejects_invalid_utf8(engine: Engine, tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ SPECIFICATION_SOURCE_CONTEXT_ID: str = "SRC.specification-source.context"
 SPECIFICATION_SOURCE_ADR_ID_PREFIX: str = "SRC.specification-source.adr."
 SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES: int = 96 * 1024
 SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES: int = 192 * 1024
+SPECIFICATION_SOURCE_MAX_ADR_COUNT: int = 64
 
 Fingerprint = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 SourceId = Annotated[
@@ -183,7 +184,10 @@ class SpecificationSourceBundle(_FrozenClosedModel):
     preparation_capability: Literal["grill-with-docs"] = "grill-with-docs"
     source: SpecificationSourceDocument
     context: SpecificationContextCapture
-    adrs: tuple[SpecificationSourceDocument, ...] = ()
+    adrs: tuple[SpecificationSourceDocument, ...] = Field(
+        default=(),
+        max_length=SPECIFICATION_SOURCE_MAX_ADR_COUNT,
+    )
     repository_revision: SpecificationRepositoryRevision
     accepted_vision_fingerprint: Fingerprint
     accepted_product_goal_fingerprint: Fingerprint
