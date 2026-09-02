@@ -23,8 +23,19 @@ from services.application import (
     StoryReviewRequest,
     StorySetCorrectionRequest,
 )
+from services.vision_evidence import (
+    VisionEvidenceCollectionError,
+    VisionEvidenceErrorCode,
+)
+from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.test_command_renderer import position_fixture
-from workflow.contracts import TransitionResult, WorkflowPosition
+from workflow.contracts import (
+    NodeCategory,
+    NodeDecision,
+    RecommendationKind,
+    TransitionResult,
+    WorkflowPosition,
+)
 
 if TYPE_CHECKING:
     from services.application import (
@@ -1298,6 +1309,33 @@ class _FakeApplication:
         return self._position
 
 
+class _UnavailableVisionApplication(_FakeApplication):
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        del project_id
+        return RepositoryEvidenceCapability(
+            available=False,
+            code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+            message="Repository evidence is unavailable.",
+        )
+
+
+class _InvalidVisionCapabilityApplication(_FakeApplication):
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        del project_id
+        raise VisionEvidenceCollectionError(
+            VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID,
+            "Repository capability context is invalid.",
+        )
+
+
 def test_workflow_next_reads_position_once() -> None:
     """Render workflow-next from exactly one domain position query."""
     application = _FakeApplication(position_fixture())
@@ -1310,6 +1348,76 @@ def test_workflow_next_reads_position_once() -> None:
         "planning.roadmap.review",
         "planning.story.review",
         "planning.sprint.review",
+    ]
+
+
+def test_workflow_next_blocks_unavailable_vision_evidence_without_a_command() -> None:
+    """Do not advertise an executable bootstrap that capability preflight rejects."""
+    decision = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_BOOTSTRAP_REQUIRED",
+        decision_fingerprint="vision-bootstrap-capability",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+            "decisions": (decision,),
+        }
+    )
+    application = _UnavailableVisionApplication(position)
+
+    payload = workflow_next(application=application, project_id=41)
+
+    assert payload["commands"] == []
+    assert payload["blocked_commands"] == [
+        {
+            "node_id": "vision.bootstrap",
+            "reason_code": "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+            "message": "Repository evidence is unavailable.",
+        }
+    ]
+
+
+def test_workflow_next_blocks_invalid_capability_context() -> None:
+    """Project a typed blocker instead of raising from the read-only CLI path."""
+    decision = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_BOOTSTRAP_REQUIRED",
+        decision_fingerprint="vision-bootstrap-invalid-context",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+            "decisions": (decision,),
+        }
+    )
+
+    payload = workflow_next(
+        application=_InvalidVisionCapabilityApplication(position),
+        project_id=41,
+    )
+
+    assert payload["commands"] == []
+    assert payload["blocked_commands"] == [
+        {
+            "node_id": "vision.bootstrap",
+            "reason_code": "REPOSITORY_BINDING_INVALID",
+            "message": "Repository capability context is invalid.",
+        }
     ]
 
 
@@ -1818,8 +1926,7 @@ def test_invest_assessment_lines_formats_valid_assessment() -> None:
         "(Evidence: No unbuilt dependencies.)"
     ) in lines
     assert (
-        "    - Small [CONCERN]: Near upper size bound. "
-        "(Evidence: Effort is M.)"
+        "    - Small [CONCERN]: Near upper size bound. (Evidence: Effort is M.)"
     ) in lines
     assert (
         "    - Testable [PASS]: Deterministic pass/fail. "
@@ -1896,9 +2003,7 @@ def test_story_item_lines_formats_missing_invest_assessment() -> None:
         "specification_evidence": [],
     }
     lines = _story_item_lines(story_without_invest, indent="  ")
-    assert any(
-        "INVEST assessment: [MALFORMED / MISSING]" in line for line in lines
-    )
+    assert any("INVEST assessment: [MALFORMED / MISSING]" in line for line in lines)
 
 
 @pytest.mark.parametrize(

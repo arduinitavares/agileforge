@@ -65,10 +65,12 @@ from services.application import (
     planning_action_decision_is_transportable,
     production_application,
 )
+from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
+    NodeDecision,
     RecommendationKind,
     TransitionResult,
     WorkflowErrorCode,
@@ -544,23 +546,56 @@ def _workflow_actions(
             "transport": transport,
         }
         actions.append(action)
-        if (
-            request_kind == "record_story_draft"
-            and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
-            and application is not None
-        ):
-            checker = getattr(
-                application,
-                "story_set_correction_decision_is_executable",
-                None,
-            )
-            if callable(checker) and not checker(
-                project_id=position.project_id,
-                decision=decision,
-            ):
-                action["availability"] = "locked"
-                action["reason_code"] = "STORY_CORRECTION_INPUT_UNAVAILABLE"
+        _project_action_availability(
+            action=action,
+            application=application,
+            decision=decision,
+            project_id=position.project_id,
+        )
     return actions
+
+
+def _project_action_availability(
+    *,
+    action: JsonObject,
+    application: object | None,
+    decision: NodeDecision,
+    project_id: int,
+) -> None:
+    """Lock actions whose provider-free inputs cannot be opened safely."""
+    if application is None:
+        return
+    if decision.request_kind == "generate_vision_bootstrap":
+        checker = getattr(application, "vision_bootstrap_capability", None)
+        if callable(checker):
+            try:
+                capability = checker(project_id=project_id)
+            except VisionEvidenceCollectionError as error:
+                action["availability"] = "locked"
+                action["reason_code"] = error.code.value
+                return
+            if not capability.available:
+                action["availability"] = "locked"
+                action["reason_code"] = (
+                    capability.code or "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+                )
+        return
+    if (
+        decision.request_kind != "record_story_draft"
+        or decision.reason_code != "STORY_CORRECTION_AVAILABLE"
+    ):
+        return
+    checker = getattr(
+        application,
+        "story_set_correction_decision_is_executable",
+        None,
+    )
+    if callable(checker) and not checker(
+        project_id=project_id,
+        decision=decision,
+    ):
+        action["availability"] = "locked"
+        action["reason_code"] = "STORY_CORRECTION_INPUT_UNAVAILABLE"
 
 
 def _read_payload(result: JsonObject) -> dict[str, object]:

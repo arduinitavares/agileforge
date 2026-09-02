@@ -10,7 +10,13 @@ import pytest
 
 from cli import main as cli_main
 from services.application import VisionBootstrapRequest
-from workflow.contracts import JsonObject, TransitionResult, WorkflowPosition
+from workflow.contracts import (
+    JsonObject,
+    TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
+    WorkflowPosition,
+)
 
 PROJECT_ID = 41
 
@@ -37,6 +43,30 @@ class _CapturingApplication:
     def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
         self.requests.append(request)
         return TransitionResult(ok=True, applied_node_id="vision.bootstrap")
+
+
+class _CapabilityFailureApplication:
+    def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
+        del request
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE,
+                message="Repository evidence is unavailable.",
+            ),
+        )
+
+
+class _LostWorktreeApplication:
+    def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
+        del request
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE,
+                message="Repository provenance could not be refreshed.",
+            ),
+        )
 
 
 class _PureReads:
@@ -97,6 +127,56 @@ def test_vision_bootstrap_cli_forwards_transport_metadata(
         "correlation_id": "corr-41",
     }
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_vision_bootstrap_cli_returns_the_closed_capability_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Match the API capability code without invoking a provider transport."""
+    exit_code = cli_main.main(
+        [
+            "vision",
+            "bootstrap",
+            "--project-id",
+            str(PROJECT_ID),
+            "--idempotency-key",
+            "vision-capability-41",
+            "--actor",
+            "operator",
+        ],
+        application=_CapabilityFailureApplication(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE.value
+    )
+
+
+def test_vision_bootstrap_cli_preserves_lost_worktree_provenance_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Do not relabel a lost bound checkout as capability unavailable."""
+    exit_code = cli_main.main(
+        [
+            "vision",
+            "bootstrap",
+            "--project-id",
+            str(PROJECT_ID),
+            "--idempotency-key",
+            "lost-worktree-41",
+            "--actor",
+            "operator",
+        ],
+        application=_LostWorktreeApplication(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["error"]["code"] == (
+        WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE.value
+    )
 
 
 @pytest.mark.parametrize(

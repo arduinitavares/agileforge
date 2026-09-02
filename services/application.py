@@ -129,6 +129,7 @@ from services.vision_evidence import (
     VisionEvidenceCollectionError,
     VisionEvidenceErrorCode,
 )
+from services.vision_evidence_reader import RepositoryEvidenceCapability
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.runtime_config import get_specification_structurer_generation_config
@@ -238,6 +239,10 @@ class _VisionInputPort(Protocol):
         self,
         query: TransitionReplayQuery,
     ) -> TransitionResult | None: ...
+
+    def bootstrap_capability(self, project_id: int) -> RepositoryEvidenceCapability:
+        """Return whether secure host evidence collection can run."""
+        ...
 
     def build_bootstrap(
         self,
@@ -1803,6 +1808,8 @@ def _vision_evidence_workflow_error_code(
             return WorkflowErrorCode.REPOSITORY_BINDING_INVALID
         case VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE:
             return WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE
+        case VisionEvidenceErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE:
+            return WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE
         case VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION:
             return WorkflowErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
     assert_never(code)
@@ -1886,6 +1893,18 @@ class AgileForgeApplication:
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return the current durable workflow position."""
         return self._workflow_domain.position(project_id)
+
+    def vision_bootstrap_capability(
+        self,
+        *,
+        project_id: int,
+    ) -> RepositoryEvidenceCapability:
+        """Project the same provider-free capability used by bootstrap execution."""
+        input_service = self._vision_input
+        checker = getattr(input_service, "bootstrap_capability", None)
+        if not callable(checker):
+            return RepositoryEvidenceCapability(available=True)
+        return cast("RepositoryEvidenceCapability", checker(project_id))
 
     def backlog_review(self, project_id: int) -> JsonObject:  # noqa: PLR0911
         """Read a pending Backlog review or its exact Feedback continuation."""
@@ -3676,6 +3695,21 @@ class AgileForgeApplication:
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "vision.bootstrap")
         try:
+            capability = self.vision_bootstrap_capability(project_id=request.project_id)
+            if not capability.available:
+                return TransitionResult(
+                    ok=False,
+                    position=position,
+                    error=WorkflowError(
+                        code=(
+                            WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE
+                        ),
+                        message=(
+                            capability.message
+                            or "Repository evidence collection is unavailable."
+                        ),
+                    ),
+                )
             input_payload = input_service.build_bootstrap(request.project_id, decision)
         except VisionEvidenceCollectionError as error:
             return TransitionResult(

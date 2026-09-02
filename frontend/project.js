@@ -469,9 +469,17 @@ function waitingReason(decision) {
     return `${sentence[0].toUpperCase()}${sentence.slice(1)}.`;
 }
 
+function lockedActionReason(action) {
+    if (action?.request_kind === 'generate_vision_bootstrap') {
+        return 'Vision generation unavailable.';
+    }
+    return 'Correction input unavailable.';
+}
+
 function stageReason(decision, actions, projections = {}) {
-    if (findDecisionAction(actions, decision)?.availability === 'locked') {
-        return 'Correction input unavailable.';
+    const decisionAction = findDecisionAction(actions, decision);
+    if (decisionAction?.availability === 'locked') {
+        return lockedActionReason(decisionAction);
     }
     if (
         decision?.request_kind === 'start_sprint'
@@ -811,6 +819,7 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
 
     const bootstrapAction = findAction(actions, 'generate_vision_bootstrap');
     if (bootstrapAction) {
+        const bootstrapLocked = bootstrapAction.availability === 'locked';
         const current = projection?.current
             ? `<div class="mb-5 border-l-4 border-emerald-500 pl-4">
                 <p class="text-xs font-semibold uppercase text-emerald-700">Accepted Vision</p>
@@ -819,8 +828,8 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
             : '';
         return `${current}<p class="mb-4 text-sm leading-6 text-slate-600">Draft from available Project context.</p>
             ${visionBootstrapContextMarkup(context)}
-            <button type="button" data-direct-action="generate_vision_bootstrap" class="mt-5 ${BUTTON_PRIMARY}">
-                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>Generate Vision draft</span>
+            <button type="button" data-direct-action="generate_vision_bootstrap" data-action-availability="${bootstrapLocked ? 'locked' : 'available'}" class="mt-5 ${BUTTON_PRIMARY}"${bootstrapLocked ? ' disabled aria-disabled="true"' : ''}>
+                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>${bootstrapLocked ? 'Vision generation unavailable' : 'Generate Vision draft'}</span>
             </button>`;
     }
 
@@ -3310,24 +3319,30 @@ function findPrimaryWorkflowAction(actions = [], position = {}) {
         const found = actionList.find((a) => a?.request_kind === kind);
         if (found) {
             const config = DELIVERY_ACTION_CONFIG[kind] || {};
+            const locked = found.availability === 'locked';
             return {
                 request_kind: kind,
                 action: found,
                 label: config.label || humanizeKey(kind),
-                description: config.description || 'Current authoritative action for project stage.',
-                kind: 'Available',
+                description: locked
+                    ? lockedActionReason(found)
+                    : config.description || 'Current authoritative action for project stage.',
+                kind: locked ? 'Locked' : 'Available',
             };
         }
     }
 
     if (actionList.length > 0) {
         const first = actionList[0];
+        const locked = first.availability === 'locked';
         return {
             request_kind: first.request_kind,
             action: first,
             label: humanizeKey(first.request_kind || 'Action'),
-            description: 'Action available for current state.',
-            kind: 'Available',
+            description: locked
+                ? lockedActionReason(first)
+                : 'Action available for current state.',
+            kind: locked ? 'Locked' : 'Available',
         };
     }
     return null;
@@ -3447,12 +3462,18 @@ function renderTopCockpit() {
     const actionBtn = document.getElementById('cockpit-primary-action-btn');
 
     if (primaryAction) {
-        setText('cockpit-primary-action-label', 'Execute Stage Action');
+        const primaryLocked = primaryAction.action?.availability === 'locked';
+        setText(
+            'cockpit-primary-action-label',
+            primaryLocked ? 'Action Unavailable' : 'Execute Stage Action',
+        );
         setText('cockpit-action-stage-chip', primaryAction.kind || 'Available');
         setText('cockpit-action-description', primaryAction.description || primaryAction.label || 'Proceed with current stage');
         if (actionBtn) {
-            actionBtn.disabled = false;
-            actionBtn.onclick = () => handlePrimaryCockpitAction(primaryAction);
+            actionBtn.disabled = primaryLocked;
+            actionBtn.onclick = primaryLocked
+                ? null
+                : () => handlePrimaryCockpitAction(primaryAction);
         }
     } else {
         setText('cockpit-primary-action-label', 'No Action Required');
@@ -4561,6 +4582,12 @@ async function runSprintStart(binding, button) {
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
     if (button.disabled) return false;
+    const projectedAction = findAction(lifecycleState.actions, requestKind);
+    if (projectedAction?.availability === 'locked') {
+        button.disabled = true;
+        setProjectError('This action is currently unavailable. Reload after its requirements are satisfied.');
+        return false;
+    }
     if (requestKind === 'record_backlog_draft' && activeBacklogCorrectionMutation) return false;
     const backlogCorrection = requestKind === 'record_backlog_draft'
         ? captureBacklogCorrectionBinding(lifecycleState, button)

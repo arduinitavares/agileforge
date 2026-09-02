@@ -128,6 +128,76 @@ test('initial Vision state offers one generation action without fallback input',
     assert.equal(fetchCalls, 0);
 });
 
+test('locked Vision generation renders disabled and cannot execute from a stale control', async () => {
+    let fetchCalls = 0;
+    const cockpitButton = { disabled: false, onclick: null };
+    const cockpitLabel = { textContent: '' };
+    const cockpitChip = { textContent: '' };
+    const cockpitDescription = { textContent: '' };
+    const context = loadFrontend({
+        fetchImpl: async () => {
+            fetchCalls += 1;
+            return { ok: true, text: async () => '{}' };
+        },
+        elements: {
+            'cockpit-primary-action-btn': cockpitButton,
+            'cockpit-primary-action-label': cockpitLabel,
+            'cockpit-action-stage-chip': cockpitChip,
+            'cockpit-action-description': cockpitDescription,
+        },
+    });
+    const lockedAction = {
+        ...bootstrapAction,
+        availability: 'locked',
+        reason_code: 'REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE',
+    };
+    const markup = context.visionPanelMarkup(
+        {
+            bootstrap_available: false,
+            current: null,
+            draft: null,
+            transcript: [],
+            candidate: null,
+            review: null,
+        },
+        [lockedAction],
+    );
+
+    assert.match(markup, /data-direct-action="generate_vision_bootstrap"/);
+    assert.match(markup, /data-action-availability="locked"/);
+    assert.match(markup, /\bdisabled\b/);
+    assert.match(markup, /Vision generation unavailable/);
+
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState.actions = [${JSON.stringify(lockedAction)}];
+    `, context);
+    context.renderTopCockpit();
+
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.onclick, null);
+    assert.equal(cockpitLabel.textContent, 'Action Unavailable');
+    assert.equal(cockpitChip.textContent, 'Locked');
+    assert.equal(cockpitDescription.textContent, 'Vision generation unavailable.');
+    assert.equal(
+        context.stageReason(
+            { request_kind: 'generate_vision_bootstrap' },
+            [lockedAction],
+        ),
+        'Vision generation unavailable.',
+    );
+    const staleButton = { disabled: false };
+
+    const submitted = await context.runDirectAction(
+        'generate_vision_bootstrap',
+        staleButton,
+    );
+
+    assert.equal(submitted, false);
+    assert.equal(staleButton.disabled, true);
+    assert.equal(fetchCalls, 0);
+});
+
 test('stale initial Vision lineage keeps the graph-advertised generation action', () => {
     const context = loadFrontend();
     const markup = context.visionPanelMarkup(

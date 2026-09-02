@@ -12,6 +12,7 @@ from services.application import (
     execution_action_decision_is_transportable,
     planning_action_decision_is_transportable,
 )
+from services.vision_evidence import VisionEvidenceCollectionError
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -41,12 +42,21 @@ class RenderedCommand(TypedDict):
     command: str
 
 
+class BlockedCommand(TypedDict):
+    """One graph action withheld by a provider-free host capability check."""
+
+    node_id: str
+    reason_code: str
+    message: str
+
+
 class WorkflowNextPayload(TypedDict):
     """Workflow-next CLI response."""
 
     project_id: int
     evaluated_at: str
     commands: list[RenderedCommand]
+    blocked_commands: list[BlockedCommand]
     terminal: bool
     waiting_nodes: list[str]
     blocked_nodes: list[str]
@@ -256,9 +266,7 @@ def _render_semantic_command(
             and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
         ):
             story_references = tuple(
-                item
-                for item in decision.fact_references
-                if item.fact_type == "story"
+                item for item in decision.fact_references if item.fact_type == "story"
             )
             if decision.instance_key is None or len(story_references) != 1:
                 message = "Story correction requires one exact artifact reference."
@@ -333,7 +341,11 @@ def _decision_payload(
     }
 
 
-def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
+def render_workflow_next(
+    position: WorkflowPosition,
+    *,
+    application: object | None = None,
+) -> WorkflowNextPayload:
     """Render immediate work plus supported optional re-entry actions."""
     candidates = tuple(
         decision
@@ -373,6 +385,43 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         and planning_action_decision_is_transportable(position.project_id, decision)
         and execution_action_decision_is_transportable(decision)
     )
+    blocked_commands: list[BlockedCommand] = []
+    executable_candidates: list[NodeDecision] = []
+    for decision in candidates:
+        if (
+            decision.request_kind == "generate_vision_bootstrap"
+            and application is not None
+        ):
+            checker = getattr(application, "vision_bootstrap_capability", None)
+            if callable(checker):
+                try:
+                    capability = checker(project_id=position.project_id)
+                except VisionEvidenceCollectionError as error:
+                    blocked_commands.append(
+                        {
+                            "node_id": decision.node_id,
+                            "reason_code": error.code.value,
+                            "message": str(error),
+                        }
+                    )
+                    continue
+                if not capability.available:
+                    blocked_commands.append(
+                        {
+                            "node_id": decision.node_id,
+                            "reason_code": (
+                                capability.code
+                                or "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+                            ),
+                            "message": (
+                                capability.message
+                                or "Repository evidence collection is unavailable."
+                            ),
+                        }
+                    )
+                    continue
+        executable_candidates.append(decision)
+    candidates = tuple(executable_candidates)
     semantic_counts = Counter(
         decision.request_kind
         for decision in candidates
@@ -424,6 +473,7 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         "project_id": position.project_id,
         "evaluated_at": position.evaluated_at.isoformat(),
         "commands": commands,
+        "blocked_commands": blocked_commands,
         "terminal": position.terminal,
         "waiting_nodes": list(position.waiting_nodes),
         "blocked_nodes": list(position.blocked_nodes),
@@ -437,7 +487,10 @@ def workflow_next(
     project_id: int,
 ) -> WorkflowNextPayload:
     """Read one position and render its immediate required work."""
-    return render_workflow_next(application.position(project_id=project_id))
+    return render_workflow_next(
+        application.position(project_id=project_id),
+        application=application,
+    )
 
 
 def workflow_position(
