@@ -20,6 +20,7 @@ from models.repository import RepositoryBinding, repository_binding_fingerprint
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_source import (
     SPECIFICATION_SOURCE_CONTEXT_ID,
+    SPECIFICATION_SOURCE_MAX_ADR_COUNT,
     SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
     SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
     SPECIFICATION_SOURCE_PRIMARY_ID,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
 
 MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES: int = SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES
 MAX_SPECIFICATION_SOURCE_TOTAL_BYTES: int = SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES
+MAX_SPECIFICATION_SOURCE_ADR_COUNT: int = SPECIFICATION_SOURCE_MAX_ADR_COUNT
 _CONTEXT_PATH = "CONTEXT.md"
 
 
@@ -74,8 +76,10 @@ class SpecificationSourceRegistrationErrorCode(StrEnum):
     SOURCE_MISSING = "SOURCE_MISSING"
     UNSAFE_FILE = "UNSAFE_FILE"
     INVALID_UTF8 = "INVALID_UTF8"
+    EMPTY_SOURCE = "EMPTY_SOURCE"
     SOURCE_TOO_LARGE = "SOURCE_TOO_LARGE"
     SOURCE_CHANGED_DURING_CAPTURE = "SOURCE_CHANGED_DURING_CAPTURE"
+    SOURCE_PREVIEW_STALE = "SOURCE_PREVIEW_STALE"
     DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
 
 
@@ -90,6 +94,51 @@ class SpecificationSourceRegistrationError(RuntimeError):
         """Retain the stable closed code with one bounded diagnostic."""
         self.code = code
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class SpecificationSourceCapturePreview:
+    """Provider-free byte summary for a proposed source registration."""
+
+    documents: tuple[tuple[str, int], ...]
+    total_bytes: int
+    source_fingerprint: str
+    document_limit_bytes: int = MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    package_limit_bytes: int = MAX_SPECIFICATION_SOURCE_TOTAL_BYTES
+
+    @classmethod
+    def from_prepared(
+        cls,
+        prepared: PreparedSpecificationSourceRegistration,
+    ) -> SpecificationSourceCapturePreview:
+        """Build a disclosure that contains paths and sizes, never source bytes."""
+        bundle = prepared.bundle
+        documents = [bundle.source]
+        if bundle.context.document is not None:
+            documents.append(bundle.context.document)
+        documents.extend(bundle.adrs)
+        sizes = tuple(
+            (document.relative_path, document.byte_length) for document in documents
+        )
+        return cls(
+            documents=sizes,
+            total_bytes=sum(byte_length for _, byte_length in sizes),
+            source_fingerprint=prepared.source_fingerprint,
+        )
+
+    def payload(self) -> dict[str, object]:
+        """Return a closed transport projection without any captured content."""
+        return {
+            "documents": [
+                {"relative_path": path, "byte_length": byte_length}
+                for path, byte_length in self.documents
+            ],
+            "total_bytes": self.total_bytes,
+            "document_limit_bytes": self.document_limit_bytes,
+            "package_limit_bytes": self.package_limit_bytes,
+            "source_fingerprint": self.source_fingerprint,
+            "provider_run_performed": False,
+        }
 
 
 def _canonical_relative_path(value: str) -> str:
@@ -115,10 +164,19 @@ class SpecificationSourceRegistrationRequest(FrozenModel):
     project_id: int = Field(gt=0)
     source_path: str = Field(min_length=1)
     preparation_capability: Literal["grill-with-docs"]
-    adr_paths: tuple[str, ...] = ()
+    adr_paths: tuple[str, ...] = Field(
+        default=(),
+        max_length=SPECIFICATION_SOURCE_MAX_ADR_COUNT,
+    )
     expected_decision_fingerprint: str | None = Field(
         default=None,
         min_length=1,
+        exclude=True,
+        repr=False,
+    )
+    expected_source_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
         exclude=True,
         repr=False,
     )
@@ -366,6 +424,11 @@ class SpecificationSourceRegistrationService:
                 SpecificationSourceRegistrationErrorCode.SOURCE_LINEAGE_CHANGED,
                 "Vision, Product Goal, or repository selection changed during capture.",
             )
+        if verified_source.byte_length == 0:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE,
+                f"Selected source must not be empty: {verified_source.relative_path}",
+            )
 
         bundle = SpecificationSourceBundle(
             producer_capability="to-spec",
@@ -387,7 +450,7 @@ class SpecificationSourceRegistrationService:
             accepted_vision_fingerprint=context.vision_fingerprint,
             accepted_product_goal_fingerprint=context.product_goal_fingerprint,
         )
-        return PreparedSpecificationSourceRegistration(
+        prepared = PreparedSpecificationSourceRegistration(
             project_id=request.project_id,
             accepted_vision_artifact_id=context.vision_artifact_id,
             accepted_product_goal_artifact_id=context.product_goal_artifact_id,
@@ -397,6 +460,24 @@ class SpecificationSourceRegistrationService:
             source_fingerprint=source_bundle_fingerprint(bundle),
             bundle=bundle,
         )
+        if (
+            request.expected_source_fingerprint is not None
+            and request.expected_source_fingerprint != prepared.source_fingerprint
+        ):
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.SOURCE_PREVIEW_STALE,
+                "The checked Specification source changed. "
+                "Check the package again before registration.",
+            )
+        return prepared
+
+    def preview(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> SpecificationSourceCapturePreview:
+        """Safely read and size an exact selection without changing workflow state."""
+        prepared = self.prepare(request)
+        return SpecificationSourceCapturePreview.from_prepared(prepared)
 
     def _load_context(self, project_id: int) -> _DurableSourceContext:
         try:
@@ -534,8 +615,8 @@ def _capture_selected_documents(
             required=True,
         )
         source_capture = _require_capture(source_capture)
+        total_bytes = _checked_package_total(total_bytes, source_capture)
         captures.append(source_capture)
-        total_bytes += source_capture.document.byte_length
 
         context_capture = _capture_document(
             root_descriptor,
@@ -546,8 +627,8 @@ def _capture_selected_documents(
         if context_capture is None:
             context = SpecificationContextCapture(state="absent")
         else:
+            total_bytes = _checked_package_total(total_bytes, context_capture)
             captures.append(context_capture)
-            total_bytes += context_capture.document.byte_length
             context = SpecificationContextCapture(
                 state="present",
                 document=context_capture.document,
@@ -562,15 +643,10 @@ def _capture_selected_documents(
                 required=True,
             )
             captured = _require_capture(captured)
+            total_bytes = _checked_package_total(total_bytes, captured)
             captures.append(captured)
             adr_captures.append(captured)
-            total_bytes += captured.document.byte_length
 
-    if total_bytes > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
-        raise SpecificationSourceRegistrationError(
-            SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-            "Registered source bytes exceed the aggregate capture limit.",
-        )
     identities = [capture.physical_identity for capture in captures]
     if len(identities) != len(set(identities)):
         raise SpecificationSourceRegistrationError(
@@ -582,6 +658,19 @@ def _capture_selected_documents(
         context,
         tuple(capture.document for capture in adr_captures),
     )
+
+
+def _checked_package_total(total_bytes: int, captured: _CapturedDocument) -> int:
+    """Reject an over-limit package before retaining another captured document."""
+    updated_total = total_bytes + captured.document.byte_length
+    if updated_total > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
+        raise SpecificationSourceRegistrationError(
+            SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
+            "Registered source package has "
+            f"{updated_total} bytes; the aggregate limit is "
+            f"{MAX_SPECIFICATION_SOURCE_TOTAL_BYTES} bytes.",
+        )
+    return updated_total
 
 
 @contextmanager
@@ -706,7 +795,9 @@ def _capture_posix_document(
         if current.st_size > MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES:
             raise SpecificationSourceRegistrationError(
                 SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-                f"Selected source exceeds the per-document limit: {relative_path}",
+                f"Selected source {relative_path} has {current.st_size} bytes; the "
+                "per-document limit is "
+                f"{MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES} bytes.",
             )
         return _read_open_document(
             parent_descriptor,
@@ -854,7 +945,8 @@ def _document_from_bytes(
     if len(raw) > MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES:
         raise SpecificationSourceRegistrationError(
             SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-            f"Selected source exceeds the per-document limit: {relative_path}",
+            f"Selected source {relative_path} has at least {len(raw)} bytes; the "
+            f"per-document limit is {MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES} bytes.",
         )
     try:
         raw.decode("utf-8", errors="strict")
@@ -909,9 +1001,11 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 __all__ = [
+    "MAX_SPECIFICATION_SOURCE_ADR_COUNT",
     "MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES",
     "MAX_SPECIFICATION_SOURCE_TOTAL_BYTES",
     "PreparedSpecificationSourceRegistration",
+    "SpecificationSourceCapturePreview",
     "SpecificationSourceRegistrationError",
     "SpecificationSourceRegistrationErrorCode",
     "SpecificationSourceRegistrationRequest",

@@ -70,6 +70,10 @@ from services.node_attempt_replay import (
 )
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.read_projections import DurableReadProjectionService
+from services.specification_source_registration import (
+    SpecificationSourceRegistrationError,
+    SpecificationSourceRegistrationErrorCode,
+)
 from services.sprint_ownership import ResolvedSprintOwner
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.test_command_renderer import position_fixture
@@ -5318,7 +5322,10 @@ def test_specification_source_endpoint_binds_semantic_file_selection(
 
     response = TestClient(api_module.app).post(
         "/api/projects/41/specifications/source",
-        headers={"X-AgileForge-Expected-Decision": "sha256:source-position"},
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:source-position",
+            "X-AgileForge-Expected-Source": "sha256:" + ("a" * 64),
+        },
         json={
             "source_path": "SPECIFICATION.md",
             "adr_paths": ["docs/adr/0002.md", "docs/adr/0001.md"],
@@ -5333,6 +5340,7 @@ def test_specification_source_endpoint_binds_semantic_file_selection(
     request = application.requests[0]
     assert isinstance(request, SpecificationSourceRegistrationRequest)
     assert request.expected_decision_fingerprint == "sha256:source-position"
+    assert request.expected_source_fingerprint == "sha256:" + ("a" * 64)
     assert request.model_dump(mode="json") == {
         "project_id": PROJECT_ID,
         "source_path": "SPECIFICATION.md",
@@ -5353,6 +5361,218 @@ def test_specification_source_endpoint_binds_semantic_file_selection(
         },
     )
     assert missing_guard.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize(
+    ("payload", "field"),
+    [
+        ({"source_path": "../SPECIFICATION.md"}, "source_path"),
+        ({"source_path": "docs\\SPECIFICATION.md"}, "source_path"),
+        ({"adr_paths": ["SPECIFICATION.md"]}, "adr_paths"),
+        ({"adr_paths": ["docs/adr/0001.md", "docs/adr/0001.md"]}, ""),
+    ],
+)
+def test_specification_source_endpoint_returns_structured_path_errors_before_mutation(
+    payload: dict[str, object],
+    field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed source selections remain request errors and never reach the app."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:source-position",
+            "X-AgileForge-Expected-Source": "sha256:" + ("a" * 64),
+        },
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": [],
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-invalid-path-41",
+            "actor": "dashboard-user",
+            **payload,
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "INVALID_SPECIFICATION_SOURCE_REQUEST"
+    assert field in detail["error"]["message"]
+    assert application.requests == []
+
+
+def test_specification_source_endpoint_omits_an_empty_field_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-level validation errors must stay readable for API clients."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:source-position",
+            "X-AgileForge-Expected-Source": "sha256:" + ("a" * 64),
+        },
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": ["docs/adr/0001.md", "docs/adr/0001.md"],
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-duplicate-adr-41",
+            "actor": "dashboard-user",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "INVALID_SPECIFICATION_SOURCE_REQUEST"
+    assert not detail["error"]["message"].startswith(":")
+    assert "Source, Context, and ADR paths must be distinct." in detail["error"][
+        "message"
+    ]
+    assert application.requests == []
+
+
+def test_specification_source_preview_returns_sizes_without_a_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size check reads host-owned bytes but never invokes source registration."""
+    application = _FakeApiApplication()
+    previews: list[SpecificationSourceRegistrationRequest] = []
+
+    class _Preview:
+        def payload(self) -> dict[str, object]:
+            return {
+                "documents": [
+                    {"relative_path": "SPECIFICATION.md", "byte_length": 63_682}
+                ],
+                "total_bytes": 63_682,
+                "document_limit_bytes": 98_304,
+                "package_limit_bytes": 196_608,
+                "source_fingerprint": "sha256:" + ("a" * 64),
+                "provider_run_performed": False,
+            }
+
+    def preview(request: SpecificationSourceRegistrationRequest) -> _Preview:
+        previews.append(request)
+        return _Preview()
+
+    monkeypatch.setattr(
+        application,
+        "preview_specification_source",
+        preview,
+        raising=False,
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source/preview",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": ["docs/adr/0001.md"],
+            "preparation_capability": "grill-with-docs",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["data"]["provider_run_performed"] is False
+    assert response.json()["data"]["source_fingerprint"] == "sha256:" + ("a" * 64)
+    assert previews[0].source_path == "SPECIFICATION.md"
+    assert application.requests == []
+
+
+def test_specification_source_preview_returns_empty_source_as_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview errors must remain actionable JSON instead of uncaught validation."""
+    application = _FakeApiApplication()
+
+    def preview(_request: SpecificationSourceRegistrationRequest) -> object:
+        raise SpecificationSourceRegistrationError(
+            SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE,
+            "Selected source must not be empty: SPECIFICATION.md",
+        )
+
+    monkeypatch.setattr(
+        application,
+        "preview_specification_source",
+        preview,
+        raising=False,
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source/preview",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": [],
+            "preparation_capability": "grill-with-docs",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "EMPTY_SOURCE"
+    assert detail["provider_run_performed"] is False
+
+
+def test_specification_source_preview_returns_not_found_for_a_missing_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing project is a resource failure, not malformed source input."""
+    application = _FakeApiApplication()
+
+    def preview(_request: SpecificationSourceRegistrationRequest) -> object:
+        raise SpecificationSourceRegistrationError(
+            SpecificationSourceRegistrationErrorCode.PROJECT_NOT_FOUND,
+            "Project does not exist.",
+        )
+
+    monkeypatch.setattr(
+        application,
+        "preview_specification_source",
+        preview,
+        raising=False,
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/999/specifications/source/preview",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": [],
+            "preparation_capability": "grill-with-docs",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.NOT_FOUND
+    assert response.json()["detail"]["error"]["code"] == "PROJECT_NOT_FOUND"
+
+
+def test_specification_source_endpoint_requires_a_checked_package_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration must bind to the package shown by the provider-free preview."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        headers={"X-AgileForge-Expected-Decision": "sha256:source-position"},
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": [],
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-without-preview-41",
+            "actor": "dashboard-user",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert application.requests == []
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -65,8 +66,13 @@ from services.application import (
     planning_action_decision_is_transportable,
     production_application,
 )
+from services.contracts.specification_source import (
+    SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
+    SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
+)
 from services.specification_source_registration import (
     SpecificationSourceRegistrationError,
+    SpecificationSourceRegistrationErrorCode,
 )
 from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
@@ -129,6 +135,15 @@ class MutationApiRequest(BaseModel):
 class SpecificationSourceApiRequest(MutationApiRequest):
     """Semantic repository paths for one exact source registration."""
 
+    source_path: str = Field(min_length=1)
+    adr_paths: tuple[str, ...] = ()
+    preparation_capability: Literal["grill-with-docs"]
+
+
+class SpecificationSourcePreviewApiRequest(BaseModel):
+    """Provider-free source selection used only to reveal bounded byte sizes."""
+
+    model_config = ConfigDict(extra="forbid")
     source_path: str = Field(min_length=1)
     adr_paths: tuple[str, ...] = ()
     preparation_capability: Literal["grill-with-docs"]
@@ -631,6 +646,68 @@ def _metadata(request: MutationApiRequest) -> MutationMetadata:
     }
 
 
+def _specification_source_request(
+    *,
+    project_id: int,
+    selection: SpecificationSourceApiRequest | SpecificationSourcePreviewApiRequest,
+    metadata: MutationMetadata,
+    expected_decision_fingerprint: str | None,
+    expected_source_fingerprint: str | None,
+) -> SpecificationSourceRegistrationRequest:
+    """Validate source semantics before any application or capture call."""
+    try:
+        return SpecificationSourceRegistrationRequest(
+            project_id=project_id,
+            expected_decision_fingerprint=expected_decision_fingerprint,
+            expected_source_fingerprint=expected_source_fingerprint,
+            source_path=selection.source_path,
+            adr_paths=selection.adr_paths,
+            preparation_capability=selection.preparation_capability,
+            **metadata,
+        )
+    except ValidationError as error:
+        errors = [
+            {
+                "field": ".".join(str(part) for part in item["loc"]),
+                "message": str(item["msg"]),
+            }
+            for item in error.errors()
+        ]
+        field = errors[0]["field"] if errors else "source_path"
+        message = errors[0]["message"] if errors else "Source selection is invalid."
+        rendered_message = f"{field}: {message}" if field else message
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "code": "INVALID_SPECIFICATION_SOURCE_REQUEST",
+                    "message": rendered_message,
+                },
+                "errors": errors,
+            },
+        ) from error
+
+
+def _source_preview_error(error: SpecificationSourceRegistrationError) -> HTTPException:
+    """Expose a bounded capture failure without hiding its configured limits."""
+    status_code = (
+        404
+        if error.code is SpecificationSourceRegistrationErrorCode.PROJECT_NOT_FOUND
+        else 422
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {"code": error.code.value, "message": str(error)},
+            "limits": {
+                "document_limit_bytes": SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
+                "package_limit_bytes": SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
+            },
+            "provider_run_performed": False,
+        },
+    )
+
+
 def _database_path(environment_name: str) -> Path:
     value = os.environ.get(environment_name, "")
     prefix = "sqlite:///"
@@ -896,20 +973,44 @@ def register_specification_source(
         str,
         Header(alias="X-AgileForge-Expected-Decision", include_in_schema=False),
     ],
+    expected_source_fingerprint: Annotated[
+        str,
+        Header(alias="X-AgileForge-Expected-Source", include_in_schema=False),
+    ],
 ) -> dict[str, object]:
     """Capture one exact external to-spec source from semantic paths."""
-    return _result_payload(
-        _application().register_specification_source(
-            SpecificationSourceRegistrationRequest(
-                project_id=project_id,
-                expected_decision_fingerprint=expected_decision_fingerprint,
-                source_path=req.source_path,
-                adr_paths=req.adr_paths,
-                preparation_capability=req.preparation_capability,
-                **_metadata(req),
-            )
-        )
+    request = _specification_source_request(
+        project_id=project_id,
+        expected_decision_fingerprint=expected_decision_fingerprint,
+        expected_source_fingerprint=expected_source_fingerprint,
+        selection=req,
+        metadata=_metadata(req),
     )
+    return _result_payload(_application().register_specification_source(request))
+
+
+@app.post("/api/projects/{project_id}/specifications/source/preview")
+def preview_specification_source(
+    project_id: int,
+    req: SpecificationSourcePreviewApiRequest,
+) -> dict[str, object]:
+    """Safely show exact source sizes without provider or workflow execution."""
+    request = _specification_source_request(
+        project_id=project_id,
+        expected_decision_fingerprint=None,
+        expected_source_fingerprint=None,
+        selection=req,
+        metadata={
+            "idempotency_key": "specification-source-preview",
+            "actor": "dashboard-source-preview",
+            "correlation_id": None,
+        },
+    )
+    try:
+        preview = _application().preview_specification_source(request)
+    except SpecificationSourceRegistrationError as error:
+        raise _source_preview_error(error) from error
+    return {"status": "success", "data": preview.payload()}
 
 
 @app.post("/api/projects/{project_id}/specifications/structure")

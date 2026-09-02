@@ -484,6 +484,46 @@ class FakeLifecycle:
         body: JsonObject,
         headers: dict[str, str],
     ) -> tuple[int, JsonObject]:
+        if suffix == "/specifications/source/preview":
+            assert headers.get("content-type") == "application/json"
+            assert set(body) == {
+                "source_path",
+                "preparation_capability",
+                "adr_paths",
+            }
+            source_path = body["source_path"]
+            adr_paths = body["adr_paths"]
+            assert isinstance(source_path, str)
+            assert isinstance(adr_paths, list)
+            assert all(isinstance(path, str) for path in adr_paths)
+            adr_document_paths = cast("list[str]", adr_paths)
+            source_document: JsonObject = {
+                "relative_path": source_path,
+                "byte_length": 1_024,
+            }
+            documents: list[JsonObject] = [source_document]
+            for path in adr_document_paths:
+                adr_document: JsonObject = {
+                    "relative_path": path,
+                    "byte_length": 512,
+                }
+                documents.append(adr_document)
+            preview = cast(
+                "JsonObject",
+                {
+                    "documents": documents,
+                    "total_bytes": 1_024 + (512 * len(adr_document_paths)),
+                    "document_limit_bytes": 98_304,
+                    "package_limit_bytes": 196_608,
+                    "source_fingerprint": "sha256:" + ("a" * 64),
+                    "provider_run_performed": False,
+                },
+            )
+            return _HTTP_OK, self._success(preview)
+        if suffix == "/specifications/source":
+            assert headers.get("x-agileforge-expected-source") == "sha256:" + (
+                "a" * 64
+            )
         if suffix in {
             "/backlog/generate",
             "/roadmap/generate",
@@ -1051,10 +1091,7 @@ class FakeLifecycle:
             },
         )
         assert headers.get("x-agileforge-expected-decision") == _fingerprint("b")
-        assert (
-            body["accepted_story_artifact_id"]
-            == _STORY_CORRECTION_ARTIFACT_ID
-        )
+        assert body["accepted_story_artifact_id"] == _STORY_CORRECTION_ARTIFACT_ID
         assert body["accepted_story_artifact_fingerprint"] == _fingerprint("a")
         self._generate_story(
             {
@@ -2310,6 +2347,10 @@ def _submit_specification_source(
     form.locator('[name="source_path"]').fill(source_path)
     form.locator('[name="adr_paths"]').fill(adr_path)
     form.locator('[name="preparation_capability"]').select_option("grill-with-docs")
+    form.locator('[data-specification-source-preview="true"]').click()
+    expect(form.locator('[data-specification-source-status="true"]')).to_contain_text(
+        "Checked"
+    )
     form.evaluate("form => form.requestSubmit()")
 
 
@@ -3552,9 +3593,7 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
         "Correct Stories for PBI-000004: Provide the installed CLI."
     )
     expect(
-        page.locator(
-            '[data-delivery-action-instance="backlog_item:PBI-000004"]'
-        )
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000004"]')
     ).to_have_attribute("data-story-correction-priority", "secondary")
 
     # Ensure no array ordinals appear in delivery panel
@@ -3585,9 +3624,7 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     )
     expect(pbi4_btn).to_contain_text("Correct Stories for PBI-000004")
     expect(
-        page.locator(
-            '[data-delivery-action-instance="backlog_item:PBI-000004"]'
-        )
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000004"]')
     ).to_have_attribute("data-story-correction-priority", "recovery")
     pbi4_btn.click()
     dialog = _verify_dialog_content(
@@ -3606,8 +3643,7 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     assert correction_suffix == "/story/correct"
     assert correction_body["instance_key"] == "backlog_item:PBI-000004"
     assert (
-        correction_body["accepted_story_artifact_id"]
-        == _STORY_CORRECTION_ARTIFACT_ID
+        correction_body["accepted_story_artifact_id"] == _STORY_CORRECTION_ARTIFACT_ID
     )
     assert correction_body["accepted_story_artifact_fingerprint"] == _fingerprint("a")
     assert correction_body["actor"] == "dashboard-ui"
@@ -4176,9 +4212,7 @@ def test_corrected_story_set_dashboard_omits_superseded_history(
 ) -> None:
     """Render the 11 active Stories, not four retained historical ancestors."""
     fake = _delivery_ready_fake([])
-    fake.stories = [
-        _corrected_story_projection(story_id) for story_id in range(1, 16)
-    ]
+    fake.stories = [_corrected_story_projection(story_id) for story_id in range(1, 16)]
 
     context, page = _open_project_page(dashboard_harness, fake)
 
@@ -4186,7 +4220,7 @@ def test_corrected_story_set_dashboard_omits_superseded_history(
     expect(readiness).to_be_visible()
     expect(readiness).to_contain_text("11 accepted stories")
     assert (
-        readiness.locator('[data-story-readiness-row]').count()
+        readiness.locator("[data-story-readiness-row]").count()
         == _CORRECTED_ACTIVE_STORY_COUNT
     )
     for story_id in range(1, 5):
@@ -4209,9 +4243,7 @@ def test_story_dashboard_locks_row_without_supersession_identity(
 ) -> None:
     """Fail closed when an active Story row omits its history discriminator."""
     fake = _delivery_ready_fake([])
-    malformed = _corrected_story_projection(
-        _CORRECTED_REPLACEMENT_FIRST_STORY_ID
-    )
+    malformed = _corrected_story_projection(_CORRECTED_REPLACEMENT_FIRST_STORY_ID)
     malformed.pop("is_superseded")
     fake.stories = [malformed]
 
@@ -4239,14 +4271,10 @@ def test_story_dashboard_keeps_issue_188_stale_dependency_fail_closed(
         "transport": "semantic",
     }
     fake = _delivery_ready_fake([dependency_action])
-    fake.stories = [
-        _corrected_story_projection(story_id) for story_id in range(1, 16)
-    ]
+    fake.stories = [_corrected_story_projection(story_id) for story_id in range(1, 16)]
     active_story = cast("JsonObject", fake.stories[11])
     active_story["sprint_selection_state"] = "selected"
-    fake.dependency_selected_story_ids = [
-        _CORRECTED_REPLACEMENT_FIRST_STORY_ID
-    ]
+    fake.dependency_selected_story_ids = [_CORRECTED_REPLACEMENT_FIRST_STORY_ID]
     fake.dependency_selected_scope_fingerprint = _fingerprint("b")
     fake.story_dependencies = [
         {
@@ -4843,9 +4871,7 @@ def test_story_review_disables_acceptance_for_exact_authoring_sentinels(
     expect(banner).to_contain_text(
         "story_items[2].invest_assessment.independent.rationale"
     )
-    expect(banner).to_contain_text(
-        "story_items[2].invest_assessment.testable.evidence"
-    )
+    expect(banner).to_contain_text("story_items[2].invest_assessment.testable.evidence")
     expect(
         review_card.locator(
             '[data-planning-review="story"][data-review-decision="accepted"]'

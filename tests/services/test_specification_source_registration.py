@@ -14,6 +14,7 @@ from git import Repo
 from pydantic import ValidationError
 from sqlmodel import Session
 
+import services.specification_source_registration as registration_module
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.repository import RepositoryBinding
@@ -23,7 +24,9 @@ from services.repository_probe import (
     RepositoryProbeErrorCode,
 )
 from services.specification_source_registration import (
+    MAX_SPECIFICATION_SOURCE_ADR_COUNT,
     MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES,
+    MAX_SPECIFICATION_SOURCE_TOTAL_BYTES,
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
     SpecificationSourceRegistrationRequest,
@@ -43,6 +46,8 @@ if TYPE_CHECKING:
 _EXPECTED_PROBE_CALLS = 3
 _MIDDLE_PROBE_CALL = 2
 _WINDOWS_PRIVILEGE_NOT_HELD = 1314
+_COMPLETE_PACKAGE_ADR_COUNT = 14
+_COMPLETE_PACKAGE_BYTES = 125_432
 
 
 def test_source_capability_reports_missing_posix_open_support(
@@ -171,12 +176,14 @@ def _request(
         "docs/adr/0002-second.md",
         "docs/adr/0001-first.md",
     ),
+    expected_source_fingerprint: str | None = None,
 ) -> SpecificationSourceRegistrationRequest:
     return SpecificationSourceRegistrationRequest(
         project_id=project_id,
         source_path=source_path,
         preparation_capability="grill-with-docs",
         adr_paths=adr_paths,
+        expected_source_fingerprint=expected_source_fingerprint,
         idempotency_key="register-source-1",
         actor="operator@example.test",
         correlation_id="source-correlation-1",
@@ -227,6 +234,34 @@ def test_prepare_preserves_exact_utf8_bytes_and_canonicalizes_adrs(
         "agileforge.repository-probe.v1"
     )
     assert probe.calls == _EXPECTED_PROBE_CALLS
+
+
+def test_prepare_requires_the_exact_package_checked_by_preview(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A preview fingerprint binds registration to the exact captured bytes."""
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    service = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
+
+    preview = service.preview(_request())
+    prepared = service.prepare(
+        _request(expected_source_fingerprint=preview.source_fingerprint)
+    )
+
+    assert prepared.source_fingerprint == preview.source_fingerprint
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        service.prepare(
+            _request(expected_source_fingerprint="sha256:" + ("0" * 64))
+        )
+    assert (
+        caught.value.code
+        is SpecificationSourceRegistrationErrorCode.SOURCE_PREVIEW_STALE
+    )
 
 
 def test_prepare_records_context_absence(engine: Engine, tmp_path: Path) -> None:
@@ -302,6 +337,17 @@ def test_request_rejects_duplicate_or_reserved_paths(
     """A physical source may have only one semantic role."""
     with pytest.raises(ValidationError):
         _request(adr_paths=adr_paths)
+
+
+def test_request_rejects_an_unbounded_adr_selection() -> None:
+    """Empty ADR files must not bypass the bounded capture work contract."""
+    with pytest.raises(ValidationError):
+        _request(
+            adr_paths=tuple(
+                f"docs/adr/{index:04}-decision.md"
+                for index in range(MAX_SPECIFICATION_SOURCE_ADR_COUNT + 1)
+            )
+        )
 
 
 def test_prepare_rejects_invalid_utf8(engine: Engine, tmp_path: Path) -> None:
@@ -410,6 +456,147 @@ def test_prepare_rejects_oversize_source(engine: Engine, tmp_path: Path) -> None
 
     assert (
         caught.value.code is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
+    )
+
+
+def test_prepare_rejects_an_empty_source_with_a_closed_error(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """An empty required source must remain an actionable capture failure."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(b"")
+    repo = Repo(repository)
+    repo.index.add(["specification.md"])
+    repo.index.commit("empty source")
+    _seed_lineage_and_binding(engine, repository)
+
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        SpecificationSourceRegistrationService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).prepare(_request())
+
+    assert caught.value.code is SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE
+
+
+def test_prepare_stops_capturing_adrs_when_the_aggregate_limit_is_reached(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The aggregate cap prevents a long ADR selection from growing in memory."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(
+        b"s" * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    (repository / "CONTEXT.md").write_bytes(
+        b"c" * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    first_adr = repository / "docs" / "adr" / "0001-first.md"
+    second_adr = repository / "docs" / "adr" / "0002-second.md"
+    first_adr.write_bytes(b"a")
+    second_adr.write_bytes(b"b")
+    repo = Repo(repository)
+    repo.index.add(
+        [
+            "specification.md",
+            "CONTEXT.md",
+            "docs/adr/0001-first.md",
+            "docs/adr/0002-second.md",
+        ]
+    )
+    repo.index.commit("aggregate source limit")
+    _seed_lineage_and_binding(engine, repository)
+
+    captured_paths: list[str] = []
+    original_capture = registration_module._capture_document
+
+    def record_capture(
+        root_descriptor: int | registration_module.WindowsSpecificationSourceWorktree,
+        *,
+        relative_path: str,
+        source_id: str,
+        required: bool,
+    ) -> registration_module._CapturedDocument | None:
+        captured_paths.append(relative_path)
+        return original_capture(
+            root_descriptor,
+            relative_path=relative_path,
+            source_id=source_id,
+            required=required,
+        )
+
+    monkeypatch.setattr(registration_module, "_capture_document", record_capture)
+
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        SpecificationSourceRegistrationService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).prepare(
+            _request(
+                adr_paths=(
+                    "docs/adr/0001-first.md",
+                    "docs/adr/0002-second.md",
+                )
+            )
+        )
+
+    assert (
+        caught.value.code
+        is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
+    )
+    assert (
+        MAX_SPECIFICATION_SOURCE_TOTAL_BYTES
+        == 2 * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    assert captured_paths == [
+        "specification.md",
+        "CONTEXT.md",
+        "docs/adr/0001-first.md",
+    ]
+
+
+def test_prepare_captures_the_complete_approved_source_package(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Keep the known 14-ADR P&ID package intact within one bounded capture."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(b"s" * 63_682)
+    (repository / "CONTEXT.md").write_bytes(b"c" * 30_122)
+    for index in range(1, _COMPLETE_PACKAGE_ADR_COUNT + 1):
+        size = 2_378 if index == _COMPLETE_PACKAGE_ADR_COUNT else 2_250
+        (repository / "docs" / "adr" / f"{index:04}-source.md").write_bytes(b"a" * size)
+    repo = Repo(repository)
+    repo.index.add(
+        [
+            item.relative_to(repository).as_posix()
+            for item in repository.rglob("*")
+            if item.is_file()
+        ]
+    )
+    repo.index.commit("complete approved source package")
+    _seed_lineage_and_binding(engine, repository)
+
+    prepared = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).prepare(
+        _request(
+            adr_paths=tuple(
+                f"docs/adr/{index:04}-source.md"
+                for index in range(1, _COMPLETE_PACKAGE_ADR_COUNT + 1)
+            )
+        )
+    )
+
+    documents = [prepared.bundle.source, *prepared.bundle.adrs]
+    assert prepared.bundle.context.document is not None
+    documents.append(prepared.bundle.context.document)
+    assert len(prepared.bundle.adrs) == _COMPLETE_PACKAGE_ADR_COUNT
+    assert (
+        sum(document.byte_length for document in documents) == _COMPLETE_PACKAGE_BYTES
     )
 
 

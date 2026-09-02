@@ -33,6 +33,46 @@ test('unsupported Specification capture locks the form and submission binding', 
     assert.equal(binding, null);
 });
 
+test('Specification source registration shows bounded size guidance and local status', () => {
+    const context = loadFrontend();
+    const markup = context.specificationSourceRegistrationMarkup([{
+        node_id: 'specification.source.register',
+        request_kind: 'register_specification_source',
+        endpoint: 'specifications/source',
+    }]);
+
+    assert.match(markup, /data-specification-source-status="true"/);
+    assert.match(markup, /96 KiB per document/);
+    assert.match(markup, /192 KiB for the complete package/);
+    assert.match(markup, /Check selected package/);
+    assert.match(markup, /No provider run is performed/);
+    assert.match(markup, /aria-atomic="true"/);
+    assert.match(
+        context.specificationSourcePreviewMessage({
+            documents: [{ relative_path: 'specification.md', byte_length: 63682 }],
+            total_bytes: 63682,
+            document_limit_bytes: 98304,
+            package_limit_bytes: 196608,
+        }),
+        /specification\.md: 63682 bytes.*No provider run was performed/,
+    );
+
+    const attributes = new Map();
+    const status = {
+        textContent: '',
+        classList: { toggle() {} },
+        setAttribute(name, value) { attributes.set(name, value); },
+    };
+    context.setSpecificationSourceRegistrationStatus(
+        { querySelector() { return status; } },
+        'The selected source is too large.',
+        true,
+    );
+    assert.equal(attributes.get('role'), 'alert');
+    assert.equal(attributes.get('aria-live'), 'assertive');
+    assert.equal(attributes.get('aria-atomic'), 'true');
+});
+
 function loadFrontend({ fetchImpl, elements = {} } = {}) {
     const documentListeners = {};
     const context = vm.createContext({

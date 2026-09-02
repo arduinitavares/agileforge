@@ -18,6 +18,7 @@ from services.contracts.specification_source import (
 )
 from services.specification_source_registration import (
     PreparedSpecificationSourceRegistration,
+    SpecificationSourceCapturePreview,
     SpecificationSourceRegistrationRequest,
 )
 from workflow.contracts import (
@@ -73,6 +74,13 @@ class _RegistrationService:
     ) -> PreparedSpecificationSourceRegistration:
         self.requests.append(request)
         return self.prepared
+
+    def preview(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> SpecificationSourceCapturePreview:
+        self.requests.append(request)
+        return SpecificationSourceCapturePreview.from_prepared(self.prepared)
 
 
 class _Domain:
