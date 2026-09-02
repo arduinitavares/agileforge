@@ -3907,9 +3907,29 @@ async function loadDashboard() {
         ) {
             activeDependencyMutation = null;
         }
+        if (
+            activeSprintMutation?.phase === 'awaiting_authority'
+            && sprintStartConfirmed(lifecycleState, activeSprintMutation.binding)
+        ) {
+            completeSprintStartReconciliation(activeSprintMutation.token);
+        }
         lastSuccessfulDashboardLoadSequence = sequence;
-        activeDeliveryUnreconciled = false;
-        setProjectError('');
+        const awaitingConfirmation = Boolean(
+            (activeBacklogCorrectionMutation !== null
+                && (activeBacklogCorrectionMutation.phase === 'awaiting_authority'
+                    || activeBacklogCorrectionMutation.phase === 'recovering_failure'))
+            || (activeSprintMutation !== null
+                && activeSprintMutation.phase === 'awaiting_authority'
+                && !sprintStartConfirmed(lifecycleState, activeSprintMutation.binding))
+            || (activeStoryMutation !== null && activeStoryMutation.phase === 'awaiting_authority')
+            || (activeDependencyMutation !== null && activeDependencyMutation.phase === 'awaiting_authority')
+        );
+        if (awaitingConfirmation) {
+            activeDeliveryUnreconciled = true;
+        } else {
+            activeDeliveryUnreconciled = false;
+            setProjectError('');
+        }
         renderDashboard();
         consumeBacklogCorrectionFocus(backlogFocusMutation);
         consumeBacklogFeedbackFocus();
@@ -5321,13 +5341,16 @@ function installInteractions() {
                 mutationCompleted = true;
                 loadSequence = dashboardLoadSequence + 1;
                 let refreshed = false;
+                let loadError = null;
                 try {
                     refreshed = await loadDashboard() === true;
                 } catch (_loadError) {
                     refreshed = false;
+                    loadError = _loadError;
                 }
                 if (!refreshed && !isDashboardReconciled(loadSequence)) {
                     activeDeliveryUnreconciled = true;
+                    if (loadError) throw loadError;
                 }
             } catch (error) {
                 if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
@@ -5422,13 +5445,16 @@ function installInteractions() {
             mutationCompleted = true;
             loadSequence = dashboardLoadSequence + 1;
             let refreshed = false;
+            let loadError = null;
             try {
                 refreshed = await loadDashboard() === true;
             } catch (_loadError) {
                 refreshed = false;
+                loadError = _loadError;
             }
             if (!refreshed && !isDashboardReconciled(loadSequence)) {
                 activeDeliveryUnreconciled = true;
+                if (loadError) throw loadError;
             }
         } catch (error) {
             if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
@@ -5661,13 +5687,16 @@ function installInteractions() {
                     renderDashboard();
                 }
                 loadSequence = dashboardLoadSequence + 1;
+                let loadError = null;
                 try {
                     refreshed = await loadDashboard() === true;
                 } catch (_loadError) {
                     refreshed = false;
+                    loadError = _loadError;
                 }
                 if (!refreshed && !isDashboardReconciled(loadSequence)) {
                     activeDeliveryUnreconciled = true;
+                    if (loadError) throw loadError;
                     throw new Error('The update was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
                 focusStoryReadiness(storyId);
@@ -5762,13 +5791,16 @@ function installInteractions() {
                     renderDashboard();
                 }
                 loadSequence = dashboardLoadSequence + 1;
+                let loadError = null;
                 try {
                     refreshed = await loadDashboard() === true;
                 } catch (_loadError) {
                     refreshed = false;
+                    loadError = _loadError;
                 }
                 if (!refreshed && !isDashboardReconciled(loadSequence)) {
                     activeDeliveryUnreconciled = true;
+                    if (loadError) throw loadError;
                     throw new Error('The dependency review was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
             } catch (error) {

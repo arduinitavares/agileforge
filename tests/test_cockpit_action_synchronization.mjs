@@ -78,6 +78,7 @@ function harness(actions = []) {
         cockpit: elements['cockpit-primary-action-btn'],
         state(expression) { return vm.runInContext(expression, context); },
         submit(form) { return Promise.all(documentListeners.submit.map((listener) => listener({ target: form, preventDefault() {} }))); },
+        click(target) { return Promise.all(documentListeners.click.map((listener) => listener({ target }))); },
         direct(action) {
             const button = element();
             button.dataset = {
@@ -516,4 +517,121 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
     assert.equal(h.state('activeCockpitAction'), null);
     assert.equal(h.cockpit.disabled, false);
     assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Available');
+});
+
+test('repeated successful GETs with unconfirmed projection keep cockpit locked until confirming projection arrives', async () => {
+    const action = { request_kind: 'record_backlog_draft', node_id: 'backlog.generate', endpoint: 'backlog/generate' };
+    const h = harness([action]);
+    await successfulDashboardLoad(h, [action]);
+    assert.equal(h.state('activeDeliveryUnreconciled'), false);
+
+    // Simulate an active Backlog correction mutation awaiting authority
+    h.state(`activeBacklogCorrectionMutation = {
+        token: 'test-mutation-token',
+        phase: 'awaiting_authority',
+        action: ${JSON.stringify(action)},
+        backlogArtifactId: 10,
+        decisionFingerprint: 'decision-fp',
+    }; activeDeliveryUnreconciled = true;`);
+    h.context.renderTopCockpit();
+    assert.equal(h.cockpit.disabled, true);
+    assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Locked');
+
+    // Run a manual loadDashboard(): all GET requests succeed (HTTP 200),
+    // but the backlog projection does NOT confirm the correction (qualifyingBacklogState is false).
+    const refresh1 = h.context.loadDashboard();
+    completeDashboardGets(h.requests.slice(14), [action]);
+    assert.equal(await refresh1, true);
+
+    // Assert: repeated successful GETs must NOT clear activeDeliveryUnreconciled
+    assert.equal(h.state('activeDeliveryUnreconciled'), true);
+    assert.equal(h.cockpit.disabled, true);
+    assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Locked');
+
+    // Now simulate a confirming projection arriving on the next reload
+    // Clearing the mutation simulates successful authority confirmation.
+    h.state('activeBacklogCorrectionMutation = null;');
+    const refresh2 = h.context.loadDashboard();
+    completeDashboardGets(h.requests.slice(28), [action]);
+    assert.equal(await refresh2, true);
+
+    // Assert: confirming projection unlocks the controls and cockpit
+    assert.equal(h.state('activeDeliveryUnreconciled'), false);
+    assert.equal(h.cockpit.disabled, false);
+    assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Available');
+});
+
+test('normal successful operations unlock without requiring an extra manual refresh', async () => {
+    const h = harness([bootstrap]);
+    await successfulDashboardLoad(h, [bootstrap]);
+    const button = h.direct(bootstrap);
+    const postIndex = h.requests.length;
+    const pending = h.context.runDirectAction(bootstrap.request_kind, button);
+    assert.equal(h.state('activeCockpitAction.requestKind'), 'generate_vision_bootstrap');
+    assert.equal(h.cockpit.disabled, true);
+
+    h.requests[postIndex].resolve({ ok: true, text: async () => '{}' });
+    await nextTurn();
+    completeDashboardGets(h.requests.slice(postIndex + 1), [bootstrap]);
+    await pending;
+
+    // Direct operation completes and immediately unlocks cockpit without needing another refresh
+    assert.equal(h.state('activeDeliveryUnreconciled'), false);
+    assert.equal(h.state('activeCockpitAction'), null);
+    assert.equal(h.cockpit.disabled, false);
+    assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Available');
+    assert.equal(button.disabled, false);
+});
+
+test('backend reload errors remain visible in Story selection and Dependency review', async () => {
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const h = harness([action]);
+    await successfulDashboardLoad(h, [action]);
+    const selectedScopeFingerprint = `sha256:${'a'.repeat(64)}`;
+    const candidate = {
+        story_id: 101, source_story_item_id: 'US-001', is_superseded: false,
+        structurally_eligible: true, structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'selected', sprint_selection_state_fingerprint: `sha256:${'f'.repeat(64)}`,
+        selected_scope_fingerprint: selectedScopeFingerprint,
+        dependency_safe: true, sprint_candidate: true,
+        validation_status: 'validated', validation_failures: [],
+    };
+    const button = h.direct({});
+    button.dataset = {
+        storySelectionId: '101',
+        storySelectionIntent: 'select',
+        storySelectionFingerprint: candidate.sprint_selection_state_fingerprint,
+    };
+    h.context.document.querySelectorAll = (selector) => (selector.includes('[data-story-selection-intent]') ? [button] : []);
+
+    button.click();
+    await nextTurn();
+
+    const postIndex = h.requests.length - 1;
+    assert.equal(h.requests[postIndex].options.method, 'POST');
+    h.requests[postIndex].resolve({ ok: true, text: async () => '{}' });
+    await nextTurn();
+
+    // The reload fails with an authoritative backend error message
+    const reloadRequests = h.requests.slice(postIndex + 1);
+    assert.equal(reloadRequests.length, 14);
+    for (const request of reloadRequests) {
+        if (request.url.endsWith('/story/dependencies')) {
+            request.reject(new Error('Story authority projection conflicted.'));
+        } else {
+            request.resolve({ ok: true, text: async () => '{}' });
+        }
+    }
+    await button.completion;
+
+    // Error message from backend reload must be preserved in project-error
+    assert.equal(h.elements['project-error'].textContent, 'Story authority projection conflicted.');
+    assert.equal(h.state('activeDeliveryUnreconciled'), true);
+    assert.equal(h.cockpit.disabled, true);
+    assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Locked');
 });
