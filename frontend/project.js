@@ -472,7 +472,7 @@ function waitingReason(decision) {
 function lockedActionReason(action) {
     if (action?.request_kind === 'register_specification_source') {
         return action.reason_code === 'REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE'
-            ? 'Specification source capture is unavailable on this runtime or filesystem. Native Windows requires 64-bit Python and a local NTFS/ReFS worktree with safe handle support.'
+            ? 'Specification source capture is unavailable on this runtime or filesystem. This action requires secure repository evidence capture support.'
             : 'Specification source registration is unavailable for the current repository binding.';
     }
     if (action?.request_kind === 'generate_vision_bootstrap') {

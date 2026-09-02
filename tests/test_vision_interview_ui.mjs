@@ -19,6 +19,8 @@ test('unsupported Specification capture locks the form and submission binding', 
     const markup = context.specificationSourceRegistrationMarkup([action]);
     assert.doesNotMatch(markup, /<form/);
     assert.match(markup, /role="alert"/);
+    assert.match(markup, /Specification source capture is unavailable on this runtime or filesystem\./);
+    assert.doesNotMatch(markup, /Native Windows/);
     const binding = context.captureSpecificationSourceRegistrationBinding({
         actions: [action],
         position: { decisions: [{
