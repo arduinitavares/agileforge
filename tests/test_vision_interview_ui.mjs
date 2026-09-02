@@ -73,7 +73,7 @@ test('Specification source registration shows bounded size guidance and local st
     assert.equal(attributes.get('aria-atomic'), 'true');
 });
 
-function loadFrontend({ fetchImpl, elements = {} } = {}) {
+function loadFrontend({ fetchImpl, elements = {}, querySelectorImpl = null } = {}) {
     const documentListeners = {};
     const context = vm.createContext({
         console,
@@ -96,7 +96,10 @@ function loadFrontend({ fetchImpl, elements = {} } = {}) {
             },
             addEventListener(type, listener) { documentListeners[type] = listener; },
             getElementById(id) { return elements[id] ?? null; },
-            querySelector() { return null; },
+            querySelector(selector) {
+                if (querySelectorImpl) return querySelectorImpl(selector);
+                return null;
+            },
         },
         fetch: fetchImpl ?? (async () => ({ ok: true, text: async () => '{}' })),
         URLSearchParams,
@@ -598,4 +601,228 @@ test('Vision generation disables immediately and ignores a second submission', a
     });
     await Promise.all([first, second]);
     assert.equal(button.disabled, false);
+});
+
+test('Cockpit primary action disables immediately and ignores repeat clicks during Vision generation', async () => {
+    const pendingResponses = [];
+    const directButton = {
+        disabled: false,
+        dataset: { directAction: 'generate_vision_bootstrap' },
+        closest(sel) { return sel === 'button' ? this : null; },
+        click() {
+            if (!this.disabled) {
+                context.__documentListeners.click({
+                    target: this,
+                });
+            }
+        },
+    };
+    const cockpitAttrs = new Map();
+    const cockpitButton = {
+        disabled: false,
+        onclick: null,
+        setAttribute(name, value) { cockpitAttrs.set(name, value); },
+        removeAttribute(name) { cockpitAttrs.delete(name); },
+        getAttribute(name) { return cockpitAttrs.get(name) ?? null; },
+        click() {
+            if (!this.disabled && this.onclick) {
+                this.onclick();
+            }
+        },
+    };
+    const cockpitLabel = { textContent: 'Execute Stage Action' };
+    const cockpitChip = { textContent: 'Available' };
+    const cockpitDescription = { textContent: 'Action available for current state.' };
+
+    let currentDirectButton = directButton;
+    const context = loadFrontend({
+        fetchImpl: (...args) => new Promise((resolve) => {
+            pendingResponses.push({ args, resolve });
+        }),
+        elements: {
+            'cockpit-primary-action-btn': cockpitButton,
+            'cockpit-primary-action-label': cockpitLabel,
+            'cockpit-action-stage-chip': cockpitChip,
+            'cockpit-action-description': cockpitDescription,
+        },
+        querySelectorImpl: (selector) => {
+            if (selector === 'button[data-direct-action="generate_vision_bootstrap"]') {
+                return currentDirectButton;
+            }
+            return null;
+        },
+    });
+
+    const bootstrapAction = {
+        request_kind: 'generate_vision_bootstrap',
+        endpoint: 'vision/bootstrap',
+        availability: 'available',
+    };
+
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState.actions = [${JSON.stringify(bootstrapAction)}];
+        lifecycleState.position = {};
+    `, context);
+    context.installInteractions();
+    context.renderTopCockpit();
+
+    assert.equal(cockpitButton.disabled, false);
+    assert.equal(cockpitLabel.textContent, 'Execute Stage Action');
+    assert.equal(cockpitChip.textContent, 'Available');
+
+    // Click the cockpit primary action button
+    cockpitButton.click();
+
+    // Assert that the cockpit button immediately entered busy/disabled state
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), 'true');
+    assert.equal(cockpitLabel.textContent, 'Executing...');
+    assert.equal(cockpitChip.textContent, 'Executing');
+    assert.equal(pendingResponses.length, 1);
+
+    // Second click on the cockpit button while in flight must be dropped
+    cockpitButton.click();
+    assert.equal(pendingResponses.length, 1);
+
+    // Complete the in-flight request
+    pendingResponses[0].resolve({
+        ok: false,
+        text: async () => JSON.stringify({ message: 'Expected test stop.' }),
+    });
+
+    // Wait for the mutation to finish
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Assert that the cockpit button is unlocked and state is restored
+    assert.equal(cockpitButton.disabled, false);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), null);
+    assert.equal(cockpitChip.textContent, 'Available');
+    assert.equal(cockpitLabel.textContent, 'Execute Stage Action');
+});
+
+test('Cockpit primary action synchronizes busy state when direct action in workbench is clicked', async () => {
+    const pendingResponses = [];
+    const directButton = { disabled: false };
+    const cockpitAttrs = new Map();
+    const cockpitButton = {
+        disabled: false,
+        onclick: null,
+        setAttribute(name, value) { cockpitAttrs.set(name, value); },
+        removeAttribute(name) { cockpitAttrs.delete(name); },
+        getAttribute(name) { return cockpitAttrs.get(name) ?? null; },
+    };
+    const cockpitLabel = { textContent: 'Execute Stage Action' };
+    const cockpitChip = { textContent: 'Available' };
+    const cockpitDescription = { textContent: 'Action available for current state.' };
+
+    const context = loadFrontend({
+        fetchImpl: (...args) => new Promise((resolve) => {
+            pendingResponses.push({ args, resolve });
+        }),
+        elements: {
+            'cockpit-primary-action-btn': cockpitButton,
+            'cockpit-primary-action-label': cockpitLabel,
+            'cockpit-action-stage-chip': cockpitChip,
+            'cockpit-action-description': cockpitDescription,
+        },
+    });
+
+    const bootstrapAction = {
+        request_kind: 'generate_vision_bootstrap',
+        endpoint: 'vision/bootstrap',
+        availability: 'available',
+    };
+
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState.actions = [${JSON.stringify(bootstrapAction)}];
+        lifecycleState.position = {};
+    `, context);
+    context.renderTopCockpit();
+
+    const promise = context.runDirectAction('generate_vision_bootstrap', directButton);
+
+    assert.equal(directButton.disabled, true);
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), 'true');
+    assert.equal(cockpitChip.textContent, 'Executing');
+    assert.equal(cockpitLabel.textContent, 'Executing...');
+
+    pendingResponses[0].resolve({
+        ok: false,
+        text: async () => JSON.stringify({ message: 'Expected test stop.' }),
+    });
+
+    await promise;
+
+    assert.equal(directButton.disabled, false);
+    assert.equal(cockpitButton.disabled, false);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), null);
+});
+
+test('Cockpit primary action preserves in-flight busy state during intermediate renderTopCockpit calls', async () => {
+    const pendingResponses = [];
+    const directButton = { disabled: false };
+    const cockpitAttrs = new Map();
+    const cockpitButton = {
+        disabled: false,
+        onclick: null,
+        setAttribute(name, value) { cockpitAttrs.set(name, value); },
+        removeAttribute(name) { cockpitAttrs.delete(name); },
+        getAttribute(name) { return cockpitAttrs.get(name) ?? null; },
+    };
+    const cockpitLabel = { textContent: 'Execute Stage Action' };
+    const cockpitChip = { textContent: 'Available' };
+    const cockpitDescription = { textContent: 'Action available for current state.' };
+
+    const context = loadFrontend({
+        fetchImpl: (...args) => new Promise((resolve) => {
+            pendingResponses.push({ args, resolve });
+        }),
+        elements: {
+            'cockpit-primary-action-btn': cockpitButton,
+            'cockpit-primary-action-label': cockpitLabel,
+            'cockpit-action-stage-chip': cockpitChip,
+            'cockpit-action-description': cockpitDescription,
+        },
+    });
+
+    const bootstrapAction = {
+        request_kind: 'generate_vision_bootstrap',
+        endpoint: 'vision/bootstrap',
+        availability: 'available',
+    };
+
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState.actions = [${JSON.stringify(bootstrapAction)}];
+        lifecycleState.position = {};
+    `, context);
+    context.renderTopCockpit();
+
+    const promise = context.runDirectAction('generate_vision_bootstrap', directButton);
+
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), 'true');
+    assert.equal(cockpitLabel.textContent, 'Executing...');
+
+    // Simulate an intermediate dashboard re-render while request is still pending
+    context.renderTopCockpit();
+
+    // Assert that the busy state was preserved
+    assert.equal(cockpitButton.disabled, true);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), 'true');
+    assert.equal(cockpitChip.textContent, 'Executing');
+    assert.equal(cockpitLabel.textContent, 'Executing...');
+
+    pendingResponses[0].resolve({
+        ok: false,
+        text: async () => JSON.stringify({ message: 'Expected test stop.' }),
+    });
+
+    await promise;
+
+    assert.equal(cockpitButton.disabled, false);
+    assert.equal(cockpitButton.getAttribute('aria-busy'), null);
 });
