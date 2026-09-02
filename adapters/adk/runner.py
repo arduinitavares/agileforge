@@ -1,14 +1,17 @@
+# adapters/adk/runner.py
 """Run one ADK recipe inside durable domain attempt boundaries."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import uuid4
 
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.errors.already_exists_error import AlreadyExistsError
+from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, DatabaseSessionService
 from google.adk.workflow import NodeTimeoutError
@@ -22,6 +25,7 @@ from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
     SpecificationAgenticExecutionError,
+    SpecificationOutputValidationError,
     VisionAgenticPreflightError,
 )
 from adapters.adk.preflight import (
@@ -55,6 +59,8 @@ from workflow.requests import (
     StartNodeAttempt,
     TransitionRequest,
 )
+
+logger: logging.Logger = logging.getLogger(name=__name__)
 
 
 class WorkflowDomainRunnerPort(Protocol):
@@ -581,14 +587,33 @@ class AdkWorkflowRunner:
                     )
                 ],
             )
+            is_specification = recipe.node_id == "specification.structure"
+            invocation_id = ""
             output: object | None = None
-            async for event in runner.run_async(
-                user_id=self._config.identity.user_id,
-                session_id=session_id,
-                new_message=message,
-            ):
-                if event.output is not None:
-                    output = event.output
+            try:
+                async for event in runner.run_async(
+                    user_id=self._config.identity.user_id,
+                    session_id=session_id,
+                    new_message=message,
+                    yield_user_message=is_specification,
+                ):
+                    if (
+                        is_specification
+                        and event.author == "user"
+                        and not invocation_id
+                    ):
+                        invocation_id = event.invocation_id
+                    if event.output is not None:
+                        output = event.output
+            except SpecificationOutputValidationError as error:
+                if is_specification:
+                    await self._append_specification_output_diagnostic(
+                        session_service=session_service,
+                        session_id=session_id,
+                        invocation_id=invocation_id,
+                        diagnostic=error.diagnostic,
+                    )
+                raise
             if output is None:
                 msg = "ADK recipe completed without structured output."
                 raise ValueError(msg)
@@ -596,6 +621,46 @@ class AdkWorkflowRunner:
         finally:
             if owned_session_service is not None:
                 await owned_session_service.close()
+
+    async def _append_specification_output_diagnostic(
+        self,
+        *,
+        session_service: BaseSessionService,
+        session_id: str,
+        invocation_id: str,
+        diagnostic: JsonObject,
+    ) -> None:
+        try:
+            session = await session_service.get_session(
+                app_name=self._config.identity.app_name,
+                user_id=self._config.identity.user_id,
+                session_id=session_id,
+            )
+            if session is None or not invocation_id:
+                logger.warning(
+                    "Specification output diagnostic could not be appended: "
+                    "session_id=%s",
+                    session_id,
+                )
+                return
+            await session_service.append_event(
+                session=session,
+                event=Event(
+                    author="specification_output_validator",
+                    invocation_id=invocation_id,
+                    actions=EventActions(
+                        state_delta={"specification_output_diagnostic": diagnostic}
+                    ),
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Specification output diagnostic could not be appended: "
+                "session_id=%s",
+                session_id,
+            )
 
 
 __all__ = [

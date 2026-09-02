@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +17,11 @@ from google.adk.agents import Agent, BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import (
+    BaseSessionService,
+    DatabaseSessionService,
+    InMemorySessionService,
+)
 from google.adk.sessions import Session as AdkSession
 from google.genai import types
 from openai import OpenAIError
@@ -54,6 +60,7 @@ from services.specification_source_registration import (
 from services.specs.candidate_contract import load_candidate_contract
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
+from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
@@ -299,6 +306,7 @@ def _system(  # noqa: PLR0913
     tmp_path: Path,
     leaf: BaseAgent,
     *,
+    session_service: BaseSessionService | None = None,
     source_check: SpecificationSourceCheck | None = None,
     execution_settings: JsonObject = EXECUTION_SETTINGS,
     source_bytes: bytes = b"# Exact external Specification\n",
@@ -437,7 +445,11 @@ def _system(  # noqa: PLR0913
     runner = AdkWorkflowRunner(
         domain=domain,
         registry=registry,
-        session_service=InMemorySessionService(),
+        session_service=(
+            InMemorySessionService()
+            if session_service is None
+            else session_service
+        ),
         specification_source_check=runner_source_check,
         config=AdkExecutionConfig(
             project_id=project_id,
@@ -1691,3 +1703,341 @@ def test_provider_schema_and_payload_failures_keep_stable_codes(
         assert outcome.status == "failure"
         assert outcome.failure_code == expected_code
         assert not session.exec(select(SpecificationCandidate)).all()
+
+
+def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Safe diagnostic is appended with correlated invocation ID and prose redaction."""
+    sentinel = "PRIVATE_RESPONSE_SENTINEL_245"
+    dangling_with_sentinel: JsonObject = {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "items": [
+                {
+                    "id": "REQ.item-one",
+                    "title": f"Title {sentinel}",
+                    "statement": f"Statement {sentinel}",
+                    "rationale": f"Rationale {sentinel}",
+                    "level": "SHOULD",
+                    "kind": "CAPABILITY",
+                    "scope": "TARGET",
+                    "status": "DRAFT",
+                    "applicability": "CORE",
+                    "criticality": "LOW",
+                    "provenance": {"source": "spec.md"},
+                }
+            ],
+            "relations": [
+                {
+                    "from": "REQ.item-one",
+                    "type": "tracks",
+                    "to": "REQ.missing-target",
+                }
+            ],
+        }
+    }
+    raw_response = json.dumps(dangling_with_sentinel)
+    model = _SpecificationResponseLlm(
+        model="fake/diagnostic-in-memory",
+        response_text=raw_response,
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="diagnostic_in_memory_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = InMemorySessionService()
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    adk_session = asyncio.run(
+        session_service.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=session_id,
+        )
+    )
+    assert adk_session is not None
+    assert len(adk_session.events) >= 2  # noqa: PLR2004
+    user_event = next(ev for ev in adk_session.events if ev.author == "user")
+    assert user_event.invocation_id
+
+    diag_event = next(
+        ev for ev in adk_session.events if ev.author == "specification_output_validator"
+    )
+    assert diag_event.invocation_id == user_event.invocation_id
+    assert diag_event.output is None
+    assert diag_event.actions is not None
+    diagnostic = diag_event.actions.state_delta["specification_output_diagnostic"]
+    assert (
+        diagnostic["schema_version"]
+        == "agileforge.specification-output-diagnostic.v1"
+    )
+    assert diagnostic["stage"] == "primary"
+    assert diagnostic["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+    assert diagnostic["missing_item_count"] == 1
+    assert diagnostic["missing_item_ids"] == ["REQ.missing-target"]
+    assert diagnostic["item_count"] == 1
+    assert diagnostic["relation_count"] == 1
+    assert diagnostic["item_ids"] == ["REQ.item-one"]
+    assert diagnostic["response_bytes"] == len(raw_response.encode("utf-8"))
+    assert (
+        diagnostic["response_sha256"]
+        == f"sha256:{hashlib.sha256(raw_response.encode('utf-8')).hexdigest()}"
+    )
+    assert sentinel not in json.dumps(diagnostic)
+    assert adk_session.state.get("specification_output_diagnostic") == diagnostic
+
+
+def test_output_validation_failure_persists_correlated_diagnostic_sqlite(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Safe diagnostic persists to a real disposable SQLite trace database."""
+    sentinel = "PRIVATE_SQLITE_SENTINEL_245"
+    dangling_payload: JsonObject = {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "items": [
+                {
+                    "id": "REQ.item-one",
+                    "statement": f"Do not leak {sentinel}",
+                }
+            ],
+            "relations": [
+                {
+                    "from": "REQ.item-one",
+                    "type": "tracks",
+                    "to": "REQ.missing-target",
+                }
+            ],
+        }
+    }
+    raw_response = json.dumps(dangling_payload)
+    model = _SpecificationResponseLlm(
+        model="fake/diagnostic-sqlite",
+        response_text=raw_response,
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="diagnostic_sqlite_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    db_file = tmp_path / "disposable_adk_trace.db"
+    db_url = f"sqlite+aiosqlite:///{db_file}"
+    session_service = DatabaseSessionService(db_url=db_url)
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+
+    with Session(engine) as session:
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+
+    async def read_back_diagnostic() -> JsonObject:
+        verify_service = DatabaseSessionService(db_url=db_url)
+        try:
+            persisted_session = await verify_service.get_session(
+                app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+                user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+                session_id=session_id,
+            )
+            assert persisted_session is not None
+            diag_event = next(
+                ev
+                for ev in persisted_session.events
+                if ev.author == "specification_output_validator"
+            )
+            assert diag_event.invocation_id
+            assert diag_event.output is None
+            diag = persisted_session.state["specification_output_diagnostic"]
+            assert diag["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+            assert diag["missing_item_ids"] == ["REQ.missing-target"]
+            assert sentinel not in json.dumps(diag)
+            return diag
+        finally:
+            await verify_service.close()
+            await session_service.close()
+
+    diagnostic = asyncio.run(read_back_diagnostic())
+    assert diagnostic["missing_item_count"] == 1
+
+
+class _SyntheticAppendDiagnosticError(RuntimeError):
+    """Synthetic error injected into session service during test."""
+
+
+class _FailingDiagnosticAppendSessionService(InMemorySessionService):
+    """Fail only when appending the specification_output_diagnostic event."""
+
+    async def append_event(self, session: AdkSession, event: Event) -> Event:
+        if (
+            event.actions
+            and "specification_output_diagnostic" in event.actions.state_delta
+        ):
+            msg = "Synthetic failure appending diagnostic event."
+            raise _SyntheticAppendDiagnosticError(msg)
+        return await super().append_event(session=session, event=event)
+
+
+def test_specification_output_diagnostic_append_failure_preserves_business_failure(
+    engine: Engine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Append failure emits a fixed safe warning and preserves the original failure."""
+    model = _SpecificationResponseLlm(
+        model="fake/failing-diagnostic-append",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="failing_append_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = _FailingDiagnosticAppendSessionService()
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    with caplog.at_level(logging.WARNING):
+        result = runner.run(decision, frozen, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    matching_records = [
+        rec
+        for rec in caplog.records
+        if "Specification output diagnostic could not be appended" in rec.message
+    ]
+    assert len(matching_records) == 1
+    warning_record = matching_records[0]
+    assert session_id in warning_record.message
+    assert warning_record.exc_info is None
+    assert "Synthetic failure appending diagnostic event" not in warning_record.message
+
+
+def test_precedence_post_call_revalidation_supersedes_output_diagnostic(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-call source drift obsoletes attempt and supersedes output diagnostic."""
+    model = _SpecificationResponseLlm(
+        model="fake/precedence-drift",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="precedence_drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = InMemorySessionService()
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    transition = domain.transition
+    drifted = False
+
+    def drift_after_provider(request: TransitionRequest) -> TransitionResult:
+        nonlocal drifted
+        if (
+            request.kind == "revalidate_node_attempt"
+            and bool(model.calls)
+            and not drifted
+        ):
+            with Session(engine) as session:
+                project = session.get(Project, project_id)
+                assert project is not None
+                project.description = "Drifted after provider returned."
+                session.add(project)
+                session.commit()
+            drifted = True
+        return transition(request)
+
+    monkeypatch.setattr(domain, "transition", drift_after_provider)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "obsolete"
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    adk_session = asyncio.run(
+        session_service.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=session_id,
+        )
+    )
+    assert adk_session is not None
+    diagnostic_events = [
+        ev
+        for ev in adk_session.events
+        if ev.author == "specification_output_validator"
+    ]
+    assert len(diagnostic_events) == 0
