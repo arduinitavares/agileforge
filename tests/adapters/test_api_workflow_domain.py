@@ -5397,6 +5397,35 @@ def test_specification_source_endpoint_returns_structured_path_errors_before_mut
     assert application.requests == []
 
 
+def test_specification_source_endpoint_omits_an_empty_field_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-level validation errors must stay readable for API clients."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        headers={"X-AgileForge-Expected-Decision": "sha256:source-position"},
+        json={
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": ["docs/adr/0001.md", "docs/adr/0001.md"],
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-duplicate-adr-41",
+            "actor": "dashboard-user",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "INVALID_SPECIFICATION_SOURCE_REQUEST"
+    assert not detail["error"]["message"].startswith(":")
+    assert "Source, Context, and ADR paths must be distinct." in detail["error"][
+        "message"
+    ]
+    assert application.requests == []
+
+
 def test_specification_source_preview_returns_sizes_without_a_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

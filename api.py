@@ -672,12 +672,13 @@ def _specification_source_request(
         ]
         field = errors[0]["field"] if errors else "source_path"
         message = errors[0]["message"] if errors else "Source selection is invalid."
+        rendered_message = f"{field}: {message}" if field else message
         raise HTTPException(
             status_code=422,
             detail={
                 "error": {
                     "code": "INVALID_SPECIFICATION_SOURCE_REQUEST",
-                    "message": f"{field}: {message}",
+                    "message": rendered_message,
                 },
                 "errors": errors,
             },

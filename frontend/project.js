@@ -962,7 +962,7 @@ function specificationSourceRegistrationMarkup(actions) {
                     <p>Root CONTEXT.md is captured automatically when present; its absence is recorded.</p>
                     <p class="mt-1">The secure host check allows up to 96 KiB per document and 192 KiB for the complete package. No provider run is performed while checking source sizes.</p>
                 </div>
-                <p data-specification-source-status="true" role="status" aria-live="polite" class="text-sm text-slate-700">Check the selected package to show its exact captured sizes before registration.</p>
+                <p data-specification-source-status="true" role="status" aria-live="polite" aria-atomic="true" class="text-sm text-slate-700">Check the selected package to show its exact captured sizes before registration.</p>
                 <div class="flex flex-wrap gap-3">
                     <button type="button" data-specification-source-preview="true" class="${BUTTON_SECONDARY}"><span>Check selected package</span></button>
                     <button type="submit" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
@@ -4948,6 +4948,8 @@ function setSpecificationSourceRegistrationStatus(form, message, isError = false
     status.classList?.toggle?.('text-red-700', isError);
     status.classList?.toggle?.('text-slate-700', !isError);
     status.setAttribute?.('role', isError ? 'alert' : 'status');
+    status.setAttribute?.('aria-live', isError ? 'assertive' : 'polite');
+    status.setAttribute?.('aria-atomic', 'true');
 }
 
 function specificationSourcePreviewKey(fields) {
