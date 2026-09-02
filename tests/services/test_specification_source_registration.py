@@ -14,6 +14,7 @@ from git import Repo
 from pydantic import ValidationError
 from sqlmodel import Session
 
+import services.specification_source_registration as registration_module
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.repository import RepositoryBinding
@@ -24,6 +25,7 @@ from services.repository_probe import (
 )
 from services.specification_source_registration import (
     MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES,
+    MAX_SPECIFICATION_SOURCE_TOTAL_BYTES,
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
     SpecificationSourceRegistrationRequest,
@@ -464,6 +466,83 @@ def test_prepare_rejects_an_empty_source_with_a_closed_error(
         ).prepare(_request())
 
     assert caught.value.code is SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE
+
+
+def test_prepare_stops_capturing_adrs_when_the_aggregate_limit_is_reached(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The aggregate cap prevents a long ADR selection from growing in memory."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(
+        b"s" * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    (repository / "CONTEXT.md").write_bytes(
+        b"c" * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    first_adr = repository / "docs" / "adr" / "0001-first.md"
+    second_adr = repository / "docs" / "adr" / "0002-second.md"
+    first_adr.write_bytes(b"a")
+    second_adr.write_bytes(b"b")
+    repo = Repo(repository)
+    repo.index.add(
+        [
+            "specification.md",
+            "CONTEXT.md",
+            "docs/adr/0001-first.md",
+            "docs/adr/0002-second.md",
+        ]
+    )
+    repo.index.commit("aggregate source limit")
+    _seed_lineage_and_binding(engine, repository)
+
+    captured_paths: list[str] = []
+    original_capture = registration_module._capture_document
+
+    def record_capture(
+        root_descriptor: int | registration_module.WindowsSpecificationSourceWorktree,
+        *,
+        relative_path: str,
+        source_id: str,
+        required: bool,
+    ) -> registration_module._CapturedDocument | None:
+        captured_paths.append(relative_path)
+        return original_capture(
+            root_descriptor,
+            relative_path=relative_path,
+            source_id=source_id,
+            required=required,
+        )
+
+    monkeypatch.setattr(registration_module, "_capture_document", record_capture)
+
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        SpecificationSourceRegistrationService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).prepare(
+            _request(
+                adr_paths=(
+                    "docs/adr/0001-first.md",
+                    "docs/adr/0002-second.md",
+                )
+            )
+        )
+
+    assert (
+        caught.value.code
+        is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
+    )
+    assert (
+        MAX_SPECIFICATION_SOURCE_TOTAL_BYTES
+        == 2 * MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    )
+    assert captured_paths == [
+        "specification.md",
+        "CONTEXT.md",
+        "docs/adr/0001-first.md",
+    ]
 
 
 def test_prepare_captures_the_complete_approved_source_package(

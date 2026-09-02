@@ -610,8 +610,8 @@ def _capture_selected_documents(
             required=True,
         )
         source_capture = _require_capture(source_capture)
+        total_bytes = _checked_package_total(total_bytes, source_capture)
         captures.append(source_capture)
-        total_bytes += source_capture.document.byte_length
 
         context_capture = _capture_document(
             root_descriptor,
@@ -622,8 +622,8 @@ def _capture_selected_documents(
         if context_capture is None:
             context = SpecificationContextCapture(state="absent")
         else:
+            total_bytes = _checked_package_total(total_bytes, context_capture)
             captures.append(context_capture)
-            total_bytes += context_capture.document.byte_length
             context = SpecificationContextCapture(
                 state="present",
                 document=context_capture.document,
@@ -638,17 +638,10 @@ def _capture_selected_documents(
                 required=True,
             )
             captured = _require_capture(captured)
+            total_bytes = _checked_package_total(total_bytes, captured)
             captures.append(captured)
             adr_captures.append(captured)
-            total_bytes += captured.document.byte_length
 
-    if total_bytes > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
-        raise SpecificationSourceRegistrationError(
-            SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-            "Registered source package has "
-            f"{total_bytes} bytes; the aggregate limit is "
-            f"{MAX_SPECIFICATION_SOURCE_TOTAL_BYTES} bytes.",
-        )
     identities = [capture.physical_identity for capture in captures]
     if len(identities) != len(set(identities)):
         raise SpecificationSourceRegistrationError(
@@ -660,6 +653,19 @@ def _capture_selected_documents(
         context,
         tuple(capture.document for capture in adr_captures),
     )
+
+
+def _checked_package_total(total_bytes: int, captured: _CapturedDocument) -> int:
+    """Reject an over-limit package before retaining another captured document."""
+    updated_total = total_bytes + captured.document.byte_length
+    if updated_total > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
+        raise SpecificationSourceRegistrationError(
+            SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
+            "Registered source package has "
+            f"{updated_total} bytes; the aggregate limit is "
+            f"{MAX_SPECIFICATION_SOURCE_TOTAL_BYTES} bytes.",
+        )
+    return updated_total
 
 
 @contextmanager
