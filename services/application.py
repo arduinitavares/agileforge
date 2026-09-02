@@ -1825,6 +1825,8 @@ def _source_registration_workflow_error_code(
         return WorkflowErrorCode.REPOSITORY_BINDING_INVALID
     if code is SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE:
         return WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE
+    if code is (SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE):
+        return WorkflowErrorCode.REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE
     return WorkflowErrorCode.STALE_SPECIFICATION_INPUT
 
 
@@ -1902,6 +1904,15 @@ class AgileForgeApplication:
         """Project the same provider-free capability used by bootstrap execution."""
         input_service = self._vision_input
         checker = getattr(input_service, "bootstrap_capability", None)
+        if not callable(checker):
+            return RepositoryEvidenceCapability(available=True)
+        return cast("RepositoryEvidenceCapability", checker(project_id))
+
+    def specification_source_capability(
+        self, *, project_id: int
+    ) -> RepositoryEvidenceCapability:
+        """Expose the same safe root capability used during source capture."""
+        checker = getattr(self._specification_source_registration, "capability", None)
         if not callable(checker):
             return RepositoryEvidenceCapability(available=True)
         return cast("RepositoryEvidenceCapability", checker(project_id))

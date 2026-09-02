@@ -65,6 +65,9 @@ from services.application import (
     planning_action_decision_is_transportable,
     production_application,
 )
+from services.specification_source_registration import (
+    SpecificationSourceRegistrationError,
+)
 from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
@@ -565,12 +568,19 @@ def _project_action_availability(
     """Lock actions whose provider-free inputs cannot be opened safely."""
     if application is None:
         return
-    if decision.request_kind == "generate_vision_bootstrap":
-        checker = getattr(application, "vision_bootstrap_capability", None)
+    capability_method = {
+        "generate_vision_bootstrap": "vision_bootstrap_capability",
+        "register_specification_source": "specification_source_capability",
+    }.get(decision.request_kind)
+    if capability_method is not None:
+        checker = getattr(application, capability_method, None)
         if callable(checker):
             try:
                 capability = checker(project_id=project_id)
-            except VisionEvidenceCollectionError as error:
+            except (
+                VisionEvidenceCollectionError,
+                SpecificationSourceRegistrationError,
+            ) as error:
                 action["availability"] = "locked"
                 action["reason_code"] = error.code.value
                 return

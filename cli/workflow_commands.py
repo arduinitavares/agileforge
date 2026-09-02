@@ -12,6 +12,9 @@ from services.application import (
     execution_action_decision_is_transportable,
     planning_action_decision_is_transportable,
 )
+from services.specification_source_registration import (
+    SpecificationSourceRegistrationError,
+)
 from services.vision_evidence import VisionEvidenceCollectionError
 from workflow.contracts import (
     JsonObject,
@@ -388,15 +391,19 @@ def render_workflow_next(
     blocked_commands: list[BlockedCommand] = []
     executable_candidates: list[NodeDecision] = []
     for decision in candidates:
-        if (
-            decision.request_kind == "generate_vision_bootstrap"
-            and application is not None
-        ):
-            checker = getattr(application, "vision_bootstrap_capability", None)
+        capability_method = {
+            "generate_vision_bootstrap": "vision_bootstrap_capability",
+            "register_specification_source": "specification_source_capability",
+        }.get(decision.request_kind)
+        if capability_method is not None and application is not None:
+            checker = getattr(application, capability_method, None)
             if callable(checker):
                 try:
                     capability = checker(project_id=position.project_id)
-                except VisionEvidenceCollectionError as error:
+                except (
+                    VisionEvidenceCollectionError,
+                    SpecificationSourceRegistrationError,
+                ) as error:
                     blocked_commands.append(
                         {
                             "node_id": decision.node_id,

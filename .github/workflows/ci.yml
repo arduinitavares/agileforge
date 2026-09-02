@@ -72,7 +72,7 @@ jobs:
           --expect-sha ${{ github.sha }}
 
   windows-vision-evidence:
-    name: Windows Vision evidence security
+    name: Windows repository evidence security
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -86,6 +86,9 @@ jobs:
       - name: Run secure Windows evidence suites
         run: >-
           uv run --locked pytest tests/windows/test_vision_evidence_windows.py
+          tests/windows/test_specification_source_windows.py
           tests/services/test_vision_evidence_reader.py
+          tests/services/test_specification_source_registration.py
+          tests/services/test_specification_source_application.py
           tests/adapters/test_vision_bootstrap_api.py
           tests/adapters/test_cli_workflow_domain.py -q

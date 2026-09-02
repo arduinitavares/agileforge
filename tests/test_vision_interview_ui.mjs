@@ -7,6 +7,30 @@ import vm from 'node:vm';
 const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
 
+test('unsupported Specification capture locks the form and submission binding', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'specification.source.register',
+        request_kind: 'register_specification_source',
+        endpoint: 'specifications/source',
+        availability: 'locked',
+        reason_code: 'REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE',
+    };
+    const markup = context.specificationSourceRegistrationMarkup([action]);
+    assert.doesNotMatch(markup, /<form/);
+    assert.match(markup, /role="alert"/);
+    const binding = context.captureSpecificationSourceRegistrationBinding({
+        actions: [action],
+        position: { decisions: [{
+            node_id: action.node_id,
+            request_kind: action.request_kind,
+            category: 'available',
+            decision_fingerprint: 'current-decision',
+        }] },
+    });
+    assert.equal(binding, null);
+});
+
 function loadFrontend({ fetchImpl, elements = {} } = {}) {
     const documentListeners = {};
     const context = vm.createContext({

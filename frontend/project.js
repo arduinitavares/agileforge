@@ -470,6 +470,11 @@ function waitingReason(decision) {
 }
 
 function lockedActionReason(action) {
+    if (action?.request_kind === 'register_specification_source') {
+        return action.reason_code === 'REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE'
+            ? 'Specification source capture is unavailable on this runtime or filesystem. Native Windows requires 64-bit Python and a local NTFS/ReFS worktree with safe handle support.'
+            : 'Specification source registration is unavailable for the current repository binding.';
+    }
     if (action?.request_kind === 'generate_vision_bootstrap') {
         return 'Vision generation unavailable.';
     }
@@ -929,6 +934,9 @@ function specificationSourceSubmission(actions, sourcePath, preparationCapabilit
 
 function specificationSourceRegistrationMarkup(actions) {
     const action = findAction(actions, 'register_specification_source');
+    if (action?.availability === 'locked') {
+        return `<p role="alert" class="text-sm text-red-700">${escapeWorkflowText(lockedActionReason(action))}</p>`;
+    }
     return action
         ? `<form data-specification-source-form="true" class="max-w-3xl space-y-4">
                 <p class="text-sm leading-6 text-slate-600">Register the repository document that contains the external Specification source.</p>
@@ -1106,7 +1114,7 @@ function captureSpecificationSourceRegistrationBinding(state) {
     ).filter((decision) => decision?.node_id === 'specification.source.register'
         && decision?.request_kind === 'register_specification_source'
         && decision?.category === 'available');
-    if (!action || decisions.length !== 1) return null;
+    if (!action || action.availability === 'locked' || decisions.length !== 1) return null;
     const decision = decisions[0];
     if (typeof decision.decision_fingerprint !== 'string'
         || !decision.decision_fingerprint) return null;
