@@ -74,6 +74,7 @@ class SpecificationSourceRegistrationErrorCode(StrEnum):
     SOURCE_MISSING = "SOURCE_MISSING"
     UNSAFE_FILE = "UNSAFE_FILE"
     INVALID_UTF8 = "INVALID_UTF8"
+    EMPTY_SOURCE = "EMPTY_SOURCE"
     SOURCE_TOO_LARGE = "SOURCE_TOO_LARGE"
     SOURCE_CHANGED_DURING_CAPTURE = "SOURCE_CHANGED_DURING_CAPTURE"
     DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
@@ -90,6 +91,47 @@ class SpecificationSourceRegistrationError(RuntimeError):
         """Retain the stable closed code with one bounded diagnostic."""
         self.code = code
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class SpecificationSourceCapturePreview:
+    """Provider-free byte summary for a proposed source registration."""
+
+    documents: tuple[tuple[str, int], ...]
+    total_bytes: int
+    document_limit_bytes: int = MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+    package_limit_bytes: int = MAX_SPECIFICATION_SOURCE_TOTAL_BYTES
+
+    @classmethod
+    def from_bundle(
+        cls,
+        bundle: SpecificationSourceBundle,
+    ) -> SpecificationSourceCapturePreview:
+        """Build a disclosure that contains paths and sizes, never source bytes."""
+        documents = [bundle.source]
+        if bundle.context.document is not None:
+            documents.append(bundle.context.document)
+        documents.extend(bundle.adrs)
+        sizes = tuple(
+            (document.relative_path, document.byte_length) for document in documents
+        )
+        return cls(
+            documents=sizes,
+            total_bytes=sum(byte_length for _, byte_length in sizes),
+        )
+
+    def payload(self) -> dict[str, object]:
+        """Return a closed transport projection without any captured content."""
+        return {
+            "documents": [
+                {"relative_path": path, "byte_length": byte_length}
+                for path, byte_length in self.documents
+            ],
+            "total_bytes": self.total_bytes,
+            "document_limit_bytes": self.document_limit_bytes,
+            "package_limit_bytes": self.package_limit_bytes,
+            "provider_run_performed": False,
+        }
 
 
 def _canonical_relative_path(value: str) -> str:
@@ -366,6 +408,11 @@ class SpecificationSourceRegistrationService:
                 SpecificationSourceRegistrationErrorCode.SOURCE_LINEAGE_CHANGED,
                 "Vision, Product Goal, or repository selection changed during capture.",
             )
+        if verified_source.byte_length == 0:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE,
+                f"Selected source must not be empty: {verified_source.relative_path}",
+            )
 
         bundle = SpecificationSourceBundle(
             producer_capability="to-spec",
@@ -397,6 +444,14 @@ class SpecificationSourceRegistrationService:
             source_fingerprint=source_bundle_fingerprint(bundle),
             bundle=bundle,
         )
+
+    def preview(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> SpecificationSourceCapturePreview:
+        """Safely read and size an exact selection without changing workflow state."""
+        prepared = self.prepare(request)
+        return SpecificationSourceCapturePreview.from_bundle(prepared.bundle)
 
     def _load_context(self, project_id: int) -> _DurableSourceContext:
         try:
@@ -569,7 +624,9 @@ def _capture_selected_documents(
     if total_bytes > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
         raise SpecificationSourceRegistrationError(
             SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-            "Registered source bytes exceed the aggregate capture limit.",
+            "Registered source package has "
+            f"{total_bytes} bytes; the aggregate limit is "
+            f"{MAX_SPECIFICATION_SOURCE_TOTAL_BYTES} bytes.",
         )
     identities = [capture.physical_identity for capture in captures]
     if len(identities) != len(set(identities)):
@@ -706,7 +763,9 @@ def _capture_posix_document(
         if current.st_size > MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES:
             raise SpecificationSourceRegistrationError(
                 SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-                f"Selected source exceeds the per-document limit: {relative_path}",
+                f"Selected source {relative_path} has {current.st_size} bytes; the "
+                "per-document limit is "
+                f"{MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES} bytes.",
             )
         return _read_open_document(
             parent_descriptor,
@@ -854,7 +913,8 @@ def _document_from_bytes(
     if len(raw) > MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES:
         raise SpecificationSourceRegistrationError(
             SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
-            f"Selected source exceeds the per-document limit: {relative_path}",
+            f"Selected source {relative_path} has at least {len(raw)} bytes; the "
+            f"per-document limit is {MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES} bytes.",
         )
     try:
         raw.decode("utf-8", errors="strict")
@@ -912,6 +972,7 @@ __all__ = [
     "MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES",
     "MAX_SPECIFICATION_SOURCE_TOTAL_BYTES",
     "PreparedSpecificationSourceRegistration",
+    "SpecificationSourceCapturePreview",
     "SpecificationSourceRegistrationError",
     "SpecificationSourceRegistrationErrorCode",
     "SpecificationSourceRegistrationRequest",

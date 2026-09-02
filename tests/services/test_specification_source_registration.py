@@ -43,6 +43,8 @@ if TYPE_CHECKING:
 _EXPECTED_PROBE_CALLS = 3
 _MIDDLE_PROBE_CALL = 2
 _WINDOWS_PRIVILEGE_NOT_HELD = 1314
+_COMPLETE_PACKAGE_ADR_COUNT = 14
+_COMPLETE_PACKAGE_BYTES = 125_432
 
 
 def test_source_capability_reports_missing_posix_open_support(
@@ -410,6 +412,70 @@ def test_prepare_rejects_oversize_source(engine: Engine, tmp_path: Path) -> None
 
     assert (
         caught.value.code is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
+    )
+
+
+def test_prepare_rejects_an_empty_source_with_a_closed_error(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """An empty required source must remain an actionable capture failure."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(b"")
+    repo = Repo(repository)
+    repo.index.add(["specification.md"])
+    repo.index.commit("empty source")
+    _seed_lineage_and_binding(engine, repository)
+
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        SpecificationSourceRegistrationService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).prepare(_request())
+
+    assert caught.value.code is SpecificationSourceRegistrationErrorCode.EMPTY_SOURCE
+
+
+def test_prepare_captures_the_complete_approved_source_package(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Keep the known 14-ADR P&ID package intact within one bounded capture."""
+    repository = _git_repository(tmp_path)
+    (repository / "specification.md").write_bytes(b"s" * 63_682)
+    (repository / "CONTEXT.md").write_bytes(b"c" * 30_122)
+    for index in range(1, _COMPLETE_PACKAGE_ADR_COUNT + 1):
+        size = 2_378 if index == _COMPLETE_PACKAGE_ADR_COUNT else 2_250
+        (repository / "docs" / "adr" / f"{index:04}-source.md").write_bytes(b"a" * size)
+    repo = Repo(repository)
+    repo.index.add(
+        [
+            item.relative_to(repository).as_posix()
+            for item in repository.rglob("*")
+            if item.is_file()
+        ]
+    )
+    repo.index.commit("complete approved source package")
+    _seed_lineage_and_binding(engine, repository)
+
+    prepared = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).prepare(
+        _request(
+            adr_paths=tuple(
+                f"docs/adr/{index:04}-source.md"
+                for index in range(1, _COMPLETE_PACKAGE_ADR_COUNT + 1)
+            )
+        )
+    )
+
+    documents = [prepared.bundle.source, *prepared.bundle.adrs]
+    assert prepared.bundle.context.document is not None
+    documents.append(prepared.bundle.context.document)
+    assert len(prepared.bundle.adrs) == _COMPLETE_PACKAGE_ADR_COUNT
+    assert (
+        sum(document.byte_length for document in documents) == _COMPLETE_PACKAGE_BYTES
     )
 
 

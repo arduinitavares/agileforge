@@ -86,6 +86,7 @@ from services.project_lifecycle import (
 from services.roadmap_runtime import build_roadmap_input_context
 from services.specification_source_registration import (
     PreparedSpecificationSourceRegistration,
+    SpecificationSourceCapturePreview,
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
     SpecificationSourceRegistrationRequest,
@@ -303,6 +304,11 @@ class _SpecificationSourceRegistrationPort(Protocol):
         self,
         request: SpecificationSourceRegistrationRequest,
     ) -> PreparedSpecificationSourceRegistration: ...
+
+    def preview(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> SpecificationSourceCapturePreview: ...
 
 
 class _SpecificationSourceReplayPort(Protocol):
@@ -4268,6 +4274,17 @@ class AgileForgeApplication:
                 bundle=prepared.bundle,
             )
         )
+
+    def preview_specification_source(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> SpecificationSourceCapturePreview:
+        """Read selected source sizes without a provider run or workflow mutation."""
+        registration = self._specification_source_registration
+        if registration is None:
+            message = "Specification source registration requires an injected service."
+            raise RuntimeError(message)
+        return registration.preview(request)
 
     def review_specification(
         self,

@@ -960,8 +960,13 @@ function specificationSourceRegistrationMarkup(actions) {
                 </div>
                 <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
                     <p>Root CONTEXT.md is captured automatically when present; its absence is recorded.</p>
+                    <p class="mt-1">The secure host check allows up to 96 KiB per document and 192 KiB for the complete package. No provider run is performed while checking source sizes.</p>
                 </div>
-                <button type="submit" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
+                <p data-specification-source-status="true" role="status" aria-live="polite" class="text-sm text-slate-700">Check the selected package to show its exact captured sizes before registration.</p>
+                <div class="flex flex-wrap gap-3">
+                    <button type="button" data-specification-source-preview="true" class="${BUTTON_SECONDARY}"><span>Check selected package</span></button>
+                    <button type="submit" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
+                </div>
             </form>`
         : '';
 }
@@ -4936,6 +4941,31 @@ function setSpecificationSourceRegistrationBusy(form, busy) {
     });
 }
 
+function setSpecificationSourceRegistrationStatus(form, message, isError = false) {
+    const status = form?.querySelector?.('[data-specification-source-status="true"]');
+    if (!status) return;
+    status.textContent = message;
+    status.classList?.toggle?.('text-red-700', isError);
+    status.classList?.toggle?.('text-slate-700', !isError);
+    status.setAttribute?.('role', isError ? 'alert' : 'status');
+}
+
+function specificationSourcePreviewKey(fields) {
+    return JSON.stringify({
+        source_path: fields.source_path,
+        preparation_capability: fields.preparation_capability,
+        adr_paths: fields.adr_paths,
+    });
+}
+
+function specificationSourcePreviewMessage(preview) {
+    const documents = Array.isArray(preview?.documents) ? preview.documents : [];
+    const sizes = documents.map((document) => (
+        `${document.relative_path}: ${document.byte_length} bytes`
+    )).join('; ');
+    return `Checked ${preview?.total_bytes ?? 0} bytes across ${documents.length} document(s). ${sizes} Limits: ${preview?.document_limit_bytes ?? 0} bytes per document and ${preview?.package_limit_bytes ?? 0} bytes for the complete package. No provider run was performed.`;
+}
+
 function reapplyActiveSpecificationMutation() {
     const mutation = activeSpecificationMutation;
     if (!mutation) return;
@@ -4952,6 +4982,58 @@ function reapplyActiveSpecificationMutation() {
 }
 
 function installInteractions() {
+    document.addEventListener('click', async (event) => {
+        const previewButton = event.target?.closest?.(
+            '[data-specification-source-preview="true"]',
+        );
+        if (!previewButton) return;
+        const form = previewButton.closest?.('form[data-specification-source-form="true"]');
+        if (!form || form.dataset.previewing === 'true') return;
+        const sourcePath = form.querySelector('[name="source_path"]')?.value ?? '';
+        const preparationCapability = form.querySelector('[name="preparation_capability"]')?.value ?? '';
+        const adrPaths = form.querySelector('[name="adr_paths"]')?.value ?? '';
+        const submission = specificationSourceSubmission(
+            lifecycleState.actions,
+            sourcePath,
+            preparationCapability,
+            adrPaths,
+        );
+        if (!submission.fields.source_path || !submission.fields.preparation_capability) {
+            setSpecificationSourceRegistrationStatus(
+                form,
+                'Enter a source path and select the preparation capability before checking sizes.',
+                true,
+            );
+            return;
+        }
+        form.dataset.previewing = 'true';
+        previewButton.disabled = true;
+        setSpecificationSourceRegistrationStatus(
+            form,
+            'Checking the selected package on the secure host. No provider run is performed.',
+        );
+        try {
+            const response = await requestJson(
+                `/api/projects/${selectedProjectId}/specifications/source/preview`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(submission.fields),
+                },
+            );
+            form.dataset.previewKey = specificationSourcePreviewKey(submission.fields);
+            setSpecificationSourceRegistrationStatus(
+                form,
+                specificationSourcePreviewMessage(response.data),
+            );
+        } catch (error) {
+            delete form.dataset.previewKey;
+            setSpecificationSourceRegistrationStatus(form, error.message, true);
+        } finally {
+            delete form.dataset.previewing;
+            previewButton.disabled = false;
+        }
+    });
     document.addEventListener('submit', async (event) => {
         const form = event.target;
         if (form?.id === 'human-action-form') {
@@ -4996,6 +5078,17 @@ function installInteractions() {
                 setProjectError('Select the preparation capability that produced this source.');
                 return;
             }
+            if (
+                form.dataset.previewKey
+                !== specificationSourcePreviewKey(submission.fields)
+            ) {
+                setSpecificationSourceRegistrationStatus(
+                    form,
+                    'Check the selected package before registration so AgileForge can show its exact sizes and limits.',
+                    true,
+                );
+                return;
+            }
             const submit = form.querySelector('button[type="submit"]');
             form.dataset.submitting = 'true';
             const specificationMutationToken = crypto.randomUUID();
@@ -5004,6 +5097,10 @@ function installInteractions() {
                 kind: 'source-registration',
             };
             setSpecificationSourceRegistrationBusy(form, true);
+            setSpecificationSourceRegistrationStatus(
+                form,
+                'Registering the checked source package. No provider run is performed.',
+            );
             setProjectError('');
             try {
                 await postAction(
@@ -5014,6 +5111,7 @@ function installInteractions() {
                 await loadDashboard();
             } catch (error) {
                 setProjectError(error.message);
+                setSpecificationSourceRegistrationStatus(form, error.message, true);
             } finally {
                 if (activeSpecificationMutation?.token === specificationMutationToken) {
                     activeSpecificationMutation = null;

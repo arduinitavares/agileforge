@@ -21,8 +21,8 @@ SPECIFICATION_SOURCE_SCHEMA_VERSION: str = "agileforge.specification-source.v1"
 SPECIFICATION_SOURCE_PRIMARY_ID: str = "SRC.specification-source.primary"
 SPECIFICATION_SOURCE_CONTEXT_ID: str = "SRC.specification-source.context"
 SPECIFICATION_SOURCE_ADR_ID_PREFIX: str = "SRC.specification-source.adr."
-SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES: int = 32 * 1024
-SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES: int = 96 * 1024
+SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES: int = 96 * 1024
+SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES: int = 192 * 1024
 
 Fingerprint = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 SourceId = Annotated[
