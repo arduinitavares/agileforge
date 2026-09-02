@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from workflow.contracts import TransitionResult, WorkflowErrorCode
+    from workflow.contracts import JsonObject, TransitionResult, WorkflowErrorCode
 
 
 @dataclass
@@ -48,9 +48,17 @@ class SpecificationAgenticExecutionError(RuntimeError):
         return self.message
 
 
+@dataclass
+class SpecificationOutputValidationError(SpecificationAgenticExecutionError):
+    """Typed failure carrying diagnostic metadata for invalid generated output."""
+
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
     "SpecificationAgenticExecutionError",
+    "SpecificationOutputValidationError",
     "VisionAgenticPreflightError",
 ]

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -22,6 +24,7 @@ from sqlmodel import Session, col, select
 
 from adapters.adk.agents.specification_author import (
     reject_incomplete_specification_output,
+    validate_specification_output,
 )
 from adapters.adk.errors import SpecificationAgenticExecutionError
 from adapters.adk.recipes import (
@@ -58,8 +61,9 @@ from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import RegisterSpecificationSource, RevalidateNodeAttempt
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
+    from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
@@ -71,6 +75,12 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
+
+
+def _issue_200_fixture_bytes(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 ISSUE_200_SOURCE: Path = (
     Path(__file__).parents[1] / "fixtures" / "issue_200" / "to-spec-source.md"
 )
@@ -493,6 +503,314 @@ def _latest_attempt(
     ).one()
 
 
+def _dangling_output() -> JsonObject:
+    output = deepcopy(_valid_output())
+    payload = cast("JsonObject", output["payload"])
+    payload["relations"] = [
+        {"from": "REQ.attempt-boundary", "type": "tracks", "to": "RISK.missing-source"}
+    ]
+    return output
+
+
+def test_real_leaf_dangling_endpoint_is_invalid_payload(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """Classify a dangling relation graph as an invalid payload error."""
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, _, project_id, decision, frozen, guards = _system(engine, tmp_path, leaf)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    (
+        "response_text",
+        "finish_reason",
+        "callback",
+        "expected_code",
+        "expected_message_contains",
+    ),
+    [
+        pytest.param(
+            json.dumps(_dangling_output()),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Unknown relation endpoint: RISK.missing-source.",
+            id="dangling-relation-endpoint",
+        ),
+        pytest.param(
+            (
+                '{"payload": {"schema_version": "agileforge.spec.v2", '
+                '"title": "Missing fields"}}'
+            ),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="missing-required-fields",
+        ),
+        pytest.param(
+            '{"payload": invalid}',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="malformed-json-non-eof",
+        ),
+        pytest.param(
+            '{"payload": {"schema_version": "agileforge.spec.v1"}}',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
+            "Specification structurer returned an unsupported schema.",
+            id="explicit-v1-schema",
+        ),
+        pytest.param(
+            '{"payload":',
+            types.FinishReason.STOP,
+            reject_incomplete_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="cut-off-json-old-callback",
+        ),
+        pytest.param(
+            '{"payload":',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="cut-off-json-new-callback",
+        ),
+        pytest.param(
+            json.dumps(_valid_output()),
+            types.FinishReason.MAX_TOKENS,
+            reject_incomplete_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="valid-json-max-tokens-old-callback",
+        ),
+        pytest.param(
+            json.dumps(_valid_output()),
+            types.FinishReason.MAX_TOKENS,
+            validate_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="valid-json-max-tokens-new-callback",
+        ),
+        pytest.param(
+            "",
+            types.FinishReason.SAFETY,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="empty-response-safety",
+        ),
+        pytest.param(
+            "",
+            types.FinishReason.OTHER,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="empty-response-other",
+        ),
+    ],
+)
+def test_real_runner_output_validation_classification_matrix(  # noqa: PLR0913
+    engine: Engine,
+    tmp_path: Path,
+    response_text: str,
+    finish_reason: types.FinishReason,
+    callback: Callable[[CallbackContext, LlmResponse], None],
+    expected_code: WorkflowErrorCode,
+    expected_message_contains: str,
+) -> None:
+    """Validate real-runner behavior across all generated-output failure classes."""
+    model = _SpecificationResponseLlm(
+        model="fake/classification-matrix",
+        response_text=response_text,
+        finish_reason=finish_reason,
+    )
+    leaf = Agent(
+        name="matrix_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=callback,
+    )
+    runner, _, project_id, decision, frozen, guards = _system(engine, tmp_path, leaf)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is expected_code
+    assert expected_message_contains in result.error.message
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == expected_code.value
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+def test_fake_leaf_unallowlisted_typed_code_falls_back_to_producer_failed(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """An unallowlisted typed error must fall back to producer-failed."""
+
+    class _UnallowlistedErrorLeaf(BaseAgent):
+        def __init__(self) -> None:
+            super().__init__(name="unallowlisted_leaf")
+
+        async def _run_async_impl(
+            self, ctx: InvocationContext
+        ) -> AsyncGenerator[Event, None]:
+            del ctx
+            raise SpecificationAgenticExecutionError(
+                code="UNKNOWN_CUSTOM_CODE",
+                message="Something strange happened.",
+            )
+            yield Event()  # pragma: no cover
+
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, _UnallowlistedErrorLeaf()
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "SPECIFICATION_PRODUCER_FAILED"
+
+
+def test_real_runner_max_attempts_two_makes_single_dispatch_on_invalid_output(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """Configured max_attempts=2 must not cause retry on terminal output error."""
+    model = _SpecificationResponseLlm(
+        model="fake/max-attempts-two",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="max_attempts_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    settings: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 2}
+    runner, _, _project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, execution_settings=settings
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert model.calls == ["provider"]
+
+
+def test_source_drift_after_invalid_output_post_call_revalidation_wins(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-call revalidation must detect fact drift and obsolete the attempt."""
+    model = _SpecificationResponseLlm(
+        model="fake/drift-after-invalid",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf
+    )
+    transition = domain.transition
+    drifted = False
+
+    def drift_after_provider(request: TransitionRequest) -> TransitionResult:
+        nonlocal drifted
+        if (
+            request.kind == "revalidate_node_attempt"
+            and bool(model.calls)
+            and not drifted
+        ):
+            with Session(engine) as session:
+                project = session.get(Project, project_id)
+                assert project is not None
+                project.description = "Drifted after model returned."
+                session.add(project)
+                session.commit()
+            drifted = True
+        return transition(request)
+
+    monkeypatch.setattr(domain, "transition", drift_after_provider)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "obsolete"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    "raw_bytes",
+    [
+        b"# Source\nDescription.\n",
+        b"# Source\r\nDescription.\r\n",
+    ],
+)
+def test_real_runner_preserves_exact_source_bytes_lf_and_crlf(
+    engine: Engine, tmp_path: Path, raw_bytes: bytes
+) -> None:
+    """Input assembly must preserve exact LF and CRLF source bytes."""
+    leaf = _unused_leaf("unused_structurer")
+    _, _, _, _, frozen, _ = _system(
+        engine, tmp_path, leaf, source_bytes=raw_bytes
+    )
+    parsed_input = SpecificationStructuringInput.model_validate(frozen)
+    assert parsed_input.registered_source.source.text.encode("utf-8") == raw_bytes
+
+
 def test_fact_drift_after_start_obsoletes_attempt_before_provider(
     engine: Engine,
     tmp_path: Path,
@@ -657,8 +975,8 @@ def test_incomplete_realistic_response_uses_actionable_durable_failure(
         mode="single_turn",
         after_model_callback=reject_incomplete_specification_output,
     )
-    source_bytes = ISSUE_200_SOURCE.read_bytes()
-    context_bytes = ISSUE_200_CONTEXT.read_bytes()
+    source_bytes = _issue_200_fixture_bytes(ISSUE_200_SOURCE)
+    context_bytes = _issue_200_fixture_bytes(ISSUE_200_CONTEXT)
     assert len(source_bytes) == ISSUE_200_SOURCE_BYTES
     assert hashlib.sha256(source_bytes).hexdigest() == (
         "7d1cb963d06f9e40c82204bc32093b505f6b10bc46027162104b05b4a0ba507a"
@@ -711,9 +1029,9 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
     tmp_path: Path,
 ) -> None:
     """Structure the unshortened issue fixture through the actual ADK schema path."""
-    source_bytes = ISSUE_200_SOURCE.read_bytes()
-    context_bytes = ISSUE_200_CONTEXT.read_bytes()
-    output_bytes = ISSUE_200_OUTPUT.read_bytes()
+    source_bytes = _issue_200_fixture_bytes(ISSUE_200_SOURCE)
+    context_bytes = _issue_200_fixture_bytes(ISSUE_200_CONTEXT)
+    output_bytes = _issue_200_fixture_bytes(ISSUE_200_OUTPUT)
     expected = SpecificationStructuringOutput.model_validate_json(output_bytes)
     assert len(output_bytes) > ISSUE_200_OBSERVED_TRUNCATION_CHARS
     assert (
@@ -735,7 +1053,8 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
             max_output_tokens=ISSUE_200_MAX_OUTPUT_TOKENS
         ),
         mode="single_turn",
-        after_model_callback=reject_incomplete_specification_output,
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
     )
 
     def unchanged_source(_project_id: int, _input: JsonObject) -> None:

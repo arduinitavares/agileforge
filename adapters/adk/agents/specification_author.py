@@ -10,9 +10,16 @@ from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 from pydantic_core import from_json
 
-from adapters.adk.errors import SpecificationAgenticExecutionError
+from adapters.adk.errors import (
+    SpecificationAgenticExecutionError,
+    SpecificationOutputValidationError,
+)
 from adapters.adk.prompts.specification_author import (
     SPECIFICATION_STRUCTURER_INSTRUCTIONS,
+)
+from adapters.adk.specification_output import (
+    build_specification_output_diagnostic,
+    validate_specification_response,
 )
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
@@ -30,6 +37,8 @@ from utils.runtime_config import (
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_response import LlmResponse
+
+    from workflow.contracts import JsonObject
 
 _INCOMPLETE_OUTPUT_MESSAGE: str = (
     "Specification structurer returned incomplete output. Increase "
@@ -89,6 +98,42 @@ def reject_incomplete_specification_output(
         )
 
 
+def validate_specification_output(
+    callback_context: CallbackContext,
+    llm_response: LlmResponse,
+) -> None:
+    """Validate structurer output before ADK output schema processing."""
+    text = _response_text(llm_response)
+    reason = llm_response.finish_reason
+    finish_reason = None if reason is None else reason.value
+    usage: JsonObject = {
+        "prompt_token_count": getattr(
+            llm_response.usage_metadata, "prompt_token_count", None
+        ),
+        "candidates_token_count": getattr(
+            llm_response.usage_metadata, "candidates_token_count", None
+        ),
+    }
+    try:
+        reject_incomplete_specification_output(callback_context, llm_response)
+    except SpecificationAgenticExecutionError as error:
+        raise SpecificationOutputValidationError(
+            code=error.code,
+            message=error.message,
+            diagnostic=build_specification_output_diagnostic(
+                text,
+                finish_reason=finish_reason,
+                usage=usage,
+                code=error.code,
+            ),
+        ) from None
+    validate_specification_response(
+        text,
+        finish_reason=finish_reason,
+        usage=usage,
+    )
+
+
 root_agent: Agent = Agent(
     name="specification_structurer",
     description="Structure host-owned sources into one canonical Specification.",
@@ -99,11 +144,15 @@ root_agent: Agent = Agent(
     generate_content_config=types.GenerateContentConfig.model_validate(
         get_specification_structurer_generation_config()
     ),
-    after_model_callback=reject_incomplete_specification_output,
+    after_model_callback=validate_specification_output,
     mode="single_turn",
     output_key="specification_candidate",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
 )
 
-__all__ = ["reject_incomplete_specification_output", "root_agent"]
+__all__ = [
+    "reject_incomplete_specification_output",
+    "root_agent",
+    "validate_specification_output",
+]
