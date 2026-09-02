@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import socket
-import sys
-from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
@@ -24,6 +22,7 @@ from services.vision_evidence import (
     VisionEvidenceErrorCode,
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
+from tests.conftest import _windows_testclient_socketpair
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -42,43 +41,6 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 PROJECT_ID = 41
-_ORIGINAL_SOCKET: type[socket.socket] = socket.socket
-
-
-def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
-    """Create only the loopback pair required by Windows ProactorEventLoop."""
-    with _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        address = listener.getsockname()
-        with ExitStack() as sockets:
-            client = _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.callback(client.close)
-            client.setblocking(False)
-            with suppress(BlockingIOError, InterruptedError):
-                client.connect(address)
-            client.setblocking(True)
-            accepted_fd, _ = listener._accept()  # ty: ignore[unresolved-attribute]
-            server = _ORIGINAL_SOCKET(
-                listener.family,
-                listener.type,
-                listener.proto,
-                fileno=accepted_fd,
-            )
-            sockets.callback(server.close)
-            assert server.getsockname() == client.getpeername()
-            assert client.getsockname() == server.getpeername()
-            sockets.pop_all()
-            return server, client
-
-
-@pytest.fixture(autouse=True)
-def _permit_windows_testclient_socketpair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Permit only Proactor's internal pair while pytest-socket blocks sockets."""
-    if sys.platform == "win32":
-        monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
 
 def test_testclient_transport_policy_allows_only_loopback() -> None:
