@@ -28,6 +28,7 @@ from services.specification_source_registration import (
     SpecificationSourceRegistrationErrorCode,
     SpecificationSourceRegistrationRequest,
     SpecificationSourceRegistrationService,
+    _required_open_flags,
 )
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from workflow.fingerprints import canonical_json
@@ -41,6 +42,20 @@ if TYPE_CHECKING:
 
 _EXPECTED_PROBE_CALLS = 3
 _MIDDLE_PROBE_CALL = 2
+_WINDOWS_PRIVILEGE_NOT_HELD = 1314
+
+
+def test_source_capability_reports_missing_posix_open_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported host must report capability rather than unsafe source bytes."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        _required_open_flags(directory=True)
+    assert (
+        caught.value.code
+        is SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE
+    )
 
 
 class _CountingProbe:
@@ -311,7 +326,14 @@ def test_prepare_rejects_symlink_source(engine: Engine, tmp_path: Path) -> None:
     repository = _git_repository(tmp_path)
     (repository / "real-source.md").write_bytes(b"real source\n")
     (repository / "specification.md").unlink()
-    (repository / "specification.md").symlink_to("real-source.md")
+    try:
+        (repository / "specification.md").symlink_to("real-source.md")
+    except OSError as error:
+        if getattr(error, "winerror", None) == _WINDOWS_PRIVILEGE_NOT_HELD:
+            raise pytest.skip.Exception(
+                msg="Windows user lacks symbolic-link creation privilege"
+            ) from error
+        raise
     repo = Repo(repository)
     repo.index.remove(["specification.md"])
     repo.index.add(["real-source.md", "specification.md"])

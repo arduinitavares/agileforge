@@ -292,7 +292,10 @@ def test_windows_job_runs_only_provider_free_evidence_contracts(
     expected = (
         "uv run --locked pytest "
         "tests/windows/test_vision_evidence_windows.py "
+        "tests/windows/test_specification_source_windows.py "
         "tests/services/test_vision_evidence_reader.py "
+        "tests/services/test_specification_source_registration.py "
+        "tests/services/test_specification_source_application.py "
         "tests/adapters/test_vision_bootstrap_api.py "
         "tests/adapters/test_cli_workflow_domain.py -q"
     )

@@ -6,9 +6,10 @@ import base64
 import hashlib
 import os
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
@@ -30,6 +31,16 @@ from services.contracts.specification_source import (
     specification_source_adr_id,
 )
 from services.repository_probe import RepositoryProbeError
+from services.specification_source_windows import (
+    UnsafeWindowsSourceError,
+    WindowsSpecificationSourceWorktree,
+    open_windows_source_worktree,
+)
+from services.vision_evidence_reader import (
+    RepositoryEvidenceCapability,
+    RepositoryEvidenceCapabilityError,
+    RepositoryEvidenceChangedError,
+)
 from workflow.contracts import FrozenModel
 from workflow.definitions.product_goal import (
     accepted_current_goal,
@@ -38,6 +49,8 @@ from workflow.definitions.product_goal import (
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from sqlalchemy.engine import Engine
 
     from services.repository_probe import RepositoryProbe, RepositoryProbeResult
@@ -57,6 +70,7 @@ class SpecificationSourceRegistrationErrorCode(StrEnum):
     REPOSITORY_PROVENANCE_STALE = "REPOSITORY_PROVENANCE_STALE"
     REPOSITORY_CHANGED_DURING_CAPTURE = "REPOSITORY_CHANGED_DURING_CAPTURE"
     SOURCE_LINEAGE_CHANGED = "SOURCE_LINEAGE_CHANGED"
+    CAPABILITY_UNAVAILABLE = "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
     SOURCE_MISSING = "SOURCE_MISSING"
     UNSAFE_FILE = "UNSAFE_FILE"
     INVALID_UTF8 = "INVALID_UTF8"
@@ -210,6 +224,43 @@ class SpecificationSourceRegistrationService:
     engine: Engine
     repository_probe: RepositoryProbe
 
+    def capability(self, project_id: int) -> RepositoryEvidenceCapability:
+        """Probe the source root without reading documents or hiding stale bindings."""
+        context = self._load_context(project_id)
+        self._verify_provenance(context)
+        try:
+            with _source_root(context.worktree_path):
+                pass
+        except SpecificationSourceRegistrationError as error:
+            if error.code is not (
+                SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE
+            ):
+                raise
+            self._verify_provenance(context)
+            return RepositoryEvidenceCapability(
+                available=False,
+                code="REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE",
+                message=str(error),
+            )
+        return RepositoryEvidenceCapability(available=True)
+
+    def _verify_provenance(
+        self, context: _DurableSourceContext
+    ) -> RepositoryProbeResult:
+        try:
+            observed = self.repository_probe.inspect(context.worktree_path)
+        except RepositoryProbeError as error:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
+                "Repository provenance cannot be inspected for source capture.",
+            ) from error
+        if not _probe_matches_context(observed, context):
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
+                "Repository provenance differs from the active binding.",
+            )
+        return observed
+
     def verify_prepared(
         self,
         prepared: PreparedSpecificationSourceRegistration,
@@ -260,18 +311,7 @@ class SpecificationSourceRegistrationService:
     ) -> PreparedSpecificationSourceRegistration:
         """Capture exact bytes between stable probes and recheck durable lineage."""
         context = self._load_context(request.project_id)
-        try:
-            before = self.repository_probe.inspect(context.worktree_path)
-        except RepositoryProbeError as error:
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
-                "Repository provenance cannot be inspected for source capture.",
-            ) from error
-        if not _probe_matches_context(before, context):
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
-                "Repository provenance differs from the active binding.",
-            )
+        before = self._verify_provenance(context)
 
         source, context_capture, adrs = _capture_selected_documents(
             worktree_path=context.worktree_path,
@@ -484,10 +524,9 @@ def _capture_selected_documents(
     tuple[SpecificationSourceDocument, ...],
 ]:
     """Capture the selected source set from one non-following worktree anchor."""
-    root_descriptor = _open_root(worktree_path)
     captures: list[_CapturedDocument] = []
     total_bytes = 0
-    try:
+    with _source_root(worktree_path) as root_descriptor:
         source_capture = _capture_document(
             root_descriptor,
             relative_path=source_path,
@@ -526,8 +565,6 @@ def _capture_selected_documents(
             captures.append(captured)
             adr_captures.append(captured)
             total_bytes += captured.document.byte_length
-    finally:
-        os.close(root_descriptor)
 
     if total_bytes > MAX_SPECIFICATION_SOURCE_TOTAL_BYTES:
         raise SpecificationSourceRegistrationError(
@@ -547,6 +584,39 @@ def _capture_selected_documents(
     )
 
 
+@contextmanager
+def _source_root(
+    worktree_path: str,
+) -> Iterator[int | WindowsSpecificationSourceWorktree]:
+    if os.name == "nt":
+        try:
+            with open_windows_source_worktree(Path(worktree_path)) as worktree:
+                yield worktree
+        except UnsafeWindowsSourceError as error:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.UNSAFE_FILE,
+                str(error),
+            ) from error
+        except RepositoryEvidenceCapabilityError as error:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE,
+                "Specification capture needs native 64-bit Windows and a local "
+                "NTFS/ReFS worktree with safe handle support. "
+                "This runtime or filesystem cannot provide that support.",
+            ) from error
+        except RepositoryEvidenceChangedError as error:
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.SOURCE_CHANGED_DURING_CAPTURE,
+                str(error),
+            ) from error
+        return
+    descriptor = _open_root(worktree_path)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
 def _open_root(worktree_path: str) -> int:
     flags = _required_open_flags(directory=True)
     try:
@@ -559,11 +629,40 @@ def _open_root(worktree_path: str) -> int:
 
 
 def _capture_document(
-    root_descriptor: int,
+    root_descriptor: int | WindowsSpecificationSourceWorktree,
     *,
     relative_path: str,
     source_id: str,
     required: bool,
+) -> _CapturedDocument | None:
+    if isinstance(root_descriptor, WindowsSpecificationSourceWorktree):
+        captured = root_descriptor.capture(
+            relative_path, MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
+        )
+        if captured is None:
+            if not required:
+                return None
+            raise SpecificationSourceRegistrationError(
+                SpecificationSourceRegistrationErrorCode.SOURCE_MISSING,
+                f"Selected source path is missing: {relative_path}",
+            )
+        return _document_from_bytes(
+            captured.content,
+            relative_path=relative_path,
+            source_id=source_id,
+            device=captured.volume,
+            inode=captured.file_id,
+        )
+    return _capture_posix_document(
+        root_descriptor,
+        relative_path=relative_path,
+        source_id=source_id,
+        required=required,
+    )
+
+
+def _capture_posix_document(
+    root_descriptor: int, *, relative_path: str, source_id: str, required: bool
 ) -> _CapturedDocument | None:
     parent_descriptor = os.dup(root_descriptor)
     parts = PurePosixPath(relative_path).parts
@@ -739,7 +838,19 @@ def _read_open_document(
             SpecificationSourceRegistrationErrorCode.SOURCE_CHANGED_DURING_CAPTURE,
             f"Selected source changed while it was read: {relative_path}",
         )
-    raw = bytes(content)
+    return _document_from_bytes(
+        bytes(content),
+        relative_path=relative_path,
+        source_id=source_id,
+        device=before.st_dev,
+        inode=before.st_ino,
+    )
+
+
+def _document_from_bytes(
+    raw: bytes, *, relative_path: str, source_id: str, device: int, inode: int
+) -> _CapturedDocument:
+    """Apply the same strict byte contract after either platform's safe read."""
     if len(raw) > MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES:
         raise SpecificationSourceRegistrationError(
             SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE,
@@ -762,8 +873,8 @@ def _read_open_document(
     )
     return _CapturedDocument(
         document=document,
-        device=before.st_dev,
-        inode=before.st_ino,
+        device=device,
+        inode=inode,
     )
 
 
@@ -773,13 +884,15 @@ def _required_open_flags(*, directory: bool) -> int:
     directory_flag = getattr(os, "O_DIRECTORY", None)
     if not isinstance(no_follow, int) or not isinstance(nonblock, int):
         raise SpecificationSourceRegistrationError(
-            SpecificationSourceRegistrationErrorCode.UNSAFE_FILE,
-            "This platform cannot safely capture repository source files.",
+            SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE,
+            "Specification capture requires non-following, non-blocking file opens "
+            "on this platform.",
         )
     if directory and not isinstance(directory_flag, int):
         raise SpecificationSourceRegistrationError(
-            SpecificationSourceRegistrationErrorCode.UNSAFE_FILE,
-            "This platform cannot safely traverse repository directories.",
+            SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE,
+            "Specification capture requires safe directory-descriptor traversal "
+            "on this platform.",
         )
     flags = os.O_RDONLY | no_follow | nonblock
     return flags | directory_flag if directory else flags
