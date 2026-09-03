@@ -1708,6 +1708,7 @@ def test_provider_schema_and_payload_failures_keep_stable_codes(
 def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
     engine: Engine,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Safe diagnostic is appended with correlated invocation ID and prose redaction."""
     sentinel = "PRIVATE_RESPONSE_SENTINEL_245"
@@ -1758,13 +1759,17 @@ def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
     runner, _, project_id, decision, frozen, guards = _system(
         engine, tmp_path, leaf, session_service=session_service
     )
-    result = runner.run(decision, frozen, guards=guards)
+    with caplog.at_level(logging.DEBUG):
+        result = runner.run(decision, frozen, guards=guards)
+
     assert not result.ok
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
     assert sentinel not in str(result.error)
     assert sentinel not in repr(result.error)
     assert sentinel not in result.error.message
+    assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
 
     with Session(engine) as session:
         outcome = _latest_outcome(session, project_id=project_id)
@@ -1784,14 +1789,22 @@ def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
         )
     )
     assert adk_session is not None
-    assert len(adk_session.events) >= 2  # noqa: PLR2004
+    assert len(adk_session.events) >= 3  # noqa: PLR2004
     user_event = next(ev for ev in adk_session.events if ev.author == "user")
-    assert user_event.invocation_id
-
+    leaf_event = next(
+        ev
+        for ev in adk_session.events
+        if ev.author not in ("user", "specification_output_validator")
+    )
     diag_event = next(
         ev for ev in adk_session.events if ev.author == "specification_output_validator"
     )
-    assert diag_event.invocation_id == user_event.invocation_id
+    assert user_event.invocation_id
+    assert (
+        user_event.invocation_id
+        == leaf_event.invocation_id
+        == diag_event.invocation_id
+    )
     assert diag_event.output is None
     assert diag_event.actions is not None
     diagnostic = diag_event.actions.state_delta["specification_output_diagnostic"]
@@ -1815,9 +1828,10 @@ def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
     assert adk_session.state.get("specification_output_diagnostic") == diagnostic
 
 
-def test_output_validation_failure_persists_correlated_diagnostic_sqlite(
+def test_output_validation_failure_persists_correlated_diagnostic_sqlite(  # noqa: PLR0915
     engine: Engine,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Safe diagnostic persists to a real disposable SQLite trace database."""
     sentinel = "PRIVATE_SQLITE_SENTINEL_245"
@@ -1861,16 +1875,29 @@ def test_output_validation_failure_persists_correlated_diagnostic_sqlite(
     runner, _, project_id, decision, frozen, guards = _system(
         engine, tmp_path, leaf, session_service=session_service
     )
-    result = runner.run(decision, frozen, guards=guards)
+    with caplog.at_level(logging.DEBUG):
+        result = runner.run(decision, frozen, guards=guards)
+
     assert not result.ok
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
+    assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
 
     with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
         attempt = _latest_attempt(session, project_id=project_id)
         session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
 
-    async def read_back_diagnostic() -> JsonObject:
+    async def read_back_diagnostic() -> None:
         verify_service = DatabaseSessionService(db_url=db_url)
         try:
             persisted_session = await verify_service.get_session(
@@ -1879,24 +1906,59 @@ def test_output_validation_failure_persists_correlated_diagnostic_sqlite(
                 session_id=session_id,
             )
             assert persisted_session is not None
+            assert len(persisted_session.events) >= 3  # noqa: PLR2004
+            user_event = next(
+                ev for ev in persisted_session.events if ev.author == "user"
+            )
+            leaf_event = next(
+                ev
+                for ev in persisted_session.events
+                if ev.author not in ("user", "specification_output_validator")
+            )
             diag_event = next(
                 ev
                 for ev in persisted_session.events
                 if ev.author == "specification_output_validator"
             )
-            assert diag_event.invocation_id
+            assert user_event.invocation_id
+            assert (
+                user_event.invocation_id
+                == leaf_event.invocation_id
+                == diag_event.invocation_id
+            )
             assert diag_event.output is None
-            diag = persisted_session.state["specification_output_diagnostic"]
-            assert diag["code"] == "INVALID_SPECIFICATION_PAYLOAD"
-            assert diag["missing_item_ids"] == ["REQ.missing-target"]
-            assert sentinel not in json.dumps(diag)
-            return diag
+            assert diag_event.actions is not None
+            diag_from_event = diag_event.actions.state_delta[
+                "specification_output_diagnostic"
+            ]
+            diag_from_state = persisted_session.state[
+                "specification_output_diagnostic"
+            ]
+            assert diag_from_event == diag_from_state
+            assert (
+                diag_from_state["schema_version"]
+                == "agileforge.specification-output-diagnostic.v1"
+            )
+            assert diag_from_state["stage"] == "primary"
+            assert diag_from_state["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+            assert diag_from_state["missing_item_count"] == 1
+            assert diag_from_state["missing_item_ids"] == ["REQ.missing-target"]
+            assert diag_from_state["item_count"] == 1
+            assert diag_from_state["relation_count"] == 1
+            assert diag_from_state["item_ids"] == ["REQ.item-one"]
+            assert diag_from_state["response_bytes"] == len(
+                raw_response.encode("utf-8")
+            )
+            assert (
+                diag_from_state["response_sha256"]
+                == f"sha256:{hashlib.sha256(raw_response.encode('utf-8')).hexdigest()}"
+            )
+            assert sentinel not in json.dumps(diag_from_state)
         finally:
             await verify_service.close()
             await session_service.close()
 
-    diagnostic = asyncio.run(read_back_diagnostic())
-    assert diagnostic["missing_item_count"] == 1
+    asyncio.run(read_back_diagnostic())
 
 
 class _SyntheticAppendDiagnosticError(RuntimeError):
@@ -1922,9 +1984,16 @@ def test_specification_output_diagnostic_append_failure_preserves_business_failu
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Append failure emits a fixed safe warning and preserves the original failure."""
+    sentinel = "PRIVATE_APPEND_FAIL_SENTINEL_245"
+    dangling_with_sentinel = deepcopy(_dangling_output())
+    items = cast(
+        "list[JsonObject]",
+        cast("JsonObject", dangling_with_sentinel["payload"])["items"],
+    )
+    items[0]["statement"] = f"Private statement {sentinel}"
     model = _SpecificationResponseLlm(
         model="fake/failing-diagnostic-append",
-        response_text=json.dumps(_dangling_output()),
+        response_text=json.dumps(dangling_with_sentinel),
         finish_reason=types.FinishReason.STOP,
     )
     leaf = Agent(
@@ -1941,18 +2010,24 @@ def test_specification_output_diagnostic_append_failure_preserves_business_failu
     runner, _, project_id, decision, frozen, guards = _system(
         engine, tmp_path, leaf, session_service=session_service
     )
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         result = runner.run(decision, frozen, guards=guards)
 
     assert not result.ok
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
     assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
 
     with Session(engine) as session:
         outcome = _latest_outcome(session, project_id=project_id)
         assert outcome.status == "failure"
         assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
         attempt = _latest_attempt(session, project_id=project_id)
         session_id = attempt.attempt_fingerprint
         assert not session.exec(select(SpecificationCandidate)).all()
