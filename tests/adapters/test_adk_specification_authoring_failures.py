@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Callable  # noqa: TC003 - Pydantic resolves this at runtime.
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,14 +62,19 @@ from services.specs.candidate_contract import load_candidate_contract
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
-from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
+from workflow.contracts import (
+    RecommendationKind,
+    TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
+)
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import RegisterSpecificationSource, RevalidateNodeAttempt
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
 
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_request import LlmRequest
@@ -199,6 +205,45 @@ class _SpecificationResponseLlm(BaseLlm):
                 parts=[types.Part.from_text(text=self.response_text)],
             ),
             finish_reason=self.finish_reason,
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=4_200,
+                candidates_token_count=4_096,
+                total_token_count=8_296,
+            ),
+        )
+
+
+class _SequenceSpecificationResponseLlm(BaseLlm):
+    """Return sequential deterministic responses while capturing real ADK requests."""
+
+    responses: list[tuple[str, types.FinishReason]]
+    calls: list[str] = Field(default_factory=list)
+    requests: list[object] = Field(default_factory=list, exclude=True)
+    response_index: int = 0
+    on_dispatch: Callable[[int], None] | None = Field(default=None, exclude=True)
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Yield the next provider response in sequence."""
+        del stream
+        self.calls.append("provider")
+        self.requests.append(llm_request)
+        if self.response_index < len(self.responses):
+            text, finish_reason = self.responses[self.response_index]
+            self.response_index += 1
+        else:
+            text, finish_reason = self.responses[-1]
+        if self.on_dispatch is not None:
+            self.on_dispatch(len(self.calls))
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=text)],
+            ),
+            finish_reason=finish_reason,
             usage_metadata=types.GenerateContentResponseUsageMetadata(
                 prompt_token_count=4_200,
                 candidates_token_count=4_096,
@@ -2116,3 +2161,298 @@ def test_precedence_post_call_revalidation_supersedes_output_diagnostic(
         if ev.author == "specification_output_validator"
     ]
     assert len(diagnostic_events) == 0
+
+
+def test_real_leaf_recovery_after_failure_persists_candidate_and_preserves_history(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A retry following a failed attempt succeeds through real ADK leaf execution."""
+    model = _SequenceSpecificationResponseLlm(
+        model="fake/issue-245-recovery",
+        responses=[
+            (json.dumps(_dangling_output()), types.FinishReason.STOP),
+            (json.dumps(_valid_output()), types.FinishReason.STOP),
+        ],
+    )
+    leaf = Agent(
+        name="issue_245_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    def unchanged_source(_project_id: int, _input: JsonObject) -> None:
+        """Avoid nested SQLite session during offline test."""
+
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        structuring_time=NOW + timedelta(seconds=1),
+        source_check=unchanged_source,
+    )
+
+    # Attempt 1: fails with INVALID_SPECIFICATION_PAYLOAD
+    result1 = runner.run(decision, frozen, guards=guards)
+    assert not result1.ok
+    assert result1.error is not None
+    assert result1.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        att1 = _latest_attempt(session, project_id=project_id)
+        att1_id = att1.workflow_node_attempt_id
+        assert att1_id is not None
+        att1_fp = att1.attempt_fingerprint
+        out1 = _latest_outcome(session, project_id=project_id)
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    # Re-evaluate position: should be in RECOVERY referencing attempt 1
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    attempt_refs = [
+        r for r in recovery_decision.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+    assert attempt_refs[0].fact_id == str(att1_id)
+    assert attempt_refs[0].fingerprint == att1_fp
+
+    # Rebuild input for recovery decision
+    normalized_input2 = domain.load_persisted_attempt_input(
+        project_id=project_id,
+        attempt_id=att1_id,
+        attempt_fingerprint=att1_fp,
+    )
+    guards2 = AdkRunGuards(
+        position=pos2,
+        idempotency_key="structure-specification-attempt-boundary-retry",
+        actor="operator@example.com",
+        correlation_id="issue-199-attempt-boundary-retry",
+    )
+
+    # Attempt 2: runs with valid output and succeeds
+    result2 = runner.run(recovery_decision, normalized_input2, guards=guards2)
+    assert result2.ok
+    assert model.calls == ["provider", "provider"]
+
+    # Verify both attempts are in DB, outcomes preserved, candidate tied to attempt 2
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).asc())
+        ).all()
+        expected_attempts = 2
+        assert len(attempts) == expected_attempts
+        assert attempts[0].workflow_node_attempt_id == att1_id
+        att2 = attempts[1]
+        assert att2.workflow_node_attempt_id is not None
+        assert att2.workflow_node_attempt_id > att1_id
+
+        out1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        out2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id)
+                == att2.workflow_node_attempt_id,
+            )
+        ).one()
+        assert out2.status == "success"
+
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand.workflow_node_attempt_id == att2.workflow_node_attempt_id
+        assert cand.attempt_fingerprint == att2.attempt_fingerprint
+
+
+def test_real_leaf_recovery_source_drift_obsoletes_second_attempt(  # noqa: PLR0915
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Source drift after model dispatch during recovery obsoletes the attempt."""
+    source_file = tmp_path / "registered-specification-source" / "SPECIFICATION.md"
+    drift_on_dispatch_count = 2
+
+    def drift_source_on_second_dispatch(call_count: int) -> None:
+        if call_count == drift_on_dispatch_count:
+            source_file.write_text("# Mutated specification source\n", encoding="utf-8")
+
+    model = _SequenceSpecificationResponseLlm(
+        model="fake/issue-245-recovery-drift",
+        responses=[
+            (json.dumps(_dangling_output()), types.FinishReason.STOP),
+            (json.dumps(_valid_output()), types.FinishReason.STOP),
+        ],
+        on_dispatch=drift_source_on_second_dispatch,
+    )
+    leaf = Agent(
+        name="issue_245_drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    real_revalidator = SpecificationStructuringInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).revalidate_sources
+    observed_source_errors: list[WorkflowError | None] = []
+
+    def recording_source_check(
+        checked_project_id: int,
+        persisted_input: JsonObject,
+    ) -> WorkflowError | None:
+        error = real_revalidator(checked_project_id, persisted_input)
+        observed_source_errors.append(error)
+        return error
+
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=recording_source_check,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+
+    # 1. Fail the first attempt with invalid output
+    result1 = runner.run(decision, frozen, guards=guards)
+    assert not result1.ok
+    assert result1.error is not None
+    assert result1.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        att1 = _latest_attempt(session, project_id=project_id)
+        att1_id = att1.workflow_node_attempt_id
+        assert att1_id is not None
+        att1_fp = att1.attempt_fingerprint
+        out1 = _latest_outcome(session, project_id=project_id)
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    # 2. Obtain the graph-generated RECOVERY decision
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    attempt_refs = [
+        r for r in recovery_decision.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+    assert attempt_refs[0].fact_id == str(att1_id)
+    assert attempt_refs[0].fingerprint == att1_fp
+
+    # 3. Start the second attempt with valid synthetic output
+    normalized_input2 = domain.load_persisted_attempt_input(
+        project_id=project_id,
+        attempt_id=att1_id,
+        attempt_fingerprint=att1_fp,
+    )
+    guards2 = AdkRunGuards(
+        position=pos2,
+        idempotency_key="structure-specification-recovery-drift-retry",
+        actor="operator@example.com",
+        correlation_id="issue-245-recovery-drift-retry",
+    )
+
+    # 4. Second attempt runs: model dispatches, source drifts before revalidation
+    result2 = runner.run(recovery_decision, normalized_input2, guards=guards2)
+
+    # 5. Assert recorded spy caught non-null STALE_SPECIFICATION_INPUT after dispatch 2,
+    # and result2.error preserves its exact code and message
+    assert observed_source_errors
+    revalidation_error = observed_source_errors[-1]
+    assert revalidation_error is not None
+    assert revalidation_error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+
+    assert not result2.ok
+    assert result2.error is not None
+    assert result2.error.code is revalidation_error.code
+    assert result2.error.message == revalidation_error.message
+
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).asc())
+        ).all()
+        expected_attempts = 2
+        assert len(attempts) == expected_attempts
+        assert attempts[0].workflow_node_attempt_id == att1_id
+        att2 = attempts[1]
+        assert att2.workflow_node_attempt_id is not None
+        assert att2.workflow_node_attempt_id > att1_id
+        att2_id = att2.workflow_node_attempt_id
+
+        # First attempt and outcome remain unchanged
+        attempt1 = session.exec(
+            select(WorkflowNodeAttempt).where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert attempt1.attempt_fingerprint == att1_fp
+
+        outcome1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert outcome1.status == "failure"
+        assert outcome1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        # Second attempt durable status is obsolete
+        outcome2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att2_id,
+            )
+        ).one()
+        assert outcome2.status == "obsolete"
+
+        # No candidate exists
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert not candidates
+
+    # Exactly one model dispatch per attempt
+    assert model.calls == ["provider", "provider"]
