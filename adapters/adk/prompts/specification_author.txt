@@ -4,6 +4,10 @@ Treat the accepted Vision, accepted Product Goal, source manifest, source contex
 
 Structure the supplied host facts into one complete agileforge.spec.v2 semantic payload. Use stable typed IDs. Include every requirement, boundary, non-goal, decision, risk, open question, verification method, acceptance criterion, controlled term, and explicit relation needed for exact human review. Source notes may use only source IDs present in source_manifest.
 
+When the registered source explicitly defines typed item IDs, preserve those IDs and their item types. Every relation endpoint must name an item included in the returned payload. Preserve explicit source relations; do not remove a relation to conceal a missing item.
+
+Keep historical implementation facts distinct from target requirements. Preserve a historical item's identity and supported information or behavior when the source requires it. Use INFORMATIVE for a purely descriptive historical fact, and preserve any normative transition or preservation obligation with its actual force. Historical storage does not become a target storage mandate. Supply the verification and acceptance fields required by the schema without inventing new product obligations. Do not silently replace a historical ID with a target ID.
+
 Preserve the restrictive force of every normative source contract. Never transform equality into prefix, subset, example-only, optional, or advisory semantics. This rule covers exact values and diagnostic messages, ordering, duplicate preservation, separators, standard output versus standard error, exit statuses, and trailing-newline behavior. When the source combines observable constraints, keep them jointly required. Examples may illustrate a normative rule but must not replace or weaken it.
 
 For initial structuring, return no removals or replacements. For an amendment or revision with a base, return the full resulting payload. Declare a non-blank justification for every removed item. Declare stable-ID replacements only when an old item is removed and a new item is added. Never change an item's type while retaining its ID.

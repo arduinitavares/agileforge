@@ -42,6 +42,28 @@ NORMATIVE_FIDELITY_REQUIREMENTS: tuple[str, ...] = (
         "trailing-newline behavior"
     ),
 )
+EXPLICIT_ID_AND_HISTORICAL_REQUIREMENTS: tuple[str, ...] = (
+    (
+        "When the registered source explicitly defines typed item IDs, "
+        "preserve those IDs and their item types."
+    ),
+    "Every relation endpoint must name an item included in the returned payload.",
+    (
+        "Preserve explicit source relations; do not remove a relation to conceal "
+        "a missing item."
+    ),
+    "Keep historical implementation facts distinct from target requirements.",
+    (
+        "Preserve a historical item's identity and supported information or "
+        "behavior when the source requires it."
+    ),
+    (
+        "Use INFORMATIVE for a purely descriptive historical fact, and preserve "
+        "any normative transition or preservation obligation with its actual force."
+    ),
+    "Historical storage does not become a target storage mandate.",
+    "Do not silently replace a historical ID with a target ID.",
+)
 
 
 class _CapturingLiteLlmClient(LiteLLMClient):
@@ -168,13 +190,27 @@ def test_structurer_prompt_hash_binds_the_actual_packaged_instructions() -> None
     assert contract.compute_specification_structurer_prompt_hash(instructions) == (
         contract.SPECIFICATION_STRUCTURER_PROMPT_HASH
     )
-    assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.1"
+    assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.2"
     assert contract.SPECIFICATION_STRUCTURER_PROMPT_VERSION == (
-        "agileforge.specification-structurer.prompt.v2"
+        "agileforge.specification-structurer.prompt.v3"
     )
     assert contract.SPECIFICATION_STRUCTURER_PROMPT_HASH == (
-        "sha256:88cad14ee56fde7c351b98063f375b5bd7747d4eb7f2c89191cd29b560f1d669"
+        "sha256:ecc68026d01a9ade96707e345c47d2fe07acf3fcf37da82b7a739f9cfed6d00f"
     )
+
+
+def test_changing_structurer_instructions_changes_prompt_hash() -> None:
+    """Validate that mutating primary instructions changes the computed digest."""
+    contract = importlib.import_module("services.contracts.specification_authoring")
+    prompts = importlib.import_module("adapters.adk.prompts")
+    instructions = prompts.load_prompt("specification_author.txt")
+
+    mutated_instructions = instructions + "\nAdditional test instruction."
+    mutated_hash = contract.compute_specification_structurer_prompt_hash(
+        mutated_instructions
+    )
+
+    assert mutated_hash != contract.SPECIFICATION_STRUCTURER_PROMPT_HASH
 
 
 def test_agent_advertises_the_exact_closed_structuring_contract(
@@ -212,6 +248,20 @@ def test_production_structurer_receives_normative_fidelity_instructions(
 
     assert isinstance(instructions, str)
     for requirement in NORMATIVE_FIDELITY_REQUIREMENTS:
+        assert requirement in instructions
+
+
+def test_production_structurer_receives_explicit_id_and_historical_fact_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind explicit item preservation and historical fact guidance to prompt."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+
+    instructions = module.root_agent.instruction
+
+    assert isinstance(instructions, str)
+    for requirement in EXPLICIT_ID_AND_HISTORICAL_REQUIREMENTS:
         assert requirement in instructions
 
 
