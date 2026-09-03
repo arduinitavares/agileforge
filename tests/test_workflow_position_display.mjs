@@ -3316,3 +3316,72 @@ test('planningReviewCardMarkup enables Accept when story review has valid INVEST
     assert.notStrictEqual(acceptBinding, null);
     assert.equal(acceptBinding.decision, 'accepted');
 });
+
+const terminalSpecificationCodes = [
+    'SPECIFICATION_PRODUCER_FAILED',
+    'INVALID_SPECIFICATION_PAYLOAD',
+    'UNSUPPORTED_SPECIFICATION_SCHEMA',
+    'SPECIFICATION_OUTPUT_INCOMPLETE',
+];
+
+for (const code of terminalSpecificationCodes) {
+    test(`known invalid Specification output (${code}) has a definitive failure message for initial structuring`, () => {
+        const context = loadFrontend();
+        const message = context.specificationStructuringFailureMessage(
+            { mode: 'initial' },
+            { status: 409, code, message: 'Unknown relation endpoint: RISK.missing-source.' },
+            true,
+        );
+        assert.match(message, /Specification structuring failed\./);
+        assert.match(message, /No new candidate was produced\./);
+        assert.match(message, /The registered source remains current\./);
+        assert.match(message, /RISK\.missing-source/);
+        assert.doesNotMatch(message, /outcome is uncertain/);
+    });
+
+    test(`known invalid Specification output (${code}) has a definitive failure message for amendment`, () => {
+        const context = loadFrontend();
+        const message = context.specificationStructuringFailureMessage(
+            { mode: 'same-source-feedback' },
+            { status: 409, code, message: 'Schema validation error.' },
+            false,
+        );
+        assert.match(message, /Specification structuring failed\./);
+        assert.match(message, /No new candidate was produced\./);
+        assert.match(message, /The prior candidate and Feedback remain current\./);
+        assert.match(message, /Schema validation error\./);
+        assert.doesNotMatch(message, /outcome is uncertain/);
+    });
+}
+
+test('503 network failure retains uncertain outcome message with refresh instructions', () => {
+    const context = loadFrontend();
+    const refreshedMessage = context.specificationStructuringFailureMessage(
+        { mode: 'initial' },
+        { status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Connection timed out.' },
+        true,
+    );
+    assert.match(refreshedMessage, /Specification structuring outcome is uncertain\./);
+    assert.match(refreshedMessage, /The dashboard was refreshed\. Verify the current candidate before retrying\./);
+    assert.doesNotMatch(refreshedMessage, /No new candidate was produced/);
+
+    const unrefreshedMessage = context.specificationStructuringFailureMessage(
+        { mode: 'initial' },
+        { status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Connection timed out.' },
+        false,
+    );
+    assert.match(unrefreshedMessage, /Specification structuring outcome is uncertain\./);
+    assert.match(unrefreshedMessage, /Refresh the dashboard and verify the current candidate before retrying\./);
+    assert.doesNotMatch(unrefreshedMessage, /No new candidate was produced/);
+});
+
+test('unknown 409 error retains uncertain outcome message', () => {
+    const context = loadFrontend();
+    const message = context.specificationStructuringFailureMessage(
+        { mode: 'initial' },
+        { status: 409, code: 'UNKNOWN_CONFLICT_CODE', message: 'An unexpected conflict occurred.' },
+        true,
+    );
+    assert.match(message, /Specification structuring outcome is uncertain\./);
+    assert.doesNotMatch(message, /No new candidate was produced/);
+});

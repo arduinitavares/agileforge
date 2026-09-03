@@ -2,6 +2,7 @@
 
 import importlib
 import io
+import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,8 @@ from workflow.contracts import (
     NodeDecision,
     RecommendationKind,
     TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
 
@@ -198,9 +201,14 @@ def test_semantic_lifecycle_commands_parse(command: str) -> None:
 class _SpecificationPreparationApplication:
     """Capture the two host-prepared Specification commands."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        structure_result: TransitionResult | None = None,
+    ) -> None:
         self.registered: list[object] = []
         self.structured: list[object] = []
+        self._structure_result = structure_result
 
     def register_specification_source(self, request: object) -> object:
         self.registered.append(request)
@@ -208,7 +216,7 @@ class _SpecificationPreparationApplication:
 
     def structure_specification(self, request: object) -> object:
         self.structured.append(request)
-        return cli_main.TransitionResult(ok=True)
+        return self._structure_result or cli_main.TransitionResult(ok=True)
 
 
 def test_specification_source_register_cli_sends_only_human_paths_and_metadata(
@@ -296,6 +304,44 @@ def test_specification_structure_cli_sends_only_transport_metadata(
         "correlation_id": "correlation-41",
     }
     assert '"ok": true' in capsys.readouterr().out
+
+
+def test_specification_structure_cli_returns_nonzero_on_invalid_payload(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Render terminal payload failure envelope and return a nonzero exit code."""
+    safe_message = "Specification structurer returned an invalid v2 payload."
+    failure_result = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            message=safe_message,
+        ),
+    )
+    application = _SpecificationPreparationApplication(
+        structure_result=failure_result
+    )
+
+    exit_code = cli_main.main(
+        [
+            "specification",
+            "structure",
+            "--project-id",
+            "41",
+            "--idempotency-key",
+            "structure-cli-41",
+            "--actor",
+            "operator",
+            "--correlation-id",
+            "correlation-41",
+        ],
+        application=application,
+    )
+
+    assert exit_code != 0
+    cli_payload = json.loads(capsys.readouterr().out)
+    assert cli_payload["error"]["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+    assert cli_payload["error"]["message"] == safe_message
 
 
 def test_retired_specification_author_command_is_not_parseable() -> None:

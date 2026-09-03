@@ -5054,7 +5054,14 @@ function setDeliveryActionBusy(control, busy, requestKind, keepDisabled = false)
 }
 
 function specificationStructuringFailureMessage(binding, error, refreshed) {
-    if (error?.status !== 409 || error?.code !== 'SPECIFICATION_PRODUCER_FAILED') {
+    const terminalCodes = new Set([
+        'SPECIFICATION_PRODUCER_FAILED',
+        'INVALID_SPECIFICATION_PAYLOAD',
+        'UNSUPPORTED_SPECIFICATION_SCHEMA',
+        'SPECIFICATION_OUTPUT_INCOMPLETE',
+    ]);
+    const terminalFailure = error?.status === 409 && terminalCodes.has(error?.code);
+    if (!terminalFailure) {
         const nextStep = refreshed
             ? 'The dashboard was refreshed. Verify the current candidate before retrying.'
             : 'Refresh the dashboard and verify the current candidate before retrying.';

@@ -5640,6 +5640,41 @@ def test_specification_structure_endpoint_binds_the_rendered_position(
     assert missing_guard.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+def test_specification_structure_api_returns_409_conflict_on_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate terminal payload validation errors via the 409 envelope."""
+    safe_message = "Specification structurer returned an invalid v2 payload."
+    failure_result = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            message=safe_message,
+        ),
+    )
+    application = _FakeApiApplication(transition_result=failure_result)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/structure",
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:structure-position",
+        },
+        json={
+            "idempotency_key": "structure-api-41",
+            "actor": "dashboard-user",
+            "correlation_id": "corr-api-41",
+        },
+    )
+
+    assert response.status_code == 409  # noqa: PLR2004
+    assert (
+        response.json()["detail"]["error"]["code"]
+        == "INVALID_SPECIFICATION_PAYLOAD"
+    )
+    assert response.json()["detail"]["error"]["message"] == safe_message
+
+
 def test_retired_specification_author_endpoint_is_not_registered() -> None:
     """Hard-break the retired combined authoring transport."""
     response = TestClient(api_module.app).post(
