@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import secrets
+import shutil
 import signal
 import sqlite3
 import stat
@@ -212,6 +213,16 @@ class ChildRuntimeEnvironment(BaseModel):
         alias="SPECIFICATION_STRUCTURER_MAX_TOKENS",
         gt=0,
     )
+    system_root: str | None = Field(
+        default=None,
+        alias="SystemRoot",
+        exclude=True,
+    )
+    git_executable: str | None = Field(
+        default=None,
+        alias="GIT_PYTHON_GIT_EXECUTABLE",
+        exclude=True,
+    )
 
 
 class InfoResult(BaseModel):
@@ -362,10 +373,13 @@ def _verify_business_schema(database: Path) -> SchemaValidation:
         raise SchemaVerificationError(message)
 
     try:
-        with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        try:
             rows = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
             ).fetchall()
+        finally:
+            connection.close()
     except sqlite3.Error as error:
         message = f"business database verification failed: {database}"
         raise SchemaVerificationError(message) from error
@@ -464,10 +478,50 @@ class UiReadyResult(BaseModel):
     launch_nonce: str = Field(min_length=1)
 
 
-def _launcher_child_environment(profile: RuntimeProfile) -> dict[str, str]:
+def _resolve_git_executable() -> str:
+    """Resolve and validate an absolute Git executable at the launcher boundary."""
+    candidate = os.environ.get("GIT_PYTHON_GIT_EXECUTABLE")
+    if candidate:
+        candidate_path = Path(candidate)
+        if (
+            candidate_path.is_absolute()
+            and candidate_path.is_file()
+            and os.access(candidate_path, os.X_OK)
+        ):
+            return str(candidate_path.resolve())
+        message = (
+            f"configured git executable is not a valid executable file: {candidate}"
+        )
+        raise DeveloperCommandError(message)
+
+    resolved = shutil.which("git")
+    if resolved:
+        resolved_path = Path(resolved).resolve()
+        if (
+            resolved_path.is_absolute()
+            and resolved_path.is_file()
+            and os.access(resolved_path, os.X_OK)
+        ):
+            return str(resolved_path)
+    message = "git executable could not be resolved from PATH"
+    raise DeveloperCommandError(message)
+
+
+def _launcher_child_environment(
+    profile: RuntimeProfile,
+    *,
+    git_executable: str | None = None,
+) -> dict[str, str]:
     """Add the fixed child boundary without changing the profile contract."""
     environment = profile_environment(profile)
     environment[LAUNCHER_CHILD_ENV] = LAUNCHER_CHILD_VALUE
+    if os.name == "nt":
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            environment["SystemRoot"] = system_root
+    environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
+        git_executable or _resolve_git_executable()
+    )
     return environment
 
 

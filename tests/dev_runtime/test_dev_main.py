@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -17,14 +18,18 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from git import Git
 from git.exc import GitCommandError
+from sqlmodel import create_engine
 
+from api import _checkout_commit, _runtime_provenance, _selected_git_executable
 from cli.dev_checks import CheckCommandResult
 from cli.dev_profiles import initialize_profile_record
+from models.db import ensure_business_db_ready
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from types import ModuleType
 
+_COMMIT_HASH_LENGTH = 40
 _EXPECTED_TABLES = {"projects", "spec_registry", "workflow_events"}
 _FORBIDDEN_TABLES = {"products", "sessions", "cli_" + "mutation" + "_ledger"}
 _DEFAULT_READY_TIMEOUT = 15.0
@@ -53,6 +58,8 @@ _HOSTILE_SOURCE_CONTROLS = (
     "UV_NO_EDITABLE",
     "VIRTUAL_ENV",
 )
+_WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
+_GIT_EXECUTABLE_FILE_MODE = "100755"
 
 
 def _module() -> ModuleType:
@@ -73,8 +80,16 @@ def _run_process(
     command = Git(working_dir=str(cwd))
     if env is not None:
         command.update_environment(**dict(env))
+    argv = list(arguments)
+    if os.name == "nt":
+        target = Path(argv[0])
+        if target.is_file() and target.suffix.lower() not in {".exe", ".bat", ".cmd"}:
+            posix_path = target.resolve().as_posix()
+            if len(posix_path) > 1 and posix_path[1] == ":":
+                posix_path = f"/{posix_path[0].lower()}{posix_path[2:]}"
+            argv = ["sh", posix_path, *argv[1:]]
     try:
-        output = command.execute(command=list(arguments))
+        output = command.execute(command=argv)
     except GitCommandError as error:
         status = error.status if isinstance(error.status, int) else 1
         return status, error.stdout, error.stderr
@@ -165,9 +180,13 @@ class FakeRunner:
                 business_path.parent / "profile.json"
             ).exists()
             assert not trace_path.exists()
-            with sqlite3.connect(business_path) as connection:
-                for table in sorted(self.schema_tables):
-                    connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+            connection = sqlite3.connect(business_path)
+            try:
+                with connection:
+                    for table in sorted(self.schema_tables):
+                        connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+            finally:
+                connection.close()
             return module.CommandResult(
                 arguments=arguments,
                 exit_code=self.schema_exit_code,
@@ -281,7 +300,11 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     source = launcher.read_text(encoding="utf-8")
     execution_lines = [line for line in source.splitlines() if line.startswith("exec ")]
 
-    assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
+    if os.name == "nt":
+        file_mode = _git(launcher.parent, "ls-files", "-s", "agileforge-dev")
+        assert file_mode.startswith(_GIT_EXECUTABLE_FILE_MODE)
+    else:
+        assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
     assert (launcher.parent / ".python-version").read_text(
         encoding="utf-8"
     ) == "3.13.15\n"
@@ -329,14 +352,21 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
             **os.environ,
             **hostile_environment,
             **harmless_controls,
-            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+            "PATH": f"{bin_directory}{os.pathsep}{os.environ['PATH']}",
         },
     )
 
     assert exit_code == 0
-    assert stdout.splitlines() == [
-        "--directory",
-        str(launcher.parent.resolve()),
+    output_lines = stdout.splitlines()
+    assert output_lines[0] == "--directory"
+    reported_root = output_lines[1]
+    if os.name == "nt":
+        msys_match = re.match(r"^/([a-zA-Z])/(.*)$", reported_root)
+        if msys_match:
+            drive, rest = msys_match.groups()
+            reported_root = f"{drive.upper()}:/{rest}"
+    assert Path(reported_root).resolve() == launcher.parent.resolve()
+    assert output_lines[2:] == [
         "run",
         "--locked",
         "--exact",
@@ -449,7 +479,14 @@ def test_bootstrap_rejects_symlinked_entrypoint(tmp_path: Path) -> None:
     module_path = Path(cast("str", _module().__file__))
     launcher = module_path.parents[1] / "agileforge-dev"
     linked_launcher = tmp_path / "linked-launcher"
-    linked_launcher.symlink_to(launcher)
+    try:
+        linked_launcher.symlink_to(launcher)
+    except OSError as error:
+        if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
+            )
+        raise
 
     exit_code, _stdout, stderr = _run_process(
         (str(linked_launcher), "--help"),
@@ -607,8 +644,7 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
     capsys.readouterr()
     schema_environment = runner.calls[-1][2]
     paths = module.profile_paths(checkout, "sanitized")
-    assert schema_environment is not None
-    assert schema_environment == {
+    expected_environment = {
         "AGILEFORGE_DB_URL": f"sqlite:///{paths.business_database.as_posix()}",
         "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
             f"sqlite:///{paths.trace_database.as_posix()}"
@@ -617,6 +653,13 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
         "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
+    if os.name == "nt":
+        expected_environment["SystemRoot"] = os.environ["SYSTEMROOT"]
+    expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
+        module._resolve_git_executable()
+    )
+    assert schema_environment is not None
+    assert schema_environment == expected_environment
     for secret_value in parent_values.values():
         assert secret_value not in schema_environment.values()
 
@@ -878,6 +921,13 @@ def test_info_secrets_file_reports_presence_without_credential_value(
     )
 
     captured = capsys.readouterr()
+    if not hasattr(os, "O_NOFOLLOW"):
+        assert exit_code == 1
+        assert "secrets file must be a regular file" in captured.out
+        assert credential not in captured.out
+        assert credential not in captured.err
+        return
+
     payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["provider_credentials"] == {"OPEN_ROUTER_API_KEY": True}
@@ -1000,3 +1050,248 @@ def test_schema_contract_names_removed_tables() -> None:
 
     assert set(module.EXPECTED_BUSINESS_TABLES) == _EXPECTED_TABLES
     assert set(module.FORBIDDEN_BUSINESS_TABLES) == _FORBIDDEN_TABLES
+
+
+def test_real_launcher_child_environment_preserves_windows_systemroot(
+    checkout: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve Windows SystemRoot for child asyncio while isolating credentials."""
+    module = _module()
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "must-not-leak-provider-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak-aws-secret")
+    monkeypatch.setenv("CUSTOM_PARENT_CONTROL", "parent-control-value")
+    monkeypatch.setenv("RELAX_ZDR_FOR_TESTS", "true")
+
+    profile = module.prepare_profile_record(
+        checkout, "asyncio-child", module.ProfileMode.DEVELOPMENT
+    )
+    child_environment = module._launcher_child_environment(profile)
+
+    assert child_environment["AGILEFORGE_LAUNCHER_CHILD"] == "1"
+    assert "AGILEFORGE_DB_URL" in child_environment
+    assert "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL" in child_environment
+    assert "MODEL_CONFIG_PATH" in child_environment
+    assert "SPECIFICATION_STRUCTURER_MAX_TOKENS" in child_environment
+    assert "GIT_PYTHON_GIT_EXECUTABLE" in child_environment
+
+    assert "OPEN_ROUTER_API_KEY" not in child_environment
+    assert "AWS_SECRET_ACCESS_KEY" not in child_environment
+    assert "CUSTOM_PARENT_CONTROL" not in child_environment
+    assert "RELAX_ZDR_FOR_TESTS" not in child_environment
+
+    if os.name == "nt":
+        assert "SystemRoot" in child_environment
+        assert child_environment["SystemRoot"] == os.environ["SYSTEMROOT"]
+    else:
+        assert "SystemRoot" not in child_environment
+
+    validated = module.ChildRuntimeEnvironment.model_validate(child_environment)
+    dumped = validated.model_dump(by_alias=True)
+    assert set(dumped.keys()) == {
+        "AGILEFORGE_DB_URL",
+        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
+        "AGILEFORGE_LAUNCHER_CHILD",
+        "MODEL_CONFIG_PATH",
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS",
+    }
+    assert "SystemRoot" not in dumped
+    assert "GIT_PYTHON_GIT_EXECUTABLE" not in dumped
+
+    probe = (
+        "import json, os\n"
+        "import asyncio\n"
+        "print(json.dumps({\n"
+        "    'system_root': os.environ.get('SYSTEMROOT'),\n"
+        "    'child_marker': os.environ.get('AGILEFORGE_LAUNCHER_CHILD'),\n"
+        "    'provider_present': 'OPEN_ROUTER_API_KEY' in os.environ,\n"
+        "    'aws_present': 'AWS_SECRET_ACCESS_KEY' in os.environ,\n"
+        "    'custom_present': 'CUSTOM_PARENT_CONTROL' in os.environ,\n"
+        "}))\n"
+    )
+
+    runner = module.SubprocessCommandRunner()
+    result = runner.run(
+        (sys.executable, "-c", probe),
+        cwd=checkout,
+        env=child_environment,
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["child_marker"] == "1"
+    assert payload["provider_present"] is False
+    assert payload["aws_present"] is False
+    assert payload["custom_present"] is False
+    if os.name == "nt":
+        assert payload["system_root"] == os.environ["SYSTEMROOT"]
+
+
+def test_resolve_git_executable_validates_path_and_rejects_untrusted_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate that Git resolution enforces absolute, existing, executable paths."""
+    module = _module()
+
+    # Case 1: Untrusted relative override is rejected
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", "git")
+    with pytest.raises(
+        module.DeveloperCommandError,
+        match="configured git executable is not a valid executable file: git",
+    ):
+        module._resolve_git_executable()
+
+    # Case 2: Nonexistent path is rejected
+    nonexistent = tmp_path / "does-not-exist" / "git.exe"
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(nonexistent))
+    with pytest.raises(
+        module.DeveloperCommandError,
+        match="configured git executable is not a valid executable file",
+    ):
+        module._resolve_git_executable()
+
+    # Case 3: Non-file directory is rejected
+    directory_path = tmp_path / "git_dir"
+    directory_path.mkdir()
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(directory_path))
+    with pytest.raises(
+        module.DeveloperCommandError,
+        match="configured git executable is not a valid executable file",
+    ):
+        module._resolve_git_executable()
+
+    # Case 4: Default resolution without override resolves real git from PATH
+    monkeypatch.delenv("GIT_PYTHON_GIT_EXECUTABLE", raising=False)
+    resolved = module._resolve_git_executable()
+    assert Path(resolved).is_file()
+    assert Path(resolved).is_absolute()
+    assert os.access(resolved, os.X_OK)
+
+
+def test_real_launcher_child_environment_executes_git_cli_and_dashboard_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execute GitPython, CLI, and dashboard provenance in child environment."""
+    module = _module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Tester")
+    _git(repo_root, "config", "user.email", "tester@example.invalid")
+    (repo_root / "config").mkdir()
+    models_config = Path.cwd() / "config" / "models.yaml"
+    (repo_root / "config" / "models.yaml").write_text(
+        models_config.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (repo_root / "agile_sqlmodel.py").write_text("pass\n", encoding="utf-8")
+    (repo_root / "README.md").write_text("test\n", encoding="utf-8")
+    _git(repo_root, "add", ".")
+    _git(repo_root, "commit", "-m", "init")
+
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "must-not-leak-provider-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak-aws-secret")
+    monkeypatch.setenv("CUSTOM_PARENT_CONTROL", "parent-control-value")
+
+    database_path = tmp_path / "synthetic_business.sqlite3"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    ensure_business_db_ready(engine)
+    engine.dispose()
+
+    profile = module.prepare_profile_record(
+        repo_root, "temp-exec", module.ProfileMode.DEVELOPMENT
+    )
+    child_environment = module._launcher_child_environment(profile)
+    child_environment["AGILEFORGE_DB_URL"] = f"sqlite:///{database_path.as_posix()}"
+
+    database_target = Path(
+        child_environment["AGILEFORGE_DB_URL"].removeprefix("sqlite:///")
+    ).resolve()
+    assert database_target.is_relative_to(tmp_path.resolve())
+    child_environment["ALLOW_PROD_DB_IN_TEST"] = "1"
+
+    assert "GIT_PYTHON_GIT_EXECUTABLE" in child_environment
+    assert Path(child_environment["GIT_PYTHON_GIT_EXECUTABLE"]).is_file()
+    assert "OPEN_ROUTER_API_KEY" not in child_environment
+    assert "AWS_SECRET_ACCESS_KEY" not in child_environment
+
+    probe = (
+        "import pytest_socket\n"
+        "pytest_socket.disable_socket()\n"
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from git import Repo\n"
+        "from api import _checkout_commit, _runtime_provenance, get_dashboard_config\n"
+        "root = Path(os.getcwd())\n"
+        "repo = Repo(root)\n"
+        "head_sha = repo.head.commit.hexsha\n"
+        "commit = _checkout_commit(root)\n"
+        "provenance = _runtime_provenance(root)\n"
+        "dashboard_config = get_dashboard_config()\n"
+        "print(json.dumps({\n"
+        "    'git_python_imported': True,\n"
+        "    'head_sha': head_sha,\n"
+        "    'commit': commit,\n"
+        "    'provenance': provenance,\n"
+        "    'dashboard_commit': dashboard_config.commit,\n"
+        "    'dashboard_db': str(dashboard_config.business_database),\n"
+        "    'provider_present': 'OPEN_ROUTER_API_KEY' in os.environ,\n"
+        "    'aws_present': 'AWS_SECRET_ACCESS_KEY' in os.environ,\n"
+        "}))\n"
+    )
+
+    runner = module.SubprocessCommandRunner()
+    probe_result = runner.run(
+        (sys.executable, "-c", probe),
+        cwd=repo_root,
+        env=child_environment,
+    )
+    assert probe_result.exit_code == 0, f"probe stderr:\n{probe_result.stderr}"
+    probe_payload = json.loads(probe_result.stdout)
+    assert probe_payload["git_python_imported"] is True
+    assert len(probe_payload["head_sha"]) == _COMMIT_HASH_LENGTH
+    assert probe_payload["commit"] == probe_payload["head_sha"]
+    assert probe_payload["provenance"] == probe_payload["head_sha"]
+    assert len(probe_payload["dashboard_commit"]) == _COMMIT_HASH_LENGTH
+    assert probe_payload["dashboard_db"] == str(database_path)
+    assert probe_payload["provider_present"] is False
+    assert probe_payload["aws_present"] is False
+
+    cli_probe = (
+        "import pytest_socket\n"
+        "pytest_socket.disable_socket()\n"
+        "import sys\n"
+        "from cli.main import main\n"
+        "sys.argv = ['agileforge', 'project', 'list']\n"
+        "sys.exit(main())\n"
+    )
+    cli_result = runner.run(
+        (sys.executable, "-c", cli_probe),
+        cwd=repo_root,
+        env=child_environment,
+    )
+    assert cli_result.exit_code == 0, f"cli stderr:\n{cli_result.stderr}"
+    cli_payload = json.loads(cli_result.stdout)
+    assert cli_payload["ok"] is True
+    assert cli_payload["data"]["count"] == 0
+
+
+def test_selected_git_executable_reuses_gitpython_and_ignores_later_environment_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later changes to GIT_PYTHON_GIT_EXECUTABLE do not alter API git execution."""
+    current_gitpython = getattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", None)
+    assert isinstance(current_gitpython, str)
+    assert current_gitpython
+    assert _selected_git_executable() == current_gitpython
+
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", "nonexistent-git-override")
+    assert _selected_git_executable() == current_gitpython
+
+    checkout_root = Path(__file__).resolve().parents[2]
+    commit = _checkout_commit(checkout_root)
+    assert len(commit) == _COMMIT_HASH_LENGTH
+    provenance = _runtime_provenance(checkout_root)
+    assert provenance == commit

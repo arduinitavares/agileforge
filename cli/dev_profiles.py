@@ -386,11 +386,12 @@ def _write_profile(
             os.fsync(stream.fileno())
         temporary_path.replace(paths.manifest)
         paths.manifest.chmod(_MANIFEST_MODE)
-        directory_descriptor = os.open(paths.root, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+        if os.name != "nt":
+            directory_descriptor = os.open(paths.root, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
     finally:
         if descriptor >= 0:
             os.close(descriptor)

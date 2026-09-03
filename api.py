@@ -721,17 +721,32 @@ def _database_path(environment_name: str) -> Path:
     return path
 
 
+def _selected_git_executable() -> str:
+    git_python_executable = getattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", None)
+    if isinstance(git_python_executable, str) and git_python_executable:
+        return git_python_executable
+    return os.environ.get("GIT_PYTHON_GIT_EXECUTABLE") or "git"
+
+
 def _checkout_commit(checkout_root: Path) -> str:
+    git_executable = _selected_git_executable()
     output = Git().execute(
-        command=["git", "-C", str(checkout_root), "rev-parse", "HEAD"]
+        command=[git_executable, "-C", str(checkout_root), "rev-parse", "HEAD"]
     )
     return cast("str", output).strip()
 
 
 def _runtime_provenance(checkout_root: Path) -> str:
+    git_executable = _selected_git_executable()
     try:
         top_level = Git().execute(
-            command=["git", "-C", str(checkout_root), "rev-parse", "--show-toplevel"]
+            command=[
+                git_executable,
+                "-C",
+                str(checkout_root),
+                "rev-parse",
+                "--show-toplevel",
+            ]
         )
     except GitCommandError:
         top_level = None

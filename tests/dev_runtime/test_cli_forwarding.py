@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ _JSON_FAILURE_EXIT = 9
 _INVALID_CHILD_EXIT = 13
 _INVALID_CHILD_RESULT = {"ok": False, "error": "invalid_production_cli_output"}
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
+_WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,9 +99,13 @@ def checkout(tmp_path: Path) -> Path:
         "local",
         now=datetime(2026, 8, 3, 10, tzinfo=UTC),
     )
-    with sqlite3.connect(profile.business_database) as connection:
-        for table in dev_main.EXPECTED_BUSINESS_TABLES:
-            connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+    connection = sqlite3.connect(profile.business_database)
+    try:
+        with connection:
+            for table in dev_main.EXPECTED_BUSINESS_TABLES:
+                connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+    finally:
+        connection.close()
     return root
 
 
@@ -225,10 +231,16 @@ def test_cli_forwarding_installs_only_profile_environment(
     child_environment = runner.calls[-1][2]
     assert child_environment is not None
     profile = dev_main.load_profile(checkout, "local")
-    assert child_environment == {
+    expected_environment = {
         **profile_environment(profile),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
     }
+    if os.name == "nt":
+        expected_environment["SystemRoot"] = os.environ["SYSTEMROOT"]
+    expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
+        dev_main._resolve_git_executable()
+    )
+    assert child_environment == expected_environment
     assert child_environment["SPECIFICATION_STRUCTURER_MAX_TOKENS"] == "24576"
 
 
@@ -256,24 +268,26 @@ def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(
     monkeypatch.setenv("OPEN_ROUTER_API_KEY", parent_value)
     runner = _runner(checkout)
 
-    assert (
-        dev_main.main(
-            [
-                "cli",
-                "--profile",
-                "local",
-                "--secrets-file",
-                str(secrets_file),
-                "--",
-                "project",
-                "list",
-            ],
-            checkout_root=checkout,
-            runner=runner,
-            clock=_clock(),
-        )
-        == 0
+    exit_code = dev_main.main(
+        [
+            "cli",
+            "--profile",
+            "local",
+            "--secrets-file",
+            str(secrets_file),
+            "--",
+            "project",
+            "list",
+        ],
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
     )
+    if not hasattr(os, "O_NOFOLLOW"):
+        assert exit_code == 1
+        return
+
+    assert exit_code == 0
 
     child_environment = runner.calls[-1][2]
     assert child_environment is not None
@@ -350,6 +364,10 @@ def test_cli_reads_secrets_from_one_no_follow_descriptor(
     )
 
     child_environment = runner.calls[-1][2]
+    if not hasattr(os, "O_NOFOLLOW"):
+        assert exit_code == 1
+        return
+
     assert exit_code == 0
     assert swap_count == 1
     assert child_environment is not None
@@ -369,7 +387,14 @@ def test_cli_rejects_non_regular_secrets_file(
     if kind == "symlink":
         target.write_text("OPEN_ROUTER_API_KEY=not-loaded\n", encoding="utf-8")
         selected = tmp_path / "linked.env"
-        selected.symlink_to(target)
+        try:
+            selected.symlink_to(target)
+        except OSError as error:
+            if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
+                pytest.skip(
+                    "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
+                )
+            raise
     else:
         selected = tmp_path / "secrets"
         selected.mkdir()
@@ -523,6 +548,12 @@ def test_cli_json_mode_wraps_provenance_and_redacts_secret(
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
+    if not hasattr(os, "O_NOFOLLOW"):
+        assert exit_code == 1
+        assert "secrets file must be a regular file" in payload["error"]
+        assert credential_value not in captured.out
+        return
+
     profile = dev_main.load_profile(checkout, "local")
     assert exit_code == _JSON_FAILURE_EXIT
     assert captured.err == ""

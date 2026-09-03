@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import signal
 import subprocess  # nosec B404
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib.request import urlopen
 
+import psutil
 import pytest
 
 if TYPE_CHECKING:
@@ -42,8 +45,16 @@ def _run(
     cwd: Path,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    argv = list(arguments)
+    if os.name == "nt":
+        target = Path(argv[0])
+        if target.is_file() and target.suffix.lower() not in {".exe", ".bat", ".cmd"}:
+            posix_path = target.resolve().as_posix()
+            if len(posix_path) > 1 and posix_path[1] == ":":
+                posix_path = f"/{posix_path[0].lower()}{posix_path[2:]}"
+            argv = ["sh", posix_path, *argv[1:]]
     completed = subprocess.run(  # noqa: S603  # nosec B603
-        arguments,
+        argv,
         cwd=cwd,
         env=None if env is None else dict(env),
         check=False,
@@ -92,7 +103,7 @@ def _launcher_environment(fake_bin: Path) -> dict[str, str]:
         environment.pop(key, None)
     environment.update(
         {
-            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
             "UV_OFFLINE": "1",
             "UV_NO_PROGRESS": "1",
         }
@@ -177,6 +188,12 @@ def _fake_path_shim(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     fake_agileforge.chmod(0o700)
+    if os.name == "nt":
+        fake_cmd = fake_bin / "agileforge.cmd"
+        fake_cmd.write_text(
+            "@echo PATH shim must not run 1>&2\n@exit /b 97\n",
+            encoding="utf-8",
+        )
     return fake_bin
 
 
@@ -185,18 +202,25 @@ def _start_ui_launcher(
     *,
     env: Mapping[str, str],
 ) -> subprocess.Popen[str]:
+    launcher = worktree / "agileforge-dev"
+    argv = [
+        str(launcher),
+        "ui",
+        "--profile",
+        "local",
+        "--port",
+        "auto",
+        "--json",
+        "--ready-timeout",
+        "30",
+    ]
+    if os.name == "nt":
+        posix_path = launcher.resolve().as_posix()
+        if len(posix_path) > 1 and posix_path[1] == ":":
+            posix_path = f"/{posix_path[0].lower()}{posix_path[2:]}"
+        argv = ["sh", posix_path, *argv[1:]]
     return subprocess.Popen(  # noqa: S603  # nosec B603
-        (
-            str(worktree / "agileforge-dev"),
-            "ui",
-            "--profile",
-            "local",
-            "--port",
-            "auto",
-            "--json",
-            "--ready-timeout",
-            "30",
-        ),
+        argv,
         cwd=worktree,
         env=dict(env),
         stdout=subprocess.PIPE,
@@ -221,22 +245,55 @@ def _dashboard_config(port: int) -> dict[str, object]:
 
 def _stop_launcher(process: subprocess.Popen[str]) -> None:
     if process.poll() is None:
-        process.send_signal(signal.SIGINT)
+        if os.name == "nt":
+            children: list[psutil.Process] = []
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                parent = psutil.Process(process.pid)
+                children = parent.children(recursive=True)
+            process.terminate()
+            for child in children:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    child.terminate()
+            _gone, alive = psutil.wait_procs(children, timeout=5)
+            for stubborn in alive:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    stubborn.kill()
+        else:
+            process.send_signal(signal.SIGINT)
     try:
         process.communicate(timeout=15)
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate(timeout=5)
-    assert process.returncode == 0
+    if os.name == "nt":
+        assert process.returncode in (0, 1)
+    else:
+        assert process.returncode == 0
 
 
-def _assert_process_gone(process_id: int) -> None:
-    for _attempt in range(50):
+def _assert_process_gone(process_id: int, *, attempts: int = 50) -> None:
+    access_denied_error: psutil.AccessDenied | None = None
+    for _attempt in range(attempts):
         try:
-            os.kill(process_id, 0)
-        except ProcessLookupError:
+            if not psutil.pid_exists(process_id):
+                return
+            proc = psutil.Process(process_id)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
             return
-        time.sleep(0.05)
+        except psutil.AccessDenied as error:
+            access_denied_error = error
+        if attempts > 1:
+            time.sleep(0.05)
+    if access_denied_error is not None:
+        message = (
+            f"process absence could not be verified: "
+            f"{process_id} ({access_denied_error})"
+        )
+        pytest.fail(
+            message  # ty: ignore[invalid-argument-type]
+        )
     pytest.fail(
         f"dashboard child still exists: {process_id}"  # ty: ignore[invalid-argument-type]
     )
@@ -403,3 +460,135 @@ def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
 
     for process_id in dashboard_process_ids:
         _assert_process_gone(process_id)
+
+
+def _cleanup_synthetic_process(
+    process: subprocess.Popen[str],
+    *,
+    descendants: Sequence[psutil.Process] = (),
+    child_pid: int | None = None,
+) -> None:
+    """Clean up synthetic parent and all owned descendants even if parsing failed."""
+    targets = list(descendants)
+    if not targets and process.poll() is None:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            targets = psutil.Process(process.pid).children(recursive=True)
+
+    for descendant in targets:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            descendant.kill()
+
+    if child_pid is not None:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            if psutil.pid_exists(child_pid):
+                psutil.Process(child_pid).kill()
+
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.kill()
+            process.communicate(timeout=5)
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows-specific process tree cleanup test",
+)
+def test_stop_launcher_cleans_owned_child_process_tree() -> None:
+    """Verify _stop_launcher terminates launcher and owned child process tree."""
+    child_script = "import time; time.sleep(60)"
+    code = (
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(  # noqa: S603  # nosec B603
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    child_pid: int | None = None
+    descendants: list[psutil.Process] = []
+    try:
+        assert process.stdout is not None
+        line = process.stdout.readline()
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            descendants = psutil.Process(process.pid).children(recursive=True)
+
+        child_pid = int(line.strip())
+        assert psutil.pid_exists(child_pid)
+
+        _stop_launcher(process)
+        assert process.poll() is not None
+        _assert_process_gone(child_pid)
+    finally:
+        _cleanup_synthetic_process(
+            process,
+            descendants=descendants,
+            child_pid=child_pid,
+        )
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows-specific process tree cleanup test",
+)
+def test_synthetic_process_cleanup_cleans_descendants_when_pid_parsing_fails() -> None:
+    """Verify descendants and parent are cleaned up even when PID parsing fails."""
+    child_script = "import time; time.sleep(60)"
+    code = (
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}])\n"
+        "print('MALFORMED_PID', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(  # noqa: S603  # nosec B603
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    child_pid: int | None = None
+    descendants: list[psutil.Process] = []
+    parsing_failed = False
+    try:
+        assert process.stdout is not None
+        line = process.stdout.readline()
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            descendants = psutil.Process(process.pid).children(recursive=True)
+
+        try:
+            child_pid = int(line.strip())
+        except ValueError:
+            parsing_failed = True
+
+        assert parsing_failed is True
+        assert len(descendants) >= 1
+        for descendant in descendants:
+            assert psutil.pid_exists(descendant.pid)
+    finally:
+        _cleanup_synthetic_process(
+            process,
+            descendants=descendants,
+            child_pid=child_pid,
+        )
+
+    assert process.poll() is not None
+    for descendant in descendants:
+        _assert_process_gone(descendant.pid)
+
+
+def test_assert_process_gone_fails_when_access_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AccessDenied must not be treated as successful process absence."""
+
+    def fake_process(_pid: int) -> psutil.Process:
+        raise psutil.AccessDenied(pid=12345)
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
+    monkeypatch.setattr(psutil, "Process", fake_process)
+
+    with pytest.raises(
+        pytest.fail.Exception, match="process absence could not be verified"
+    ):
+        _assert_process_gone(12345, attempts=1)
