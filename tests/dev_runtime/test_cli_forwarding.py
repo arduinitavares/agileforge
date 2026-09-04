@@ -237,6 +237,9 @@ def test_cli_forwarding_installs_only_profile_environment(
     }
     if os.name == "nt":
         expected_environment["SystemRoot"] = os.environ["SYSTEMROOT"]
+        temp_directory = dev_main._profile_temporary_directory(profile)
+        expected_environment["TEMP"] = temp_directory
+        expected_environment["TMP"] = temp_directory
     expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
         dev_main._resolve_git_executable()
     )

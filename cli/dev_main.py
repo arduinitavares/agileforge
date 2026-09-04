@@ -13,6 +13,7 @@ import sqlite3
 import stat
 import subprocess  # nosec B404
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -221,6 +222,16 @@ class ChildRuntimeEnvironment(BaseModel):
     git_executable: str | None = Field(
         default=None,
         alias="GIT_PYTHON_GIT_EXECUTABLE",
+        exclude=True,
+    )
+    temp: str | None = Field(
+        default=None,
+        alias="TEMP",
+        exclude=True,
+    )
+    tmp: str | None = Field(
+        default=None,
+        alias="TMP",
         exclude=True,
     )
 
@@ -507,6 +518,55 @@ def _resolve_git_executable() -> str:
     raise DeveloperCommandError(message)
 
 
+def _is_writable_directory(path: Path) -> bool:
+    """Verify that a path exists, is a directory, and is writable."""
+    try:
+        with tempfile.TemporaryFile(dir=path) as probe_file:
+            probe_file.write(b"ok")
+            probe_file.flush()
+    except OSError:
+        return False
+    else:
+        return True
+
+
+def _profile_temporary_directory(profile: RuntimeProfile) -> str:
+    """Derive and validate the owned profile root as child TEMP/TMP."""
+    paths = profile_paths(profile.checkout.root, profile.name)
+    root = paths.root
+    if (
+        profile.business_database.parent != root
+        or profile.trace_database.parent != root
+    ):
+        message = "profile database paths do not reside in profile root"
+        raise DeveloperCommandError(message)
+
+    if not root.is_absolute():
+        message = f"profile root is not absolute: {root}"
+        raise DeveloperCommandError(message)
+
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        message = f"profile root cannot be inspected: {root}"
+        raise DeveloperCommandError(message) from exc
+
+    if stat.S_ISLNK(metadata.st_mode):
+        message = f"profile root must not be a symlink: {root}"
+        raise DeveloperCommandError(message)
+
+    if not stat.S_ISDIR(metadata.st_mode):
+        message = f"profile root is not a directory: {root}"
+        raise DeveloperCommandError(message)
+
+    canonical_root = root.resolve(strict=True)
+    if not _is_writable_directory(canonical_root):
+        message = f"profile root is not writable: {canonical_root}"
+        raise DeveloperCommandError(message)
+
+    return str(canonical_root)
+
+
 def _launcher_child_environment(
     profile: RuntimeProfile,
     *,
@@ -519,6 +579,9 @@ def _launcher_child_environment(
         system_root = os.environ.get("SYSTEMROOT")
         if system_root:
             environment["SystemRoot"] = system_root
+        temp_directory = _profile_temporary_directory(profile)
+        environment["TEMP"] = temp_directory
+        environment["TMP"] = temp_directory
     environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
         git_executable or _resolve_git_executable()
     )
