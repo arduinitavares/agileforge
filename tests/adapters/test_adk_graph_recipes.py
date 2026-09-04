@@ -182,6 +182,7 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
             in {
                 "vision.bootstrap",
                 "vision.interview",
+                "specification.structure",
                 "planning.story.generate",
             }
             else RECIPE_MAX_ATTEMPTS

@@ -184,4 +184,4 @@ The user prompt event (`author = 'user'`), the leaf execution event (`author = '
 Automatic recovery (such as whole-candidate re-prompting with validation findings, additive missing-item patching, or automated multi-turn repair) is **explicitly deferred** pending architectural review and explicit authorization.
 
 ### P&ID Structuring Status
-The P&ID project specification structuring remains **unverified** in production until a separately authorized live execution attempt is conducted and followed by human semantic review of all items and relations.
+The P&ID project specification structuring was verified through authorized live recovery: Attempt 11 produced Candidate 2, containing 50 items and 24 relations, which received human acceptance as approved Specification Version 1. However, successful recovery does not establish the original omission's cause or guarantee future semantic completeness.
