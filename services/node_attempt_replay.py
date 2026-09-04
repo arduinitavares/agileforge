@@ -79,7 +79,9 @@ class DurableNodeAttemptReplayService:
             if receipt is None:
                 return None
             stored = StartNodeAttempt.model_validate_json(receipt.request_json)
-            if _sprint_replay_conflicts(stored, query):
+            if _sprint_replay_conflicts(
+                stored, query
+            ) or _backlog_correction_replay_conflicts(stored, query):
                 return _fact_conflict(
                     "The idempotency key was already used for different input."
                 )
@@ -243,6 +245,41 @@ def _sprint_replay_conflicts(
             != stored.normalized_input.get("team_name")
         )
     return stored_kind not in _SPRINT_OWNER_KINDS or stored_kind != requested_kind
+
+
+_BACKLOG_CORRECTION_FIELDS = frozenset(
+    {
+        "accepted_backlog_artifact_id",
+        "accepted_backlog_artifact_fingerprint",
+        "guidance",
+    }
+)
+
+
+def _backlog_correction_replay_conflicts(
+    stored: StartNodeAttempt,
+    query: NodeAttemptReplayQuery,
+) -> bool:
+    requested_semantics = query.semantic_input
+    requested = (
+        None
+        if requested_semantics is None
+        else requested_semantics.get("backlog_correction")
+    )
+    persisted = stored.normalized_input.get("backlog_correction")
+    if requested is None and persisted is None:
+        return False
+    return (
+        query.node_id != "backlog.generate"
+        or stored.target_node_id != "backlog.generate"
+        or requested_semantics is None
+        or set(requested_semantics) != {"backlog_correction"}
+        or not isinstance(requested, dict)
+        or set(requested) != _BACKLOG_CORRECTION_FIELDS
+        or not isinstance(persisted, dict)
+        or set(persisted) != _BACKLOG_CORRECTION_FIELDS
+        or persisted != requested
+    )
 
 
 def _reuses_stored_story_correction_selector(

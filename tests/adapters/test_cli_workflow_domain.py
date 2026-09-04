@@ -20,6 +20,7 @@ from cli.main import (
 )
 from cli.workflow_commands import workflow_next
 from services.application import (
+    BacklogCorrectionRequest,
     ExpectedPlanningReviewBinding,
     StoryReviewRequest,
     StorySetCorrectionRequest,
@@ -2315,3 +2316,111 @@ def test_story_item_lines_formats_sizing_rank_and_dependencies() -> None:
     dep_lines = _story_item_lines(item_with_deps, indent="  ")
     assert "  Proposed dependencies:" in dep_lines
     assert "    - Prerequisite: US-001 (explicit) - Requires US-001" in dep_lines
+
+
+class _BacklogCorrectionCliApplication:
+    """Capture the backlog correct CLI command."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def correct_backlog(self, request: object) -> TransitionResult:
+        self.calls.append(request)
+        return TransitionResult(ok=True)
+
+
+_TEST_PROJECT_ID: int = 41
+_TEST_BACKLOG_ID: int = 3
+_TEST_FP_B: str = "sha256:" + "b" * 64
+_TEST_FP_A: str = "sha256:" + "a" * 64
+
+
+def test_backlog_correct_cli_parses_and_forwards_exact_request(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parse exact synthetic command and forward one BacklogCorrectionRequest."""
+    application = _BacklogCorrectionCliApplication()
+    cmd = (
+        f"backlog correct --project-id {_TEST_PROJECT_ID} "
+        '--guidance "Split consent audit from gold publication." '
+        f"--accepted-backlog-artifact-id {_TEST_BACKLOG_ID} "
+        f"--accepted-backlog-artifact-fingerprint {_TEST_FP_B} "
+        f"--expected-decision-fingerprint {_TEST_FP_A} "
+        "--idempotency-key backlog-correct-41-01 --actor operator "
+        "--correlation-id corr-backlog-correct-41-01"
+    )
+
+    exit_code = cli_main.main(shlex.split(cmd), application=application)
+
+    assert exit_code == 0
+    assert len(application.calls) == 1
+    req = application.calls[0]
+    assert isinstance(req, BacklogCorrectionRequest)
+    assert req.project_id == _TEST_PROJECT_ID
+    assert req.guidance == "Split consent audit from gold publication."
+    assert req.accepted_backlog_artifact_id == _TEST_BACKLOG_ID
+    assert req.accepted_backlog_artifact_fingerprint == _TEST_FP_B
+    assert req.expected_decision_fingerprint == _TEST_FP_A
+    assert req.idempotency_key == "backlog-correct-41-01"
+    assert req.actor == "operator"
+    assert req.correlation_id == "corr-backlog-correct-41-01"
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_backlog_correct_cli_rejects_invalid_args() -> None:
+    """Reject missing required flags and invalid types at parser boundary."""
+    parser = build_parser()
+    with pytest.raises((SystemExit, ValueError)):
+        parser.parse_args(
+            shlex.split(
+                f"backlog correct --project-id {_TEST_PROJECT_ID} "
+                f"--accepted-backlog-artifact-id {_TEST_BACKLOG_ID} "
+                f"--accepted-backlog-artifact-fingerprint {_TEST_FP_B} "
+                f"--expected-decision-fingerprint {_TEST_FP_A} "
+                "--idempotency-key key-1 --actor operator"
+            )
+        )
+
+    with pytest.raises((SystemExit, ValueError)):
+        parser.parse_args(
+            shlex.split(
+                f"backlog correct --project-id {_TEST_PROJECT_ID} "
+                '--guidance "Valid guidance" '
+                "--accepted-backlog-artifact-id not-an-int "
+                f"--accepted-backlog-artifact-fingerprint {_TEST_FP_B} "
+                f"--expected-decision-fingerprint {_TEST_FP_A} "
+                "--idempotency-key key-1 --actor operator"
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_flag",
+    [
+        '--actor "   "',
+        '--idempotency-key "   "',
+        '--guidance "   "',
+    ],
+)
+def test_backlog_correct_cli_fails_request_validation_for_whitespace_flags(
+    invalid_flag: str,
+) -> None:
+    """Whitespace metadata fails before application is called."""
+    application = _BacklogCorrectionCliApplication()
+    cmd = (
+        f"backlog correct --project-id {_TEST_PROJECT_ID} "
+        '--guidance "Valid guidance" '
+        f"--accepted-backlog-artifact-id {_TEST_BACKLOG_ID} "
+        f"--accepted-backlog-artifact-fingerprint {_TEST_FP_B} "
+        f"--expected-decision-fingerprint {_TEST_FP_A} "
+        "--idempotency-key backlog-correct-41-01 --actor operator"
+    )
+    tokens = shlex.split(cmd)
+    override_tokens = shlex.split(invalid_flag)
+    flag_name = override_tokens[0]
+    idx = tokens.index(flag_name)
+    tokens[idx + 1] = override_tokens[1]
+
+    exit_code = cli_main.main(tokens, application=application)
+    assert exit_code != 0
+    assert len(application.calls) == 0

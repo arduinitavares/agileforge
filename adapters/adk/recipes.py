@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 
 from adapters.adk.errors import (
     AttemptRevalidationError,
@@ -133,6 +140,18 @@ class _JoinedBacklogValidations(BaseModel):
     validate_round_trip: RecipeOutput
 
 
+class _BacklogCorrectionRecipeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
+    accepted_backlog_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    guidance: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=32_768),
+    ]
+
+
 class _BacklogRecipePayload(BaseModel):
     """Provider input beside host-only Backlog persistence guards."""
 
@@ -141,6 +160,7 @@ class _BacklogRecipePayload(BaseModel):
     product_goal_artifact_id: int
     product_goal_fingerprint: str
     supersedes_backlog_artifact_id: int | None = None
+    backlog_correction: _BacklogCorrectionRecipeInput | None = None
 
 
 class _RoadmapRecipePayload(BaseModel):

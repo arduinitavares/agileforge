@@ -29,6 +29,7 @@ from repositories.project import ProjectRepository
 from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgileForgeApplication,
+    BacklogCorrectionRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
@@ -214,6 +215,25 @@ class StoryDeliveryActionApiRequest(DeliveryActionApiRequest):
     """Story delivery request with one exact caller-owned selector."""
 
     instance_key: SemanticText
+
+
+class BacklogCorrectionApiRequest(MutationApiRequest):
+    """Exact semantic request body for correcting an accepted Backlog."""
+
+    idempotency_key: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+    ]
+    actor: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+    ]
+    accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
+    accepted_backlog_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    guidance: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=32_768),
+    ]
 
 
 class StorySetCorrectionApiRequest(MutationApiRequest):
@@ -520,6 +540,16 @@ def _workflow_actions(
         and decision.request_kind in SEMANTIC_API_PATHS | DELIVERY_API_PATHS
         and planning_action_decision_is_transportable(position.project_id, decision)
         and execution_action_decision_is_transportable(decision)
+        and not (
+            decision.request_kind == "record_backlog_draft"
+            and decision.reason_code
+            in {
+                "BACKLOG_CORRECTION_AVAILABLE",
+                "BACKLOG_CORRECTION_ACTIVE",
+                "BACKLOG_CORRECTION_FAILED",
+                "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            }
+        )
     )
     semantic_counts = Counter(
         decision.request_kind
@@ -1350,6 +1380,36 @@ def generate_project_backlog(
     """Generate Backlog from host-prepared durable input."""
     return _result_payload(
         _application().generate_backlog(_delivery_request(project_id, req))
+    )
+
+
+@app.post("/api/projects/{project_id}/backlog/correct")
+def correct_project_backlog(
+    project_id: int,
+    req: BacklogCorrectionApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^sha256:[0-9a-f]{64}$",
+        ),
+    ],
+) -> dict[str, object]:
+    """Correct one exact accepted Backlog through the current graph decision."""
+    return _result_payload(
+        _application().correct_backlog(
+            BacklogCorrectionRequest(
+                project_id=project_id,
+                expected_decision_fingerprint=expected_decision,
+                accepted_backlog_artifact_id=req.accepted_backlog_artifact_id,
+                accepted_backlog_artifact_fingerprint=(
+                    req.accepted_backlog_artifact_fingerprint
+                ),
+                guidance=req.guidance,
+                **_metadata(req),
+            )
+        )
     )
 
 

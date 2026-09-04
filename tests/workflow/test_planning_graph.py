@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal, TypedDict, Unpack
+from typing import Literal, TypedDict, Unpack, cast
 
 import pytest
 from pydantic import ValidationError
@@ -25,6 +25,7 @@ from workflow.definitions.planning import (
 )
 from workflow.facts import (
     BacklogItemFact,
+    NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
     PostSprintTriageFact,
@@ -45,6 +46,7 @@ from workflow.facts import (
     VisionArtifactFact,
     WorkflowFactSnapshot,
 )
+from workflow.fingerprints import business_fact_fingerprint
 from workflow.graph import RuleCategory
 from workflow.planning_integrity import (
     active_dependency_review_edges,
@@ -2091,3 +2093,162 @@ def test_story_change_makes_reviewed_sprint_plan_stale() -> None:
     start = _node(snapshot, "planning.sprint.start")
     assert start.category is NodeCategory.INVALID
     assert start.reason_code == "SPRINT_PLAN_STALE"
+
+
+ALL_PLANNING_NODE_IDS = (
+    "planning.roadmap.generate",
+    "planning.roadmap.review",
+    "planning.story.generate",
+    "planning.story.review",
+    "planning.story_dependencies",
+    "planning.story_readiness",
+    "planning.sprint.plan",
+    "planning.sprint.review",
+    "planning.sprint.start",
+)
+
+
+@pytest.mark.parametrize("outcome", [None, "failure", "obsolete", "expired"])
+def test_all_planning_nodes_pause_during_unresolved_correction_attempt(
+    outcome: str | None,
+) -> None:
+    """All nine planning nodes block when correction attempt is unresolved."""
+    base = _snapshot()
+    current_facts = business_fact_fingerprint(base)
+    is_expired = outcome == "expired"
+    attempt = NodeAttemptFact(
+        attempt_id=99,
+        node_id="backlog.generate",
+        instance_key=None,
+        graph_version="agileforge.workflow.v2",
+        input_fingerprint="sha256:input",
+        fact_fingerprint="sha256:facts",
+        business_fact_fingerprint=current_facts,
+        decision_fingerprint="sha256:decision",
+        attempt_fingerprint="sha256:attempt-99",
+        model_id="test",
+        lease_expires_at=(
+            EVALUATED_AT - timedelta(minutes=5)
+            if is_expired
+            else EVALUATED_AT + timedelta(minutes=5)
+        ),
+        outcome=cast(
+            "Literal['success', 'failure', 'obsolete'] | None",
+            None if is_expired else outcome,
+        ),
+    )
+    snapshot = base.model_copy(update={"node_attempts": (attempt,)})
+    expected_msg = (
+        "New planning waits until the accepted Backlog correction chain "
+        "is resolved."
+    )
+    for node_id in ALL_PLANNING_NODE_IDS:
+        decision = _node(snapshot, node_id)
+        assert decision.category is NodeCategory.BLOCKED
+        assert decision.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        assert len(decision.blockers) == 1
+        assert decision.blockers[0].code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        assert decision.blockers[0].message == expected_msg
+
+
+@pytest.mark.parametrize("child_status", ["pending_review", "feedback", "rejected"])
+def test_all_planning_nodes_pause_during_unresolved_backlog_child(
+    child_status: str,
+) -> None:
+    """All nine planning nodes block when unaccepted Backlog successor exists."""
+    base = _snapshot()
+    child_backlog = PhaseArtifactFact.model_validate(
+        {
+            "artifact_type": "backlog",
+            "artifact_id": BACKLOG_ID + 1,
+            "artifact_fingerprint": "sha256:backlog-child",
+            "version_number": 2,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "product_goal_artifact_id": 1,
+            "product_goal_fingerprint": "sha256:goal",
+            "supersedes_artifact_id": BACKLOG_ID,
+            "status": child_status,
+        }
+    )
+    decisions: tuple[ReviewDecisionFact, ...] = ()
+    if child_status in {"feedback", "rejected"}:
+        decisions = (
+            ReviewDecisionFact.model_validate(
+                {
+                    "decision_id": 999,
+                    "artifact_type": "backlog",
+                    "artifact_id": BACKLOG_ID + 1,
+                    "artifact_fingerprint": "sha256:backlog-child",
+                    "decision": child_status,
+                    "decided_at": EVALUATED_AT,
+                }
+            ),
+        )
+    snapshot = base.model_copy(
+        update={
+            "phase_artifacts": (*base.phase_artifacts, child_backlog),
+            "review_decisions": (*base.review_decisions, *decisions),
+        }
+    )
+    expected_msg = (
+        "New planning waits until the accepted Backlog correction chain "
+        "is resolved."
+    )
+    for node_id in ALL_PLANNING_NODE_IDS:
+        decision = _node(snapshot, node_id)
+        assert decision.category is NodeCategory.BLOCKED
+        assert decision.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        assert len(decision.blockers) == 1
+        assert decision.blockers[0].code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        assert decision.blockers[0].message == expected_msg
+
+
+def test_planning_nodes_not_blocked_before_correction_or_after_acceptance() -> None:
+    """Planning nodes are not blocked before correction or after acceptance."""
+    base = _snapshot()
+    position = _position(base)
+    assert not any(
+        d.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        for d in position.decisions
+    )
+
+    # Accepted successor replaces parent
+    superseded_parent = base.phase_artifacts[0].model_copy(
+        update={"status": "superseded"}
+    )
+    accepted_child = PhaseArtifactFact.model_validate(
+        {
+            "artifact_type": "backlog",
+            "artifact_id": BACKLOG_ID + 1,
+            "artifact_fingerprint": "sha256:backlog-accepted-child",
+            "version_number": 2,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "product_goal_artifact_id": 1,
+            "product_goal_fingerprint": "sha256:goal",
+            "supersedes_artifact_id": BACKLOG_ID,
+            "status": "accepted",
+        }
+    )
+    child_decision = ReviewDecisionFact.model_validate(
+        {
+            "decision_id": 1000,
+            "artifact_type": "backlog",
+            "artifact_id": BACKLOG_ID + 1,
+            "artifact_fingerprint": "sha256:backlog-accepted-child",
+            "decision": "accepted",
+            "decided_at": EVALUATED_AT,
+        }
+    )
+    accepted_snapshot = base.model_copy(
+        update={
+            "phase_artifacts": (superseded_parent, accepted_child),
+            "review_decisions": (*base.review_decisions, child_decision),
+        }
+    )
+    accepted_position = _position(accepted_snapshot)
+    assert not any(
+        d.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
+        for d in accepted_position.decisions
+    )

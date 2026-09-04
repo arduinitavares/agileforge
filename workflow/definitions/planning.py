@@ -22,12 +22,16 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
-from workflow.definitions.backlog import current_backlog_lineage
+from workflow.definitions.backlog import (
+    backlog_correction_in_progress,
+    current_backlog_lineage,
+)
 from workflow.definitions.product_goal import lifecycle_is_quiescent
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
     AgenticExecutionSpec,
     ChildGraphSpec,
+    NodeRule,
     NodeSpec,
     RuleCategory,
     RuleEvaluation,
@@ -1686,6 +1690,24 @@ def _sprint_start_rule(
     return _sprint_start_evaluation(snapshot, plan, joined)
 
 
+def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
+    def _guarded_rule(
+        snapshot: WorkflowFactSnapshot,
+        evaluated_at: datetime,
+    ) -> tuple[RuleEvaluation, ...]:
+        if backlog_correction_in_progress(snapshot, evaluated_at):
+            return _blocked(
+                "BACKLOG_CORRECTION_IN_PROGRESS",
+                (
+                    "New planning waits until the accepted Backlog correction chain "
+                    "is resolved."
+                ),
+            )
+        return rule(snapshot, evaluated_at)
+
+    return _guarded_rule
+
+
 PLANNING_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
         node_id="planning.roadmap.generate",
@@ -1698,7 +1720,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="canonical_content", value_type="object"),
             InputField(name="content_fingerprint", value_type="string"),
         ),
-        evaluate_rule=_roadmap_generate_rule,
+        evaluate_rule=_pause_during_backlog_correction(_roadmap_generate_rule),
         agentic_execution=AgenticExecutionSpec(
             active_reason="ROADMAP_GENERATION_ACTIVE",
             failure_reason="ROADMAP_GENERATION_FAILED",
@@ -1716,7 +1738,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="decision", value_type="string"),
             InputField(name="rationale", value_type="string"),
         ),
-        evaluate_rule=_roadmap_review_rule,
+        evaluate_rule=_pause_during_backlog_correction(_roadmap_review_rule),
     ),
     NodeSpec(
         node_id="planning.story.generate",
@@ -1734,7 +1756,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="canonical_content", value_type="object"),
             InputField(name="content_fingerprint", value_type="string"),
         ),
-        evaluate_rule=_story_generate_rule,
+        evaluate_rule=_pause_during_backlog_correction(_story_generate_rule),
         agentic_execution=AgenticExecutionSpec(
             active_reason="STORY_GENERATION_ACTIVE",
             failure_reason="STORY_GENERATION_FAILED",
@@ -1752,7 +1774,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="decision", value_type="string"),
             InputField(name="rationale", value_type="string"),
         ),
-        evaluate_rule=_story_review_rule,
+        evaluate_rule=_pause_during_backlog_correction(_story_review_rule),
     ),
     NodeSpec(
         node_id="planning.story_dependencies",
@@ -1764,7 +1786,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="reviewed_edges", value_type="array"),
             InputField(name="source_fingerprint", value_type="string"),
         ),
-        evaluate_rule=_story_dependencies_rule,
+        evaluate_rule=_pause_during_backlog_correction(_story_dependencies_rule),
     ),
     NodeSpec(
         node_id="planning.story_readiness",
@@ -1779,7 +1801,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
                 value_type="string",
             ),
         ),
-        evaluate_rule=_story_readiness_rule,
+        evaluate_rule=_pause_during_backlog_correction(_story_readiness_rule),
     ),
     NodeSpec(
         node_id="planning.sprint.plan",
@@ -1792,7 +1814,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="spec_hash", value_type="string"),
             InputField(name="planner_output", value_type="object"),
         ),
-        evaluate_rule=_sprint_plan_rule,
+        evaluate_rule=_pause_during_backlog_correction(_sprint_plan_rule),
         agentic_execution=AgenticExecutionSpec(
             active_reason="SPRINT_PLANNING_ACTIVE",
             failure_reason="SPRINT_PLANNING_FAILED",
@@ -1810,7 +1832,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="decision", value_type="string"),
             InputField(name="rationale", value_type="string"),
         ),
-        evaluate_rule=_sprint_review_rule,
+        evaluate_rule=_pause_during_backlog_correction(_sprint_review_rule),
     ),
     NodeSpec(
         node_id="planning.sprint.start",
@@ -1818,7 +1840,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
         request_kind="start_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(),
-        evaluate_rule=_sprint_start_rule,
+        evaluate_rule=_pause_during_backlog_correction(_sprint_start_rule),
     ),
 )
 

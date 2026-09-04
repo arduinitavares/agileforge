@@ -4040,6 +4040,203 @@ def test_apply_dependencies_rejects_cycle_without_persisting_edges(
         assert session.exec(select(StoryDependencyReview)).all() == []
 
 
+def _setup_backlog_a_with_failed_roadmap(
+    engine: Engine,
+    domain: WorkflowDomain,
+    project_id: int,
+) -> None:
+    from workflow.fingerprints import (  # noqa: PLC0415
+        business_fact_fingerprint,
+        fact_fingerprint,
+    )
+
+    pos = domain.position(project_id)
+    content = _roadmap_content("Plan immutable work")
+    backlog_ref = _decision(pos, "planning.roadmap.generate").fact_references[0]
+    recorded_roadmap = domain.transition(
+        RecordRoadmapDraft(
+            **_guards(pos, "planning.roadmap.generate"),
+            idempotency_key="record-roadmap-draft-a",
+            backlog_artifact_id=int(backlog_ref.fact_id),
+            backlog_artifact_fingerprint=backlog_ref.fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_roadmap_artifact_id=None,
+        )
+    )
+    assert recorded_roadmap.ok is True
+    roadmap_a_id = _output_int(recorded_roadmap, "roadmap_artifact_id")
+    roadmap_a_fingerprint = str(recorded_roadmap.output["content_fingerprint"])
+
+    pos = domain.position(project_id)
+    reviewed_roadmap = domain.transition(
+        DecideRoadmap(
+            **_guards(pos, "planning.roadmap.review"),
+            idempotency_key="feedback-roadmap-a",
+            roadmap_artifact_id=roadmap_a_id,
+            artifact_fingerprint=roadmap_a_fingerprint,
+            decision="feedback",
+            rationale="Reorder milestone priorities.",
+        )
+    )
+    assert reviewed_roadmap.ok is True
+
+    pos = domain.position(project_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        attempt = WorkflowNodeAttempt(
+            workflow_node_attempt_id=18,
+            project_id=project_id,
+            node_id="planning.roadmap.generate",
+            graph_version=pos.graph_version,
+            fact_fingerprint=fact_fingerprint(snapshot),
+            business_fact_fingerprint=business_fact_fingerprint(snapshot),
+            decision_fingerprint="sha256:roadmap-dec-18",
+            normalized_input_json="{}",
+            input_fingerprint="sha256:input-18",
+            model_id="test",
+            execution_settings_json="{}",
+            idempotency_key="failed-roadmap-att-18",
+            actor="operator@example.com",
+            started_at=EVALUATED_AT,
+            lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+            attempt_fingerprint="sha256:att-18",
+        )
+        outcome = WorkflowNodeAttemptOutcome(
+            workflow_node_attempt_id=18,
+            project_id=project_id,
+            status="failure",
+            failure_code="INTERNAL_ERROR",
+            failure_message="Provider failed.",
+            recorded_at=EVALUATED_AT + timedelta(minutes=1),
+        )
+        session.add(attempt)
+        session.add(outcome)
+        session.commit()
+
+
+def test_backlog_correction_accepted_successor_starts_clean_roadmap_lineage(
+    engine: Engine,
+) -> None:
+    """Corrected Backlog successor begins clean Roadmap lineage."""
+    from workflow.definitions.root import project_graph  # noqa: PLC0415
+    from workflow.requests.product_definition import (  # noqa: PLC0415
+        DecideBacklog,
+        RecordBacklogDraft,
+    )
+
+    # 1. Accepted Backlog A
+    project_id = _seed_accepted_backlog(
+        engine,
+        requirements=("Plan immutable work",),
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=EVALUATED_AT),
+    )
+
+    # 2. Record Roadmap under Backlog A, review feedback, and inject failed attempt 18
+    _setup_backlog_a_with_failed_roadmap(engine, domain, project_id)
+
+    # Verify attempt 18 put roadmap generation into recovery/failed
+    pos_failed = domain.position(project_id)
+    roadmap_failed_dec = _decision(pos_failed, "planning.roadmap.generate")
+    assert any(
+        ref.fact_type == "node_attempt"
+        for ref in roadmap_failed_dec.fact_references
+    )
+
+    # 4. Record pending Backlog B superseding A
+    new_backlog_content = _backlog_content("Plan immutable work with revised scope")
+    new_backlog_hash = canonical_hash(new_backlog_content)
+    with Session(engine) as session:
+        backlog_a = session.exec(
+            select(BacklogArtifact).where(BacklogArtifact.project_id == project_id)
+        ).one()
+    record_b_result = domain.transition(
+        RecordBacklogDraft(
+            **_guards(pos_failed, "backlog.generate"),
+            idempotency_key="record-backlog-b",
+            spec_version_id=int(backlog_a.spec_version_id or 0),
+            spec_hash=str(backlog_a.spec_hash),
+            product_goal_artifact_id=int(backlog_a.product_goal_artifact_id or 0),
+            product_goal_fingerprint=str(backlog_a.product_goal_fingerprint),
+            canonical_content=new_backlog_content,
+            content_fingerprint=new_backlog_hash,
+            supersedes_backlog_artifact_id=backlog_a.backlog_artifact_id,
+        )
+    )
+    assert record_b_result.ok is True
+    backlog_b_id = _output_int(record_b_result, "backlog_artifact_id")
+
+    # 5. While Backlog B is pending review, assert planning is blocked
+    pos_pending = domain.position(project_id)
+    planning_node_ids = (
+        "planning.roadmap.generate",
+        "planning.roadmap.review",
+        "planning.story.generate",
+        "planning.story.review",
+        "planning.story_dependencies",
+        "planning.story_readiness",
+        "planning.sprint.plan",
+        "planning.sprint.review",
+        "planning.sprint.start",
+    )
+    for node_id in planning_node_ids:
+        dec = _decision(pos_pending, node_id)
+        assert dec.category is NodeCategory.BLOCKED
+        assert dec.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
+
+    # 6. Accepted review for Backlog B
+    review_dec = _decision(pos_pending, "backlog.review")
+    assert review_dec.category is NodeCategory.WAITING
+    decide_result = domain.transition(
+        DecideBacklog(
+            project_id=project_id,
+            graph_version=pos_pending.graph_version,
+            fact_fingerprint=pos_pending.fact_fingerprint,
+            decision_fingerprint=review_dec.decision_fingerprint,
+            idempotency_key="accept-backlog-b",
+            actor="operator@example.com",
+            backlog_artifact_id=backlog_b_id,
+            artifact_fingerprint=new_backlog_hash,
+            decision="accepted",
+            rationale="Accepted corrected backlog B.",
+        )
+    )
+    assert decide_result.ok is True
+
+    # 7. Assert planning.roadmap.generate is AVAILABLE and bound to Backlog B
+    pos_final = domain.position(project_id)
+    roadmap_gen_dec = _decision(pos_final, "planning.roadmap.generate")
+    assert roadmap_gen_dec.category is NodeCategory.AVAILABLE
+    assert roadmap_gen_dec.reason_code == "ROADMAP_GENERATION_REQUIRED"
+    assert roadmap_gen_dec.recommendation_kind is RecommendationKind.REQUIRED
+
+    # Bound to Backlog B:
+    backlog_refs = [
+        ref for ref in roadmap_gen_dec.fact_references if ref.fact_type == "backlog"
+    ]
+    assert len(backlog_refs) == 1
+    assert backlog_refs[0].fact_id == str(backlog_b_id)
+    assert backlog_refs[0].fingerprint == new_backlog_hash
+
+    # No attempt 18 reference:
+    attempt_refs = [
+        ref
+        for ref in roadmap_gen_dec.fact_references
+        if ref.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 0
+
+    # No old roadmap/feedback reference:
+    roadmap_refs = [
+        ref for ref in roadmap_gen_dec.fact_references if ref.fact_type == "roadmap"
+    ]
+    assert len(roadmap_refs) == 0
+
+
 def test_transition_adapter_rejects_unknown_request_shape() -> None:
     """Reject unknown planning transition request shapes."""
     adapter = TypeAdapter(TransitionRequest)

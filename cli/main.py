@@ -19,6 +19,7 @@ from cli.workflow_commands import (
 )
 from services.agent_workbench.version import agileforge_version
 from services.application import (
+    BacklogCorrectionRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
@@ -202,6 +203,11 @@ class _Application(Protocol):
     ) -> TransitionResult: ...
 
     def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
+    def correct_backlog(
+        self,
+        request: BacklogCorrectionRequest,
+    ) -> TransitionResult: ...
 
     def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult: ...
 
@@ -723,6 +729,23 @@ def _install_lifecycle_mutations(
         generate = _semantic_leaf(branches[(group,)], "generate", handler)
         generate.add_argument("--instance-key", required=group == "story")
 
+    backlog_correct = _semantic_leaf(
+        branches[("backlog",)],
+        "correct",
+        _backlog_correct,
+    )
+    backlog_correct.add_argument("--guidance", required=True)
+    backlog_correct.add_argument("--expected-decision-fingerprint", required=True)
+    backlog_correct.add_argument(
+        "--accepted-backlog-artifact-id",
+        type=int,
+        required=True,
+    )
+    backlog_correct.add_argument(
+        "--accepted-backlog-artifact-fingerprint",
+        required=True,
+    )
+
     story_correct = _semantic_leaf(
         branches[("story",)],
         "correct",
@@ -1211,6 +1234,27 @@ def _delivery_action_request(args: argparse.Namespace) -> DeliveryActionRequest:
 
 def _backlog_generate(args: argparse.Namespace, application: _Application) -> int:
     return _emit_result(application.generate_backlog(_delivery_action_request(args)))
+
+
+def _backlog_correct(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.correct_backlog(
+            BacklogCorrectionRequest(
+                project_id=args.project_id,
+                expected_decision_fingerprint=(
+                    args.expected_decision_fingerprint
+                ),
+                accepted_backlog_artifact_id=args.accepted_backlog_artifact_id,
+                accepted_backlog_artifact_fingerprint=(
+                    args.accepted_backlog_artifact_fingerprint
+                ),
+                guidance=args.guidance,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
 
 
 def _roadmap_generate(args: argparse.Namespace, application: _Application) -> int:
