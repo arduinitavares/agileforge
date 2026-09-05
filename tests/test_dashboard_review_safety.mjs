@@ -227,6 +227,47 @@ test('only the exact no-current-review conflict becomes absence', async () => {
     );
 });
 
+test('dashboard treats 409 PLANNING_REVIEW_NOT_AVAILABLE as absent review without throwing and exposes no correction action', async () => {
+    const fetchAbsence = async (url) => {
+        if (url.includes('/backlog/review')) {
+            return {
+                ok: false,
+                status: 409,
+                text: async () => JSON.stringify({
+                    detail: {
+                        errors: [{ code: 'PLANNING_REVIEW_NOT_AVAILABLE', message: 'No planning review is currently available.' }],
+                    },
+                }),
+            };
+        }
+        return { ok: true, text: async () => '{}' };
+    };
+    const context = loadFrontend(fetchAbsence);
+    const reviewResult = await context.requestPlanningReview('/api/projects/41/backlog/review', {});
+    assert.equal(Object.keys(reviewResult.data).length, 0);
+
+    // When delivery panel renders with empty backlog review (absent) and no correction actions
+    const position = {
+        decisions: [
+            {
+                node_id: 'backlog.generate',
+                category: 'available',
+                recommendation_kind: 'optional_reentry',
+                reason_code: 'BACKLOG_CORRECTION_AVAILABLE',
+                decision_fingerprint: 'sha256:dec',
+                fact_references: [],
+            },
+        ],
+    };
+    const actions = [];
+    const markup = context.deliveryPanelMarkup(position, { backlog: reviewResult.data }, actions);
+    assert.ok(!markup.includes('data-backlog-feedback-projection-error="true"'));
+    assert.ok(!markup.includes('data-planning-review="backlog"'));
+    assert.ok(!markup.includes('data-backlog-correction-action="true"'));
+    assert.ok(!markup.includes('data-backlog-feedback-continuation="true"'));
+});
+
+
 test('dashboard keeps exact planning binding in memory only', () => {
     const context = loadFrontend();
     const backlog = context.planningReviewBinding(

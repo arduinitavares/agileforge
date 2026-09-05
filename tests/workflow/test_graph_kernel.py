@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -24,7 +24,9 @@ from workflow.facts import (
     StoryFact,
     WorkflowFactSnapshot,
 )
+from workflow.fingerprints import business_fact_fingerprint, canonical_hash
 from workflow.graph import (
+    AgenticExecutionSpec,
     ChildGraphSpec,
     NodeRule,
     NodeSpec,
@@ -96,6 +98,40 @@ def _graph(*nodes: NodeSpec, graph_version: str = GRAPH_VERSION) -> WorkflowGrap
             nodes=(),
             children=(ChildGraphSpec(child_graph_id="test", nodes=nodes),),
         ),
+    )
+
+
+def _agentic_graph(  # noqa: PLR0913
+    reason_code: str = "READY",
+    *,
+    node_id: str = "test.execute",
+    recommendation_kind: RecommendationKind = RecommendationKind.REQUIRED,
+    active_reason: str = "TEST_ACTIVE",
+    failure_reason: str = "TEST_FAILED",
+    recovery_reason: str = "TEST_RECOVERY_REQUIRED",
+    evaluate_rule: NodeRule | None = None,
+) -> WorkflowGraph:
+    """Build a one-node agentic graph for kernel testing."""
+    evaluation = RuleEvaluation(
+        category=RuleCategory.AVAILABLE,
+        reason_code=reason_code,
+        recommendation_kind=recommendation_kind,
+    )
+    rule = evaluate_rule or _constant_rule(evaluation)
+    return _graph(
+        NodeSpec(
+            node_id=node_id,
+            child_graph_id="test",
+            request_kind=f"{node_id}.request",
+            recommendation_kind=recommendation_kind,
+            required_inputs=(InputField(name="payload", value_type="object"),),
+            evaluate_rule=rule,
+            agentic_execution=AgenticExecutionSpec(
+                active_reason=active_reason,
+                failure_reason=failure_reason,
+                recovery_reason=recovery_reason,
+            ),
+        )
     )
 
 
@@ -493,3 +529,144 @@ def test_graph_construction_rejects_duplicate_identifiers(
     """Reject ambiguous node and child graph identities at construction."""
     with pytest.raises(ValueError, match="Duplicate"):
         graph_factory()
+
+
+@pytest.mark.parametrize("outcome", [None, "failure", "obsolete", "success"])
+def test_agentic_overlay_ignores_attempt_from_prior_business_facts(
+    outcome: Literal["success", "failure", "obsolete"] | None,
+) -> None:
+    """Ignore attempts from prior business facts for all attempt outcomes."""
+    snapshot = _snapshot()
+    stale_attempt = NodeAttemptFact(
+        attempt_id=19,
+        node_id="test.execute",
+        instance_key=None,
+        graph_version=GRAPH_VERSION,
+        input_fingerprint="sha256:input",
+        fact_fingerprint="sha256:facts",
+        business_fact_fingerprint=canonical_hash({"prior": True}),
+        decision_fingerprint="sha256:decision",
+        attempt_fingerprint="sha256:attempt",
+        model_id="fixed-model",
+        lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+        outcome=outcome,
+    )
+    graph = _agentic_graph(reason_code="READY")
+
+    decision = graph.evaluate(
+        snapshot.model_copy(update={"node_attempts": (stale_attempt,)}),
+        EVALUATED_AT,
+    ).decisions[0]
+
+    assert decision.category is NodeCategory.AVAILABLE
+    assert decision.reason_code == "READY"
+    assert decision.recommendation_kind is RecommendationKind.REQUIRED
+
+
+def test_agentic_overlay_preserves_active_attempt_on_current_business_facts() -> None:
+    """Keep waiting category and active reason for current-facts active attempts."""
+    snapshot = _snapshot()
+    attempt = NodeAttemptFact(
+        attempt_id=19,
+        node_id="test.execute",
+        instance_key=None,
+        graph_version=GRAPH_VERSION,
+        input_fingerprint="sha256:input",
+        fact_fingerprint="sha256:facts",
+        business_fact_fingerprint=business_fact_fingerprint(snapshot),
+        decision_fingerprint="sha256:decision",
+        attempt_fingerprint="sha256:attempt",
+        model_id="fixed-model",
+        lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+        outcome=None,
+    )
+    graph = _agentic_graph(reason_code="READY")
+
+    decision = graph.evaluate(
+        snapshot.model_copy(update={"node_attempts": (attempt,)}),
+        EVALUATED_AT,
+    ).decisions[0]
+
+    assert decision.category is NodeCategory.WAITING
+    assert decision.reason_code == "TEST_ACTIVE"
+
+
+def test_agentic_overlay_preserves_failed_attempt_on_current_business_facts() -> None:
+    """Overlay failure reason and reference for current-facts failed attempts."""
+    snapshot = _snapshot()
+    attempt = NodeAttemptFact(
+        attempt_id=19,
+        node_id="test.execute",
+        instance_key=None,
+        graph_version=GRAPH_VERSION,
+        input_fingerprint="sha256:input",
+        fact_fingerprint="sha256:facts",
+        business_fact_fingerprint=business_fact_fingerprint(snapshot),
+        decision_fingerprint="sha256:decision",
+        attempt_fingerprint="sha256:attempt",
+        model_id="fixed-model",
+        lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+        outcome="failure",
+    )
+    graph = _agentic_graph(reason_code="READY")
+
+    decision = graph.evaluate(
+        snapshot.model_copy(update={"node_attempts": (attempt,)}),
+        EVALUATED_AT,
+    ).decisions[0]
+
+    assert decision.category is NodeCategory.AVAILABLE
+    assert decision.reason_code == "TEST_FAILED"
+    assert decision.recommendation_kind is RecommendationKind.RECOVERY
+    assert decision.fact_references == (
+        FactReference(
+            fact_type="node_attempt",
+            fact_id="19",
+            fingerprint=attempt.attempt_fingerprint,
+        ),
+    )
+
+
+def test_decision_refs_ignore_stale_attempt_for_intrinsic_recovery() -> None:
+    """Recovery decisions do not attach attempts from older business facts."""
+    intrinsic_ref = FactReference(
+        fact_type="intrinsic",
+        fact_id="1",
+        fingerprint="sha256:intrinsic",
+    )
+    evaluation = RuleEvaluation(
+        category=RuleCategory.AVAILABLE,
+        reason_code="INTRINSIC_RECOVERY",
+        recommendation_kind=RecommendationKind.RECOVERY,
+        fact_references=(intrinsic_ref,),
+    )
+    graph = _agentic_graph(
+        reason_code="INTRINSIC_RECOVERY",
+        recommendation_kind=RecommendationKind.RECOVERY,
+        evaluate_rule=_constant_rule(evaluation),
+    )
+    snapshot = _snapshot()
+    stale_failed_attempt = NodeAttemptFact(
+        attempt_id=20,
+        node_id="test.execute",
+        instance_key=None,
+        graph_version=GRAPH_VERSION,
+        input_fingerprint="sha256:input",
+        fact_fingerprint="sha256:facts",
+        business_fact_fingerprint=canonical_hash({"prior": True}),
+        decision_fingerprint="sha256:decision",
+        attempt_fingerprint="sha256:attempt",
+        model_id="fixed-model",
+        lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+        outcome="failure",
+    )
+
+    decision = graph.evaluate(
+        snapshot.model_copy(update={"node_attempts": (stale_failed_attempt,)}),
+        EVALUATED_AT,
+    ).decisions[0]
+
+    assert decision.category is NodeCategory.AVAILABLE
+    assert decision.reason_code == "INTRINSIC_RECOVERY"
+    assert decision.recommendation_kind is RecommendationKind.RECOVERY
+    assert decision.fact_references == (intrinsic_ref,)

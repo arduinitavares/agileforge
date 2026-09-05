@@ -21,6 +21,7 @@ from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from subprocess import Popen  # nosec B404  # type-only process annotation
 
 
 @pytest.fixture
@@ -88,6 +89,48 @@ def test_clean_branch_returns_identity_and_empty_status(git_repository: Path) ->
     assert result.status_entries == ()
     assert result.warnings == ()
     assert result.probe_version == "agileforge.repository-probe.v1"
+
+
+@pytest.mark.parametrize("fail_head_read", [False, True], ids=["success", "error"])
+def test_probe_reaps_git_process_before_returning_or_raising(
+    git_repository: Path,
+    fail_head_read: bool,
+) -> None:
+    """Release the owned Git subprocess without relying on garbage collection."""
+    opened_repositories: list[Repo] = []
+    processes: list[Popen[bytes]] = []
+
+    def read_head(repo: Repo) -> str:
+        if not opened_repositories:
+            opened_repositories.append(repo)
+            # HEAD validation has already started the real cached cat-file process.
+            cached_command = repo.git.cat_file_header
+            assert cached_command is not None
+            process = cached_command.proc
+            assert process is not None
+            processes.append(process)
+        if fail_head_read:
+            message = "HEAD metadata became unreadable"
+            raise OSError(message)
+        return repo.head.commit.hexsha
+
+    probe = GitPythonRepositoryProbe(_read_head_sha=read_head)
+    try:
+        if fail_head_read:
+            with pytest.raises(RepositoryProbeError) as caught:
+                probe.inspect(git_repository)
+            assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+        else:
+            assert probe.inspect(git_repository).dirty is False
+
+        assert len(processes) == 1
+        # Do not poll here: the probe must have waited for its process already.
+        assert processes[0].returncode is not None
+        assert opened_repositories[0].git.cat_file_header is None
+    finally:
+        # Also release real resources when exercising the unfixed implementation.
+        for repo in opened_repositories:
+            repo.close()
 
 
 def test_staged_unstaged_deleted_renamed_and_untracked_entries_are_sorted(
@@ -266,6 +309,7 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
         working_tree_dir=worktree_path,
         common_dir=common_git_dir,
         active_branch=SimpleNamespace(name="main"),
+        git=SimpleNamespace(clear_cache=lambda: None),
     )
 
     def repository_factory(*_args: object, **_kwargs: object) -> Repo:

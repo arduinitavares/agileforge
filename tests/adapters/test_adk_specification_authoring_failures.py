@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
+import json
+import logging
+from collections.abc import Callable  # noqa: TC003 - Pydantic resolves this at runtime.
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -13,7 +19,11 @@ from google.adk.agents import Agent, BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import (
+    BaseSessionService,
+    DatabaseSessionService,
+    InMemorySessionService,
+)
 from google.adk.sessions import Session as AdkSession
 from google.genai import types
 from openai import OpenAIError
@@ -22,6 +32,7 @@ from sqlmodel import Session, col, select
 
 from adapters.adk.agents.specification_author import (
     reject_incomplete_specification_output,
+    validate_specification_output,
 )
 from adapters.adk.errors import SpecificationAgenticExecutionError
 from adapters.adk.recipes import (
@@ -36,8 +47,12 @@ from adapters.adk.runner import (
 )
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
-from models.product_definition import SpecificationCandidate
+from models.product_definition import (
+    SpecificationCandidate,
+    SpecificationSource,
+)
 from models.repository import RepositoryBinding
+from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
@@ -51,7 +66,13 @@ from services.specification_source_registration import (
 from services.specs.candidate_contract import load_candidate_contract
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
-from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
+from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
+from workflow.contracts import (
+    RecommendationKind,
+    TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
+)
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -60,6 +81,7 @@ from workflow.requests import RegisterSpecificationSource, RevalidateNodeAttempt
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
+    from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
@@ -71,6 +93,12 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
+
+
+def _issue_200_fixture_bytes(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 ISSUE_200_SOURCE: Path = (
     Path(__file__).parents[1] / "fixtures" / "issue_200" / "to-spec-source.md"
 )
@@ -83,6 +111,14 @@ ISSUE_200_OUTPUT: Path = (
     / "issue_200"
     / "complete-provider-output.json"
 )
+ISSUE_245_FIXTURE_DIR: Path = (
+    Path(__file__).parents[1] / "fixtures" / "issue_245"
+)
+ISSUE_245_SOURCE: Path = ISSUE_245_FIXTURE_DIR / "source.md"
+
+
+def _issue_245_fixture_bytes() -> bytes:
+    return ISSUE_245_SOURCE.read_bytes().replace(b"\r\n", b"\n")
 ISSUE_200_MAX_OUTPUT_TOKENS: int = 32_768
 ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
     "timeout_seconds": 5.0,
@@ -190,6 +226,45 @@ class _SpecificationResponseLlm(BaseLlm):
         )
 
 
+class _SequenceSpecificationResponseLlm(BaseLlm):
+    """Return sequential deterministic responses while capturing real ADK requests."""
+
+    responses: list[tuple[str, types.FinishReason]]
+    calls: list[str] = Field(default_factory=list)
+    requests: list[object] = Field(default_factory=list, exclude=True)
+    response_index: int = 0
+    on_dispatch: Callable[[int], None] | None = Field(default=None, exclude=True)
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Yield the next provider response in sequence."""
+        del stream
+        self.calls.append("provider")
+        self.requests.append(llm_request)
+        if self.response_index < len(self.responses):
+            text, finish_reason = self.responses[self.response_index]
+            self.response_index += 1
+        else:
+            text, finish_reason = self.responses[-1]
+        if self.on_dispatch is not None:
+            self.on_dispatch(len(self.calls))
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=text)],
+            ),
+            finish_reason=finish_reason,
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=4_200,
+                candidates_token_count=4_096,
+                total_token_count=8_296,
+            ),
+        )
+
+
 class _PostProviderDriftingSpecificationLeaf(BaseAgent):
     """Change external source state after provider work returns."""
 
@@ -289,6 +364,7 @@ def _system(  # noqa: PLR0913
     tmp_path: Path,
     leaf: BaseAgent,
     *,
+    session_service: BaseSessionService | None = None,
     source_check: SpecificationSourceCheck | None = None,
     execution_settings: JsonObject = EXECUTION_SETTINGS,
     source_bytes: bytes = b"# Exact external Specification\n",
@@ -427,7 +503,11 @@ def _system(  # noqa: PLR0913
     runner = AdkWorkflowRunner(
         domain=domain,
         registry=registry,
-        session_service=InMemorySessionService(),
+        session_service=(
+            InMemorySessionService()
+            if session_service is None
+            else session_service
+        ),
         specification_source_check=runner_source_check,
         config=AdkExecutionConfig(
             project_id=project_id,
@@ -491,6 +571,314 @@ def _latest_attempt(
         )
         .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).desc())
     ).one()
+
+
+def _dangling_output() -> JsonObject:
+    output = deepcopy(_valid_output())
+    payload = cast("JsonObject", output["payload"])
+    payload["relations"] = [
+        {"from": "REQ.attempt-boundary", "type": "tracks", "to": "RISK.missing-source"}
+    ]
+    return output
+
+
+def test_real_leaf_dangling_endpoint_is_invalid_payload(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """Classify a dangling relation graph as an invalid payload error."""
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, _, project_id, decision, frozen, guards = _system(engine, tmp_path, leaf)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    (
+        "response_text",
+        "finish_reason",
+        "callback",
+        "expected_code",
+        "expected_message_contains",
+    ),
+    [
+        pytest.param(
+            json.dumps(_dangling_output()),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Unknown relation endpoint: RISK.missing-source.",
+            id="dangling-relation-endpoint",
+        ),
+        pytest.param(
+            (
+                '{"payload": {"schema_version": "agileforge.spec.v2", '
+                '"title": "Missing fields"}}'
+            ),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="missing-required-fields",
+        ),
+        pytest.param(
+            '{"payload": invalid}',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="malformed-json-non-eof",
+        ),
+        pytest.param(
+            '{"payload": {"schema_version": "agileforge.spec.v1"}}',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
+            "Specification structurer returned an unsupported schema.",
+            id="explicit-v1-schema",
+        ),
+        pytest.param(
+            '{"payload":',
+            types.FinishReason.STOP,
+            reject_incomplete_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="cut-off-json-old-callback",
+        ),
+        pytest.param(
+            '{"payload":',
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="cut-off-json-new-callback",
+        ),
+        pytest.param(
+            json.dumps(_valid_output()),
+            types.FinishReason.MAX_TOKENS,
+            reject_incomplete_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="valid-json-max-tokens-old-callback",
+        ),
+        pytest.param(
+            json.dumps(_valid_output()),
+            types.FinishReason.MAX_TOKENS,
+            validate_specification_output,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+            "Specification structurer returned incomplete output.",
+            id="valid-json-max-tokens-new-callback",
+        ),
+        pytest.param(
+            "",
+            types.FinishReason.SAFETY,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="empty-response-safety",
+        ),
+        pytest.param(
+            "",
+            types.FinishReason.OTHER,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="empty-response-other",
+        ),
+    ],
+)
+def test_real_runner_output_validation_classification_matrix(  # noqa: PLR0913
+    engine: Engine,
+    tmp_path: Path,
+    response_text: str,
+    finish_reason: types.FinishReason,
+    callback: Callable[[CallbackContext, LlmResponse], None],
+    expected_code: WorkflowErrorCode,
+    expected_message_contains: str,
+) -> None:
+    """Validate real-runner behavior across all generated-output failure classes."""
+    model = _SpecificationResponseLlm(
+        model="fake/classification-matrix",
+        response_text=response_text,
+        finish_reason=finish_reason,
+    )
+    leaf = Agent(
+        name="matrix_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=callback,
+    )
+    runner, _, project_id, decision, frozen, guards = _system(engine, tmp_path, leaf)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is expected_code
+    assert expected_message_contains in result.error.message
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == expected_code.value
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+def test_fake_leaf_unallowlisted_typed_code_falls_back_to_producer_failed(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """An unallowlisted typed error must fall back to producer-failed."""
+
+    class _UnallowlistedErrorLeaf(BaseAgent):
+        def __init__(self) -> None:
+            super().__init__(name="unallowlisted_leaf")
+
+        async def _run_async_impl(
+            self, ctx: InvocationContext
+        ) -> AsyncGenerator[Event, None]:
+            del ctx
+            raise SpecificationAgenticExecutionError(
+                code="UNKNOWN_CUSTOM_CODE",
+                message="Something strange happened.",
+            )
+            yield Event()  # pragma: no cover
+
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, _UnallowlistedErrorLeaf()
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "SPECIFICATION_PRODUCER_FAILED"
+
+
+def test_real_runner_max_attempts_two_makes_single_dispatch_on_invalid_output(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """Configured max_attempts=2 must not cause retry on terminal output error."""
+    model = _SpecificationResponseLlm(
+        model="fake/max-attempts-two",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="max_attempts_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    settings: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 2}
+    runner, _, _project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, execution_settings=settings
+    )
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert model.calls == ["provider"]
+
+
+def test_source_drift_after_invalid_output_post_call_revalidation_wins(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-call revalidation must detect fact drift and obsolete the attempt."""
+    model = _SpecificationResponseLlm(
+        model="fake/drift-after-invalid",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf
+    )
+    transition = domain.transition
+    drifted = False
+
+    def drift_after_provider(request: TransitionRequest) -> TransitionResult:
+        nonlocal drifted
+        if (
+            request.kind == "revalidate_node_attempt"
+            and bool(model.calls)
+            and not drifted
+        ):
+            with Session(engine) as session:
+                project = session.get(Project, project_id)
+                assert project is not None
+                project.description = "Drifted after model returned."
+                session.add(project)
+                session.commit()
+            drifted = True
+        return transition(request)
+
+    monkeypatch.setattr(domain, "transition", drift_after_provider)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "obsolete"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    "raw_bytes",
+    [
+        b"# Source\nDescription.\n",
+        b"# Source\r\nDescription.\r\n",
+    ],
+)
+def test_real_runner_preserves_exact_source_bytes_lf_and_crlf(
+    engine: Engine, tmp_path: Path, raw_bytes: bytes
+) -> None:
+    """Input assembly must preserve exact LF and CRLF source bytes."""
+    leaf = _unused_leaf("unused_structurer")
+    _, _, _, _, frozen, _ = _system(
+        engine, tmp_path, leaf, source_bytes=raw_bytes
+    )
+    parsed_input = SpecificationStructuringInput.model_validate(frozen)
+    assert parsed_input.registered_source.source.text.encode("utf-8") == raw_bytes
 
 
 def test_fact_drift_after_start_obsoletes_attempt_before_provider(
@@ -657,8 +1045,8 @@ def test_incomplete_realistic_response_uses_actionable_durable_failure(
         mode="single_turn",
         after_model_callback=reject_incomplete_specification_output,
     )
-    source_bytes = ISSUE_200_SOURCE.read_bytes()
-    context_bytes = ISSUE_200_CONTEXT.read_bytes()
+    source_bytes = _issue_200_fixture_bytes(ISSUE_200_SOURCE)
+    context_bytes = _issue_200_fixture_bytes(ISSUE_200_CONTEXT)
     assert len(source_bytes) == ISSUE_200_SOURCE_BYTES
     assert hashlib.sha256(source_bytes).hexdigest() == (
         "7d1cb963d06f9e40c82204bc32093b505f6b10bc46027162104b05b4a0ba507a"
@@ -711,9 +1099,9 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
     tmp_path: Path,
 ) -> None:
     """Structure the unshortened issue fixture through the actual ADK schema path."""
-    source_bytes = ISSUE_200_SOURCE.read_bytes()
-    context_bytes = ISSUE_200_CONTEXT.read_bytes()
-    output_bytes = ISSUE_200_OUTPUT.read_bytes()
+    source_bytes = _issue_200_fixture_bytes(ISSUE_200_SOURCE)
+    context_bytes = _issue_200_fixture_bytes(ISSUE_200_CONTEXT)
+    output_bytes = _issue_200_fixture_bytes(ISSUE_200_OUTPUT)
     expected = SpecificationStructuringOutput.model_validate_json(output_bytes)
     assert len(output_bytes) > ISSUE_200_OBSERVED_TRUNCATION_CHARS
     assert (
@@ -735,7 +1123,8 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
             max_output_tokens=ISSUE_200_MAX_OUTPUT_TOKENS
         ),
         mode="single_turn",
-        after_model_callback=reject_incomplete_specification_output,
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
     )
 
     def unchanged_source(_project_id: int, _input: JsonObject) -> None:
@@ -1372,3 +1761,937 @@ def test_provider_schema_and_payload_failures_keep_stable_codes(
         assert outcome.status == "failure"
         assert outcome.failure_code == expected_code
         assert not session.exec(select(SpecificationCandidate)).all()
+
+
+def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
+    engine: Engine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Safe diagnostic is appended with correlated invocation ID and prose redaction."""
+    sentinel = "PRIVATE_RESPONSE_SENTINEL_245"
+    dangling_with_sentinel: JsonObject = {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "items": [
+                {
+                    "id": "REQ.item-one",
+                    "title": f"Title {sentinel}",
+                    "statement": f"Statement {sentinel}",
+                    "rationale": f"Rationale {sentinel}",
+                    "level": "SHOULD",
+                    "kind": "CAPABILITY",
+                    "scope": "TARGET",
+                    "status": "DRAFT",
+                    "applicability": "CORE",
+                    "criticality": "LOW",
+                    "provenance": {"source": "spec.md"},
+                }
+            ],
+            "relations": [
+                {
+                    "from": "REQ.item-one",
+                    "type": "tracks",
+                    "to": "REQ.missing-target",
+                }
+            ],
+        }
+    }
+    raw_response = json.dumps(dangling_with_sentinel)
+    model = _SpecificationResponseLlm(
+        model="fake/diagnostic-in-memory",
+        response_text=raw_response,
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="diagnostic_in_memory_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = InMemorySessionService()
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    with caplog.at_level(logging.DEBUG):
+        result = runner.run(decision, frozen, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
+    assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    adk_session = asyncio.run(
+        session_service.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=session_id,
+        )
+    )
+    assert adk_session is not None
+    assert len(adk_session.events) >= 3  # noqa: PLR2004
+    user_event = next(ev for ev in adk_session.events if ev.author == "user")
+    leaf_event = next(
+        ev
+        for ev in adk_session.events
+        if ev.author not in ("user", "specification_output_validator")
+    )
+    diag_event = next(
+        ev for ev in adk_session.events if ev.author == "specification_output_validator"
+    )
+    assert user_event.invocation_id
+    assert (
+        user_event.invocation_id
+        == leaf_event.invocation_id
+        == diag_event.invocation_id
+    )
+    assert diag_event.output is None
+    assert diag_event.actions is not None
+    diagnostic = diag_event.actions.state_delta["specification_output_diagnostic"]
+    assert (
+        diagnostic["schema_version"]
+        == "agileforge.specification-output-diagnostic.v1"
+    )
+    assert diagnostic["stage"] == "primary"
+    assert diagnostic["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+    assert diagnostic["missing_item_count"] == 1
+    assert diagnostic["missing_item_ids"] == ["REQ.missing-target"]
+    assert diagnostic["item_count"] == 1
+    assert diagnostic["relation_count"] == 1
+    assert diagnostic["item_ids"] == ["REQ.item-one"]
+    assert diagnostic["response_bytes"] == len(raw_response.encode("utf-8"))
+    assert (
+        diagnostic["response_sha256"]
+        == f"sha256:{hashlib.sha256(raw_response.encode('utf-8')).hexdigest()}"
+    )
+    assert sentinel not in json.dumps(diagnostic)
+    assert adk_session.state.get("specification_output_diagnostic") == diagnostic
+
+
+def test_output_validation_failure_persists_correlated_diagnostic_sqlite(  # noqa: PLR0915
+    engine: Engine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Safe diagnostic persists to a real disposable SQLite trace database."""
+    sentinel = "PRIVATE_SQLITE_SENTINEL_245"
+    dangling_payload: JsonObject = {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "items": [
+                {
+                    "id": "REQ.item-one",
+                    "statement": f"Do not leak {sentinel}",
+                }
+            ],
+            "relations": [
+                {
+                    "from": "REQ.item-one",
+                    "type": "tracks",
+                    "to": "REQ.missing-target",
+                }
+            ],
+        }
+    }
+    raw_response = json.dumps(dangling_payload)
+    model = _SpecificationResponseLlm(
+        model="fake/diagnostic-sqlite",
+        response_text=raw_response,
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="diagnostic_sqlite_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    db_file = tmp_path / "disposable_adk_trace.db"
+    db_url = f"sqlite+aiosqlite:///{db_file}"
+    session_service = DatabaseSessionService(db_url=db_url)
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    with caplog.at_level(logging.DEBUG):
+        result = runner.run(decision, frozen, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
+    assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    async def read_back_diagnostic() -> None:
+        verify_service = DatabaseSessionService(db_url=db_url)
+        try:
+            persisted_session = await verify_service.get_session(
+                app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+                user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+                session_id=session_id,
+            )
+            assert persisted_session is not None
+            assert len(persisted_session.events) >= 3  # noqa: PLR2004
+            user_event = next(
+                ev for ev in persisted_session.events if ev.author == "user"
+            )
+            leaf_event = next(
+                ev
+                for ev in persisted_session.events
+                if ev.author not in ("user", "specification_output_validator")
+            )
+            diag_event = next(
+                ev
+                for ev in persisted_session.events
+                if ev.author == "specification_output_validator"
+            )
+            assert user_event.invocation_id
+            assert (
+                user_event.invocation_id
+                == leaf_event.invocation_id
+                == diag_event.invocation_id
+            )
+            assert diag_event.output is None
+            assert diag_event.actions is not None
+            diag_from_event = diag_event.actions.state_delta[
+                "specification_output_diagnostic"
+            ]
+            diag_from_state = persisted_session.state[
+                "specification_output_diagnostic"
+            ]
+            assert diag_from_event == diag_from_state
+            assert (
+                diag_from_state["schema_version"]
+                == "agileforge.specification-output-diagnostic.v1"
+            )
+            assert diag_from_state["stage"] == "primary"
+            assert diag_from_state["code"] == "INVALID_SPECIFICATION_PAYLOAD"
+            assert diag_from_state["missing_item_count"] == 1
+            assert diag_from_state["missing_item_ids"] == ["REQ.missing-target"]
+            assert diag_from_state["item_count"] == 1
+            assert diag_from_state["relation_count"] == 1
+            assert diag_from_state["item_ids"] == ["REQ.item-one"]
+            assert diag_from_state["response_bytes"] == len(
+                raw_response.encode("utf-8")
+            )
+            assert (
+                diag_from_state["response_sha256"]
+                == f"sha256:{hashlib.sha256(raw_response.encode('utf-8')).hexdigest()}"
+            )
+            assert sentinel not in json.dumps(diag_from_state)
+        finally:
+            await verify_service.close()
+            await session_service.close()
+
+    asyncio.run(read_back_diagnostic())
+
+
+class _SyntheticAppendDiagnosticError(RuntimeError):
+    """Synthetic error injected into session service during test."""
+
+
+class _FailingDiagnosticAppendSessionService(InMemorySessionService):
+    """Fail only when appending the specification_output_diagnostic event."""
+
+    async def append_event(self, session: AdkSession, event: Event) -> Event:
+        if (
+            event.actions
+            and "specification_output_diagnostic" in event.actions.state_delta
+        ):
+            msg = "Synthetic failure appending diagnostic event."
+            raise _SyntheticAppendDiagnosticError(msg)
+        return await super().append_event(session=session, event=event)
+
+
+def test_specification_output_diagnostic_append_failure_preserves_business_failure(
+    engine: Engine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Append failure emits a fixed safe warning and preserves the original failure."""
+    sentinel = "PRIVATE_APPEND_FAIL_SENTINEL_245"
+    dangling_with_sentinel = deepcopy(_dangling_output())
+    items = cast(
+        "list[JsonObject]",
+        cast("JsonObject", dangling_with_sentinel["payload"])["items"],
+    )
+    items[0]["statement"] = f"Private statement {sentinel}"
+    model = _SpecificationResponseLlm(
+        model="fake/failing-diagnostic-append",
+        response_text=json.dumps(dangling_with_sentinel),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="failing_append_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = _FailingDiagnosticAppendSessionService()
+    runner, _, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    with caplog.at_level(logging.DEBUG):
+        result = runner.run(decision, frozen, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert sentinel not in str(result.error)
+    assert sentinel not in repr(result.error)
+    assert sentinel not in result.error.message
+    assert model.calls == ["provider"]
+    assert sentinel not in caplog.text
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert outcome.failure_message is not None
+        assert sentinel not in outcome.failure_message
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    matching_records = [
+        rec
+        for rec in caplog.records
+        if "Specification output diagnostic could not be appended" in rec.message
+    ]
+    assert len(matching_records) == 1
+    warning_record = matching_records[0]
+    assert session_id in warning_record.message
+    assert warning_record.exc_info is None
+    assert "Synthetic failure appending diagnostic event" not in warning_record.message
+
+
+def test_precedence_post_call_revalidation_supersedes_output_diagnostic(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-call source drift obsoletes attempt and supersedes output diagnostic."""
+    model = _SpecificationResponseLlm(
+        model="fake/precedence-drift",
+        response_text=json.dumps(_dangling_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="precedence_drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    session_service = InMemorySessionService()
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine, tmp_path, leaf, session_service=session_service
+    )
+    transition = domain.transition
+    drifted = False
+
+    def drift_after_provider(request: TransitionRequest) -> TransitionResult:
+        nonlocal drifted
+        if (
+            request.kind == "revalidate_node_attempt"
+            and bool(model.calls)
+            and not drifted
+        ):
+            with Session(engine) as session:
+                project = session.get(Project, project_id)
+                assert project is not None
+                project.description = "Drifted after provider returned."
+                session.add(project)
+                session.commit()
+            drifted = True
+        return transition(request)
+
+    monkeypatch.setattr(domain, "transition", drift_after_provider)
+    result = runner.run(decision, frozen, guards=guards)
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "obsolete"
+        attempt = _latest_attempt(session, project_id=project_id)
+        session_id = attempt.attempt_fingerprint
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    adk_session = asyncio.run(
+        session_service.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=session_id,
+        )
+    )
+    assert adk_session is not None
+    diagnostic_events = [
+        ev
+        for ev in adk_session.events
+        if ev.author == "specification_output_validator"
+    ]
+    assert len(diagnostic_events) == 0
+
+
+def test_real_leaf_recovery_after_failure_persists_candidate_and_preserves_history(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A retry following a failed attempt succeeds through real ADK leaf execution."""
+    model = _SequenceSpecificationResponseLlm(
+        model="fake/issue-245-recovery",
+        responses=[
+            (json.dumps(_dangling_output()), types.FinishReason.STOP),
+            (json.dumps(_valid_output()), types.FinishReason.STOP),
+        ],
+    )
+    leaf = Agent(
+        name="issue_245_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    def unchanged_source(_project_id: int, _input: JsonObject) -> None:
+        """Avoid nested SQLite session during offline test."""
+
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        structuring_time=NOW + timedelta(seconds=1),
+        source_check=unchanged_source,
+    )
+
+    # Attempt 1: fails with INVALID_SPECIFICATION_PAYLOAD
+    result1 = runner.run(decision, frozen, guards=guards)
+    assert not result1.ok
+    assert result1.error is not None
+    assert result1.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        att1 = _latest_attempt(session, project_id=project_id)
+        att1_id = att1.workflow_node_attempt_id
+        assert att1_id is not None
+        att1_fp = att1.attempt_fingerprint
+        out1 = _latest_outcome(session, project_id=project_id)
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    # Re-evaluate position: should be in RECOVERY referencing attempt 1
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    attempt_refs = [
+        r for r in recovery_decision.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+    assert attempt_refs[0].fact_id == str(att1_id)
+    assert attempt_refs[0].fingerprint == att1_fp
+
+    # Rebuild input for recovery decision
+    normalized_input2 = domain.load_persisted_attempt_input(
+        project_id=project_id,
+        attempt_id=att1_id,
+        attempt_fingerprint=att1_fp,
+    )
+    guards2 = AdkRunGuards(
+        position=pos2,
+        idempotency_key="structure-specification-attempt-boundary-retry",
+        actor="operator@example.com",
+        correlation_id="issue-199-attempt-boundary-retry",
+    )
+
+    # Attempt 2: runs with valid output and succeeds
+    result2 = runner.run(recovery_decision, normalized_input2, guards=guards2)
+    assert result2.ok
+    assert model.calls == ["provider", "provider"]
+
+    # Verify both attempts are in DB, outcomes preserved, candidate tied to attempt 2
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).asc())
+        ).all()
+        expected_attempts = 2
+        assert len(attempts) == expected_attempts
+        assert attempts[0].workflow_node_attempt_id == att1_id
+        att2 = attempts[1]
+        assert att2.workflow_node_attempt_id is not None
+        assert att2.workflow_node_attempt_id > att1_id
+
+        out1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        out2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id)
+                == att2.workflow_node_attempt_id,
+            )
+        ).one()
+        assert out2.status == "success"
+
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand.workflow_node_attempt_id == att2.workflow_node_attempt_id
+        assert cand.attempt_fingerprint == att2.attempt_fingerprint
+
+
+def test_real_leaf_recovery_source_drift_obsoletes_second_attempt(  # noqa: PLR0915
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Source drift after model dispatch during recovery obsoletes the attempt."""
+    source_file = tmp_path / "registered-specification-source" / "SPECIFICATION.md"
+    drift_on_dispatch_count = 2
+
+    def drift_source_on_second_dispatch(call_count: int) -> None:
+        if call_count == drift_on_dispatch_count:
+            source_file.write_text("# Mutated specification source\n", encoding="utf-8")
+
+    model = _SequenceSpecificationResponseLlm(
+        model="fake/issue-245-recovery-drift",
+        responses=[
+            (json.dumps(_dangling_output()), types.FinishReason.STOP),
+            (json.dumps(_valid_output()), types.FinishReason.STOP),
+        ],
+        on_dispatch=drift_source_on_second_dispatch,
+    )
+    leaf = Agent(
+        name="issue_245_drift_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the supplied synthetic response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    real_revalidator = SpecificationStructuringInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).revalidate_sources
+    observed_source_errors: list[WorkflowError | None] = []
+
+    def recording_source_check(
+        checked_project_id: int,
+        persisted_input: JsonObject,
+    ) -> WorkflowError | None:
+        error = real_revalidator(checked_project_id, persisted_input)
+        observed_source_errors.append(error)
+        return error
+
+    runner, domain, project_id, decision, frozen, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=recording_source_check,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+
+    # 1. Fail the first attempt with invalid output
+    result1 = runner.run(decision, frozen, guards=guards)
+    assert not result1.ok
+    assert result1.error is not None
+    assert result1.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    assert model.calls == ["provider"]
+
+    with Session(engine) as session:
+        att1 = _latest_attempt(session, project_id=project_id)
+        att1_id = att1.workflow_node_attempt_id
+        assert att1_id is not None
+        att1_fp = att1.attempt_fingerprint
+        out1 = _latest_outcome(session, project_id=project_id)
+        assert out1.status == "failure"
+        assert out1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+    # 2. Obtain the graph-generated RECOVERY decision
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    attempt_refs = [
+        r for r in recovery_decision.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+    assert attempt_refs[0].fact_id == str(att1_id)
+    assert attempt_refs[0].fingerprint == att1_fp
+
+    # 3. Start the second attempt with valid synthetic output
+    normalized_input2 = domain.load_persisted_attempt_input(
+        project_id=project_id,
+        attempt_id=att1_id,
+        attempt_fingerprint=att1_fp,
+    )
+    guards2 = AdkRunGuards(
+        position=pos2,
+        idempotency_key="structure-specification-recovery-drift-retry",
+        actor="operator@example.com",
+        correlation_id="issue-245-recovery-drift-retry",
+    )
+
+    # 4. Second attempt runs: model dispatches, source drifts before revalidation
+    result2 = runner.run(recovery_decision, normalized_input2, guards=guards2)
+
+    # 5. Assert recorded spy caught non-null STALE_SPECIFICATION_INPUT after dispatch 2,
+    # and result2.error preserves its exact code and message
+    assert observed_source_errors
+    revalidation_error = observed_source_errors[-1]
+    assert revalidation_error is not None
+    assert revalidation_error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+
+    assert not result2.ok
+    assert result2.error is not None
+    assert result2.error.code is revalidation_error.code
+    assert result2.error.message == revalidation_error.message
+
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).asc())
+        ).all()
+        expected_attempts = 2
+        assert len(attempts) == expected_attempts
+        assert attempts[0].workflow_node_attempt_id == att1_id
+        att2 = attempts[1]
+        assert att2.workflow_node_attempt_id is not None
+        assert att2.workflow_node_attempt_id > att1_id
+        att2_id = att2.workflow_node_attempt_id
+
+        # First attempt and outcome remain unchanged
+        attempt1 = session.exec(
+            select(WorkflowNodeAttempt).where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert attempt1.attempt_fingerprint == att1_fp
+
+        outcome1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert outcome1.status == "failure"
+        assert outcome1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        # Second attempt durable status is obsolete
+        outcome2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att2_id,
+            )
+        ).one()
+        assert outcome2.status == "obsolete"
+
+        # No candidate exists
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert not candidates
+
+    # Exactly one model dispatch per attempt
+    assert model.calls == ["provider", "provider"]
+
+
+def _issue_245_valid_output() -> JsonObject:
+    return {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.audit-service",
+            "title": "Audit Service Specification",
+            "summary": "Transactional compliance audit trail with historical lineage.",
+            "problem_statement": (
+                "Pilot audit logs lack transactional consistency and durability."
+            ),
+            "items": [
+                {
+                    "id": "DATA.legacy-audit-record",
+                    "type": "DATA",
+                    "title": "Legacy audit file format",
+                    "statement": (
+                        "Historical implementation fact: The pilot service "
+                        "recorded flat-file audit entries in a local append-only "
+                        "log without relational transaction guarantees."
+                    ),
+                    "level": "INFORMATIVE",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "Informative baseline record preserved for audit "
+                        "reconciliation."
+                    ],
+                },
+                {
+                    "id": "REQ.audit-trail-authority",
+                    "type": "REQ",
+                    "title": "Relational audit trail authority",
+                    "statement": (
+                        "The platform MUST persist all compliance events directly "
+                        "to the primary relational database within the active "
+                        "transaction boundary."
+                    ),
+                    "level": "MUST",
+                    "verification": "integration-test",
+                    "acceptance": [
+                        "Compliance events are committed transactionally to the "
+                        "relational database.",
+                        "Requests fail when the audit event cannot be durably "
+                        "committed.",
+                    ],
+                },
+            ],
+            "relations": [
+                {
+                    "from": "REQ.audit-trail-authority",
+                    "type": "tracks",
+                    "to": "DATA.legacy-audit-record",
+                    "rationale": (
+                        "Normative transactional requirement tracks legacy "
+                        "flat-file audit representation."
+                    ),
+                }
+            ],
+        }
+    }
+
+
+def _issue_245_omitted_historical_output() -> JsonObject:
+    output = deepcopy(_issue_245_valid_output())
+    payload = cast("JsonObject", output["payload"])
+    payload["items"] = [
+        item
+        for item in cast("list[JsonObject]", payload["items"])
+        if item["id"] != "DATA.legacy-audit-record"
+    ]
+    return output
+
+
+def test_issue_245_valid_output_preserves_relation_and_creates_candidate(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Valid output preserves items and relations and creates a review candidate."""
+    source_bytes = _issue_245_fixture_bytes()
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245-valid",
+        response_text=json.dumps(_issue_245_valid_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_valid_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the valid synthetic specification response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    def unchanged_source(_project_id: int, _input: JsonObject) -> None:
+        """Avoid a nested SQLite-memory session after exact input construction."""
+
+    runner, domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=unchanged_source,
+        source_bytes=source_bytes,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.ok is True
+    assert model.calls == ["provider"]
+    assert len(model.requests) == 1
+
+    with Session(engine) as session:
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.specification_candidate_id is not None
+
+        # Verify both items and their relation are preserved in candidate payload
+        payload, _ = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+        item_ids = {item.id for item in payload.items}
+        assert "DATA.legacy-audit-record" in item_ids
+        assert "REQ.audit-trail-authority" in item_ids
+        relation_triplets = {
+            (rel.from_, rel.type.value, rel.to) for rel in payload.relations
+        }
+        assert (
+            "REQ.audit-trail-authority",
+            "tracks",
+            "DATA.legacy-audit-record",
+        ) in relation_triplets
+
+        # Candidate is not automatically accepted (no approved spec in registry)
+        assert not session.exec(
+            select(SpecRegistry).where(col(SpecRegistry.project_id) == project_id)
+        ).all()
+
+    # Domain position indicates specification.review is pending, not automatic approval
+    position = domain.position(project_id)
+    assert any(item.node_id == "specification.review" for item in position.decisions)
+    assert not any(
+        item.node_id == "specification.structure" for item in position.decisions
+    )
+
+
+def test_issue_245_omitted_historical_item_fails_and_preserves_source(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Omitting the historical item while retaining its relation fails."""
+    source_bytes = _issue_245_fixture_bytes()
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245-omitted",
+        response_text=json.dumps(_issue_245_omitted_historical_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_omitted_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the omitted synthetic specification response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, _, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_bytes=source_bytes,
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code == WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert result.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    expected_endpoint = "Unknown relation endpoint: DATA.legacy-audit-record."
+    assert expected_endpoint in result.error.message
+
+    # Executes exactly one dispatch
+    assert model.calls == ["provider"]
+    assert len(model.requests) == 1
+
+    with Session(engine) as session:
+        # Durable failure recorded
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        # Creates no candidate
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert not candidates
+
+        # Preserves registered-source bytes and identity
+        source = session.exec(
+            select(SpecificationSource).where(
+                col(SpecificationSource.project_id) == project_id
+            )
+        ).one()
+        assert source.specification_source_id is not None
+        bundle_data = json.loads(source.source_bundle_json)
+        source_base64 = bundle_data["source"]["content_base64"]
+        assert base64.b64decode(source_base64) == source_bytes
+        assert bundle_data["source"]["byte_length"] == len(source_bytes)
+        assert bundle_data["source"]["content_fingerprint"] == (
+            f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+        )
+        assert (
+            tmp_path / "registered-specification-source" / "SPECIFICATION.md"
+        ).read_bytes() == source_bytes

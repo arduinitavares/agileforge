@@ -15,6 +15,7 @@ from services.planning_lineage import (
 from workflow.contracts import Blocker, FactReference, InputField, RecommendationKind
 from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.definitions.product_goal import accepted_current_goal
+from workflow.fingerprints import business_fact_fingerprint
 from workflow.graph import AgenticExecutionSpec, NodeSpec, RuleCategory, RuleEvaluation
 
 if TYPE_CHECKING:
@@ -158,6 +159,88 @@ def current_backlog_lineage(  # noqa: PLR0911
     )
 
 
+def _downstream_planning_stage_closed(snapshot: WorkflowFactSnapshot) -> bool:
+    if any(
+        (artifact.artifact_type == "roadmap" and artifact.status == "pending_review")
+        or artifact.artifact_type in {"story", "sprint_plan"}
+        for artifact in snapshot.planning_artifacts
+    ):
+        return True
+    if bool(
+        snapshot.stories
+        or snapshot.story_dependencies
+        or snapshot.story_dependency_reviews
+        or snapshot.sprints
+        or snapshot.sprint_starts
+        or snapshot.tasks
+    ):
+        return True
+    current_facts = business_fact_fingerprint(snapshot)
+    return any(
+        attempt.business_fact_fingerprint == current_facts
+        and attempt.node_id.startswith(
+            ("planning.story", "planning.sprint", "execution.")
+        )
+        for attempt in snapshot.node_attempts
+    )
+
+
+def _active_roadmap_attempt(
+    snapshot: WorkflowFactSnapshot, evaluated_at: datetime
+) -> bool:
+    current_facts = business_fact_fingerprint(snapshot)
+    return any(
+        attempt.business_fact_fingerprint == current_facts
+        and attempt.node_id == "planning.roadmap.generate"
+        and attempt.outcome is None
+        and evaluated_at < attempt.lease_expires_at
+        for attempt in snapshot.node_attempts
+    )
+
+
+def backlog_correction_boundary_problem(
+    snapshot: WorkflowFactSnapshot,
+    evaluated_at: datetime,
+) -> Blocker | None:
+    """Validate that guided Backlog correction remains within Roadmap review."""
+    if _downstream_planning_stage_closed(snapshot):
+        return Blocker(
+            code="BACKLOG_CORRECTION_STAGE_CLOSED",
+            message=(
+                "Guided Backlog correction is available only before Story "
+                "or Sprint planning begins."
+            ),
+        )
+    if _active_roadmap_attempt(snapshot, evaluated_at):
+        return Blocker(
+            code="BACKLOG_CORRECTION_DOWNSTREAM_ACTIVE",
+            message="Wait for the current downstream operation to finish.",
+        )
+    return None
+
+
+def backlog_correction_in_progress(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> bool:
+    """Return whether an accepted Backlog has an unresolved correction."""
+    lineage = current_backlog_lineage(snapshot)
+    if lineage.backlog is None or lineage.conflict:
+        return False
+    if (
+        lineage.latest is not None
+        and lineage.latest.artifact_id != lineage.backlog.artifact_id
+    ):
+        return True
+    current_facts = business_fact_fingerprint(snapshot)
+    return any(
+        attempt.node_id == "backlog.generate"
+        and attempt.business_fact_fingerprint == current_facts
+        and attempt.outcome != "success"
+        for attempt in snapshot.node_attempts
+    )
+
+
 def _references(lineage: BacklogLineage) -> tuple[FactReference, ...]:
     if lineage.specification is None or lineage.goal is None:
         return ()
@@ -175,13 +258,42 @@ def _references(lineage: BacklogLineage) -> tuple[FactReference, ...]:
     )
 
 
-def _backlog_generate_rule(
+def _accepted_backlog_generate_rule(
+    lineage: BacklogLineage,
     snapshot: WorkflowFactSnapshot,
-    _evaluated_at: datetime,
+    evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    lineage = current_backlog_lineage(snapshot)
-    if lineage.conflict:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if lineage.latest is None:
+        return ()
+    problem = backlog_correction_boundary_problem(snapshot, evaluated_at)
+    if problem is not None:
+        return (
+            RuleEvaluation(
+                RuleCategory.BLOCKED,
+                problem.code,
+                blockers=(problem,),
+            ),
+        )
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "BACKLOG_CORRECTION_AVAILABLE",
+            fact_references=(
+                *_references(lineage),
+                _reference(
+                    "backlog",
+                    lineage.latest.artifact_id,
+                    lineage.latest.artifact_fingerprint,
+                ),
+            ),
+            recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        ),
+    )
+
+
+def _backlog_prerequisite_blocker(
+    lineage: BacklogLineage,
+) -> tuple[RuleEvaluation, ...] | None:
     if lineage.goal is None:
         return _blocked(
             "ACCEPTED_PRODUCT_GOAL_REQUIRED",
@@ -192,6 +304,19 @@ def _backlog_generate_rule(
             "ACCEPTED_SPECIFICATION_REQUIRED",
             "Backlog generation requires the current accepted Specification.",
         )
+    return None
+
+
+def _backlog_generate_rule(
+    snapshot: WorkflowFactSnapshot,
+    evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    lineage = current_backlog_lineage(snapshot)
+    if lineage.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    prereq = _backlog_prerequisite_blocker(lineage)
+    if prereq is not None:
+        return prereq
     if lineage.latest is None:
         return (
             RuleEvaluation(
@@ -202,29 +327,23 @@ def _backlog_generate_rule(
         )
     if lineage.latest.status == "pending_review":
         return (RuleEvaluation(RuleCategory.SATISFIED, "BACKLOG_REVIEW_PENDING"),)
-    return (
-        RuleEvaluation(
-            RuleCategory.AVAILABLE,
-            (
-                "BACKLOG_REVISION_REQUIRED"
-                if lineage.latest.status in {"rejected", "feedback"}
-                else "BACKLOG_CORRECTION_AVAILABLE"
-            ),
-            fact_references=(
-                *_references(lineage),
-                _reference(
-                    "backlog",
-                    lineage.latest.artifact_id,
-                    lineage.latest.artifact_fingerprint,
+    if lineage.latest.status in {"rejected", "feedback"}:
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "BACKLOG_REVISION_REQUIRED",
+                fact_references=(
+                    *_references(lineage),
+                    _reference(
+                        "backlog",
+                        lineage.latest.artifact_id,
+                        lineage.latest.artifact_fingerprint,
+                    ),
                 ),
+                recommendation_kind=RecommendationKind.RECOVERY,
             ),
-            recommendation_kind=(
-                RecommendationKind.RECOVERY
-                if lineage.latest.status in {"rejected", "feedback"}
-                else RecommendationKind.OPTIONAL_REENTRY
-            ),
-        ),
-    )
+        )
+    return _accepted_backlog_generate_rule(lineage, snapshot, evaluated_at)
 
 
 def _backlog_review_rule(
@@ -274,6 +393,9 @@ BACKLOG_NODES: tuple[NodeSpec, ...] = (
             active_reason="BACKLOG_GENERATION_ACTIVE",
             failure_reason="BACKLOG_GENERATION_FAILED",
             recovery_reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+            optional_reentry_active_reason="BACKLOG_CORRECTION_ACTIVE",
+            optional_reentry_failure_reason="BACKLOG_CORRECTION_FAILED",
+            optional_reentry_recovery_reason="BACKLOG_CORRECTION_RECOVERY_REQUIRED",
         ),
     ),
     NodeSpec(
@@ -291,4 +413,10 @@ BACKLOG_NODES: tuple[NodeSpec, ...] = (
     ),
 )
 
-__all__ = ["BACKLOG_NODES", "BacklogLineage", "current_backlog_lineage"]
+__all__ = [
+    "BACKLOG_NODES",
+    "BacklogLineage",
+    "backlog_correction_boundary_problem",
+    "backlog_correction_in_progress",
+    "current_backlog_lineage",
+]

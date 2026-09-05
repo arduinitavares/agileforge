@@ -57,6 +57,9 @@ class AgenticExecutionSpec:
     active_reason: str
     failure_reason: str
     recovery_reason: str
+    optional_reentry_active_reason: str | None = None
+    optional_reentry_failure_reason: str | None = None
+    optional_reentry_recovery_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,45 +85,59 @@ def _overlay_agentic_attempt(
     execution = node.agentic_execution
     if execution is None or evaluation.category is not RuleCategory.AVAILABLE:
         return evaluation
+    current_business_facts = business_fact_fingerprint(snapshot)
     attempts = tuple(
         attempt
         for attempt in snapshot.node_attempts
         if attempt.node_id == node.node_id
         and attempt.instance_key == evaluation.instance_key
+        and attempt.business_fact_fingerprint == current_business_facts
     )
     if not attempts:
         return evaluation
     latest = max(attempts, key=lambda item: item.attempt_id)
     if latest.outcome == "success":
-        return (
-            replace(
-                evaluation,
-                category=RuleCategory.INVALID,
-                reason_code="WORKFLOW_FACT_CONFLICT",
-                valid_until=None,
-                recommendation_kind=None,
-            )
-            if latest.business_fact_fingerprint == business_fact_fingerprint(snapshot)
-            else evaluation
+        return replace(
+            evaluation,
+            category=RuleCategory.INVALID,
+            reason_code="WORKFLOW_FACT_CONFLICT",
+            valid_until=None,
+            recommendation_kind=None,
         )
+    is_optional = evaluation.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    active_reason = (
+        execution.optional_reentry_active_reason
+        if is_optional and execution.optional_reentry_active_reason is not None
+        else execution.active_reason
+    )
+    failure_reason = (
+        execution.optional_reentry_failure_reason
+        if is_optional and execution.optional_reentry_failure_reason is not None
+        else execution.failure_reason
+    )
+    recovery_reason = (
+        execution.optional_reentry_recovery_reason
+        if is_optional and execution.optional_reentry_recovery_reason is not None
+        else execution.recovery_reason
+    )
     if latest.outcome == "failure":
         return replace(
             evaluation,
-            reason_code=execution.failure_reason,
+            reason_code=failure_reason,
             valid_until=None,
             recommendation_kind=RecommendationKind.RECOVERY,
         )
     if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
         return replace(
             evaluation,
-            reason_code=execution.recovery_reason,
+            reason_code=recovery_reason,
             valid_until=None,
             recommendation_kind=RecommendationKind.RECOVERY,
         )
     return replace(
         evaluation,
         category=RuleCategory.WAITING,
-        reason_code=execution.active_reason,
+        reason_code=active_reason,
         valid_until=latest.lease_expires_at,
         recommendation_kind=None,
     )
@@ -326,11 +343,13 @@ class WorkflowGraph:
         recommendation = evaluation.recommendation_kind or node.recommendation_kind
         if recommendation is not RecommendationKind.RECOVERY:
             return evaluation.fact_references
+        current_business_facts = business_fact_fingerprint(snapshot)
         candidates = tuple(
             attempt
             for attempt in snapshot.node_attempts
             if attempt.node_id == node.node_id
             and attempt.instance_key == evaluation.instance_key
+            and attempt.business_fact_fingerprint == current_business_facts
             and (
                 attempt.outcome in {"failure", "obsolete"}
                 or (

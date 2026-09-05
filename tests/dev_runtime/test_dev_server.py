@@ -186,9 +186,13 @@ class BootstrapRunner:
             assert cwd == self.checkout
             assert env is not None
             business_path = Path(env["AGILEFORGE_DB_URL"].removeprefix("sqlite:///"))
-            with sqlite3.connect(business_path) as connection:
-                for table in _EXPECTED_TABLES:
-                    connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+            connection = sqlite3.connect(business_path)
+            try:
+                with connection:
+                    for table in _EXPECTED_TABLES:
+                        connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+            finally:
+                connection.close()
             return module.CommandResult(arguments=arguments, exit_code=0)
         message = f"unexpected command: {arguments!r}"
         raise AssertionError(message)
@@ -200,9 +204,13 @@ def _create_profile(checkout: Path, name: str = "local") -> None:
         name,
         now=datetime(2026, 8, 3, 12, tzinfo=UTC),
     )
-    with sqlite3.connect(profile.business_database) as connection:
-        for table in _EXPECTED_TABLES:
-            connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+    connection = sqlite3.connect(profile.business_database)
+    try:
+        with connection:
+            for table in _EXPECTED_TABLES:
+                connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+    finally:
+        connection.close()
 
 
 def _runtime_identity(
@@ -498,8 +506,12 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     """Reuse a validated development database and emit one readiness object."""
     _create_profile(checkout)
     profile = profile_paths(checkout, "local")
-    with sqlite3.connect(profile.business_database) as connection:
-        connection.execute("INSERT INTO projects (id) VALUES (41)")
+    connection = sqlite3.connect(profile.business_database)
+    try:
+        with connection:
+            connection.execute("INSERT INTO projects (id) VALUES (41)")
+    finally:
+        connection.close()
     started_environments: list[dict[str, str]] = []
 
     def fake_start_ui(**options: object) -> object:
@@ -543,8 +555,11 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     assert first_nonce != second_nonce
     assert started_environments[0] == started_environments[1]
     assert started_environments[0]["AGILEFORGE_LAUNCHER_CHILD"] == "1"
-    with sqlite3.connect(profile.business_database) as connection:
+    connection = sqlite3.connect(profile.business_database)
+    try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [(41,)]
+    finally:
+        connection.close()
     assert profile.root.exists()
 
 

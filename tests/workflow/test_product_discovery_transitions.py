@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from git import Repo
@@ -33,18 +33,33 @@ from services.specification_source_registration import (
     SpecificationSourceRegistrationService,
 )
 from services.specs.candidate_contract import load_candidate_contract
-from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
+from tests.workflow.lifecycle_fixtures import (
+    _attempt,
+    _seed_accepted_vision_and_goal,
+)
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.clock import FixedClock
-from workflow.contracts import GRAPH_VERSION, TransitionResult, WorkflowErrorCode
+from workflow.contracts import (
+    GRAPH_VERSION,
+    FactReference,
+    NodeDecision,
+    RecommendationKind,
+    TransitionResult,
+    WorkflowErrorCode,
+)
 from workflow.definitions.product_discovery import SPECIFICATION_NODES
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_json
 from workflow.graph import ChildGraphSpec, WorkflowGraph
-from workflow.handlers.product_discovery import execute_decide_specification
+from workflow.handlers.product_discovery import (
+    execute_complete_specification_structuring,
+    execute_decide_specification,
+)
 from workflow.requests import (
     CompleteSpecificationStructuring,
     DecideSpecification,
+    FailNodeAttempt,
+    ObsoleteNodeAttempt,
     RegisterSpecificationSource,
     StartNodeAttempt,
 )
@@ -952,3 +967,677 @@ def test_acceptance_rejects_caller_owned_source_fingerprint(
     assert not result.ok
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+
+
+def _start_structuring_attempt(  # noqa: PLR0913
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    engine: Engine,
+    probe: RepositoryProbe,
+    key: str,
+    lease_seconds: int = 60,
+) -> tuple[NodeDecision, int, str]:
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "specification.structure"
+    )
+    start = domain.transition(
+        StartNodeAttempt(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key=f"{key}-start",
+            actor="worker",
+            correlation_id=f"{key}-correlation",
+            target_node_id="specification.structure",
+            target_instance_key=decision.instance_key,
+            normalized_input=SpecificationStructuringInputService(
+                engine=engine,
+                repository_probe=probe,
+            ).build(
+                project_id=project_id,
+                decision=decision,
+            ),
+            model_id="fake/specification-structurer",
+            execution_settings={"temperature": 0},
+            lease_seconds=lease_seconds,
+        )
+    )
+    assert start.ok
+    return (
+        decision,
+        cast("int", start.output["attempt_id"]),
+        cast("str", start.output["attempt_fingerprint"]),
+    )
+
+
+def test_recovery_after_failure_persists_candidate_and_preserves_records(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Recovery after failure creates a candidate and preserves history."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="recovery-failure",
+    )
+    domain = _domain(engine, repository_probe=probe)
+
+    _dec1, att1_id, att1_fp = _start_structuring_attempt(
+        domain, project_id=project_id, engine=engine, probe=probe, key="rec-fail-att1"
+    )
+    fail_res = domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=att1_id,
+            attempt_fingerprint=att1_fp,
+            failure_code="INVALID_SPECIFICATION_PAYLOAD",
+            failure_message="Simulated structurer failure.",
+            idempotency_key="rec-fail-att1-fail",
+            actor="worker",
+            correlation_id="rec-fail-correlation",
+        )
+    )
+    assert fail_res.ok
+
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    attempt_refs = [
+        r for r in recovery_decision.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+    assert attempt_refs[0].fact_id == str(att1_id)
+    assert attempt_refs[0].fingerprint == att1_fp
+
+    _dec2, att2_id, att2_fp = _start_structuring_attempt(
+        domain, project_id=project_id, engine=engine, probe=probe, key="rec-fail-att2"
+    )
+    assert att2_id > att1_id
+
+    comp2 = domain.transition(
+        CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos2.graph_version,
+            fact_fingerprint=pos2.fact_fingerprint,
+            decision_fingerprint=recovery_decision.decision_fingerprint,
+            idempotency_key="rec-fail-att2-complete",
+            actor="worker",
+            correlation_id="rec-fail-correlation",
+            attempt_id=att2_id,
+            attempt_fingerprint=att2_fp,
+            payload=_payload(),
+        )
+    )
+    assert comp2.ok
+
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).asc())
+        ).all()
+        expected_attempts = 2
+        assert len(attempts) == expected_attempts
+        assert attempts[0].workflow_node_attempt_id == att1_id
+        assert attempts[1].workflow_node_attempt_id == att2_id
+
+        outcome1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert outcome1.status == "failure"
+        assert outcome1.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        outcome2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att2_id,
+            )
+        ).one()
+        assert outcome2.status == "success"
+
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand.workflow_node_attempt_id == att2_id
+        assert cand.attempt_fingerprint == att2_fp
+
+
+def test_recovery_after_obsolete_persists_candidate_and_preserves_records(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Recovery after obsolete creates a candidate and preserves history."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="recovery-obsolete",
+    )
+    domain = _domain(engine, repository_probe=probe)
+
+    _dec1, att1_id, att1_fp = _start_structuring_attempt(
+        domain, project_id=project_id, engine=engine, probe=probe, key="rec-obs-att1"
+    )
+    obs_res = domain.transition(
+        ObsoleteNodeAttempt(
+            project_id=project_id,
+            attempt_id=att1_id,
+            attempt_fingerprint=att1_fp,
+            error_message="Simulated obsolete.",
+            idempotency_key="rec-obs-att1-obs",
+            actor="worker",
+            correlation_id="rec-obs-correlation",
+        )
+    )
+    assert not obs_res.ok
+    assert obs_res.error is not None
+    assert obs_res.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+
+    pos2 = domain.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+
+    _dec2, att2_id, att2_fp = _start_structuring_attempt(
+        domain, project_id=project_id, engine=engine, probe=probe, key="rec-obs-att2"
+    )
+    comp2 = domain.transition(
+        CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos2.graph_version,
+            fact_fingerprint=pos2.fact_fingerprint,
+            decision_fingerprint=recovery_decision.decision_fingerprint,
+            idempotency_key="rec-obs-att2-complete",
+            actor="worker",
+            correlation_id="rec-obs-correlation",
+            attempt_id=att2_id,
+            attempt_fingerprint=att2_fp,
+            payload=_payload(),
+        )
+    )
+    assert comp2.ok
+
+    with Session(engine) as session:
+        outcome1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert outcome1.status == "obsolete"
+
+        outcome2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att2_id,
+            )
+        ).one()
+        assert outcome2.status == "success"
+
+        cand = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).one()
+        assert cand.workflow_node_attempt_id == att2_id
+
+
+def test_recovery_after_expired_lease_persists_candidate_and_preserves_records(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A recovery attempt after an expired attempt lease creates a candidate."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="recovery-expired",
+    )
+    domain1 = _domain(engine, at=NOW, repository_probe=probe)
+
+    _dec1, att1_id, _att1_fp = _start_structuring_attempt(
+        domain1,
+        project_id=project_id,
+        engine=engine,
+        probe=probe,
+        key="rec-exp-att1",
+        lease_seconds=30,
+    )
+
+    evaluated_at = NOW + timedelta(seconds=35)
+    domain2 = _domain(engine, at=evaluated_at, repository_probe=probe)
+    pos2 = domain2.position(project_id)
+    recovery_decision = next(
+        item for item in pos2.decisions if item.node_id == "specification.structure"
+    )
+    assert recovery_decision.recommendation_kind is RecommendationKind.RECOVERY
+    assert any(
+        ref.fact_type == "node_attempt" and ref.fact_id == str(att1_id)
+        for ref in recovery_decision.fact_references
+    )
+
+    _dec2, att2_id, att2_fp = _start_structuring_attempt(
+        domain2, project_id=project_id, engine=engine, probe=probe, key="rec-exp-att2"
+    )
+    comp2 = domain2.transition(
+        CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos2.graph_version,
+            fact_fingerprint=pos2.fact_fingerprint,
+            decision_fingerprint=recovery_decision.decision_fingerprint,
+            idempotency_key="rec-exp-att2-complete",
+            actor="worker",
+            correlation_id="rec-exp-correlation",
+            attempt_id=att2_id,
+            attempt_fingerprint=att2_fp,
+            payload=_payload(),
+        )
+    )
+    assert comp2.ok
+
+    with Session(engine) as session:
+        outcome1 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att1_id,
+            )
+        ).one()
+        assert outcome1.status == "obsolete"
+
+        outcome2 = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.project_id) == project_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == att2_id,
+            )
+        ).one()
+        assert outcome2.status == "success"
+
+        cand = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).one()
+        assert cand.workflow_node_attempt_id == att2_id
+
+
+def test_recovery_rejects_reference_to_successful_attempt(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Recovery fails closed if the referenced node_attempt was successful."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="rec-reject-success",
+    )
+    domain = _domain(engine, repository_probe=probe)
+
+    pos_init = domain.position(project_id)
+    base_structure_dec = next(
+        item for item in pos_init.decisions if item.node_id == "specification.structure"
+    )
+
+    assert _structure(
+        engine,
+        domain,
+        project_id=project_id,
+        payload=_payload(),
+        key="succ-att1",
+        repository_probe=probe,
+    ).ok
+
+    with Session(engine) as session:
+        att1 = session.exec(
+            select(WorkflowNodeAttempt).where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
+            )
+        ).one()
+        att1_id = att1.workflow_node_attempt_id
+        att1_fp = att1.attempt_fingerprint
+
+    pos = domain.position(project_id)
+    source_ref = next(
+        item
+        for item in base_structure_dec.fact_references
+        if item.fact_type == "specification_source"
+    )
+    vision_ref = next(
+        item
+        for item in base_structure_dec.fact_references
+        if item.fact_type == "vision"
+    )
+    goal_ref = next(
+        item
+        for item in base_structure_dec.fact_references
+        if item.fact_type == "product_goal"
+    )
+
+    tampered_decision = base_structure_dec.model_copy(
+        update={
+            "recommendation_kind": RecommendationKind.RECOVERY,
+            "reason_code": "SPECIFICATION_STRUCTURER_FAILED",
+            "fact_references": (
+                source_ref,
+                vision_ref,
+                goal_ref,
+                FactReference(
+                    fact_type="node_attempt",
+                    fact_id=str(att1_id),
+                    fingerprint=att1_fp,
+                ),
+            ),
+        }
+    )
+    with Session(engine) as session:
+        attempt2 = _attempt(
+            session,
+            project_id=project_id,
+            node_id="specification.structure",
+            started_at=NOW + timedelta(seconds=1),
+            ordinal=10,
+        )
+        session.commit()
+        session.refresh(attempt2)
+        assert attempt2.workflow_node_attempt_id is not None
+
+        req = CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos.graph_version,
+            fact_fingerprint=pos.fact_fingerprint,
+            decision_fingerprint=tampered_decision.decision_fingerprint,
+            idempotency_key="tamper-complete",
+            actor="worker",
+            correlation_id="tamper-corr",
+            attempt_id=attempt2.workflow_node_attempt_id,
+            attempt_fingerprint=attempt2.attempt_fingerprint,
+            payload=_payload(),
+        )
+        result = execute_complete_specification_structuring(
+            session,
+            req,
+            tampered_decision,
+            NOW + timedelta(seconds=1),
+        )
+        assert not result.ok
+        assert result.error is not None
+        assert result.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "not failed or obsolete" in result.error.message
+
+
+def test_recovery_rejects_reference_to_active_unexpired_attempt(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Recovery rejects references to active unexpired attempts."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="rec-reject-active",
+    )
+    domain = _domain(engine, repository_probe=probe)
+    dec1, att1_id, att1_fp = _start_structuring_attempt(
+        domain,
+        project_id=project_id,
+        engine=engine,
+        probe=probe,
+        key="active-att1",
+        lease_seconds=300,
+    )
+
+    pos = domain.position(project_id)
+    source_ref = next(
+        item
+        for item in dec1.fact_references
+        if item.fact_type == "specification_source"
+    )
+    vision_ref = next(
+        item for item in dec1.fact_references if item.fact_type == "vision"
+    )
+    goal_ref = next(
+        item for item in dec1.fact_references if item.fact_type == "product_goal"
+    )
+
+    tampered_decision = dec1.model_copy(
+        update={
+            "recommendation_kind": RecommendationKind.RECOVERY,
+            "reason_code": "SPECIFICATION_STRUCTURER_FAILED",
+            "fact_references": (
+                source_ref,
+                vision_ref,
+                goal_ref,
+                FactReference(
+                    fact_type="node_attempt",
+                    fact_id=str(att1_id),
+                    fingerprint=att1_fp,
+                ),
+            ),
+        }
+    )
+    with Session(engine) as session:
+        attempt2 = _attempt(
+            session,
+            project_id=project_id,
+            node_id="specification.structure",
+            started_at=NOW + timedelta(seconds=1),
+            ordinal=11,
+        )
+        session.commit()
+        session.refresh(attempt2)
+        assert attempt2.workflow_node_attempt_id is not None
+
+        req = CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos.graph_version,
+            fact_fingerprint=pos.fact_fingerprint,
+            decision_fingerprint=tampered_decision.decision_fingerprint,
+            idempotency_key="active-complete",
+            actor="worker",
+            correlation_id="active-corr",
+            attempt_id=attempt2.workflow_node_attempt_id,
+            attempt_fingerprint=attempt2.attempt_fingerprint,
+            payload=_payload(),
+        )
+        result = execute_complete_specification_structuring(
+            session,
+            req,
+            tampered_decision,
+            NOW + timedelta(seconds=1),
+        )
+        assert not result.ok
+        assert result.error is not None
+        assert result.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "active unexpired attempt" in result.error.message
+
+
+def test_recovery_rejects_invalid_recovery_reference_variations(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Recovery rejects invalid attempt reference variations."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="rec-reject-variations",
+    )
+    domain = _domain(engine, repository_probe=probe)
+    dec1, att1_id, att1_fp = _start_structuring_attempt(
+        domain, project_id=project_id, engine=engine, probe=probe, key="var-att1"
+    )
+    domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=att1_id,
+            attempt_fingerprint=att1_fp,
+            failure_code="INVALID_SPECIFICATION_PAYLOAD",
+            failure_message="Failed.",
+            idempotency_key="var-fail",
+            actor="worker",
+            correlation_id="var-corr",
+        )
+    )
+
+    pos = domain.position(project_id)
+    source_ref = next(
+        item
+        for item in dec1.fact_references
+        if item.fact_type == "specification_source"
+    )
+    vision_ref = next(
+        item for item in dec1.fact_references if item.fact_type == "vision"
+    )
+    goal_ref = next(
+        item for item in dec1.fact_references if item.fact_type == "product_goal"
+    )
+
+    with Session(engine) as session:
+        attempt2 = _attempt(
+            session,
+            project_id=project_id,
+            node_id="specification.structure",
+            started_at=NOW + timedelta(seconds=1),
+            ordinal=12,
+        )
+        session.commit()
+        session.refresh(attempt2)
+        assert attempt2.workflow_node_attempt_id is not None
+        req = CompleteSpecificationStructuring(
+            project_id=project_id,
+            graph_version=pos.graph_version,
+            fact_fingerprint=pos.fact_fingerprint,
+            decision_fingerprint="sha256:" + ("e" * 64),
+            idempotency_key="var-comp",
+            actor="worker",
+            correlation_id="var-corr",
+            attempt_id=attempt2.workflow_node_attempt_id,
+            attempt_fingerprint=attempt2.attempt_fingerprint,
+            payload=_payload(),
+        )
+
+        bad_id_dec = dec1.model_copy(
+            update={
+                "recommendation_kind": RecommendationKind.RECOVERY,
+                "fact_references": (
+                    source_ref,
+                    vision_ref,
+                    goal_ref,
+                    FactReference(
+                        fact_type="node_attempt",
+                        fact_id="non-int",
+                        fingerprint=att1_fp,
+                    ),
+                ),
+            }
+        )
+        res1 = execute_complete_specification_structuring(
+            session, req, bad_id_dec, NOW + timedelta(seconds=1)
+        )
+        assert not res1.ok
+        assert res1.error is not None
+        assert res1.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "invalid recovery attempt reference" in res1.error.message
+
+        bad_fp_dec = dec1.model_copy(
+            update={
+                "recommendation_kind": RecommendationKind.RECOVERY,
+                "fact_references": (
+                    source_ref,
+                    vision_ref,
+                    goal_ref,
+                    FactReference(
+                        fact_type="node_attempt",
+                        fact_id=str(att1_id),
+                        fingerprint="sha256:wrong",
+                    ),
+                ),
+            }
+        )
+        res2 = execute_complete_specification_structuring(
+            session, req, bad_fp_dec, NOW + timedelta(seconds=1)
+        )
+        assert not res2.ok
+        assert res2.error is not None
+        assert res2.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "unknown or invalid" in res2.error.message
+
+        future_dec = dec1.model_copy(
+            update={
+                "recommendation_kind": RecommendationKind.RECOVERY,
+                "fact_references": (
+                    source_ref,
+                    vision_ref,
+                    goal_ref,
+                    FactReference(
+                        fact_type="node_attempt",
+                        fact_id=str(attempt2.workflow_node_attempt_id),
+                        fingerprint=attempt2.attempt_fingerprint,
+                    ),
+                ),
+            }
+        )
+        res3 = execute_complete_specification_structuring(
+            session, req, future_dec, NOW + timedelta(seconds=1)
+        )
+        assert not res3.ok
+        assert res3.error is not None
+        assert res3.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "unknown or invalid" in res3.error.message
+
+        rogue_dec = dec1.model_copy(
+            update={
+                "recommendation_kind": RecommendationKind.RECOVERY,
+                "fact_references": (
+                    source_ref,
+                    vision_ref,
+                    goal_ref,
+                    FactReference(
+                        fact_type="unknown_rogue_type",
+                        fact_id="1",
+                        fingerprint="abc",
+                    ),
+                ),
+            }
+        )
+        res4 = execute_complete_specification_structuring(
+            session, req, rogue_dec, NOW + timedelta(seconds=1)
+        )
+        assert not res4.ok
+        assert res4.error is not None
+        assert res4.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "unknown graph source" in res4.error.message
+        not_rec_dec = dec1.model_copy(
+            update={
+                "recommendation_kind": RecommendationKind.REQUIRED,
+                "fact_references": (
+                    source_ref,
+                    vision_ref,
+                    goal_ref,
+                    FactReference(
+                        fact_type="node_attempt",
+                        fact_id=str(att1_id),
+                        fingerprint=att1_fp,
+                    ),
+                ),
+            }
+        )
+        res5 = execute_complete_specification_structuring(
+            session, req, not_rec_dec, NOW + timedelta(seconds=1)
+        )
+        assert not res5.ok
+        assert res5.error is not None
+        assert res5.error.code == WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+        assert "require a recovery decision" in res5.error.message

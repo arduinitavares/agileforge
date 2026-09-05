@@ -45,6 +45,7 @@ _PLACEHOLDERS = {
     "<impact>": "none",
     "<max-story-points>": "3",
     "<team-name>": "Platform",
+    "<guidance>": "Split consent audit from gold publication.",
     "<idempotency-key>": "run-41",
     "<actor>": "cli-user",
 }
@@ -1133,3 +1134,232 @@ def test_fixture_preserves_machine_binding_only_in_position() -> None:
         if item["request_kind"] == "decide_story"
     )
     assert "story:DATA.001" not in command
+
+
+def test_backlog_correction_renders_exact_artifact_bound_command() -> None:
+    """Render the optional graph correction as the dedicated guarded CLI flow."""
+    artifact_id = 3
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    decision = NodeDecision(
+        node_id="backlog.generate",
+        instance_key=None,
+        child_graph_id="backlog",
+        request_kind="record_backlog_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="BACKLOG_CORRECTION_AVAILABLE",
+        decision_fingerprint=decision_fingerprint,
+        fact_references=(
+            FactReference(
+                fact_type="backlog",
+                fact_id=str(artifact_id),
+                fingerprint=artifact_fingerprint,
+            ),
+            FactReference(
+                fact_type="specification",
+                fact_id="1",
+                fingerprint="sha256:" + ("c" * 64),
+            ),
+            FactReference(
+                fact_type="product_goal",
+                fact_id="1",
+                fingerprint="sha256:" + ("d" * 64),
+            ),
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == 1
+    tokens = shlex.split(commands[0]["command"])
+    assert tokens[:3] == ["agileforge", "backlog", "correct"]
+    parsed = build_parser().parse_args(
+        [
+            _PLACEHOLDERS.get(argument, argument)
+            for argument in tokens[1:]
+        ]
+    )
+    assert parsed.expected_decision_fingerprint == decision_fingerprint
+    assert parsed.accepted_backlog_artifact_id == artifact_id
+    assert parsed.accepted_backlog_artifact_fingerprint == artifact_fingerprint
+    assert parsed.guidance == _PLACEHOLDERS["<guidance>"]
+
+
+@pytest.mark.parametrize(
+    "recovery_reason",
+    [
+        "BACKLOG_CORRECTION_FAILED",
+        "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+    ],
+)
+def test_backlog_correction_recovery_renders_exact_command(
+    recovery_reason: str,
+) -> None:
+    """Render correction recovery decisions as the dedicated CLI command."""
+    artifact_id = 3
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    decision = NodeDecision(
+        node_id="backlog.generate",
+        instance_key=None,
+        child_graph_id="backlog",
+        request_kind="record_backlog_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.RECOVERY,
+        reason_code=recovery_reason,
+        decision_fingerprint=decision_fingerprint,
+        fact_references=(
+            FactReference(
+                fact_type="backlog",
+                fact_id=str(artifact_id),
+                fingerprint=artifact_fingerprint,
+            ),
+            FactReference(
+                fact_type="specification",
+                fact_id="1",
+                fingerprint="sha256:" + ("c" * 64),
+            ),
+            FactReference(
+                fact_type="product_goal",
+                fact_id="1",
+                fingerprint="sha256:" + ("d" * 64),
+            ),
+            FactReference(
+                fact_type="node_attempt",
+                fact_id="12",
+                fingerprint="sha256:" + ("e" * 64),
+            ),
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == 1
+    tokens = shlex.split(commands[0]["command"])
+    assert tokens[:3] == ["agileforge", "backlog", "correct"]
+    parsed = build_parser().parse_args(
+        [
+            _PLACEHOLDERS.get(argument, argument)
+            for argument in tokens[1:]
+        ]
+    )
+    assert parsed.expected_decision_fingerprint == decision_fingerprint
+    assert parsed.accepted_backlog_artifact_id == artifact_id
+    assert parsed.accepted_backlog_artifact_fingerprint == artifact_fingerprint
+
+
+def _ref(fact_type: str, fact_id: str, fingerprint: str) -> FactReference:
+    return FactReference(
+        fact_type=fact_type, fact_id=fact_id, fingerprint=fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("references", "recommendation_kind", "reason_code"),
+    [
+        (
+            (
+                _ref("specification", "1", "sha256:1"),
+                _ref("product_goal", "1", "sha256:2"),
+            ),
+            RecommendationKind.OPTIONAL_REENTRY,
+            "BACKLOG_CORRECTION_AVAILABLE",
+        ),
+        (
+            (
+                _ref("backlog", "1", "sha256:1"),
+                _ref("backlog", "2", "sha256:2"),
+                _ref("specification", "1", "sha256:3"),
+                _ref("product_goal", "1", "sha256:4"),
+            ),
+            RecommendationKind.OPTIONAL_REENTRY,
+            "BACKLOG_CORRECTION_AVAILABLE",
+        ),
+        (
+            (
+                _ref("backlog", "bad", "sha256:1"),
+                _ref("specification", "1", "sha256:2"),
+                _ref("product_goal", "1", "sha256:3"),
+            ),
+            RecommendationKind.OPTIONAL_REENTRY,
+            "BACKLOG_CORRECTION_AVAILABLE",
+        ),
+        (
+            (
+                _ref("backlog", "1", "sha256:1"),
+                _ref("specification", "1", "sha256:2"),
+                _ref("product_goal", "1", "sha256:3"),
+                _ref("node_attempt", "1", "sha256:4"),
+            ),
+            RecommendationKind.OPTIONAL_REENTRY,
+            "BACKLOG_CORRECTION_AVAILABLE",
+        ),
+        (
+            (
+                _ref("backlog", "1", "sha256:1"),
+                _ref("specification", "1", "sha256:2"),
+                _ref("product_goal", "1", "sha256:3"),
+            ),
+            RecommendationKind.RECOVERY,
+            "BACKLOG_CORRECTION_FAILED",
+        ),
+        (
+            (
+                _ref("backlog", "1", "sha256:1"),
+                _ref("specification", "1", "sha256:2"),
+                _ref("product_goal", "1", "sha256:3"),
+                _ref("node_attempt", "1", "sha256:4"),
+                _ref("node_attempt", "2", "sha256:5"),
+            ),
+            RecommendationKind.RECOVERY,
+            "BACKLOG_CORRECTION_FAILED",
+        ),
+    ],
+)
+def test_malformed_backlog_correction_decisions_are_not_rendered(
+    references: tuple[FactReference, ...],
+    recommendation_kind: RecommendationKind,
+    reason_code: str,
+) -> None:
+    """Do not render when references violate Backlog correction constraints."""
+    decision = NodeDecision(
+        node_id="backlog.generate",
+        instance_key=None,
+        child_graph_id="backlog",
+        request_kind="record_backlog_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=recommendation_kind,
+        reason_code=reason_code,
+        decision_fingerprint="sha256:" + ("f" * 64),
+        fact_references=references,
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+    commands = render_workflow_next(position)["commands"]
+    assert len(commands) == 0

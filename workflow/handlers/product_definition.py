@@ -196,7 +196,7 @@ def execute_record_backlog_draft(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    """Validate exact direct-Specification Backlog guards before persistence."""
+    """Validate exact Specification, Product Goal, and Backlog correction guards."""
     specification_matches = _accepted_specification(
         session,
         project_id=request.project_id,
@@ -228,6 +228,36 @@ def execute_record_backlog_draft(
         or request.supersedes_backlog_artifact_id != expected_parent
     ):
         return _conflict("RecordBacklogDraft does not target exact graph facts.")
+    parent_reference = next(
+        (
+            reference
+            for reference in decision.fact_references
+            if reference.fact_type == "backlog"
+        ),
+        None,
+    )
+    if (
+        decision.reason_code
+        in {
+            "BACKLOG_CORRECTION_AVAILABLE",
+            "BACKLOG_CORRECTION_FAILED",
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+        }
+    ):
+        if (
+            parent_reference is not None
+            and parent_reference.fingerprint == request.content_fingerprint
+        ):
+            return _conflict("Backlog correction did not change the accepted artifact.")
+        from repositories.workflow import WorkflowFactRepository  # noqa: PLC0415
+        from workflow.definitions.backlog import (  # noqa: PLC0415
+            backlog_correction_boundary_problem,
+        )
+
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        problem = backlog_correction_boundary_problem(snapshot, evaluated_at)
+        if problem is not None:
+            return _conflict(problem.message)
     from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
         record_backlog_draft_in_session,
     )
@@ -286,6 +316,19 @@ def execute_decide_backlog(
         )
     ):
         return _conflict("DecideBacklog does not target the waiting artifact.")
+    if (
+        request.decision == "accepted"
+        and artifact.supersedes_backlog_artifact_id is not None
+    ):
+        from repositories.workflow import WorkflowFactRepository  # noqa: PLC0415
+        from workflow.definitions.backlog import (  # noqa: PLC0415
+            backlog_correction_boundary_problem,
+        )
+
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        problem = backlog_correction_boundary_problem(snapshot, evaluated_at)
+        if problem is not None:
+            return _conflict(problem.message)
     try:
         from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
             record_backlog_decision_in_session,

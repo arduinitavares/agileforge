@@ -70,16 +70,33 @@ def test_model_config_path_env_overrides(
         model_config.clear_config_cache()
 
 
+_DEFAULT_LUNA_MODEL_ROLES: tuple[str, ...] = (
+    "product_goal",
+    "product_vision",
+    "specification_structurer",
+)
+_DEFAULT_TERRA_MODEL_ROLES: tuple[str, ...] = (
+    "backlog_primer",
+    "roadmap_builder",
+    "spec_validator",
+    "sprint_planner",
+    "user_story_writer",
+)
+
+
 def test_default_model_config_uses_cheapest_gpt_5_6_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Production agent roles should default to GPT-5.6 Luna."""
+    """Production agent roles should route upstream to Luna and planning to Terra."""
     monkeypatch.delenv("MODEL_CONFIG_PATH", raising=False)
     model_config.clear_config_cache()
 
     try:
-        assert {get_model_id(key) for key in _RUNTIME_MODEL_KEYS} == {
+        assert {get_model_id(key) for key in _DEFAULT_LUNA_MODEL_ROLES} == {
             "openrouter/openai/gpt-5.6-luna"
+        }
+        assert {get_model_id(key) for key in _DEFAULT_TERRA_MODEL_ROLES} == {
+            "openrouter/openai/gpt-5.6-terra"
         }
     finally:
         model_config.clear_config_cache()

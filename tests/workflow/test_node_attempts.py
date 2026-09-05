@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from google.adk import Context, Workflow
@@ -1060,3 +1060,308 @@ def test_late_model_result_is_recorded_obsolete_without_business_fact(
         outcome = _backlog_outcomes(session)[0]
         assert outcome.status == "obsolete"
         assert session.exec(select(BacklogArtifact)).all() == []
+
+
+def test_backlog_correction_replay_exact_and_conflicts(engine: Engine) -> None:
+    """Exact backlog correction attempt replays, while changed semantics conflict."""
+    original_semantics = {
+        "accepted_backlog_artifact_id": 3,
+        "accepted_backlog_artifact_fingerprint": "sha256:" + "b" * 64,
+        "guidance": "Split the overloaded items.",
+    }
+    normalized_input: JsonObject = cast(
+        "JsonObject",
+        {
+            "builder_input": {
+                "accepted_specification_version_id": 1,
+                "accepted_specification_hash": "sha256:" + "a" * 64,
+                "accepted_specification_json": "{}",
+                "product_vision_statement": "Vision",
+                "product_goal_statement": "Goal",
+                "prior_backlog_state": "{}",
+                "user_input": "Split the overloaded items.",
+            },
+            "product_goal_artifact_id": 2,
+            "product_goal_fingerprint": "sha256:" + "c" * 64,
+            "supersedes_backlog_artifact_id": 3,
+            "backlog_correction": original_semantics,
+        },
+    )
+    stored = StartNodeAttempt(
+        project_id=1,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="sha256:facts",
+        decision_fingerprint="sha256:decision",
+        target_node_id="backlog.generate",
+        target_instance_key=None,
+        normalized_input=normalized_input,
+        model_id="fixed-model",
+        execution_settings={},
+        lease_seconds=60,
+        idempotency_key="backlog-correct-replay-key",
+        actor="operator@example.com",
+        correlation_id="corr-1",
+    )
+    persisted = TransitionResult(
+        ok=True,
+        applied_node_id="backlog.generate",
+        output={"attempt_id": 10},
+    )
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=stored.idempotency_key,
+                request_fingerprint=canonical_hash(stored.model_dump(mode="json")),
+                request_json=canonical_json(stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+
+    service = DurableNodeAttemptReplayService(engine=engine)
+
+    exact_replay = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={"backlog_correction": dict(original_semantics)},
+        )
+    )
+    assert exact_replay == persisted.model_copy(update={"replayed": True})
+
+    conflicting_queries = [
+        # Changed guidance
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": {
+                    **original_semantics,
+                    "guidance": "Changed guidance.",
+                }
+            },
+        ),
+        # Changed artifact_id
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": {
+                    **original_semantics,
+                    "accepted_backlog_artifact_id": 99,
+                }
+            },
+        ),
+        # Changed artifact_fingerprint
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": {
+                    **original_semantics,
+                    "accepted_backlog_artifact_fingerprint": "sha256:" + "d" * 64,
+                }
+            },
+        ),
+        # Changed decision fingerprint in query
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint="sha256:different-decision",
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={"backlog_correction": dict(original_semantics)},
+        ),
+        # Changed actor
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor="different@example.com",
+            correlation_id=stored.correlation_id,
+            semantic_input={"backlog_correction": dict(original_semantics)},
+        ),
+        # Changed correlation_id
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id="different-correlation-id",
+            semantic_input={"backlog_correction": dict(original_semantics)},
+        ),
+        # Extra top-level semantic key
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": dict(original_semantics),
+                "extra": "forbidden",
+            },
+        ),
+        # Extra nested key
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": {**original_semantics, "extra": "forbidden"}
+            },
+        ),
+        # Missing nested key
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "backlog_correction": {"guidance": "Only guidance."}
+            },
+        ),
+        # Non-dict nested value
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={"backlog_correction": "not a dict"},
+        ),
+        # Generic generation reusing correction key (correction-to-generic collision)
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input=None,
+        ),
+    ]
+
+    for query in conflicting_queries:
+        conflict = service.replay(query)
+        assert conflict is not None
+        assert conflict.error is not None
+        assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+    # Generic-to-correction collision: store a generic attempt,
+    # then query with correction semantics.
+    generic_stored = StartNodeAttempt(
+        project_id=1,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="sha256:facts",
+        decision_fingerprint="sha256:decision",
+        target_node_id="backlog.generate",
+        target_instance_key=None,
+        normalized_input={
+            "builder_input": {
+                "accepted_specification_version_id": 1,
+                "accepted_specification_hash": "sha256:" + "a" * 64,
+                "accepted_specification_json": "{}",
+                "product_vision_statement": "Vision",
+                "product_goal_statement": "Goal",
+                "prior_backlog_state": "NO_HISTORY",
+                "user_input": None,
+            },
+            "product_goal_artifact_id": 2,
+            "product_goal_fingerprint": "sha256:" + "c" * 64,
+            "supersedes_backlog_artifact_id": None,
+        },
+        model_id="fixed-model",
+        execution_settings={},
+        lease_seconds=60,
+        idempotency_key="backlog-generic-key",
+        actor="operator@example.com",
+        correlation_id="corr-2",
+    )
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=generic_stored.idempotency_key,
+                request_fingerprint=canonical_hash(generic_stored.model_dump(mode="json")),
+                request_json=canonical_json(generic_stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+
+    cross_collision = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=generic_stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=generic_stored.target_node_id,
+            idempotency_key=generic_stored.idempotency_key,
+            actor=generic_stored.actor,
+            correlation_id=generic_stored.correlation_id,
+            semantic_input={"backlog_correction": dict(original_semantics)},
+        )
+    )
+    assert cross_collision is not None
+    assert cross_collision.error is not None
+    assert cross_collision.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+    with Session(engine) as session:
+        attempts = session.exec(select(WorkflowNodeAttempt)).all()
+        assert len(attempts) == 0

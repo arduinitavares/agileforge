@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 
 from adapters.adk.errors import (
     AttemptRevalidationError,
@@ -133,6 +140,18 @@ class _JoinedBacklogValidations(BaseModel):
     validate_round_trip: RecipeOutput
 
 
+class _BacklogCorrectionRecipeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
+    accepted_backlog_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    guidance: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=32_768),
+    ]
+
+
 class _BacklogRecipePayload(BaseModel):
     """Provider input beside host-only Backlog persistence guards."""
 
@@ -141,6 +160,7 @@ class _BacklogRecipePayload(BaseModel):
     product_goal_artifact_id: int
     product_goal_fingerprint: str
     supersedes_backlog_artifact_id: int | None = None
+    backlog_correction: _BacklogCorrectionRecipeInput | None = None
 
 
 class _RoadmapRecipePayload(BaseModel):
@@ -1052,8 +1072,8 @@ def build_specification_structuring_workflow(
     execution_settings: JsonObject,
 ) -> Workflow:
     """Validate exact host input and typed output around one structuring leaf."""
-    timeout_seconds, max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=max_attempts)
+    timeout_seconds, _max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=1)
 
     @node(
         name="execute_specification_structurer",
@@ -1071,30 +1091,34 @@ def build_specification_structuring_workflow(
         revalidated = revalidate_specification_attempt("before_provider")
         if revalidated is not None and (not revalidated.ok or revalidated.replayed):
             raise AttemptRevalidationError(revalidated)
-        generated = await context.run_node(
-            leaf_agent,
-            node_input=structuring_input.model_dump(mode="json"),
-        )
-        revalidated = revalidate_specification_attempt("after_provider")
-        if revalidated is not None and (not revalidated.ok or revalidated.replayed):
-            raise AttemptRevalidationError(revalidated)
         try:
-            output = SpecificationStructuringOutput.model_validate(generated)
-        except ValidationError as error:
-            payload = generated.get("payload") if isinstance(generated, dict) else None
-            schema_version = (
-                payload.get("schema_version") if isinstance(payload, dict) else None
+            generated = await context.run_node(
+                leaf_agent,
+                node_input=structuring_input.model_dump(mode="json"),
             )
-            if schema_version is not None and schema_version != SCHEMA_VERSION:
-                code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA
-                message = "Specification structurer returned an unsupported schema."
-            else:
-                code = WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
-                message = "Specification structurer returned an invalid v2 payload."
-            raise SpecificationAgenticExecutionError(
-                code=code,
-                message=message,
-            ) from error
+            try:
+                output = SpecificationStructuringOutput.model_validate(generated)
+            except ValidationError:
+                payload = (
+                    generated.get("payload") if isinstance(generated, dict) else None
+                )
+                schema_version = (
+                    payload.get("schema_version") if isinstance(payload, dict) else None
+                )
+                if schema_version is not None and schema_version != SCHEMA_VERSION:
+                    code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA
+                    message = "Specification structurer returned an unsupported schema."
+                else:
+                    code = WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+                    message = "Specification structurer returned an invalid v2 payload."
+                raise SpecificationAgenticExecutionError(
+                    code=code,
+                    message=message,
+                ) from None
+        finally:
+            revalidated = revalidate_specification_attempt("after_provider")
+            if revalidated is not None and (not revalidated.ok or revalidated.replayed):
+                raise AttemptRevalidationError(revalidated)
         return RecipeOutput(
             payload=specification_structuring_completion_payload(output)
         )

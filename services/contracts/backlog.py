@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 
 _MAX_BACKLOG_ITEMS = 999999
+MAX_BACKLOG_CORRECTION_GUIDANCE_CHARS: Final[int] = 32_768
 
 
 def normalize_backlog_requirement(value: str) -> str:
@@ -168,6 +169,7 @@ def canonicalize_backlog_items(
 
 
 __all__ = [
+    "MAX_BACKLOG_CORRECTION_GUIDANCE_CHARS",
     "BacklogAgentItem",
     "BacklogAgentOutput",
     "BacklogBuilderInput",

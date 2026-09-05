@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import socket
-import sys
-from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
@@ -14,6 +12,7 @@ from fastapi.testclient import TestClient
 from pytest_socket import SocketBlockedError
 
 import api as api_module
+import tests.conftest as test_config
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
@@ -24,6 +23,7 @@ from services.vision_evidence import (
     VisionEvidenceErrorCode,
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
+from tests.conftest import _windows_testclient_socketpair
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -42,43 +42,87 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 PROJECT_ID = 41
-_ORIGINAL_SOCKET: type[socket.socket] = socket.socket
 
 
-def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
-    """Create only the loopback pair required by Windows ProactorEventLoop."""
-    with _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        address = listener.getsockname()
-        with ExitStack() as sockets:
-            client = _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.callback(client.close)
-            client.setblocking(False)
-            with suppress(BlockingIOError, InterruptedError):
-                client.connect(address)
-            client.setblocking(True)
-            accepted_fd, _ = listener._accept()  # ty: ignore[unresolved-attribute]
-            server = _ORIGINAL_SOCKET(
-                listener.family,
-                listener.type,
-                listener.proto,
-                fileno=accepted_fd,
-            )
-            sockets.callback(server.close)
-            assert server.getsockname() == client.getpeername()
-            assert client.getsockname() == server.getpeername()
-            sockets.pop_all()
-            return server, client
+class _FakeSocket:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        peer_address: tuple[str, int] | None = None,
+    ) -> None:
+        self.address = address
+        self.peer_address = peer_address or address
+        self.family = socket.AF_INET
+        self.type = socket.SOCK_STREAM
+        self.proto = 0
+        self.closed = False
+
+    def __enter__(self) -> _FakeSocket:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def _accept(self) -> tuple[int, tuple[object, ...]]:
+        return (101, ())
+
+    def bind(self, _address: tuple[str, int]) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    def connect(self, _address: tuple[str, int]) -> None:
+        return None
+
+    def getsockname(self) -> tuple[str, int]:
+        return self.address
+
+    def getpeername(self) -> tuple[str, int]:
+        return self.peer_address
+
+    def listen(self) -> None:
+        return None
+
+    def setblocking(self, _flag: bool) -> None:
+        return None
 
 
-@pytest.fixture(autouse=True)
-def _permit_windows_testclient_socketpair(
+class _MismatchedSocketFactory:
+    def __init__(self, mismatch: str) -> None:
+        self.listener = _FakeSocket(("127.0.0.1", 5000))
+        if mismatch == "server":
+            self.client = _FakeSocket(("127.0.0.1", 5001), self.listener.address)
+            self.server = _FakeSocket(("127.0.0.2", 5000), self.client.address)
+        else:
+            self.client = _FakeSocket(("127.0.0.1", 5001), self.listener.address)
+            self.server = _FakeSocket(self.listener.address, ("127.0.0.2", 5001))
+        self.calls = 0
+
+    def __call__(self, *_args: object, **kwargs: object) -> _FakeSocket:
+        if "fileno" in kwargs:
+            return self.server
+        if self.calls == 0:
+            self.calls += 1
+            return self.listener
+        return self.client
+
+
+@pytest.mark.parametrize("mismatch", ["server", "client"])
+def test_testclient_socketpair_rejects_mismatched_endpoints(
     monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
 ) -> None:
-    """Permit only Proactor's internal pair while pytest-socket blocks sockets."""
-    if sys.platform == "win32":
-        monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
+    """Reject either endpoint mismatch and close the rejected pair."""
+    socket_factory = _MismatchedSocketFactory(mismatch)
+    monkeypatch.setattr(test_config, "_ORIGINAL_SOCKET", socket_factory)
+
+    with pytest.raises(RuntimeError, match="socketpair endpoints did not match"):
+        _windows_testclient_socketpair()
+
+    assert socket_factory.listener.closed is True
+    assert socket_factory.client.closed is True
+    assert socket_factory.server.closed is True
 
 
 def test_testclient_transport_policy_allows_only_loopback() -> None:

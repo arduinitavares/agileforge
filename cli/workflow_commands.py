@@ -265,6 +265,41 @@ def _render_semantic_command(
         decision: NodeDecision,
     ) -> tuple[str, ...]:
         if (
+            request_kind == "record_backlog_draft"
+            and decision.reason_code
+            in {
+                "BACKLOG_CORRECTION_AVAILABLE",
+                "BACKLOG_CORRECTION_FAILED",
+                "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            }
+        ):
+            backlog_references = tuple(
+                item for item in decision.fact_references if item.fact_type == "backlog"
+            )
+            if len(backlog_references) != 1:
+                message = "Backlog correction requires one exact artifact reference."
+                raise ValueError(message)
+            backlog_reference = backlog_references[0]
+            return (
+                "agileforge",
+                "backlog",
+                "correct",
+                "--project-id",
+                str(position.project_id),
+                "--guidance",
+                "<guidance>",
+                "--accepted-backlog-artifact-id",
+                backlog_reference.fact_id,
+                "--accepted-backlog-artifact-fingerprint",
+                backlog_reference.fingerprint,
+                "--expected-decision-fingerprint",
+                decision.decision_fingerprint,
+                "--idempotency-key",
+                "<idempotency-key>",
+                "--actor",
+                "<actor>",
+            )
+        if (
             request_kind == "record_story_draft"
             and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
         ):
@@ -381,6 +416,10 @@ def render_workflow_next(
                     or (
                         decision.request_kind == "record_story_draft"
                         and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
+                    )
+                    or (
+                        decision.request_kind == "record_backlog_draft"
+                        and decision.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
                     )
                 )
             )

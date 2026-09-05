@@ -36,12 +36,12 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 
-SPECIFICATION_STRUCTURER_VERSION: str = "1.0.1"
+SPECIFICATION_STRUCTURER_VERSION: str = "1.0.2"
 SPECIFICATION_STRUCTURER_PROMPT_VERSION: str = (
-    "agileforge.specification-structurer.prompt.v2"
+    "agileforge.specification-structurer.prompt.v3"
 )
 SPECIFICATION_STRUCTURER_PROMPT_HASH: str = (
-    "sha256:88cad14ee56fde7c351b98063f375b5bd7747d4eb7f2c89191cd29b560f1d669"
+    "sha256:ecc68026d01a9ade96707e345c47d2fe07acf3fcf37da82b7a739f9cfed6d00f"
 )
 SPECIFICATION_VISION_SOURCE_ID: str = "SRC.vision.accepted"
 SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: str = "SRC.product-goal.active"

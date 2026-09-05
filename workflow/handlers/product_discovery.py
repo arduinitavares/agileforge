@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from pydantic import TypeAdapter, ValidationError
@@ -49,6 +50,7 @@ from workflow.contracts import (
     FactReference,
     JsonObject,
     NodeDecision,
+    RecommendationKind,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
@@ -61,8 +63,6 @@ from workflow.definitions.product_goal import (
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from utils.agileforge_spec_profile_v2 import SpecificationPayload
     from workflow.requests.product_discovery import (
         CompleteSpecificationStructuring,
@@ -94,6 +94,7 @@ class _CandidateLineage:
     base_payload: SpecificationPayload | None
     supersedes: SpecificationCandidate | None
     source: SpecificationSource
+    recovered_attempt: WorkflowNodeAttempt | None = None
 
 
 @dataclass(frozen=True)
@@ -644,10 +645,79 @@ def _validate_base_lineage(
         )
 
 
+def _recovered_attempt(
+    session: Session,
+    *,
+    request: CompleteSpecificationStructuring,
+    decision: NodeDecision,
+    reference: FactReference,
+    evaluated_at: datetime,
+) -> WorkflowNodeAttempt:
+    try:
+        attempt_id = int(reference.fact_id)
+    except (ValueError, TypeError):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "Specification structuring contains an invalid recovery attempt reference.",
+        ) from None
+    attempt = session.exec(
+        select(WorkflowNodeAttempt).where(
+            col(WorkflowNodeAttempt.project_id) == request.project_id,
+            col(WorkflowNodeAttempt.workflow_node_attempt_id) == attempt_id,
+        )
+    ).one_or_none()
+    if (
+        attempt is None
+        or attempt.attempt_fingerprint != reference.fingerprint
+        or attempt.node_id != "specification.structure"
+        or attempt.instance_key != decision.instance_key
+        or attempt.workflow_node_attempt_id is None
+        or attempt.workflow_node_attempt_id >= request.attempt_id
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "Specification structuring contains an unknown "
+            "or invalid recovery attempt reference.",
+        )
+    outcome = session.exec(
+        select(WorkflowNodeAttemptOutcome).where(
+            col(WorkflowNodeAttemptOutcome.project_id) == request.project_id,
+            col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id,
+        )
+    ).one_or_none()
+    if outcome is not None:
+        if outcome.status not in {"failure", "obsolete"}:
+            raise _GuardError(
+                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                "Specification structuring recovery references an attempt "
+                "that is not failed or obsolete.",
+            )
+    else:
+        lease_expires_at = attempt.lease_expires_at
+        comp_eval = (
+            evaluated_at
+            if evaluated_at.tzinfo is not None
+            else evaluated_at.replace(tzinfo=UTC)
+        )
+        comp_lease = (
+            lease_expires_at
+            if lease_expires_at.tzinfo is not None
+            else lease_expires_at.replace(tzinfo=UTC)
+        )
+        if comp_eval < comp_lease:
+            raise _GuardError(
+                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                "Specification structuring recovery references an "
+                "active unexpired attempt.",
+            )
+    return attempt
+
+
 def _lineage_for_completion(  # noqa: C901
     session: Session,
     request: CompleteSpecificationStructuring,
     decision: NodeDecision,
+    evaluated_at: datetime,
 ) -> _CandidateLineage:
     allowed = {
         "vision",
@@ -655,6 +725,7 @@ def _lineage_for_completion(  # noqa: C901
         "specification_source",
         "specification",
         "specification_candidate",
+        "node_attempt",
     }
     if any(item.fact_type not in allowed for item in decision.fact_references):
         raise _GuardError(
@@ -671,10 +742,26 @@ def _lineage_for_completion(  # noqa: C901
         "FactReference",
         _reference(decision, "specification_source", required=True),
     )
+    recovery_ref = _reference(decision, "node_attempt", required=False)
     if base_ref is not None and prior_ref is not None:
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
             "Specification structuring cannot revise and amend simultaneously.",
+        )
+    recovered_attempt: WorkflowNodeAttempt | None = None
+    if recovery_ref is not None:
+        if decision.recommendation_kind is not RecommendationKind.RECOVERY:
+            raise _GuardError(
+                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                "Specification structuring recovery references require "
+                "a recovery decision.",
+            )
+        recovered_attempt = _recovered_attempt(
+            session,
+            request=request,
+            decision=decision,
+            reference=recovery_ref,
+            evaluated_at=evaluated_at,
         )
     vision = _accepted_vision(
         session,
@@ -758,6 +845,7 @@ def _lineage_for_completion(  # noqa: C901
                 base_payload=None,
                 supersedes=prior,
                 source=source,
+                recovered_attempt=recovered_attempt,
             )
         if prior.base_spec_version_id is None or prior.base_spec_hash is None:
             raise _GuardError(
@@ -788,6 +876,7 @@ def _lineage_for_completion(  # noqa: C901
             ),
             supersedes=prior,
             source=source,
+            recovered_attempt=recovered_attempt,
         )
     if base_ref is not None:
         base = _spec_by_reference(
@@ -808,6 +897,7 @@ def _lineage_for_completion(  # noqa: C901
             ),
             supersedes=None,
             source=source,
+            recovered_attempt=recovered_attempt,
         )
 
     candidates = session.exec(
@@ -844,6 +934,7 @@ def _lineage_for_completion(  # noqa: C901
         base_payload=None,
         supersedes=None,
         source=source,
+        recovered_attempt=recovered_attempt,
     )
 
 
@@ -1017,7 +1108,7 @@ def execute_complete_specification_structuring(
 ) -> TransitionResult:
     """Bind provider semantics to the exact host attempt and graph lineage."""
     try:
-        lineage = _lineage_for_completion(session, request, decision)
+        lineage = _lineage_for_completion(session, request, decision, evaluated_at)
         attempt = _attempt(session, request)
         structuring_input, manifest, execution_settings = _attempt_inputs(attempt)
         _validate_attempt_contract(structuring_input, lineage)

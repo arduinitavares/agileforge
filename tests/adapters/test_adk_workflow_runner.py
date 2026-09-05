@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from google.adk import Workflow as AdkWorkflow
@@ -72,7 +72,12 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from services.application import DeliveryActionInputService
+from services.application import (
+    AgileForgeApplication,
+    BacklogCorrectionRequest,
+    DeliveryActionInputService,
+    DeliveryActionRequest,
+)
 from services.contracts.backlog import (
     BacklogAgentOutput,
     BacklogBuilderInput,
@@ -104,6 +109,7 @@ from tests.test_create_user_story import (
     _seed_story_parent,
 )
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from tests.workflow.test_planning_transitions import _seed_accepted_backlog
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.clock import FixedClock
@@ -2945,6 +2951,7 @@ def _adapter(
         product_goal_fingerprint=product_goal_fingerprint,
         canonical_content=content,
         content_fingerprint=canonical_hash(content),
+        supersedes_backlog_artifact_id=envelope.get("supersedes_backlog_artifact_id"),
     )
 
 
@@ -3793,3 +3800,640 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
             replacement_id: "success",
         }
         assert session.exec(select(BacklogArtifact)).one() is not None
+
+
+def _capturing_leaf_workflow(
+    calls: list[str],
+    captured_inputs: list[dict[str, object]],
+    response: object,
+    failure_message: str | None = None,
+) -> AdkWorkflow:
+    @node(name="capturing_leaf_provider", rerun_on_resume=True)
+    async def capturing_leaf_provider(node_input: object) -> object:
+        calls.append("provider")
+        if isinstance(node_input, dict):
+            captured_inputs.append(cast("dict[str, object]", node_input))
+        if failure_message is not None:
+            raise RuntimeError(failure_message)
+        return response
+
+    return AdkWorkflow(
+        name="capturing_leaf_workflow",
+        edges=[(START, capturing_leaf_provider)],
+    )
+
+
+def test_backlog_correction_runner_commits_successor_without_leak(
+    engine: Engine,
+) -> None:
+    """Run backlog correction attempt, verify leaf isolation, and commit successor."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        source = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id).desc())
+        ).first()
+        assert source is not None
+        assert source.backlog_artifact_id is not None
+
+    calls: list[str] = []
+    captured_inputs: list[dict[str, object]] = []
+    changed_response = {
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Corrected requirement: deliver scoped audit.",
+                "spec_item_ids": ["REQ.planning-1"],
+                "value_driver": "Strategic",
+                "justification": "Deliver corrected work.",
+                "estimated_effort": "S",
+                "technical_note": None,
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    leaf = _capturing_leaf_workflow(calls, captured_inputs, changed_response)
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    guidance = "Split consent audit from gold publication."
+    request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance=guidance,
+        idempotency_key="runner-backlog-correct-1",
+        actor="operator@example.com",
+    )
+    prepared = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=request,
+    )
+    assert isinstance(prepared, dict)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key=request.idempotency_key,
+        actor=request.actor,
+        correlation_id=request.correlation_id,
+    )
+
+    result = runner.run(decision, prepared, guards=guards)
+
+    assert result.ok is True
+    assert calls == ["provider"]
+    assert len(captured_inputs) == 1
+    captured_provider_input = captured_inputs[0]
+    assert captured_provider_input["prior_backlog_state"] == (
+        source.canonical_content_json
+    )
+    assert captured_provider_input["user_input"] == guidance
+    assert "backlog_correction" not in captured_provider_input
+
+    with Session(engine) as session:
+        successors = session.exec(
+            select(BacklogArtifact).where(
+                col(BacklogArtifact.supersedes_backlog_artifact_id)
+                == source.backlog_artifact_id
+            )
+        ).all()
+        assert len(successors) == 1
+        successor = successors[0]
+        assert successor.supersedes_backlog_artifact_id == source.backlog_artifact_id
+        assert successor.content_fingerprint != source.content_fingerprint
+    new_pos = domain.position(project_id)
+    review_dec = next(
+        d for d in new_pos.decisions if d.node_id == "backlog.review"
+    )
+    assert review_dec.category is NodeCategory.WAITING
+    assert review_dec.reason_code == "BACKLOG_REVIEW_REQUIRED"
+
+
+def test_backlog_correction_runner_retries_after_failure_and_leaves_no_trace(
+    engine: Engine,
+) -> None:
+    """A failed correction attempt records failure and allows recovery retry."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        source = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id).desc())
+        ).first()
+        assert source is not None
+        assert source.backlog_artifact_id is not None
+
+    calls: list[str] = []
+    captured_inputs: list[dict[str, object]] = []
+    failing_leaf = _capturing_leaf_workflow(
+        calls, captured_inputs, {}, failure_message="Model provider unavailable."
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=failing_leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    request1 = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance="First try failed.",
+        idempotency_key="runner-correct-fail-1",
+        actor="operator@example.com",
+    )
+    prepared1 = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=request1,
+    )
+    assert isinstance(prepared1, dict)
+    guards1 = AdkRunGuards(
+        position=position,
+        idempotency_key=request1.idempotency_key,
+        actor=request1.actor,
+    )
+
+    result1 = runner.run(decision, prepared1, guards=guards1)
+    assert result1.ok is False
+    assert result1.error is not None
+    assert result1.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert calls == ["provider"]
+
+    # Replay of failed key
+    replay_fail = runner.run(decision, prepared1, guards=guards1)
+    assert replay_fail.ok is False
+    assert replay_fail.replayed is True
+    assert calls == ["provider"]
+
+    # Re-evaluate graph: shows recovery required
+    recovery_position = domain.position(project_id)
+    recovery_dec = next(
+        item
+        for item in recovery_position.decisions
+        if item.node_id == "backlog.generate"
+    )
+    assert recovery_dec.category is NodeCategory.AVAILABLE
+    assert recovery_dec.recommendation_kind is RecommendationKind.RECOVERY
+    assert recovery_dec.reason_code in {
+        "BACKLOG_CORRECTION_FAILED",
+        "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+    }
+    attempt_refs = [
+        r for r in recovery_dec.fact_references if r.fact_type == "node_attempt"
+    ]
+    assert len(attempt_refs) == 1
+
+    # Generic generation refuses recovery decision
+    app = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    generic_refusal = app.generate_backlog(
+        DeliveryActionRequest(
+            project_id=project_id,
+            idempotency_key="generic-refusal-key",
+            actor="operator@example.com",
+        )
+    )
+    assert generic_refusal.ok is False
+    assert generic_refusal.error is not None
+    assert generic_refusal.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+
+    # Successful retry with a new key and valid leaf
+    valid_response = {
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Corrected requirement on retry.",
+                "spec_item_ids": ["REQ.planning-1"],
+                "value_driver": "Strategic",
+                "justification": "Delivered on retry.",
+                "estimated_effort": "M",
+                "technical_note": None,
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    retry_leaf = _capturing_leaf_workflow(calls, captured_inputs, valid_response)
+    retry_runner, _ = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=retry_leaf,
+        sessions=TrackingSessionService(),
+    )
+    request2 = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=recovery_dec.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance="Second try succeeded.",
+        idempotency_key="runner-correct-success-2",
+        actor="operator@example.com",
+    )
+    prepared2 = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=recovery_dec,
+        request=request2,
+    )
+    assert isinstance(prepared2, dict)
+    guards2 = AdkRunGuards(
+        position=recovery_position,
+        idempotency_key=request2.idempotency_key,
+        actor=request2.actor,
+    )
+    result2 = retry_runner.run(recovery_dec, prepared2, guards=guards2)
+    assert result2.ok is True
+    with Session(engine) as session:
+        successors = session.exec(
+            select(BacklogArtifact).where(
+                col(BacklogArtifact.supersedes_backlog_artifact_id)
+                == source.backlog_artifact_id
+            )
+        ).all()
+        assert len(successors) == 1
+
+
+def test_backlog_correction_runner_unchanged_output_fails_fact_conflict(
+    engine: Engine,
+) -> None:
+    """Identical correction output fails closed with WORKFLOW_FACT_CONFLICT."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        source = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id).desc())
+        ).first()
+        assert source is not None
+        assert source.backlog_artifact_id is not None
+        parent_content = json.loads(source.canonical_content_json)
+        unchanged_items = [
+            {k: v for k, v in item.items() if k != "backlog_item_id"}
+            for item in parent_content.get("backlog_items", [])
+        ]
+        unchanged_response = {
+            "backlog_items": unchanged_items,
+            "is_complete": parent_content.get("is_complete", True),
+            "clarifying_questions": parent_content.get("clarifying_questions", []),
+        }
+
+    calls: list[str] = []
+    captured_inputs: list[dict[str, object]] = []
+    leaf = _capturing_leaf_workflow(calls, captured_inputs, unchanged_response)
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance="No changes actually made.",
+        idempotency_key="runner-unchanged-conflict",
+        actor="operator@example.com",
+    )
+    prepared = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=request,
+    )
+    assert isinstance(prepared, dict)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key=request.idempotency_key,
+        actor=request.actor,
+    )
+
+    result = runner.run(decision, prepared, guards=guards)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+    with Session(engine) as session:
+        # Zero new Backlog rows
+        successors = session.exec(
+            select(BacklogArtifact).where(
+                col(BacklogArtifact.supersedes_backlog_artifact_id)
+                == source.backlog_artifact_id
+            )
+        ).all()
+        assert len(successors) == 0
+        # One failed attempt outcome
+        outcomes = _node_outcomes(session, "backlog.generate")
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "failure"
+        assert "Backlog correction did not change the accepted artifact." in (
+            outcomes[0].failure_message or ""
+        )
+
+
+def test_application_correct_backlog_dispatch_boundary_replay_and_conflict_detection(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
+    """Direct AgileForgeApplication.correct_backlog dispatch and replay."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        source = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id).desc())
+        ).first()
+        assert source is not None
+        assert source.backlog_artifact_id is not None
+
+    calls: list[str] = []
+    captured_inputs: list[dict[str, object]] = []
+    changed_response = {
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Corrected requirement via app: deliver audit.",
+                "spec_item_ids": ["REQ.planning-1"],
+                "value_driver": "Strategic",
+                "justification": "Deliver corrected work.",
+                "estimated_effort": "S",
+                "technical_note": None,
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    leaf = _capturing_leaf_workflow(calls, captured_inputs, changed_response)
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    app = AgileForgeApplication(
+        workflow_domain=domain,
+        recipe_registry=runner._registry,
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance="Corrected guidance via application.",
+        idempotency_key="app-correct-key-1",
+        actor="operator@example.com",
+        correlation_id="app-corr-1",
+    )
+
+    # 1. Real dispatch boundary: provider called and correction identity captured
+    result1 = app.correct_backlog(request)
+    assert result1.ok is True
+    assert not result1.replayed
+    assert calls == ["provider"]
+
+    with Session(engine) as session:
+        attempts = _node_attempts(session, "backlog.generate")
+        assert len(attempts) == 1
+        attempt = attempts[0]
+        assert attempt.normalized_input_json is not None
+        attempt_input = json.loads(attempt.normalized_input_json)
+        assert "backlog_correction" in attempt_input
+        assert attempt_input["backlog_correction"] == {
+            "accepted_backlog_artifact_id": source.backlog_artifact_id,
+            "accepted_backlog_artifact_fingerprint": source.content_fingerprint,
+            "guidance": "Corrected guidance via application.",
+        }
+
+    # Verify position has advanced: successor Backlog awaits review
+    advanced_position = domain.position(project_id)
+    assert not any(
+        item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+        for item in advanced_position.decisions
+    )
+
+    # 2. Exact replay after position advances without new provider call
+    result_replay = app.correct_backlog(request)
+    assert result_replay.ok is True
+    assert result_replay.replayed is True
+    assert calls == ["provider"]
+
+    # 3. Conflicting calls on key reuse with changed inputs
+    # 3a. Changed guidance
+    conflict_guidance = app.correct_backlog(
+        request.model_copy(update={"guidance": "Changed guidance"})
+    )
+    assert conflict_guidance.ok is False
+    assert conflict_guidance.error is not None
+    assert conflict_guidance.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_guidance.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+    # 3b. Changed target ID
+    conflict_target_id = app.correct_backlog(
+        request.model_copy(
+            update={"accepted_backlog_artifact_id": source.backlog_artifact_id + 999}
+        )
+    )
+    assert conflict_target_id.ok is False
+    assert conflict_target_id.error is not None
+    assert conflict_target_id.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_target_id.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+    # 3c. Changed target fingerprint
+    conflict_target_fp = app.correct_backlog(
+        request.model_copy(
+            update={"accepted_backlog_artifact_fingerprint": "sha256:" + "0" * 64}
+        )
+    )
+    assert conflict_target_fp.ok is False
+    assert conflict_target_fp.error is not None
+    assert conflict_target_fp.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_target_fp.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+    # 3d. Changed decision fingerprint
+    conflict_dec_fp = app.correct_backlog(
+        request.model_copy(
+            update={"expected_decision_fingerprint": "sha256:" + "0" * 64}
+        )
+    )
+    assert conflict_dec_fp.ok is False
+    assert conflict_dec_fp.error is not None
+    assert conflict_dec_fp.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_dec_fp.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+    # 3e. Changed actor
+    conflict_actor = app.correct_backlog(
+        request.model_copy(update={"actor": "other-operator@example.com"})
+    )
+    assert conflict_actor.ok is False
+    assert conflict_actor.error is not None
+    assert conflict_actor.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_actor.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+    # 3f. Changed correlation ID
+    conflict_corr = app.correct_backlog(
+        request.model_copy(update={"correlation_id": "different-corr-id"})
+    )
+    assert conflict_corr.ok is False
+    assert conflict_corr.error is not None
+    assert conflict_corr.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert (
+        conflict_corr.error.message
+        == "The idempotency key was already used for different input."
+    )
+    assert calls == ["provider"]
+
+
+def test_backlog_correction_remints_out_of_order_items(engine: Engine) -> None:
+    """Host sorts items by priority and remints items sequentially."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        source = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id).desc())
+        ).first()
+        assert source is not None
+        assert source.backlog_artifact_id is not None
+
+    calls: list[str] = []
+    captured_inputs: list[dict[str, object]] = []
+    # Return 2 items out of order: priority 2 first, priority 1 second
+    out_of_order_response = {
+        "backlog_items": [
+            {
+                "priority": 2,
+                "requirement": "Second priority requirement: export audit.",
+                "spec_item_ids": ["REQ.planning-1"],
+                "value_driver": "Customer Satisfaction",
+                "justification": "Delivered second.",
+                "estimated_effort": "M",
+                "technical_note": None,
+            },
+            {
+                "priority": 1,
+                "requirement": "First priority requirement: consent audit.",
+                "spec_item_ids": ["REQ.planning-1"],
+                "value_driver": "Strategic",
+                "justification": "Delivered first.",
+                "estimated_effort": "S",
+                "technical_note": None,
+            },
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    leaf = _capturing_leaf_workflow(calls, captured_inputs, out_of_order_response)
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=source.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=source.content_fingerprint,
+        guidance="Split into two items with reminted IDs.",
+        idempotency_key="remint-out-of-order-items",
+        actor="operator@example.com",
+    )
+    prepared = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=request,
+    )
+    assert isinstance(prepared, dict)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key=request.idempotency_key,
+        actor=request.actor,
+    )
+
+    result = runner.run(decision, prepared, guards=guards)
+    assert result.ok is True
+
+    with Session(engine) as session:
+        successors = session.exec(
+            select(BacklogArtifact).where(
+                col(BacklogArtifact.supersedes_backlog_artifact_id)
+                == source.backlog_artifact_id
+            )
+        ).all()
+        assert len(successors) == 1
+        successor = successors[0]
+        content = json.loads(successor.canonical_content_json)
+        items = content["backlog_items"]
+        assert len(items) == 2  # noqa: PLR2004
+        # Host PBIs sorted and reminted sequentially starting at 1
+        assert items[0]["priority"] == 1
+        assert items[0]["backlog_item_id"] == "PBI-000001"
+        assert items[0]["requirement"] == "First priority requirement: consent audit."
+        assert items[1]["priority"] == 2  # noqa: PLR2004
+        assert items[1]["backlog_item_id"] == "PBI-000002"
+        assert items[1]["requirement"] == "Second priority requirement: export audit."

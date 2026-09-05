@@ -1,7 +1,7 @@
 """API adapter tests for exact typed workflow requests."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -24,6 +24,7 @@ from cli.workflow_commands import COMMAND_PREFIXES
 from models.core import Project, Team, UserStory
 from models.workflow import (
     BacklogArtifact,
+    BacklogArtifactDecision,
     RoadmapArtifact,
     SprintPlanArtifact,
     StoryArtifact,
@@ -35,6 +36,7 @@ from repositories.workflow import WorkflowFactRepository
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
+    BacklogCorrectionRequest,
     BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionInputService,
@@ -502,6 +504,9 @@ class _FakeApiApplication:
     def generate_backlog(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
+    def correct_backlog(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
     def generate_roadmap(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
@@ -949,7 +954,7 @@ class _CapturingDeliveryApplication(AgileForgeApplication):
     ) -> None:
         super().__init__(
             workflow_domain=domain,
-            delivery_action_input=delivery_input,
+            delivery_action_input=cast("Any", delivery_input),
         )
         self.agent_requests: list[AgenticActionRequest] = []
 
@@ -3711,6 +3716,460 @@ def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> N
     )
 
 
+def test_backlog_correction_request_rejects_invalid_guidance() -> None:
+    """Reject empty, whitespace-only, or oversized guidance on correction requests."""
+    base = {
+        "project_id": 41,
+        "expected_decision_fingerprint": "sha256:" + "a" * 64,
+        "accepted_backlog_artifact_id": 3,
+        "accepted_backlog_artifact_fingerprint": "sha256:" + "b" * 64,
+        "idempotency_key": "backlog-correct-41-01",
+        "actor": "operator",
+    }
+    for guidance in ("", "   ", "x" * 32_769):
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate({**base, "guidance": guidance})
+
+
+def test_backlog_correction_request_validations() -> None:
+    """Validate positive int artifact ID, strict types, and nonblank metadata."""
+    artifact_id = 3
+    valid = {
+        "project_id": 41,
+        "expected_decision_fingerprint": "sha256:" + "a" * 64,
+        "accepted_backlog_artifact_id": artifact_id,
+        "accepted_backlog_artifact_fingerprint": "sha256:" + "b" * 64,
+        "guidance": "Valid guidance",
+        "idempotency_key": "backlog-correct-41-01",
+        "actor": "operator",
+    }
+    req = BacklogCorrectionRequest.model_validate(valid)
+    assert req.accepted_backlog_artifact_id == artifact_id
+
+    with pytest.raises(ValidationError):
+        BacklogCorrectionRequest.model_validate(
+            {**valid, "accepted_backlog_artifact_id": True}
+        )
+
+    for invalid_id in (0, -1):
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate(
+                {**valid, "accepted_backlog_artifact_id": invalid_id}
+            )
+
+    for bad_fp in ("sha256:123", "not-a-hash", "sha256:" + "g" * 64):
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate(
+                {**valid, "expected_decision_fingerprint": bad_fp}
+            )
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate(
+                {**valid, "accepted_backlog_artifact_fingerprint": bad_fp}
+            )
+
+    for blank in ("", "   "):
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate({**valid, "actor": blank})
+        with pytest.raises(ValidationError):
+            BacklogCorrectionRequest.model_validate(
+                {**valid, "idempotency_key": blank}
+            )
+
+    with pytest.raises(ValidationError):
+        BacklogCorrectionRequest.model_validate({**valid, "extra": "forbidden"})
+
+
+def test_delivery_input_service_build_backlog_correction(engine: "Engine") -> None:
+    """Prepare typed correction input bound to the accepted Backlog."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 2, 12, tzinfo=UTC)),
+    )
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    with Session(engine) as session:
+        backlog_ref = next(
+            r for r in decision.fact_references if r.fact_type == "backlog"
+        )
+        accepted = session.get(BacklogArtifact, int(backlog_ref.fact_id))
+        assert accepted is not None
+        assert accepted.backlog_artifact_id is not None
+
+    request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=accepted.backlog_artifact_id,
+        accepted_backlog_artifact_fingerprint=accepted.content_fingerprint,
+        guidance="Split consent audit from gold publication.",
+        idempotency_key="backlog-correct-41-01",
+        actor="operator",
+    )
+    prepared = DeliveryActionInputService(engine=engine).build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=request,
+    )
+    assert isinstance(prepared, dict)
+    builder_input = BacklogBuilderInput.model_validate(prepared["builder_input"])
+    assert builder_input.prior_backlog_state == accepted.canonical_content_json
+    assert builder_input.user_input == "Split consent audit from gold publication."
+    assert prepared["supersedes_backlog_artifact_id"] == accepted.backlog_artifact_id
+    assert prepared["backlog_correction"] == {
+        "accepted_backlog_artifact_id": accepted.backlog_artifact_id,
+        "accepted_backlog_artifact_fingerprint": accepted.content_fingerprint,
+        "guidance": "Split consent audit from gold publication.",
+    }
+
+
+def test_build_backlog_correction_negative_cases(  # noqa: PLR0915
+    engine: "Engine",
+) -> None:
+    """Refuse correction when durable target or lineage facts conflict."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 2, 12, tzinfo=UTC)),
+    )
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+    with Session(engine) as session:
+        backlog_ref = next(
+            r for r in decision.fact_references if r.fact_type == "backlog"
+        )
+        accepted = session.get(BacklogArtifact, int(backlog_ref.fact_id))
+        assert accepted is not None
+        assert accepted.backlog_artifact_id is not None
+        valid_id = accepted.backlog_artifact_id
+        valid_fp = accepted.content_fingerprint
+
+    service = DeliveryActionInputService(engine=engine)
+    base_request = BacklogCorrectionRequest(
+        project_id=project_id,
+        expected_decision_fingerprint=decision.decision_fingerprint,
+        accepted_backlog_artifact_id=valid_id,
+        accepted_backlog_artifact_fingerprint=valid_fp,
+        guidance="Split items",
+        idempotency_key="k1",
+        actor="op",
+    )
+
+    res_wrong_proj = service.build_backlog_correction(
+        project_id=project_id + 99,
+        decision=decision,
+        request=base_request.model_copy(update={"project_id": project_id + 99}),
+    )
+    assert res_wrong_proj is None or isinstance(res_wrong_proj, WorkflowError)
+
+    res_wrong_id = service.build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=base_request.model_copy(
+            update={"accepted_backlog_artifact_id": valid_id + 99}
+        ),
+    )
+    assert res_wrong_id is None or isinstance(res_wrong_id, WorkflowError)
+
+    other_fp = "sha256:" + "f" * 64
+    res_wrong_fp = service.build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=base_request.model_copy(
+            update={"accepted_backlog_artifact_fingerprint": other_fp}
+        ),
+    )
+    assert res_wrong_fp is None or isinstance(res_wrong_fp, WorkflowError)
+
+    with Session(engine) as session:
+        rev = session.exec(
+            select(BacklogArtifactDecision).where(
+                col(BacklogArtifactDecision.backlog_artifact_id) == valid_id
+            )
+        ).one()
+        rev.decision = "rejected"
+        session.add(rev)
+        session.commit()
+    res_nonaccepted = service.build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=base_request,
+    )
+    assert res_nonaccepted is None or isinstance(res_nonaccepted, WorkflowError)
+
+    with Session(engine) as session:
+        rev = session.exec(
+            select(BacklogArtifactDecision).where(
+                col(BacklogArtifactDecision.backlog_artifact_id) == valid_id
+            )
+        ).one()
+        rev.decision = "accepted"
+        session.add(rev)
+        session.commit()
+
+    with Session(engine) as session:
+        child = BacklogArtifact(
+            project_id=project_id,
+            spec_version_id=accepted.spec_version_id,
+            spec_hash=accepted.spec_hash,
+            product_goal_artifact_id=accepted.product_goal_artifact_id,
+            product_goal_fingerprint=accepted.product_goal_fingerprint,
+            version_number=accepted.version_number + 1,
+            canonical_content_json=accepted.canonical_content_json,
+            content_fingerprint="sha256:" + "e" * 64,
+            supersedes_backlog_artifact_id=valid_id,
+            created_by="op",
+        )
+        session.add(child)
+        session.commit()
+        session.refresh(child)
+        child_id = child.backlog_artifact_id
+    res_superseded = service.build_backlog_correction(
+        project_id=project_id,
+        decision=decision,
+        request=base_request,
+    )
+    assert res_superseded is None or isinstance(res_superseded, WorkflowError)
+
+    # Negative cases for changed Spec/Goal lineage in build_backlog_correction
+    with Session(engine) as session:
+        stored_child = session.get(BacklogArtifact, child_id)
+        if stored_child is not None:
+            session.delete(stored_child)
+            session.commit()
+
+
+    # Negative cases for changed Spec/Goal lineage in build_backlog_correction
+    with Session(engine) as session:
+        real_lineage = application_module._delivery_lineage(
+            session, project_id=project_id, decision=decision
+        )
+        assert real_lineage is not None
+        assert real_lineage.goal.product_goal_artifact_id is not None
+
+    # 1. Changed spec_version_id
+    mismatched_spec_id = replace(
+        real_lineage.accepted_specification,
+        spec_version_id=real_lineage.accepted_specification.spec_version_id + 999,
+    )
+    lineage_spec_id = application_module._DeliveryLineage(
+        accepted_specification=mismatched_spec_id,
+        goal=real_lineage.goal,
+        spec=real_lineage.spec,
+        vision=real_lineage.vision,
+    )
+    with patch.object(
+        application_module, "_delivery_lineage", return_value=lineage_spec_id
+    ):
+        res_changed_spec_id = service.build_backlog_correction(
+            project_id=project_id,
+            decision=decision,
+            request=base_request,
+        )
+        assert isinstance(res_changed_spec_id, WorkflowError)
+        assert res_changed_spec_id.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert (
+            res_changed_spec_id.message
+            == "The accepted Backlog target no longer matches durable facts."
+        )
+
+    # 2. Changed spec_hash
+    mismatched_spec_hash = replace(
+        real_lineage.accepted_specification,
+        spec_hash="sha256:" + "0" * 64,
+    )
+    lineage_spec_hash = application_module._DeliveryLineage(
+        accepted_specification=mismatched_spec_hash,
+        goal=real_lineage.goal,
+        spec=real_lineage.spec,
+        vision=real_lineage.vision,
+    )
+    with patch.object(
+        application_module, "_delivery_lineage", return_value=lineage_spec_hash
+    ):
+        res_changed_spec_hash = service.build_backlog_correction(
+            project_id=project_id,
+            decision=decision,
+            request=base_request,
+        )
+        assert isinstance(res_changed_spec_hash, WorkflowError)
+        assert res_changed_spec_hash.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert (
+            res_changed_spec_hash.message
+            == "The accepted Backlog target no longer matches durable facts."
+        )
+
+    # 3. Changed product_goal_artifact_id
+    mismatched_goal_id = real_lineage.goal.model_copy(
+        update={
+            "product_goal_artifact_id": real_lineage.goal.product_goal_artifact_id + 999
+        }
+    )
+    lineage_goal_id = application_module._DeliveryLineage(
+        accepted_specification=real_lineage.accepted_specification,
+        goal=mismatched_goal_id,
+        spec=real_lineage.spec,
+        vision=real_lineage.vision,
+    )
+    with patch.object(
+        application_module, "_delivery_lineage", return_value=lineage_goal_id
+    ):
+        res_changed_goal_id = service.build_backlog_correction(
+            project_id=project_id,
+            decision=decision,
+            request=base_request,
+        )
+        assert isinstance(res_changed_goal_id, WorkflowError)
+        assert res_changed_goal_id.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert (
+            res_changed_goal_id.message
+            == "The accepted Backlog target no longer matches durable facts."
+        )
+
+    # 4. Changed product_goal_fingerprint
+    mismatched_goal_fp = real_lineage.goal.model_copy(
+        update={"content_fingerprint": "sha256:" + "0" * 64}
+    )
+    lineage_goal_fp = application_module._DeliveryLineage(
+        accepted_specification=real_lineage.accepted_specification,
+        goal=mismatched_goal_fp,
+        spec=real_lineage.spec,
+        vision=real_lineage.vision,
+    )
+    with patch.object(
+        application_module, "_delivery_lineage", return_value=lineage_goal_fp
+    ):
+        res_changed_goal_fp = service.build_backlog_correction(
+            project_id=project_id,
+            decision=decision,
+            request=base_request,
+        )
+        assert isinstance(res_changed_goal_fp, WorkflowError)
+        assert res_changed_goal_fp.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert (
+            res_changed_goal_fp.message
+            == "The accepted Backlog target no longer matches durable facts."
+        )
+
+
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt).where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "backlog.generate",
+            )
+        ).all()
+        assert len(attempts) == 0
+
+
+
+def test_generic_backlog_generation_refuses_correction(engine: "Engine") -> None:
+    """Generic backlog generation refuses to run correction-specific decisions."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 2, 12, tzinfo=UTC)),
+    )
+    app = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_action_input=DeliveryActionInputService(engine=engine),
+    )
+    result = app.generate_backlog(
+        DeliveryActionRequest(
+            project_id=project_id,
+            idempotency_key="gen-refuse-1",
+            actor="operator",
+        )
+    )
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+
+def test_backlog_correction_decision_shape_cases(engine: "Engine") -> None:
+    """Validate decision shape constraints for initial correction and retry."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 2, 12, tzinfo=UTC)),
+    )
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "backlog.generate"
+        and item.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+    )
+
+    wrong_reason_dec = decision.model_copy(
+        update={"reason_code": "BACKLOG_GENERATION_REQUIRED"}
+    )
+    assert not application_module._backlog_correction_decision_is_valid(
+        wrong_reason_dec
+    )
+
+    attempt_ref = FactReference(
+        fact_type="node_attempt", fact_id="1", fingerprint="sha256:" + "1" * 64
+    )
+    with_attempt = decision.model_copy(
+        update={"fact_references": (*decision.fact_references, attempt_ref)}
+    )
+    assert not application_module._backlog_correction_decision_is_valid(
+        with_attempt
+    )
+
+    rec_dec = decision.model_copy(
+        update={
+            "reason_code": "BACKLOG_CORRECTION_FAILED",
+            "recommendation_kind": RecommendationKind.RECOVERY,
+            "fact_references": (*decision.fact_references, attempt_ref),
+        }
+    )
+    assert application_module._backlog_correction_decision_is_valid(rec_dec)
+
+    attempt_ref_2 = FactReference(
+        fact_type="node_attempt", fact_id="2", fingerprint="sha256:" + "2" * 64
+    )
+    with_two_attempts = rec_dec.model_copy(
+        update={
+            "fact_references": (
+                *decision.fact_references,
+                attempt_ref,
+                attempt_ref_2,
+            )
+        }
+    )
+    assert not application_module._backlog_correction_decision_is_valid(
+        with_two_attempts
+    )
+
+    bad_attempt_ref = FactReference(
+        fact_type="node_attempt",
+        fact_id="bad",
+        fingerprint="sha256:" + "1" * 64,
+    )
+    with_bad_attempt = decision.model_copy(
+        update={
+            "reason_code": "BACKLOG_CORRECTION_FAILED",
+            "recommendation_kind": RecommendationKind.RECOVERY,
+            "fact_references": (*decision.fact_references, bad_attempt_ref),
+        }
+    )
+    assert not application_module._backlog_correction_decision_is_valid(
+        with_bad_attempt
+    )
+
+
+
 _AGENTIC_NODE_IDS = {
     "record_backlog_draft": "backlog.generate",
     "record_roadmap_draft": "planning.roadmap.generate",
@@ -5171,6 +5630,149 @@ def test_story_set_correction_api_forwards_exact_graph_and_artifact_binding(
     ]
 
 
+def test_backlog_correction_api_forwards_exact_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translate one Backlog correction request once to the application."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    decision_fingerprint = "sha256:" + ("b" * 64)
+    artifact_fingerprint = "sha256:" + ("a" * 64)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/backlog/correct",
+        headers={"X-AgileForge-Expected-Decision": decision_fingerprint},
+        json={
+            "guidance": "Split consent audit from gold publication.",
+            "accepted_backlog_artifact_id": 3,
+            "accepted_backlog_artifact_fingerprint": artifact_fingerprint,
+            "idempotency_key": "backlog-correct-41",
+            "actor": "operator",
+            "correlation_id": "correction-41",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    assert application.requests == [
+        BacklogCorrectionRequest(
+            project_id=41,
+            expected_decision_fingerprint=decision_fingerprint,
+            accepted_backlog_artifact_id=3,
+            accepted_backlog_artifact_fingerprint=artifact_fingerprint,
+            guidance="Split consent audit from gold publication.",
+            idempotency_key="backlog-correct-41",
+            actor="operator",
+            correlation_id="correction-41",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("patch_headers", "patch_body"),
+    [
+        ({}, {"guidance": "   "}),
+        ({}, {"guidance": "x" * 32_769}),
+        ({}, {"accepted_backlog_artifact_id": True}),
+        ({}, {"accepted_backlog_artifact_id": 0}),
+        ({}, {"accepted_backlog_artifact_id": -1}),
+        ({}, {"accepted_backlog_artifact_fingerprint": "not-a-sha256"}),
+        ({}, {"actor": "   "}),
+        ({}, {"idempotency_key": "   "}),
+        ({"X-AgileForge-Expected-Decision": None}, {}),
+        ({"X-AgileForge-Expected-Decision": "bad-sha"}, {}),
+        ({}, {"extra_field": "disallowed"}),
+    ],
+)
+def test_backlog_correction_api_validation_rejects_malformed_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_headers: dict[str, str | None],
+    patch_body: dict[str, object],
+) -> None:
+    """Enforce strict 422 validation on headers and body."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    headers = {
+        "X-AgileForge-Expected-Decision": "sha256:" + ("b" * 64),
+    }
+    for k, v in patch_headers.items():
+        if v is None:
+            headers.pop(k, None)
+        else:
+            headers[k] = v
+
+    body: dict[str, object] = {
+        "guidance": "Split consent audit from gold publication.",
+        "accepted_backlog_artifact_id": 3,
+        "accepted_backlog_artifact_fingerprint": "sha256:" + ("a" * 64),
+        "idempotency_key": "backlog-correct-41",
+        "actor": "operator",
+    }
+    body.update(patch_body)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/backlog/correct",
+        headers=headers,
+        json=body,
+    )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert len(application.requests) == 0
+
+
+def test_workflow_actions_does_not_advertise_backlog_correction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_workflow_actions() keeps Backlog correction invisible to the browser."""
+    decision = NodeDecision(
+        node_id="backlog.generate",
+        instance_key=None,
+        child_graph_id="backlog",
+        request_kind="record_backlog_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="BACKLOG_CORRECTION_AVAILABLE",
+        decision_fingerprint="sha256:" + ("b" * 64),
+        fact_references=(
+            FactReference(
+                fact_type="backlog",
+                fact_id="3",
+                fingerprint="sha256:" + ("a" * 64),
+            ),
+            FactReference(
+                fact_type="specification",
+                fact_id="1",
+                fingerprint="sha256:" + ("c" * 64),
+            ),
+            FactReference(
+                fact_type="product_goal",
+                fact_id="1",
+                fingerprint="sha256:" + ("d" * 64),
+            ),
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    actions = response.json()["actions"]
+    assert not any(action.get("endpoint") == "backlog/correct" for action in actions)
+    assert not any(action.get("node_id") == "backlog.generate" for action in actions)
+
+
 def test_position_omits_unique_selectorless_story_review_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5640,6 +6242,41 @@ def test_specification_structure_endpoint_binds_the_rendered_position(
     assert missing_guard.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+def test_specification_structure_api_returns_409_conflict_on_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate terminal payload validation errors via the 409 envelope."""
+    safe_message = "Specification structurer returned an invalid v2 payload."
+    failure_result = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            message=safe_message,
+        ),
+    )
+    application = _FakeApiApplication(transition_result=failure_result)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/structure",
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:structure-position",
+        },
+        json={
+            "idempotency_key": "structure-api-41",
+            "actor": "dashboard-user",
+            "correlation_id": "corr-api-41",
+        },
+    )
+
+    assert response.status_code == 409  # noqa: PLR2004
+    assert (
+        response.json()["detail"]["error"]["code"]
+        == "INVALID_SPECIFICATION_PAYLOAD"
+    )
+    assert response.json()["detail"]["error"]["message"] == safe_message
+
+
 def test_retired_specification_author_endpoint_is_not_registered() -> None:
     """Hard-break the retired combined authoring transport."""
     response = TestClient(api_module.app).post(
@@ -5750,10 +6387,18 @@ class _FakeApplication:
         self,
         backlog_result: JsonObject | None = None,
         story_result: JsonObject | None = None,
+        correct_backlog_result: TransitionResult | None = None,
     ) -> None:
         self.calls: list[tuple[str, object, ExpectedPlanningReviewBinding | None]] = []
         self.backlog_result = backlog_result
         self.story_result = story_result
+        self.correct_backlog_result = correct_backlog_result
+
+    def correct_backlog(self, _request: object) -> TransitionResult:
+        if self.correct_backlog_result is not None:
+            return self.correct_backlog_result
+        return TransitionResult(ok=True)
+
 
     def backlog_review(self, project_id: int) -> JsonObject:
         if self.backlog_result is not None:
@@ -5943,6 +6588,83 @@ def test_backlog_review_route_modes(
     assert response.status_code == HTTPStatus.OK
     assert response.json()["status"] == "success"
     assert response.json()["data"] == data
+
+
+def test_backlog_review_route_returns_409_for_absence_and_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route returns HTTP 409 for absence and conflict."""
+    absence_result: JsonObject = {
+        "ok": False,
+        "errors": [
+            {
+                "code": "PLANNING_REVIEW_NOT_AVAILABLE",
+                "message": "No planning review is currently available.",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        api_module, "_application", lambda: _FakeApplication(absence_result)
+    )
+    client = TestClient(api_module.app)
+    response = client.get("/api/projects/41/backlog/review")
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert (
+        response.json()["detail"]["errors"][0]["code"]
+        == "PLANNING_REVIEW_NOT_AVAILABLE"
+    )
+
+    conflict_result: JsonObject = {
+        "ok": False,
+        "errors": [
+            {
+                "code": "WORKFLOW_FACT_CONFLICT",
+                "message": "Backlog correction re-entry is invalid.",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        api_module, "_application", lambda: _FakeApplication(conflict_result)
+    )
+    response = client.get("/api/projects/41/backlog/review")
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["detail"]["errors"][0]["code"] == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_backlog_correct_route_returns_409_on_workflow_fact_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /backlog/correct returns HTTP 409 on fact conflict."""
+    conflict_result = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message="The idempotency key was already used for different input.",
+        ),
+    )
+    app_mock = _FakeApplication(correct_backlog_result=conflict_result)
+    monkeypatch.setattr(api_module, "_application", lambda: app_mock)
+
+
+    client = TestClient(api_module.app)
+    response = client.post(
+        "/api/projects/41/backlog/correct",
+        headers={"X-AgileForge-Expected-Decision": "sha256:" + "a" * 64},
+        json={
+            "accepted_backlog_artifact_id": 7,
+            "accepted_backlog_artifact_fingerprint": "sha256:" + "b" * 64,
+            "guidance": "Corrected guidance",
+            "idempotency_key": "correct-key-1",
+            "actor": "operator",
+        },
+    )
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert response.json()["detail"]["error"]["code"] == "WORKFLOW_FACT_CONFLICT"
+    assert (
+        response.json()["detail"]["error"]["message"]
+        == "The idempotency key was already used for different input."
+    )
+
 
 
 @pytest.mark.parametrize(
@@ -7607,11 +8329,49 @@ def test_backlog_continuation_position_initial_generation_is_valid_absence() -> 
     assert reads.calls == []
 
 
-def test_backlog_continuation_position_optional_reentry_is_valid_absence() -> None:
-    """A well-formed accepted correction remains outside Feedback continuation."""
+@pytest.mark.parametrize(
+    ("reason", "category", "recommendation", "node_attempt_count"),
+    [
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            0,
+        ),
+        (
+            "BACKLOG_CORRECTION_ACTIVE",
+            NodeCategory.WAITING,
+            RecommendationKind.REQUIRED,
+            0,
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            1,
+        ),
+        (
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            1,
+        ),
+    ],
+)
+def test_backlog_continuation_position_correction_states_are_valid_absence(
+    reason: str,
+    category: NodeCategory,
+    recommendation: RecommendationKind,
+    node_attempt_count: int,
+) -> None:
+    """All exact Backlog correction states return PLANNING_REVIEW_NOT_AVAILABLE."""
     decision = _backlog_continuation_decision(
-        reason="BACKLOG_CORRECTION_AVAILABLE",
-        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+        reason=reason,
+        category=category,
+        recommendation=recommendation,
+        references=_backlog_continuation_references(
+            node_attempt_count=node_attempt_count
+        ),
     )
     reads = _CountingBacklogReads(_backlog_continuation_projection())
     selection = _NullableBacklogSelection((7, "sha256:backlog-7"))
@@ -7631,6 +8391,235 @@ def test_backlog_continuation_position_optional_reentry_is_valid_absence() -> No
     assert domain.position_calls == 1
     assert len(selection.calls) == 1
     assert reads.calls == []
+
+
+def test_backlog_continuation_position_optional_reentry_is_valid_absence() -> None:
+    """A well-formed accepted correction remains outside Feedback continuation."""
+    test_backlog_continuation_position_correction_states_are_valid_absence(
+        reason="BACKLOG_CORRECTION_AVAILABLE",
+        category=NodeCategory.AVAILABLE,
+        recommendation=RecommendationKind.OPTIONAL_REENTRY,
+        node_attempt_count=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "category", "recommendation", "references", "selection_identity"),
+    [
+        # Wrong category
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.WAITING,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_ACTIVE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.REQUIRED,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.WAITING,
+            RecommendationKind.RECOVERY,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            NodeCategory.WAITING,
+            RecommendationKind.RECOVERY,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        # Wrong recommendation
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.REQUIRED,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_ACTIVE",
+            NodeCategory.WAITING,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_ACTIVE",
+            NodeCategory.WAITING,
+            RecommendationKind.RECOVERY,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.REQUIRED,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        # Missing required reference
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _without_backlog_continuation_reference("backlog"),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _without_backlog_continuation_reference("specification"),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _without_backlog_continuation_reference("product_goal"),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            _without_backlog_continuation_reference(
+                "node_attempt", node_attempt_count=1
+            ),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            _without_backlog_continuation_reference(
+                "node_attempt", node_attempt_count=1
+            ),
+            (7, "sha256:backlog-7"),
+        ),
+        # Duplicate reference
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _duplicate_backlog_continuation_reference("backlog"),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            _duplicate_backlog_continuation_reference(
+                "node_attempt", node_attempt_count=1
+            ),
+            (7, "sha256:backlog-7"),
+        ),
+        # Extra reference
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_ACTIVE",
+            NodeCategory.WAITING,
+            RecommendationKind.REQUIRED,
+            _backlog_continuation_references(node_attempt_count=1),
+            (7, "sha256:backlog-7"),
+        ),
+        # Non-integer fact ID
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _replace_backlog_continuation_reference("backlog", fact_id="not-an-int"),
+            (7, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_FAILED",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.RECOVERY,
+            (
+                *_backlog_continuation_references(node_attempt_count=0),
+                FactReference(
+                    fact_type="node_attempt",
+                    fact_id="invalid-attempt",
+                    fingerprint="sha256:attempt-invalid",
+                ),
+            ),
+            (7, "sha256:backlog-7"),
+        ),
+        # Selection identity mismatch
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=0),
+            (8, "sha256:backlog-7"),
+        ),
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=0),
+            (7, "sha256:different-fp"),
+        ),
+        (
+            "BACKLOG_CORRECTION_AVAILABLE",
+            NodeCategory.AVAILABLE,
+            RecommendationKind.OPTIONAL_REENTRY,
+            _backlog_continuation_references(node_attempt_count=0),
+            None,
+        ),
+    ],
+)
+def test_backlog_continuation_position_malformed_correction_variants_conflict(
+    reason: str,
+    category: NodeCategory,
+    recommendation: RecommendationKind,
+    references: tuple[FactReference, ...],
+    selection_identity: tuple[int, str] | None,
+) -> None:
+    """Malformed correction decisions fail closed with WORKFLOW_FACT_CONFLICT."""
+    decision = _backlog_continuation_decision(
+        reason=reason,
+        category=category,
+        recommendation=recommendation,
+        references=references,
+    )
+    reads = _CountingBacklogReads(_backlog_continuation_projection())
+    selection = _NullableBacklogSelection(selection_identity)
+    domain = _Domain(_backlog_continuation_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", reads),
+        delivery_review_selection=selection,
+    )
+
+    result = application.backlog_review(41)
+
+    assert result["ok"] is False
+    assert (
+        _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+    )
+
+
 
 
 def test_backlog_continuation_position_rejects_torn_rejected_projection() -> None:

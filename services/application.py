@@ -51,7 +51,11 @@ from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.story_phase import (
     load_story_correction_target_in_session,
 )
-from services.contracts.backlog import BacklogBuilderInput, BacklogOutput
+from services.contracts.backlog import (
+    MAX_BACKLOG_CORRECTION_GUIDANCE_CHARS,
+    BacklogBuilderInput,
+    BacklogOutput,
+)
 from services.contracts.product_goal import ProductGoalInterviewInput
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
 from services.contracts.sprint import (
@@ -160,7 +164,11 @@ from workflow.execution_integrity import (
     sprint_review_fingerprint,
     story_completion_eligibility_fingerprint,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    canonical_stored_json_hash,
+)
 from workflow.requests import (
     AbandonProductGoal,
     ApplyStoryDependencies,
@@ -366,6 +374,14 @@ class _DeliveryActionInputPort(Protocol):
         decisions: tuple[NodeDecision, ...],
         request: StoryCorrectionRequest,
     ) -> tuple[NodeDecision, JsonObject] | WorkflowError | None: ...
+
+    def build_backlog_correction(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        request: BacklogCorrectionRequest,
+    ) -> JsonObject | WorkflowError | None: ...
 
 
 class _PlanningActionSelectionPort(SemanticTransitionReplayPort, Protocol):
@@ -841,6 +857,66 @@ class _DeliveryLineage:
     vision: VisionArtifact
 
 
+def _validate_backlog_correction_target(
+    session: Session,
+    *,
+    project_id: int,
+    request: BacklogCorrectionRequest,
+    lineage: _DeliveryLineage,
+) -> BacklogArtifact | WorkflowError:
+    """Validate that the requested Backlog target matches current durable facts."""
+    target = session.get(BacklogArtifact, request.accepted_backlog_artifact_id)
+    if (
+        target is None
+        or target.project_id != project_id
+        or target.content_fingerprint
+        != request.accepted_backlog_artifact_fingerprint
+        or canonical_stored_json_hash(target.canonical_content_json)
+        != target.content_fingerprint
+        or target.spec_version_id
+        != lineage.accepted_specification.spec_version_id
+        or target.spec_hash != lineage.accepted_specification.spec_hash
+        or target.product_goal_artifact_id
+        != lineage.goal.product_goal_artifact_id
+        or target.product_goal_fingerprint != lineage.goal.content_fingerprint
+    ):
+        return WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message=(
+                "The accepted Backlog target no longer matches durable facts."
+            ),
+        )
+    review = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == project_id,
+            col(BacklogArtifactDecision.backlog_artifact_id)
+            == request.accepted_backlog_artifact_id,
+        )
+    ).one_or_none()
+    if (
+        review is None
+        or review.decision != "accepted"
+        or review.artifact_fingerprint != target.content_fingerprint
+    ):
+        return WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message="The Backlog target must have an exact accepted review.",
+        )
+    successor = session.exec(
+        select(BacklogArtifact).where(
+            col(BacklogArtifact.project_id) == project_id,
+            col(BacklogArtifact.supersedes_backlog_artifact_id)
+            == request.accepted_backlog_artifact_id,
+        )
+    ).first()
+    if successor is not None:
+        return WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message="The Backlog target already has a successor artifact.",
+        )
+    return target
+
+
 @dataclass(frozen=True)
 class DeliveryActionInputService:
     """Prepare retained delivery model input from exact durable graph facts."""
@@ -971,6 +1047,70 @@ class DeliveryActionInputService:
                 code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
                 message="The Story correction target no longer matches durable facts.",
             )
+
+    def build_backlog_correction(  # noqa: PLR0911
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        request: BacklogCorrectionRequest,
+    ) -> JsonObject | WorkflowError | None:
+        """Resolve one accepted Backlog leaf to closed correction input."""
+        try:
+            with Session(self.engine) as session:
+                lineage = _delivery_lineage(
+                    session,
+                    project_id=project_id,
+                    decision=decision,
+                )
+                if lineage is None:
+                    return None
+                target_reference = _single_fact_reference(decision, "backlog")
+                if (
+                    target_reference is None
+                    or target_reference.fact_id
+                    != str(request.accepted_backlog_artifact_id)
+                    or target_reference.fingerprint
+                    != request.accepted_backlog_artifact_fingerprint
+                ):
+                    return None
+                target_or_error = _validate_backlog_correction_target(
+                    session,
+                    project_id=project_id,
+                    request=request,
+                    lineage=lineage,
+                )
+                if isinstance(target_or_error, WorkflowError):
+                    return target_or_error
+                target = target_or_error
+                prepared = _backlog_input(session, decision, lineage)
+                if prepared is None:
+                    return None
+                builder_input = BacklogBuilderInput.model_validate(
+                    prepared["builder_input"]
+                ).model_copy(update={"user_input": request.guidance})
+                correction = {
+                    "accepted_backlog_artifact_id": (
+                        request.accepted_backlog_artifact_id
+                    ),
+                    "accepted_backlog_artifact_fingerprint": (
+                        request.accepted_backlog_artifact_fingerprint
+                    ),
+                    "guidance": request.guidance,
+                }
+                return _JSON_OBJECT.validate_python(
+                    {
+                        **prepared,
+                        "builder_input": builder_input.model_dump(mode="json"),
+                        "supersedes_backlog_artifact_id": target.backlog_artifact_id,
+                        "backlog_correction": correction,
+                    }
+                )
+        except AcceptedSpecificationIntegrityError as error:
+            return _accepted_specification_input_error(error)
+        except (ValidationError, ValueError):
+            return None
+
 
 
 @dataclass(frozen=True)
@@ -1325,6 +1465,22 @@ class DeliveryActionRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class BacklogCorrectionRequest(FrozenModel):
+    """Semantic operator correction for an accepted Backlog artifact."""
+
+    project_id: int
+    expected_decision_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
+    accepted_backlog_artifact_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    guidance: SemanticText = Field(max_length=MAX_BACKLOG_CORRECTION_GUIDANCE_CHARS)
+    idempotency_key: SemanticText
+    actor: SemanticText
+    correlation_id: str | None = None
+
 
 
 class StorySetCorrectionRequest(FrozenModel):
@@ -1948,6 +2104,9 @@ class AgileForgeApplication:
                     "BACKLOG_GENERATION_FAILED",
                     "BACKLOG_GENERATION_RECOVERY_REQUIRED",
                     "BACKLOG_CORRECTION_AVAILABLE",
+                    "BACKLOG_CORRECTION_ACTIVE",
+                    "BACKLOG_CORRECTION_FAILED",
+                    "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
                 }
             )
         )
@@ -1968,20 +2127,20 @@ class AgileForgeApplication:
                 "No planning review is currently available.",
                 code="PLANNING_REVIEW_NOT_AVAILABLE",
             )
-        optional_correction = continuation[0]
-        if optional_correction.reason_code == "BACKLOG_CORRECTION_AVAILABLE":
-            if not _backlog_optional_correction_is_valid(optional_correction):
+        correction_candidate = continuation[0]
+        if correction_candidate.reason_code in _BACKLOG_CORRECTION_REVIEW_STATES:
+            if not _backlog_correction_review_decision_is_valid(correction_candidate):
                 return _planning_review_read_error(
                     "Backlog correction re-entry is invalid."
                 )
             backlog_reference = next(
                 reference
-                for reference in optional_correction.fact_references
+                for reference in correction_candidate.fact_references
                 if reference.fact_type == "backlog"
             )
             identity = selection.review_identity(
                 project_id=project_id,
-                decision=optional_correction,
+                decision=correction_candidate,
                 fact_type="backlog",
             )
             if identity != (
@@ -2380,6 +2539,88 @@ class AgileForgeApplication:
         return self._run_delivery_action(
             request,
             node_id="backlog.generate",
+        )
+
+    def correct_backlog(
+        self,
+        request: BacklogCorrectionRequest,
+    ) -> TransitionResult:
+        """Correct one accepted Backlog without trusting operational rows."""
+        input_service = self._delivery_action_input
+        node_id = "backlog.generate"
+        if input_service is None:
+            return _transition_not_available(None, node_id)
+        semantic_input: JsonObject = {
+            "backlog_correction": {
+                "accepted_backlog_artifact_id": request.accepted_backlog_artifact_id,
+                "accepted_backlog_artifact_fingerprint": (
+                    request.accepted_backlog_artifact_fingerprint
+                ),
+                "guidance": request.guidance,
+            }
+        }
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=request.expected_decision_fingerprint,
+                node_id=node_id,
+                instance_key=None,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                semantic_input=semantic_input,
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            node_id,
+            instance_key=None,
+        )
+        backlog_ref = (
+            _positive_integer_reference(decision, "backlog")
+            if decision is not None
+            else None
+        )
+        if (
+            decision is None
+            or not _backlog_correction_decision_is_valid(decision)
+            or decision.decision_fingerprint != request.expected_decision_fingerprint
+            or backlog_ref is None
+            or backlog_ref[0] != request.accepted_backlog_artifact_id
+            or backlog_ref[1].fingerprint
+            != request.accepted_backlog_artifact_fingerprint
+        ):
+            return _transition_not_available(position, node_id)
+        input_payload = input_service.build_backlog_correction(
+            project_id=request.project_id,
+            decision=decision,
+            request=request,
+        )
+        if isinstance(input_payload, WorkflowError):
+            return TransitionResult(
+                ok=False, position=position, error=input_payload
+            )
+        if input_payload is None:
+            return _transition_not_available(position, node_id)
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id=node_id,
+                instance_key=decision.instance_key,
+                input_payload=input_payload,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES[node_id]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
         )
 
     def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult:
@@ -3604,6 +3845,17 @@ class AgileForgeApplication:
             and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
         ):
             return _transition_not_available(position, node_id)
+        if (
+            node_id == "backlog.generate"
+            and decision.reason_code
+            in {
+                "BACKLOG_CORRECTION_AVAILABLE",
+                "BACKLOG_CORRECTION_FAILED",
+                "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+            }
+        ):
+            return _transition_not_available(position, node_id)
+
         input_payload = input_service.build(
             project_id=request.project_id,
             decision=decision,
@@ -5279,11 +5531,80 @@ def _single_fact_reference(
     return references[0] if len(references) == 1 else None
 
 
+def _positive_integer_reference(
+    decision: NodeDecision,
+    fact_type: str,
+) -> tuple[int, FactReference] | None:
+    """Return one exact positive integer reference for one fact type."""
+    matching = tuple(
+        item for item in decision.fact_references if item.fact_type == fact_type
+    )
+    if len(matching) != 1:
+        return None
+    ref = matching[0]
+    try:
+        val = int(ref.fact_id)
+    except ValueError:
+        return None
+    return (val, ref) if val > 0 else None
+
+
+_BACKLOG_CORRECTION_INITIAL_REF_COUNT: int = 3
+_BACKLOG_CORRECTION_RECOVERY_REF_COUNT: int = 4
+
+
+def _backlog_correction_decision_is_valid(decision: NodeDecision) -> bool:
+    """Validate the exact reference and recommendation shape for Backlog correction."""
+    if (
+        decision.category is not NodeCategory.AVAILABLE
+        or decision.node_id != "backlog.generate"
+        or decision.request_kind != "record_backlog_draft"
+        or decision.instance_key is not None
+    ):
+        return False
+    backlog_ref = _positive_integer_reference(decision, "backlog")
+    spec_ref = _positive_integer_reference(decision, "specification")
+    goal_ref = _positive_integer_reference(decision, "product_goal")
+    if backlog_ref is None or spec_ref is None or goal_ref is None:
+        return False
+
+    is_initial = (
+        decision.reason_code == "BACKLOG_CORRECTION_AVAILABLE"
+        and decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    )
+    is_recovery = (
+        decision.reason_code
+        in {"BACKLOG_CORRECTION_FAILED", "BACKLOG_CORRECTION_RECOVERY_REQUIRED"}
+        and decision.recommendation_kind is RecommendationKind.RECOVERY
+    )
+    if is_initial:
+        return len(decision.fact_references) == _BACKLOG_CORRECTION_INITIAL_REF_COUNT
+    if is_recovery:
+        attempt_ref = _positive_integer_reference(decision, "node_attempt")
+        return (
+            attempt_ref is not None
+            and len(decision.fact_references)
+            == _BACKLOG_CORRECTION_RECOVERY_REF_COUNT
+        )
+    return False
+
+
+
 def planning_action_decision_is_transportable(
     project_id: int,
     decision: NodeDecision,
 ) -> bool:
     """Return whether one planning decision has the references its route needs."""
+    if (
+        decision.request_kind == "record_backlog_draft"
+        and decision.reason_code
+        in {
+            "BACKLOG_CORRECTION_AVAILABLE",
+            "BACKLOG_CORRECTION_FAILED",
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+        }
+    ):
+        return _backlog_correction_decision_is_valid(decision)
     if (
         decision.request_kind == "record_story_draft"
         and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
@@ -5502,21 +5823,55 @@ def _backlog_feedback_continuation_references(
     return cast("tuple[FactReference, FactReference, FactReference]", selected)
 
 
-def _backlog_optional_correction_is_valid(decision: NodeDecision) -> bool:
-    """Recognize only the exact accepted-correction re-entry as valid absence."""
+_BACKLOG_CORRECTION_REVIEW_STATES: dict[
+    str, tuple[NodeCategory, RecommendationKind | None, bool]
+] = {
+    "BACKLOG_CORRECTION_AVAILABLE": (
+        NodeCategory.AVAILABLE,
+        RecommendationKind.OPTIONAL_REENTRY,
+        False,
+    ),
+    "BACKLOG_CORRECTION_ACTIVE": (
+        NodeCategory.WAITING,
+        RecommendationKind.REQUIRED,
+        False,
+    ),
+    "BACKLOG_CORRECTION_FAILED": (
+        NodeCategory.AVAILABLE,
+        RecommendationKind.RECOVERY,
+        True,
+    ),
+    "BACKLOG_CORRECTION_RECOVERY_REQUIRED": (
+        NodeCategory.AVAILABLE,
+        RecommendationKind.RECOVERY,
+        True,
+    ),
+}
+
+
+def _backlog_correction_review_decision_is_valid(decision: NodeDecision) -> bool:
+    """Validate exact reference and recommendation shape for correction review."""
+    expected = _BACKLOG_CORRECTION_REVIEW_STATES.get(decision.reason_code)
     if (
-        decision.reason_code != "BACKLOG_CORRECTION_AVAILABLE"
+        expected is None
+        or decision.node_id != "backlog.generate"
         or decision.request_kind != "record_backlog_draft"
         or decision.instance_key is not None
-        or decision.category is not NodeCategory.AVAILABLE
-        or decision.recommendation_kind is not RecommendationKind.OPTIONAL_REENTRY
+        or decision.category is not expected[0]
+        or decision.recommendation_kind is not expected[1]
     ):
         return False
     required = ("backlog", "specification", "product_goal")
+    allowed = (*required, "node_attempt") if expected[2] else required
     counts = Counter(reference.fact_type for reference in decision.fact_references)
-    if any(
-        reference.fact_type not in required for reference in decision.fact_references
-    ) or any(counts[fact_type] != 1 for fact_type in required):
+    if (
+        any(
+            reference.fact_type not in allowed
+            for reference in decision.fact_references
+        )
+        or any(counts[fact_type] != 1 for fact_type in required)
+        or counts["node_attempt"] != int(expected[2])
+    ):
         return False
     return all(
         _fact_reference_integer(reference) is not None
@@ -5891,6 +6246,7 @@ def production_application() -> AgileForgeApplication:
 __all__ = [
     "AgenticActionRequest",
     "AgileForgeApplication",
+    "BacklogCorrectionRequest",
     "BacklogReviewRequest",
     "CloseStoryRequest",
     "CompleteTaskRequest",

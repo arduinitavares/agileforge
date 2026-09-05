@@ -2,7 +2,10 @@
 
 import importlib
 import os
+import socket
+import sys
 from collections.abc import Iterator
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from sqlite3 import Connection
 
@@ -11,6 +14,49 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
+
+_ORIGINAL_SOCKET: type[socket.socket] = socket.socket
+
+
+def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
+    """Create only the loopback pair required by Windows ProactorEventLoop."""
+    with _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        address = listener.getsockname()
+        with ExitStack() as sockets:
+            client = _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.callback(client.close)
+            client.setblocking(False)
+            with suppress(BlockingIOError, InterruptedError):
+                client.connect(address)
+            client.setblocking(True)
+            accept_fn = getattr(listener, "_accept")  # noqa: B009
+            accepted_fd, _ = accept_fn()
+            server = _ORIGINAL_SOCKET(
+                listener.family,
+                listener.type,
+                listener.proto,
+                fileno=accepted_fd,
+            )
+            sockets.callback(server.close)
+            if (
+                server.getsockname() != client.getpeername()
+                or client.getsockname() != server.getpeername()
+            ):
+                msg = "socketpair endpoints did not match"
+                raise RuntimeError(msg)
+            sockets.pop_all()
+            return server, client
+
+
+@pytest.fixture(autouse=True)
+def _permit_windows_testclient_socketpair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permit only Proactor's internal pair while pytest-socket blocks sockets."""
+    if sys.platform == "win32":
+        monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
 _TEST_MODEL_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "models.test.yaml"

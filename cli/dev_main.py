@@ -7,11 +7,13 @@ import json
 import os
 import platform
 import secrets
+import shutil
 import signal
 import sqlite3
 import stat
 import subprocess  # nosec B404
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -212,6 +214,26 @@ class ChildRuntimeEnvironment(BaseModel):
         alias="SPECIFICATION_STRUCTURER_MAX_TOKENS",
         gt=0,
     )
+    system_root: str | None = Field(
+        default=None,
+        alias="SystemRoot",
+        exclude=True,
+    )
+    git_executable: str | None = Field(
+        default=None,
+        alias="GIT_PYTHON_GIT_EXECUTABLE",
+        exclude=True,
+    )
+    temp: str | None = Field(
+        default=None,
+        alias="TEMP",
+        exclude=True,
+    )
+    tmp: str | None = Field(
+        default=None,
+        alias="TMP",
+        exclude=True,
+    )
 
 
 class InfoResult(BaseModel):
@@ -362,10 +384,13 @@ def _verify_business_schema(database: Path) -> SchemaValidation:
         raise SchemaVerificationError(message)
 
     try:
-        with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        try:
             rows = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
             ).fetchall()
+        finally:
+            connection.close()
     except sqlite3.Error as error:
         message = f"business database verification failed: {database}"
         raise SchemaVerificationError(message) from error
@@ -464,10 +489,102 @@ class UiReadyResult(BaseModel):
     launch_nonce: str = Field(min_length=1)
 
 
-def _launcher_child_environment(profile: RuntimeProfile) -> dict[str, str]:
+def _resolve_git_executable() -> str:
+    """Resolve and validate an absolute Git executable at the launcher boundary."""
+    candidate = os.environ.get("GIT_PYTHON_GIT_EXECUTABLE")
+    if candidate:
+        candidate_path = Path(candidate)
+        if (
+            candidate_path.is_absolute()
+            and candidate_path.is_file()
+            and os.access(candidate_path, os.X_OK)
+        ):
+            return str(candidate_path.resolve())
+        message = (
+            f"configured git executable is not a valid executable file: {candidate}"
+        )
+        raise DeveloperCommandError(message)
+
+    resolved = shutil.which("git")
+    if resolved:
+        resolved_path = Path(resolved).resolve()
+        if (
+            resolved_path.is_absolute()
+            and resolved_path.is_file()
+            and os.access(resolved_path, os.X_OK)
+        ):
+            return str(resolved_path)
+    message = "git executable could not be resolved from PATH"
+    raise DeveloperCommandError(message)
+
+
+def _is_writable_directory(path: Path) -> bool:
+    """Verify that a path exists, is a directory, and is writable."""
+    try:
+        with tempfile.TemporaryFile(dir=path) as probe_file:
+            probe_file.write(b"ok")
+            probe_file.flush()
+    except OSError:
+        return False
+    else:
+        return True
+
+
+def _profile_temporary_directory(profile: RuntimeProfile) -> str:
+    """Derive and validate the owned profile root as child TEMP/TMP."""
+    paths = profile_paths(profile.checkout.root, profile.name)
+    root = paths.root
+    if (
+        profile.business_database.parent != root
+        or profile.trace_database.parent != root
+    ):
+        message = "profile database paths do not reside in profile root"
+        raise DeveloperCommandError(message)
+
+    if not root.is_absolute():
+        message = f"profile root is not absolute: {root}"
+        raise DeveloperCommandError(message)
+
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        message = f"profile root cannot be inspected: {root}"
+        raise DeveloperCommandError(message) from exc
+
+    if stat.S_ISLNK(metadata.st_mode):
+        message = f"profile root must not be a symlink: {root}"
+        raise DeveloperCommandError(message)
+
+    if not stat.S_ISDIR(metadata.st_mode):
+        message = f"profile root is not a directory: {root}"
+        raise DeveloperCommandError(message)
+
+    canonical_root = root.resolve(strict=True)
+    if not _is_writable_directory(canonical_root):
+        message = f"profile root is not writable: {canonical_root}"
+        raise DeveloperCommandError(message)
+
+    return str(canonical_root)
+
+
+def _launcher_child_environment(
+    profile: RuntimeProfile,
+    *,
+    git_executable: str | None = None,
+) -> dict[str, str]:
     """Add the fixed child boundary without changing the profile contract."""
     environment = profile_environment(profile)
     environment[LAUNCHER_CHILD_ENV] = LAUNCHER_CHILD_VALUE
+    if os.name == "nt":
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            environment["SystemRoot"] = system_root
+        temp_directory = _profile_temporary_directory(profile)
+        environment["TEMP"] = temp_directory
+        environment["TMP"] = temp_directory
+    environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
+        git_executable or _resolve_git_executable()
+    )
     return environment
 
 
