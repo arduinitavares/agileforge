@@ -1105,7 +1105,7 @@ def build_specification_structuring_workflow(
                 schema_version = (
                     payload.get("schema_version") if isinstance(payload, dict) else None
                 )
-                if schema_version is not None and schema_version != SCHEMA_VERSION:
+                if isinstance(schema_version, str) and schema_version != SCHEMA_VERSION:
                     code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA
                     message = "Specification structurer returned an unsupported schema."
                 else:
