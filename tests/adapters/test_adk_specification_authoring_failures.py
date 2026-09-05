@@ -352,6 +352,13 @@ def _valid_output() -> JsonObject:
     }
 
 
+def _valid_output_with_schema_version(schema_version: object) -> str:
+    """Build otherwise-valid Specification output, modifying only schema_version."""
+    output = deepcopy(_valid_output())
+    cast("dict[str, object]", output["payload"])["schema_version"] = schema_version
+    return json.dumps(output)
+
+
 def _invalid_model_output(
     provider_output: JsonObject,
 ) -> object:
@@ -651,12 +658,52 @@ def test_real_leaf_dangling_endpoint_is_invalid_payload(
             id="malformed-json-non-eof",
         ),
         pytest.param(
-            '{"payload": {"schema_version": "agileforge.spec.v1"}}',
+            _valid_output_with_schema_version("agileforge.spec.v1"),
             types.FinishReason.STOP,
             validate_specification_output,
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
             "Specification structurer returned an unsupported schema.",
             id="explicit-v1-schema",
+        ),
+        pytest.param(
+            _valid_output_with_schema_version(2),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="integer-schema-version",
+        ),
+        pytest.param(
+            _valid_output_with_schema_version(True),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="boolean-schema-version",
+        ),
+        pytest.param(
+            _valid_output_with_schema_version([]),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="list-schema-version",
+        ),
+        pytest.param(
+            _valid_output_with_schema_version({}),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="dict-schema-version",
+        ),
+        pytest.param(
+            _valid_output_with_schema_version(None),
+            types.FinishReason.STOP,
+            validate_specification_output,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            "Specification structurer returned an invalid v2 payload.",
+            id="null-schema-version",
         ),
         pytest.param(
             '{"payload":',

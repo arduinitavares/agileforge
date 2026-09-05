@@ -77,6 +77,30 @@ def test_valid_specification_response_returns_model() -> None:
             "UNSUPPORTED_SPECIFICATION_SCHEMA",
         ),
         (
+            '{"payload":{"schema_version":2}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
+            '{"payload":{"schema_version":true}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
+            '{"payload":{"schema_version":[]}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
+            '{"payload":{"schema_version":{}}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
+            '{"payload":{"schema_version":null}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
+            '{"payload":{}}',
+            "INVALID_SPECIFICATION_PAYLOAD",
+        ),
+        (
             '{"payload":',
             "SPECIFICATION_OUTPUT_INCOMPLETE",
         ),
@@ -106,6 +130,43 @@ def test_complete_and_incomplete_outputs_keep_distinct_codes(
     with pytest.raises(SpecificationAgenticExecutionError) as raised:
         validate_specification_output(dummy_context, response)
     assert raised.value.code == expected_code
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "expected_code"),
+    [
+        (2, "INVALID_SPECIFICATION_PAYLOAD"),
+        (True, "INVALID_SPECIFICATION_PAYLOAD"),
+        ([], "INVALID_SPECIFICATION_PAYLOAD"),
+        ({}, "INVALID_SPECIFICATION_PAYLOAD"),
+        (None, "INVALID_SPECIFICATION_PAYLOAD"),
+        ("agileforge.spec.v1", "UNSUPPORTED_SPECIFICATION_SCHEMA"),
+        ("other.version", "UNSUPPORTED_SPECIFICATION_SCHEMA"),
+    ],
+)
+def test_schema_version_type_classification(
+    schema_version: object,
+    expected_code: str,
+) -> None:
+    """Non-string schema versions must be invalid payload.
+
+    Only string mismatches are unsupported schema.
+    """
+    payload = _valid_payload()
+    cast("dict[str, object]", payload["payload"])["schema_version"] = schema_version
+    raw = json.dumps(payload)
+    with pytest.raises(SpecificationOutputValidationError) as raised:
+        validate_specification_response(raw, finish_reason="STOP", usage={})
+    assert raised.value.code == expected_code
+
+
+def test_missing_schema_version_in_otherwise_valid_payload_defaults_to_v2() -> None:
+    """Removing schema_version from otherwise-valid output defaults to v2."""
+    payload = _valid_payload()
+    del cast("dict[str, object]", payload["payload"])["schema_version"]
+    raw = json.dumps(payload)
+    output = validate_specification_response(raw, finish_reason="STOP", usage={})
+    assert output.payload.schema_version == "agileforge.spec.v2"
 
 
 def test_valid_json_at_max_tokens_is_incomplete() -> None:

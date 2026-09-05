@@ -2,26 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from google.adk.agents import BaseAgent, InvocationContext
+from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START
+from google.genai import types
 
 import adapters.adk.recipes as recipes_module
+from adapters.adk.errors import SpecificationAgenticExecutionError
 from adapters.adk.recipes import (
     AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
     AgenticRecipeNodes,
     AttemptCompletionContext,
+    RecipeInput,
     RecipeOutput,
     UnknownAdkRecipeError,
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
+    build_specification_structuring_workflow,
 )
+from tests.services.contracts.test_specification_authoring import _input
 from utils.agileforge_spec_profile_v2 import (
     RequirementLevel,
     SpecificationItem,
@@ -31,6 +41,7 @@ from utils.agileforge_spec_profile_v2 import (
     canonical_spec_hash,
     canonical_spec_json,
 )
+from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
     CompleteSpecificationStructuring,
@@ -471,3 +482,98 @@ def test_recipe_contains_execution_only_without_business_prerequisites() -> None
     assert workflow.retry_config.max_attempts == RECIPE_MAX_ATTEMPTS
     assert not hasattr(recipe, "prerequisites")
     assert not hasattr(recipe, "next_command")
+
+
+def _valid_specification_output() -> dict[str, object]:
+    return {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.agentic-recipe",
+            "title": "Agentic recipe",
+            "summary": "Structure one exact typed Specification.",
+            "problem_statement": "The lifecycle needs one semantic boundary.",
+            "items": [],
+        }
+    }
+
+
+def _specification_output_with_schema_version(
+    schema_version: object,
+) -> dict[str, object]:
+    output = copy.deepcopy(_valid_specification_output())
+    cast("dict[str, object]", output["payload"])["schema_version"] = schema_version
+    return output
+
+
+async def _run_structuring_workflow(response: dict[str, object]) -> RecipeOutput:
+    leaf = FakeLeafAgent(name="fake_structurer", response=response)
+    wf = build_specification_structuring_workflow(
+        leaf_agent=leaf,
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
+    )
+    session_service = InMemorySessionService()
+    await session_service.create_session(
+        app_name="recipe_test", user_id="user", session_id="1"
+    )
+    app = App(
+        name="recipe_test",
+        root_agent=wf,
+        resumability_config=ResumabilityConfig(is_resumable=True),
+    )
+    runner = Runner(app=app, session_service=session_service)
+    struct_input = _input()
+    inp = RecipeInput(payload=struct_input.model_dump(mode="json"))
+    msg = types.Content(
+        role="user",
+        parts=[types.Part(text=inp.model_dump_json())],
+    )
+    events: list[Event] = [
+        event
+        async for event in runner.run_async(
+            user_id="user", session_id="1", new_message=msg
+        )
+    ]
+    assert events
+    return RecipeOutput.model_validate(events[-1].output)
+
+
+def test_structuring_workflow_succeeds_with_valid_v2_control() -> None:
+    """Control proving the recipe fixture succeeds before mutation."""
+    output = asyncio.run(_run_structuring_workflow(_valid_specification_output()))
+    assert isinstance(output, RecipeOutput)
+    payload = cast("dict[str, object]", output.payload)
+    nested = cast("dict[str, object]", payload["payload"])
+    assert nested["schema_version"] == "agileforge.spec.v2"
+
+
+def test_structuring_workflow_missing_schema_version_defaults_to_v2() -> None:
+    """Missing schema_version in otherwise-valid payload defaults to v2."""
+    output_data = copy.deepcopy(_valid_specification_output())
+    del cast("dict[str, object]", output_data["payload"])["schema_version"]
+    output = asyncio.run(_run_structuring_workflow(output_data))
+    assert isinstance(output, RecipeOutput)
+    payload = cast("dict[str, object]", output.payload)
+    nested = cast("dict[str, object]", payload["payload"])
+    assert nested["schema_version"] == "agileforge.spec.v2"
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "expected_code"),
+    [
+        (2, WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD),
+        (True, WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD),
+        ([], WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD),
+        ({}, WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD),
+        (None, WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD),
+        ("agileforge.spec.v1", WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA),
+    ],
+)
+def test_structuring_workflow_validation_fallback_schema_version_classification(
+    schema_version: object,
+    expected_code: WorkflowErrorCode,
+) -> None:
+    """Fallback must classify non-string schema_version as invalid payload."""
+    response = _specification_output_with_schema_version(schema_version)
+    with pytest.raises(SpecificationAgenticExecutionError) as raised:
+        asyncio.run(_run_structuring_workflow(response))
+    assert raised.value.code == expected_code

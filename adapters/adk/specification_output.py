@@ -257,7 +257,7 @@ def validate_specification_response(
     schema_version = (
         payload.get("schema_version") if payload is not None else None
     )
-    if schema_version is not None and schema_version != SCHEMA_VERSION:
+    if isinstance(schema_version, str) and schema_version != SCHEMA_VERSION:
         code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA.value
         message = "Specification structurer returned an unsupported schema."
         diagnostic = build_specification_output_diagnostic(
