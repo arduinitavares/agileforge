@@ -133,19 +133,19 @@ def test_complete_and_incomplete_outputs_keep_distinct_codes(
 
 
 @pytest.mark.parametrize(
-    ("schema_version_json", "expected_code"),
+    ("schema_version", "expected_code"),
     [
-        ("2", "INVALID_SPECIFICATION_PAYLOAD"),
-        ("true", "INVALID_SPECIFICATION_PAYLOAD"),
-        ("[]", "INVALID_SPECIFICATION_PAYLOAD"),
-        ("{}", "INVALID_SPECIFICATION_PAYLOAD"),
-        ("null", "INVALID_SPECIFICATION_PAYLOAD"),
-        ('"agileforge.spec.v1"', "UNSUPPORTED_SPECIFICATION_SCHEMA"),
-        ('"other.version"', "UNSUPPORTED_SPECIFICATION_SCHEMA"),
+        (2, "INVALID_SPECIFICATION_PAYLOAD"),
+        (True, "INVALID_SPECIFICATION_PAYLOAD"),
+        ([], "INVALID_SPECIFICATION_PAYLOAD"),
+        ({}, "INVALID_SPECIFICATION_PAYLOAD"),
+        (None, "INVALID_SPECIFICATION_PAYLOAD"),
+        ("agileforge.spec.v1", "UNSUPPORTED_SPECIFICATION_SCHEMA"),
+        ("other.version", "UNSUPPORTED_SPECIFICATION_SCHEMA"),
     ],
 )
 def test_schema_version_type_classification(
-    schema_version_json: str,
+    schema_version: object,
     expected_code: str,
 ) -> None:
     """Non-string schema versions must be invalid payload.
@@ -153,10 +153,8 @@ def test_schema_version_type_classification(
     Only string mismatches are unsupported schema.
     """
     payload = _valid_payload()
-    raw = json.dumps(payload).replace(
-        '"schema_version": "agileforge.spec.v2"',
-        f'"schema_version": {schema_version_json}',
-    )
+    cast("dict[str, object]", payload["payload"])["schema_version"] = schema_version
+    raw = json.dumps(payload)
     with pytest.raises(SpecificationOutputValidationError) as raised:
         validate_specification_response(raw, finish_reason="STOP", usage={})
     assert raised.value.code == expected_code
