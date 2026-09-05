@@ -21,7 +21,7 @@ from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from subprocess import Popen
+    from subprocess import Popen  # nosec B404  # type-only process annotation
 
 
 @pytest.fixture

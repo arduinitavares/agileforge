@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_response import LlmResponse
 
-    from workflow.contracts import JsonObject
+    from services.contracts.specification_authoring import JsonObject
 
 _INCOMPLETE_OUTPUT_MESSAGE: str = (
     "Specification structurer returned incomplete output. Increase "

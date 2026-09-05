@@ -1151,7 +1151,8 @@ def test_real_launcher_child_environment_configures_windows_temp_for_sqlite_spil
     module = _module()
     for k, v in {
         "OPEN_ROUTER_API_KEY": "must-not-leak-provider-secret",
-        "AWS_SECRET_ACCESS_KEY": "must-not-leak-aws-secret",
+        # Test-only AWS credential sentinel: the child environment must remove it.
+        "AWS_SECRET_ACCESS_KEY": "must-not-leak-aws-secret",  # nosec B105
         "CUSTOM_PARENT_CONTROL": "parent-control-value",
         "USERPROFILE": r"C:\Users\untrusted_parent",
         "LOCALAPPDATA": r"C:\Users\untrusted_parent\AppData\Local",
@@ -1368,7 +1369,8 @@ def test_launcher_child_environment_ignores_ambient_temp_and_uses_profile_root(
         "TMP": "relative/untrusted",
         "TMPDIR": r"C:\CON",
         "OPEN_ROUTER_API_KEY": "secret-provider-key",
-        "AWS_SECRET_ACCESS_KEY": "secret-aws-key",
+        # Test-only AWS credential sentinel: the child environment must remove it.
+        "AWS_SECRET_ACCESS_KEY": "secret-aws-key",  # nosec B105
         "CUSTOM_PARENT_CONTROL": "hostile-control",
         "USERPROFILE": r"C:\Users\untrusted",
         "LOCALAPPDATA": r"C:\Users\untrusted\AppData\Local",

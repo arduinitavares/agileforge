@@ -40,8 +40,12 @@ def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
                 fileno=accepted_fd,
             )
             sockets.callback(server.close)
-            assert server.getsockname() == client.getpeername()
-            assert client.getsockname() == server.getpeername()
+            if (
+                server.getsockname() != client.getpeername()
+                or client.getsockname() != server.getpeername()
+            ):
+                msg = "socketpair endpoints did not match"
+                raise RuntimeError(msg)
             sockets.pop_all()
             return server, client
 
