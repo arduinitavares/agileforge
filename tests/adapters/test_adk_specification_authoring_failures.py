@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -46,8 +47,12 @@ from adapters.adk.runner import (
 )
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
-from models.product_definition import SpecificationCandidate
+from models.product_definition import (
+    SpecificationCandidate,
+    SpecificationSource,
+)
 from models.repository import RepositoryBinding
+from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
@@ -106,6 +111,14 @@ ISSUE_200_OUTPUT: Path = (
     / "issue_200"
     / "complete-provider-output.json"
 )
+ISSUE_245_FIXTURE_DIR: Path = (
+    Path(__file__).parents[1] / "fixtures" / "issue_245"
+)
+ISSUE_245_SOURCE: Path = ISSUE_245_FIXTURE_DIR / "source.md"
+
+
+def _issue_245_fixture_bytes() -> bytes:
+    return ISSUE_245_SOURCE.read_bytes().replace(b"\r\n", b"\n")
 ISSUE_200_MAX_OUTPUT_TOKENS: int = 32_768
 ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
     "timeout_seconds": 5.0,
@@ -2456,3 +2469,229 @@ def test_real_leaf_recovery_source_drift_obsoletes_second_attempt(  # noqa: PLR0
 
     # Exactly one model dispatch per attempt
     assert model.calls == ["provider", "provider"]
+
+
+def _issue_245_valid_output() -> JsonObject:
+    return {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.audit-service",
+            "title": "Audit Service Specification",
+            "summary": "Transactional compliance audit trail with historical lineage.",
+            "problem_statement": (
+                "Pilot audit logs lack transactional consistency and durability."
+            ),
+            "items": [
+                {
+                    "id": "DATA.legacy-audit-record",
+                    "type": "DATA",
+                    "title": "Legacy audit file format",
+                    "statement": (
+                        "Historical implementation fact: The pilot service "
+                        "recorded flat-file audit entries in a local append-only "
+                        "log without relational transaction guarantees."
+                    ),
+                    "level": "INFORMATIVE",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "Informative baseline record preserved for audit "
+                        "reconciliation."
+                    ],
+                },
+                {
+                    "id": "REQ.audit-trail-authority",
+                    "type": "REQ",
+                    "title": "Relational audit trail authority",
+                    "statement": (
+                        "The platform MUST persist all compliance events directly "
+                        "to the primary relational database within the active "
+                        "transaction boundary."
+                    ),
+                    "level": "MUST",
+                    "verification": "integration-test",
+                    "acceptance": [
+                        "Compliance events are committed transactionally to the "
+                        "relational database.",
+                        "Requests fail when the audit event cannot be durably "
+                        "committed.",
+                    ],
+                },
+            ],
+            "relations": [
+                {
+                    "from": "REQ.audit-trail-authority",
+                    "type": "tracks",
+                    "to": "DATA.legacy-audit-record",
+                    "rationale": (
+                        "Normative transactional requirement tracks legacy "
+                        "flat-file audit representation."
+                    ),
+                }
+            ],
+        }
+    }
+
+
+def _issue_245_omitted_historical_output() -> JsonObject:
+    output = deepcopy(_issue_245_valid_output())
+    payload = cast("JsonObject", output["payload"])
+    payload["items"] = [
+        item
+        for item in cast("list[JsonObject]", payload["items"])
+        if item["id"] != "DATA.legacy-audit-record"
+    ]
+    return output
+
+
+def test_issue_245_valid_output_preserves_relation_and_creates_candidate(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Valid output preserves items and relations and creates a review candidate."""
+    source_bytes = _issue_245_fixture_bytes()
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245-valid",
+        response_text=json.dumps(_issue_245_valid_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_valid_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the valid synthetic specification response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+
+    def unchanged_source(_project_id: int, _input: JsonObject) -> None:
+        """Avoid a nested SQLite-memory session after exact input construction."""
+
+    runner, domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=unchanged_source,
+        source_bytes=source_bytes,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.ok is True
+    assert model.calls == ["provider"]
+    assert len(model.requests) == 1
+
+    with Session(engine) as session:
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.specification_candidate_id is not None
+
+        # Verify both items and their relation are preserved in candidate payload
+        payload, _ = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+        item_ids = {item.id for item in payload.items}
+        assert "DATA.legacy-audit-record" in item_ids
+        assert "REQ.audit-trail-authority" in item_ids
+        relation_triplets = {
+            (rel.from_, rel.type.value, rel.to) for rel in payload.relations
+        }
+        assert (
+            "REQ.audit-trail-authority",
+            "tracks",
+            "DATA.legacy-audit-record",
+        ) in relation_triplets
+
+        # Candidate is not automatically accepted (no approved spec in registry)
+        assert not session.exec(
+            select(SpecRegistry).where(col(SpecRegistry.project_id) == project_id)
+        ).all()
+
+    # Domain position indicates specification.review is pending, not automatic approval
+    position = domain.position(project_id)
+    assert any(item.node_id == "specification.review" for item in position.decisions)
+    assert not any(
+        item.node_id == "specification.structure" for item in position.decisions
+    )
+
+
+def test_issue_245_omitted_historical_item_fails_and_preserves_source(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Omitting the historical item while retaining its relation fails."""
+    source_bytes = _issue_245_fixture_bytes()
+    model = _SpecificationResponseLlm(
+        model="fake/issue-245-omitted",
+        response_text=json.dumps(_issue_245_omitted_historical_output()),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="issue_245_omitted_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return the omitted synthetic specification response.",
+        mode="single_turn",
+        output_key="specification_candidate",
+        after_model_callback=validate_specification_output,
+    )
+    runner, _, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_bytes=source_bytes,
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code == WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+    assert result.error.code.value == "INVALID_SPECIFICATION_PAYLOAD"
+    expected_endpoint = "Unknown relation endpoint: DATA.legacy-audit-record."
+    assert expected_endpoint in result.error.message
+
+    # Executes exactly one dispatch
+    assert model.calls == ["provider"]
+    assert len(model.requests) == 1
+
+    with Session(engine) as session:
+        # Durable failure recorded
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "INVALID_SPECIFICATION_PAYLOAD"
+
+        # Creates no candidate
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert not candidates
+
+        # Preserves registered-source bytes and identity
+        source = session.exec(
+            select(SpecificationSource).where(
+                col(SpecificationSource.project_id) == project_id
+            )
+        ).one()
+        assert source.specification_source_id is not None
+        bundle_data = json.loads(source.source_bundle_json)
+        source_base64 = bundle_data["source"]["content_base64"]
+        assert base64.b64decode(source_base64) == source_bytes
+        assert bundle_data["source"]["byte_length"] == len(source_bytes)
+        assert bundle_data["source"]["content_fingerprint"] == (
+            f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+        )
+        assert (
+            tmp_path / "registered-specification-source" / "SPECIFICATION.md"
+        ).read_bytes() == source_bytes
