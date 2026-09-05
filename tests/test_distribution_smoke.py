@@ -87,7 +87,7 @@ def _git_status_with_ignored(checkout: Path) -> str:
 def _write_contaminating_uv(bin_directory: Path) -> Path:
     """Write a local builder that packages stale files found in its source root."""
     bin_directory.mkdir()
-    fake_uv = bin_directory / "uv"
+    fake_uv = bin_directory / "uv.py"
     fake_uv.write_text(
         f"""#!{sys.executable}
 import io
@@ -127,11 +127,12 @@ def _run_uv_build(
     source: Path,
     output: Path,
     environment: Mapping[str, str],
+    fake_uv: Path,
 ) -> None:
     """Run one bounded uv build for a distribution test fixture."""
     output.mkdir()
     completed = subprocess.run(  # noqa: S603  # nosec B603
-        build_command(output),
+        (sys.executable, str(fake_uv), *build_command(output)[1:]),
         cwd=source,
         env=dict(environment),
         check=False,
@@ -426,15 +427,16 @@ def test_archive_retired_label_scan_rejects_utf8_file_content(
 
 def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Build working-tree source without stale ignored build metadata or modules."""
     source_checkout = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "checkout"
     _clone_checkout(source_checkout, checkout)
     tracked_source = checkout / "cli" / "__init__.py"
-    tracked_marker = "# clean-snapshot-working-tree-marker\n"
+    tracked_marker = "# clean-snapshot-working-tree-marker"
     tracked_source.write_text(
-        tracked_source.read_text(encoding="utf-8") + tracked_marker,
+        tracked_source.read_text(encoding="utf-8") + tracked_marker + "\n",
         encoding="utf-8",
     )
     stale_module = checkout / "build" / "lib" / "cli" / "stale_shadow.py"
@@ -446,16 +448,11 @@ def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkou
         "build/lib/cli/stale_shadow.py\nSTALE_EGG_INFO_SENTINEL\n",
         encoding="utf-8",
     )
-    fake_bin = tmp_path / "fake-bin"
-    _write_contaminating_uv(fake_bin)
-    build_environment = {
-        **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-    }
+    fake_uv = _write_contaminating_uv(tmp_path / "fake-bin")
+    build_environment = dict(os.environ)
     live_output = tmp_path / "live-checkout-dist"
-    _run_uv_build(checkout, live_output, build_environment)
-    live_wheel = next(live_output.glob("*.whl"))
-    with zipfile.ZipFile(live_wheel) as package:
+    _run_uv_build(checkout, live_output, build_environment, fake_uv)
+    with zipfile.ZipFile(next(live_output.glob("*.whl"))) as package:
         assert "build/lib/cli/stale_shadow.py" in package.namelist()
         assert b"STALE_EGG_INFO_SENTINEL" in package.read(
             "agileforge.egg-info/SOURCES.txt"
@@ -474,6 +471,11 @@ def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkou
         "Callable[..., tuple[BuiltArtifact, BuiltArtifact]]",
         build_distributions,
     )
+    monkeypatch.setattr(
+        distribution_verifier,
+        "build_command",
+        lambda output: (sys.executable, str(fake_uv), *build_command(output)[1:]),
+    )
 
     artifacts = typed_build(
         checkout_root=checkout,
@@ -490,6 +492,7 @@ def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkou
     with zipfile.ZipFile(wheel_path) as wheel:
         names = set(wheel.namelist())
         assert "cli/stale_shadow.py" not in names
+        assert "build/lib/cli/stale_shadow.py" not in names
         assert tracked_marker.encode() in wheel.read("cli/__init__.py")
         assert all(
             b"STALE_EGG_INFO_SENTINEL" not in wheel.read(name)
