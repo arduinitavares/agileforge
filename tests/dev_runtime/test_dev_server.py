@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import signal
 import socket
 import sqlite3
@@ -12,6 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
@@ -322,6 +324,11 @@ def test_start_ui_uses_fixed_uvicorn_arguments_and_exact_environment(
     checkout: Path,
 ) -> None:
     """Start one non-reloading child with no shell or inherited environment."""
+    monkeypatch.setattr(
+        _module(),
+        "sys",
+        SimpleNamespace(platform="linux", executable=sys.executable, stderr=sys.stderr),
+    )
     process = FakeProcess()
     calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
 
@@ -943,3 +950,190 @@ def test_ephemeral_ui_removes_only_its_unique_child_profile(
     assert not child_database.parent.exists()
     assert parent.root.exists()
     assert stopped == [8124]
+
+
+@pytest.mark.parametrize(
+    ("platform", "reload", "same_executable"),
+    [
+        ("win32", False, False),
+        ("win32", False, True),
+        ("win32", True, False),
+        ("linux", False, False),
+    ],
+)
+def test_ui_python_preserves_the_launch_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+    reload: bool,
+    same_executable: bool,
+) -> None:
+    """Select the direct interpreter only for the supported Windows branch."""
+    executable = tmp_path / "venv-python.exe"
+    executable.touch()
+    base = executable if same_executable else tmp_path / "base-python.exe"
+    base.touch()
+    runtime = SimpleNamespace(
+        platform=platform,
+        executable=str(executable),
+        _base_executable=str(base),
+        stderr=sys.stderr,
+    )
+    monkeypatch.setattr(_module(), "sys", runtime)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "ambient-must-not-leak")
+    environment = {
+        "AGILEFORGE_DB_URL": "fixture",
+        "AGILEFORGE_UI_LAUNCH_NONCE": "nonce",
+    }
+    before = dict(environment)
+    selected, copied = _module()._ui_python(environment, reload=reload)
+    direct = platform == "win32" and not reload and not same_executable
+    assert selected == str(base if direct else executable)
+    assert copied == (
+        dict(before, __PYVENV_LAUNCHER__=str(executable)) if direct else before
+    )
+    assert copied is not environment
+    assert environment == before
+    assert os.environ["__PYVENV_LAUNCHER__"] == "ambient-must-not-leak"
+
+
+@pytest.mark.parametrize("bad_base", [None, "", "relative.exe", "missing", "directory"])
+def test_ui_python_rejects_invalid_base_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_base: str | None
+) -> None:
+    """Unsupported interpreter state cannot become an unchecked UI launch."""
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    values = {"missing": str(tmp_path / "missing.exe"), "directory": str(tmp_path)}
+    base = values[bad_base] if bad_base in ("missing", "directory") else bad_base
+    monkeypatch.setattr(
+        _module(),
+        "sys",
+        SimpleNamespace(
+            platform="win32", executable=str(executable), _base_executable=base
+        ),
+    )
+    with pytest.raises(_module().UIReadinessError, match="Python executable"):
+        _module()._ui_python({}, reload=False)
+
+
+@pytest.mark.parametrize(
+    "bad_executable", [None, "", "relative.exe", "missing", "directory"]
+)
+def test_ui_python_rejects_invalid_executable_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_executable: str | None
+) -> None:
+    """Unsupported executable state cannot become an unchecked UI launch."""
+    base = tmp_path / "base.exe"
+    base.touch()
+    values = {"missing": str(tmp_path / "missing.exe"), "directory": str(tmp_path)}
+    executable = (
+        values[bad_executable]
+        if bad_executable in ("missing", "directory")
+        else bad_executable
+    )
+    monkeypatch.setattr(
+        _module(),
+        "sys",
+        SimpleNamespace(
+            platform="win32", executable=executable, _base_executable=str(base)
+        ),
+    )
+    with pytest.raises(_module().UIReadinessError, match="Python executable"):
+        _module()._ui_python({}, reload=False)
+
+
+@pytest.mark.parametrize("bad_same", ["relative.exe", "missing", "directory"])
+def test_ui_python_rejects_invalid_same_executable_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_same: str
+) -> None:
+    """Identical executable and base must still be absolute existing files."""
+    values = {"missing": str(tmp_path / "missing.exe"), "directory": str(tmp_path)}
+    path = values[bad_same] if bad_same in ("missing", "directory") else bad_same
+    monkeypatch.setattr(
+        _module(),
+        "sys",
+        SimpleNamespace(platform="win32", executable=path, _base_executable=path),
+    )
+    with pytest.raises(_module().UIReadinessError, match="Python executable"):
+        _module()._ui_python({}, reload=False)
+
+
+def test_windows_start_ui_owns_base_interpreter_and_copies_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Wire the launch helper without changing any other Popen option."""
+    executable = tmp_path / "venv.exe"
+    executable.touch()
+    base = tmp_path / "base.exe"
+    base.touch()
+    monkeypatch.setattr(
+        _module(),
+        "sys",
+        SimpleNamespace(
+            platform="win32",
+            executable=str(executable),
+            _base_executable=str(base),
+            stderr=sys.stderr,
+        ),
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    process = FakeProcess()
+
+    def capture(arguments: tuple[str, ...], **options: object) -> FakeProcess:
+        calls.append((arguments, options))
+        return process
+
+    monkeypatch.setattr(_module().subprocess, "Popen", capture)
+    environment = {
+        "AGILEFORGE_UI_LAUNCH_NONCE": "nonce",
+        "__PYVENV_LAUNCHER__": "hostile",
+    }
+    original = dict(environment)
+    child = _module().start_ui(
+        checkout_root=tmp_path, environment=environment, port=_UI_PORT, reload=False
+    )
+    assert child.process is process
+    assert calls == [
+        (
+            (
+                str(base),
+                "-m",
+                "uvicorn",
+                "api:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(_UI_PORT),
+            ),
+            {
+                "cwd": tmp_path,
+                "env": dict(environment, __PYVENV_LAUNCHER__=str(executable)),
+                "stdout": sys.stderr,
+            },
+        )
+    ]
+    assert environment == original
+
+
+@pytest.mark.parametrize("bad_pid", [True, False, 0, -1, "1234", None])
+def test_runtime_parser_rejects_invalid_process_id(
+    checkout: Path, bad_pid: object
+) -> None:
+    """PID must remain a positive integer, excluding bool."""
+    payload = _ready_payload(checkout, process_id=1234)
+    payload["process_id"] = bad_pid
+    with pytest.raises(_module().UIReadinessError, match="invalid payload"):
+        _module()._parse_dashboard_config(payload)
+
+
+def test_runtime_rejects_noncanonical_checkout(checkout: Path) -> None:
+    """An existing path alias must not bypass the canonical checkout predicate."""
+    (checkout / "nested").mkdir()
+    payload = _ready_payload(checkout, process_id=1234)
+    payload["checkout_root"] = str(checkout / "nested" / "..")
+    config = _module()._parse_dashboard_config(payload)
+    with pytest.raises(_module().UIRuntimeMismatchError, match="identity mismatch"):
+        _module()._validate_runtime_identity(
+            config, _runtime_identity(checkout, process_id=1234)
+        )

@@ -92,3 +92,33 @@ jobs:
           tests/services/test_specification_source_application.py
           tests/adapters/test_vision_bootstrap_api.py
           tests/adapters/test_cli_workflow_domain.py -q
+
+  windows-ui-runtime:
+    name: Windows UI runtime ownership
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.12.8"
+          python-version: "3.13.15"
+      - name: Install Python 3.13.15
+        run: uv python install 3.13.15
+      - name: Verify real Windows venv and run ownership regressions
+        run: >-
+          uv run --locked pytest tests/windows/test_dev_ui_runtime_windows.py
+          tests/dev_runtime/test_dev_server.py
+          tests/dev_runtime/test_dev_main.py
+          tests/dev_runtime/test_profiles.py -q
+          --junitxml=windows-ui-runtime.xml
+      - name: Require the real regression to execute
+        shell: pwsh
+        run: |
+          [xml]$results = Get-Content -LiteralPath windows-ui-runtime.xml -Raw
+          $cases = @($results.SelectNodes('//testcase') | Where-Object {
+            $_.name -eq 'test_real_windows_ui_owns_the_serving_interpreter'
+          })
+          if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')) {
+            throw 'The real Windows ownership regression did not execute exactly once.'
+          }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess  # nosec B404
 import sys
@@ -113,6 +114,37 @@ def select_loopback_port(*, max_attempts: int = _DEFAULT_PORT_ATTEMPTS) -> int:
     raise OSError(message) from last_error
 
 
+def _ui_python(
+    environment: Mapping[str, str], *, reload: bool
+) -> tuple[str, dict[str, str]]:
+    """Own the serving interpreter directly for Windows venv non-reload UI.
+
+    CPython 3.13 multiprocessing uses this same base-executable/launcher
+    pair to avoid the Windows venv redirector while retaining the venv.
+    Keep reload on its existing supervisor/redirector cleanup path.
+    """
+    child_environment = dict(environment)
+    executable = sys.executable
+    if sys.platform != "win32" or reload:
+        return executable, child_environment
+    if not isinstance(executable, str) or not executable:
+        message = "Windows UI requires a valid Python executable"
+        raise UIReadinessError(message)
+    base_executable = getattr(sys, "_base_executable", None)
+    if not isinstance(base_executable, str) or not base_executable:
+        message = "Windows UI requires a valid base Python executable"
+        raise UIReadinessError(message)
+    for value in (executable, base_executable):
+        path = Path(value)
+        if not path.is_absolute() or not path.is_file():
+            message = "Windows UI requires absolute existing Python executables"
+            raise UIReadinessError(message)
+    if os.path.normcase(executable) == os.path.normcase(base_executable):
+        return executable, child_environment
+    child_environment["__PYVENV_LAUNCHER__"] = executable
+    return base_executable, child_environment
+
+
 def start_ui(
     *,
     checkout_root: Path,
@@ -121,8 +153,9 @@ def start_ui(
     reload: bool,
 ) -> UIChild:
     """Start one fixed-argv uvicorn child in its validated checkout."""
+    executable, child_environment = _ui_python(environment, reload=reload)
     arguments = (
-        sys.executable,
+        executable,
         "-m",
         "uvicorn",
         "api:app",
@@ -136,7 +169,7 @@ def start_ui(
     process = subprocess.Popen(  # noqa: S603  # nosec B603
         arguments,
         cwd=checkout_root,
-        env=dict(environment),
+        env=child_environment,
         stdout=sys.stderr,
     )
     return UIChild(process=process, port=port)
