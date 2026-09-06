@@ -85,7 +85,8 @@ def _run_process(
     if os.name == "nt":
         target = Path(argv[0])
         if target.is_file() and target.suffix.lower() not in {".exe", ".bat", ".cmd"}:
-            posix_path = target.resolve().as_posix()
+            # Preserve the invoked path so the bootstrap can reject symlinks.
+            posix_path = target.absolute().as_posix()
             if len(posix_path) > 1 and posix_path[1] == ":":
                 posix_path = f"/{posix_path[0].lower()}{posix_path[2:]}"
             argv = ["sh", posix_path, *argv[1:]]
