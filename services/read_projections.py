@@ -38,7 +38,7 @@ from services.contracts.specification_source import (
     SpecificationSourceDocument,
     source_bundle_fingerprint,
 )
-from services.contracts.story import STORY_POINTS_BY_EFFORT
+from services.contracts.story import STORY_POINTS_BY_EFFORT, CanonicalStoryOutput
 from services.packet_renderer import PacketRenderError, render_packet
 from services.phases.sprint_metrics import (
     build_durable_sprint_metrics,
@@ -103,7 +103,6 @@ if TYPE_CHECKING:
 
     from services.contracts.backlog import BacklogItem
     from services.contracts.roadmap import RoadmapBuilderOutput
-    from services.contracts.story import CanonicalStoryOutput
     from workflow.facts import (
         PlanningArtifactFact,
         ProductGoalArtifactDecisionFact,
@@ -114,6 +113,7 @@ if TYPE_CHECKING:
         SpecificationSourceFact,
         SpecVersionFact,
         SprintFact,
+        StoryFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
         VisionInterviewTurnFact,
@@ -122,6 +122,7 @@ if TYPE_CHECKING:
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _STRING_LIST = TypeAdapter(list[str])
+_JSON_VALUE_LIST = TypeAdapter(list[JsonValue])
 _SPECIFICATION_REVIEW_SCHEMA_VERSION = "agileforge.specification_review.v2"
 _VISION_COMPONENT_NAMES: tuple[str, ...] = (
     "project_name",
@@ -876,6 +877,23 @@ class _StoryReviewRecord:
     content: CanonicalStoryOutput
     invalid_fields: tuple[str, ...]
     decision: StoryArtifactDecision | None
+
+
+@dataclass(frozen=True)
+class _ResolvedStoryContent:
+    title: str | None
+    statement: str | None
+    criteria: list[JsonValue] | None
+    content_status: Literal["consistent", "missing", "inconsistent"]
+    content_error: str | None
+
+
+@dataclass(frozen=True)
+class _StoryReadinessContext:
+    """Lineage leaf identities and canonical outputs for Story readiness."""
+
+    accepted_leaf_artifact_ids: set[int]
+    canonical_outputs: dict[int, CanonicalStoryOutput | None]
 
 
 def _raise_planning_failure(
@@ -2357,6 +2375,246 @@ class DurableReadProjectionService:
             }
         )
 
+    @staticmethod
+    def _story_provenance_matches(
+        *,
+        item: StoryFact,
+        story_row: UserStory,
+        artifact: StoryArtifact | None,
+        decision: StoryArtifactDecision | None,
+        context: _StoryReadinessContext,
+    ) -> bool:
+        """Verify whether an active Story matches its accepted artifact provenance."""
+        return (
+            item.content_accepted
+            and not story_row.is_superseded
+            and not item.is_superseded
+            and story_row.source_story_artifact_id is not None
+            and story_row.source_story_artifact_id == item.source_story_artifact_id
+            and story_row.source_story_artifact_fingerprint is not None
+            and story_row.source_story_artifact_fingerprint
+            == item.source_story_artifact_fingerprint
+            and story_row.source_story_item_id is not None
+            and story_row.source_story_item_id == item.source_story_item_id
+            and story_row.source_story_item_fingerprint is not None
+            and story_row.source_story_item_fingerprint
+            == item.source_story_item_fingerprint
+            and artifact is not None
+            and artifact.story_artifact_id is not None
+            and artifact.story_artifact_id == item.source_story_artifact_id
+            and (
+                item.backlog_item_id is None
+                or artifact.backlog_item_id == item.backlog_item_id
+            )
+            and decision is not None
+            and decision.decision == "accepted"
+            and decision.story_artifact_id == artifact.story_artifact_id
+            and decision.artifact_fingerprint == artifact.content_fingerprint
+            and artifact.content_fingerprint
+            == item.source_story_artifact_fingerprint
+            and artifact.story_artifact_id in context.accepted_leaf_artifact_ids
+        )
+
+    @staticmethod
+    def _resolve_story_content(  # noqa: PLR0911
+        *,
+        item: StoryFact,
+        story_row: UserStory | None,
+        artifact: StoryArtifact | None,
+        decision: StoryArtifactDecision | None,
+        context: _StoryReadinessContext,
+    ) -> _ResolvedStoryContent:
+        """Resolve Story content against its exact accepted artifact item."""
+        if story_row is None:
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="missing",
+                content_error="Accepted Story content is missing from the database.",
+            )
+        if not DurableReadProjectionService._story_provenance_matches(
+            item=item,
+            story_row=story_row,
+            artifact=artifact,
+            decision=decision,
+            context=context,
+        ):
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error=(
+                    "Accepted Story content does not match"
+                    " accepted artifact provenance."
+                ),
+            )
+        if not story_row.title or not story_row.title.strip():
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error="Accepted Story title is blank or missing.",
+            )
+        if (
+            not story_row.story_description
+            or not story_row.story_description.strip()
+        ):
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error="Accepted Story statement is blank or missing.",
+            )
+        try:
+            parsed_criteria = _canonical_acceptance_criteria(
+                story_row.acceptance_criteria_json
+            )
+        except ValueError:
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error="Stored Story acceptance criteria are invalid.",
+            )
+
+        canonical_output = (
+            context.canonical_outputs.get(artifact.story_artifact_id)
+            if artifact is not None and artifact.story_artifact_id is not None
+            else None
+        )
+        matching_envelopes = (
+            [
+                env
+                for env in canonical_output.story_items
+                if env.item.story_item_id == item.source_story_item_id
+                and env.item_fingerprint == item.source_story_item_fingerprint
+            ]
+            if canonical_output is not None
+            else []
+        )
+        if len(matching_envelopes) != 1:
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error=(
+                    "Accepted Story content does not match"
+                    " accepted artifact provenance."
+                ),
+            )
+        canonical_item = matching_envelopes[0].item
+        if story_row.title != canonical_item.story_title:
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error=(
+                    "Accepted Story title does not match"
+                    " accepted artifact item."
+                ),
+            )
+        if story_row.story_description != canonical_item.statement:
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error=(
+                    "Accepted Story statement does not match"
+                    " accepted artifact item."
+                ),
+            )
+        if parsed_criteria != list(canonical_item.acceptance_criteria):
+            return _ResolvedStoryContent(
+                title=None,
+                statement=None,
+                criteria=None,
+                content_status="inconsistent",
+                content_error=(
+                    "Accepted Story acceptance criteria"
+                    " do not match accepted artifact item."
+                ),
+            )
+
+        criteria_values: list[JsonValue] = _JSON_VALUE_LIST.validate_python(
+            list(canonical_item.acceptance_criteria)
+        )
+        return _ResolvedStoryContent(
+            title=canonical_item.story_title,
+            statement=canonical_item.statement,
+            criteria=criteria_values,
+            content_status="consistent",
+            content_error=None,
+        )
+
+    @staticmethod
+    def _load_story_readiness_artifact_context(
+        session: Session,
+        *,
+        project_id: int,
+        artifacts_by_id: dict[int, StoryArtifact],
+    ) -> _StoryReadinessContext:
+        """Resolve accepted leaf IDs and load canonical outputs for artifacts."""
+        from services.agent_workbench.story_phase import (  # noqa: PLC0415
+            _story_lineage_nodes,
+        )
+        from services.planning_lineage import (  # noqa: PLC0415
+            PlanningLineageError,
+            validate_artifact_lineage,
+        )
+
+        try:
+            lineage_nodes = _story_lineage_nodes(session, project_id=project_id)
+            validate_artifact_lineage(lineage_nodes)
+        except (PlanningLineageError, ValueError):
+            lineage_nodes = ()
+
+        accepted_leaf_artifact_ids: set[int] = set()
+        nodes_by_chain: dict[tuple[int, int, str], list[ArtifactLineageNode]] = {}
+        for node in lineage_nodes:
+            nodes_by_chain.setdefault(
+                cast("tuple[int, int, str]", node.chain_key), []
+            ).append(node)
+
+        for chain_key, chain_nodes in nodes_by_chain.items():
+            try:
+                leaf = select_current_accepted_artifact(
+                    tuple(chain_nodes), chain_key=chain_key
+                )
+                accepted_leaf_artifact_ids.add(leaf.artifact_id)
+            except (PlanningLineageError, ValueError):
+                continue
+
+        canonical_outputs: dict[int, CanonicalStoryOutput | None] = {}
+        for artifact_id, artifact in artifacts_by_id.items():
+            try:
+                _parsed, parsed_output = load_stored_planning_artifact_content(
+                    artifact.canonical_content_json,
+                    expected_fingerprint=artifact.content_fingerprint,
+                    content_type=CanonicalStoryOutput,
+                )
+                item_ids = tuple(
+                    envelope.item.story_item_id
+                    for envelope in parsed_output.story_items
+                )
+                if artifact.story_item_ids_json != canonical_json(list(item_ids)):
+                    canonical_outputs[artifact_id] = None
+                else:
+                    canonical_outputs[artifact_id] = parsed_output
+            except (ValueError, TypeError, KeyError, ValidationError):
+                canonical_outputs[artifact_id] = None
+        return _StoryReadinessContext(
+            accepted_leaf_artifact_ids=accepted_leaf_artifact_ids,
+            canonical_outputs=canonical_outputs,
+        )
+
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         """Return durable dependency edges and reviewed sets."""
         snapshot_or_error = self._snapshot(project_id)
@@ -2379,22 +2637,88 @@ class DurableReadProjectionService:
         selected_scope_fingerprint = (
             None if not scope_fingerprints else next(iter(scope_fingerprints))
         )
+        with Session(self._engine) as session:
+            story_rows = {
+                row.story_id: row
+                for row in session.exec(
+                    select(UserStory).where(
+                        col(UserStory.project_id) == project_id,
+                    )
+                ).all()
+                if row.story_id is not None
+            }
+            artifacts_by_id = {
+                row.story_artifact_id: row
+                for row in session.exec(
+                    select(StoryArtifact).where(
+                        col(StoryArtifact.project_id) == project_id,
+                    )
+                ).all()
+                if row.story_artifact_id is not None
+            }
+            decisions_by_artifact_id = {
+                row.story_artifact_id: row
+                for row in session.exec(
+                    select(StoryArtifactDecision).where(
+                        col(StoryArtifactDecision.project_id) == project_id,
+                    )
+                ).all()
+                if row.story_artifact_id is not None
+            }
+            readiness_context = self._load_story_readiness_artifact_context(
+                session,
+                project_id=project_id,
+                artifacts_by_id=artifacts_by_id,
+            )
+
+        serialized_stories: list[JsonValue] = []
+        for item in active_stories:
+            payload = _validated(item.model_dump(mode="json"))
+            story_row = story_rows.get(item.story_id)
+            artifact = (
+                artifacts_by_id.get(item.source_story_artifact_id)
+                if story_row is not None
+                else None
+            )
+            decision = (
+                decisions_by_artifact_id.get(item.source_story_artifact_id)
+                if story_row is not None
+                else None
+            )
+            resolved = self._resolve_story_content(
+                item=item,
+                story_row=story_row,
+                artifact=artifact,
+                decision=decision,
+                context=readiness_context,
+            )
+            payload["title"] = resolved.title
+            payload["statement"] = resolved.statement
+            payload["description"] = resolved.statement
+            payload["acceptance_criteria"] = resolved.criteria
+            payload["content_status"] = resolved.content_status
+            payload["content_error"] = resolved.content_error
+            serialized_stories.append(payload)
+
+        edges: list[JsonValue] = [
+            _validated(dep.model_dump(mode="json"))
+            for dep in snapshot.story_dependencies
+        ]
+        reviews: list[JsonValue] = [
+            _validated(rev.model_dump(mode="json"))
+            for rev in snapshot.story_dependency_reviews
+        ]
+        selected_story_ids: list[JsonValue] = [
+            story.story_id for story in selected
+        ]
+
         return _success(
             {
                 "project_id": project_id,
-                "edges": [
-                    _validated(item.model_dump(mode="json"))
-                    for item in snapshot.story_dependencies
-                ],
-                "reviews": [
-                    _validated(item.model_dump(mode="json"))
-                    for item in snapshot.story_dependency_reviews
-                ],
-                "stories": [
-                    _validated(item.model_dump(mode="json"))
-                    for item in active_stories
-                ],
-                "selected_story_ids": [item.story_id for item in selected],
+                "edges": edges,
+                "reviews": reviews,
+                "stories": serialized_stories,
+                "selected_story_ids": selected_story_ids,
                 "selected_scope_fingerprint": selected_scope_fingerprint,
                 "structural_evidence_scope": structural_evidence_scope_payload(),
             }

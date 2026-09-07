@@ -2244,6 +2244,548 @@ test('story readiness keeps structural proof separate from three-state Sprint se
     assert.ok(!markup.includes('Validated'));
 });
 
+test('story readiness renders distinct sibling Story titles, statements, criteria, and labeled parent context', () => {
+    const context = loadFrontend();
+    const stories = [
+        {
+            story_id: 101,
+            source_story_item_id: 'US-001',
+            is_superseded: false,
+            backlog_item_id: 'PBI-000001',
+            title: 'Parse comma separated numbers',
+            statement: 'As a user, I want comma parsing.',
+            acceptance_criteria: ['Returns sum for 1,2', 'Returns 0 for empty string'],
+            content_status: 'consistent',
+            story_points: 3,
+            rank: '1',
+            structurally_eligible: true,
+            structural_eligibility_status: 'eligible',
+            sprint_selection_state: 'unselected',
+            sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            dependency_safe: false,
+            sprint_candidate: false,
+            content_accepted: true,
+            validation_status: 'validated',
+            validation_failures: [],
+            readiness_blockers: [],
+        },
+        {
+            story_id: 102,
+            source_story_item_id: 'US-002',
+            is_superseded: false,
+            backlog_item_id: 'PBI-000001',
+            title: 'Support custom delimiters',
+            statement: 'As a user, I want custom delimiters.',
+            acceptance_criteria: ['Handles //;\n1;2 delimiter syntax'],
+            content_status: 'consistent',
+            story_points: 5,
+            rank: '2',
+            structurally_eligible: true,
+            structural_eligibility_status: 'eligible',
+            sprint_selection_state: 'unselected',
+            sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            dependency_safe: false,
+            sprint_candidate: false,
+            content_accepted: true,
+            validation_status: 'validated',
+            validation_failures: [],
+            readiness_blockers: [],
+        },
+    ];
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Calculate operations for strings' },
+            ],
+        },
+        storyDependencies: dependencyProjection(stories, [], []),
+    };
+
+    const markup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(markup.includes('Parse comma separated numbers'));
+    assert.ok(markup.includes('As a user, I want comma parsing.'));
+    assert.ok(markup.includes('Support custom delimiters'));
+    assert.ok(markup.includes('As a user, I want custom delimiters.'));
+    assert.ok(markup.includes('Parent Backlog context:'));
+    assert.ok(markup.includes('Calculate operations for strings'));
+    assert.ok(markup.includes('Acceptance Criteria (2)'));
+    assert.ok(markup.includes('Returns sum for 1,2'));
+    assert.ok(markup.includes('Acceptance Criteria (1)'));
+    assert.ok(markup.includes('data-story-criteria-details="true"'));
+    assert.ok(markup.includes('data-story-title="true"'));
+    assert.ok(markup.includes('data-story-statement="true"'));
+});
+
+test('story readiness explicitly reports missing or inconsistent content without substituting parent requirement', () => {
+    const context = loadFrontend();
+    const missing = {
+        story_id: 105,
+        source_story_item_id: 'US-005',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: null,
+        statement: null,
+        acceptance_criteria: null,
+        content_status: 'missing',
+        content_error: 'Accepted Story content is missing from the database.',
+        story_points: 3,
+        rank: '5',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: false,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Parent requirement text' },
+            ],
+        },
+        storyDependencies: dependencyProjection([missing], [], []),
+    };
+
+    const markup = context.storyReadinessMarkup([missing], appState);
+    assert.ok(markup.includes('data-story-content-error="true"'));
+    assert.ok(markup.includes('Accepted Story content is missing from the database.'));
+    assert.ok(!markup.includes('data-story-title="true"'));
+    assert.ok(!markup.includes('data-story-statement="true"'));
+    assert.ok(markup.includes('Parent Backlog context:'));
+});
+
+test('story readiness never displays title, statement, or criteria when content is inconsistent', () => {
+    const context = loadFrontend();
+    const inconsistent = {
+        story_id: 106,
+        source_story_item_id: 'US-006',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Mismatched Leftover Title',
+        statement: 'Mismatched Leftover Statement.',
+        acceptance_criteria: ['Mismatched Leftover Criterion'],
+        content_status: 'inconsistent',
+        content_error: 'Accepted Story content does not match accepted artifact provenance.',
+        story_points: 3,
+        rank: '6',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: false,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Parent requirement text' },
+            ],
+        },
+        storyDependencies: dependencyProjection([inconsistent], [], []),
+    };
+
+    const markup = context.storyReadinessMarkup([inconsistent], appState);
+    assert.ok(markup.includes('data-story-content-error="true"'));
+    assert.ok(markup.includes('Accepted Story content does not match accepted artifact provenance.'));
+    assert.ok(!markup.includes('data-story-title="true"'));
+    assert.ok(!markup.includes('data-story-statement="true"'));
+    assert.ok(!markup.includes('data-story-criteria-details="true"'));
+    assert.ok(!markup.includes('Mismatched Leftover Title'));
+    assert.ok(!markup.includes('Mismatched Leftover Statement.'));
+    assert.ok(!markup.includes('Mismatched Leftover Criterion'));
+});
+
+test('story readiness preserves Story content binding regardless of row reordering', () => {
+    const context = loadFrontend();
+    const story1 = {
+        story_id: 101,
+        source_story_item_id: 'US-001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Story Alpha Title',
+        statement: 'Statement Alpha content.',
+        acceptance_criteria: ['Alpha criteria 1', 'Alpha criteria 2'],
+        content_status: 'consistent',
+        story_points: 3,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const story2 = {
+        story_id: 102,
+        source_story_item_id: 'US-002',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Story Beta Title',
+        statement: 'Statement Beta content.',
+        acceptance_criteria: ['Beta criteria 1'],
+        content_status: 'consistent',
+        story_points: 5,
+        rank: '2',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const appState = {
+        storyPending: {
+            items: [{ backlog_item_id: 'PBI-000001', requirement: 'Parent requirement' }],
+        },
+        storyDependencies: dependencyProjection([story1, story2], [], []),
+    };
+
+    // Render forward order
+    const forwardMarkup = context.storyReadinessMarkup([story1, story2], appState);
+    const alphaIndexFwd = forwardMarkup.indexOf('Story Alpha Title');
+    const betaIndexFwd = forwardMarkup.indexOf('Story Beta Title');
+    assert.ok(alphaIndexFwd < betaIndexFwd, 'Alpha appears before Beta in forward order');
+
+    // Render reversed order
+    const reversedMarkup = context.storyReadinessMarkup([story2, story1], appState);
+    const alphaIndexRev = reversedMarkup.indexOf('Story Alpha Title');
+    const betaIndexRev = reversedMarkup.indexOf('Story Beta Title');
+    assert.ok(betaIndexRev < alphaIndexRev, 'Beta appears before Alpha in reversed order');
+
+    // Verify row 101 always contains Alpha, row 102 always contains Beta
+    const row1Regex = /data-story-readiness-row="101"[\s\S]*?(?=data-story-readiness-row="102"|$)/;
+    const row2Regex = /data-story-readiness-row="102"[\s\S]*?(?=data-story-readiness-row="101"|$)/;
+
+    for (const markup of [forwardMarkup, reversedMarkup]) {
+        const row1Match = markup.match(row1Regex);
+        const row2Match = markup.match(row2Regex);
+        assert.ok(row1Match && row1Match[0].includes('Story Alpha Title'));
+        assert.ok(row1Match && row1Match[0].includes('Statement Alpha content.'));
+        assert.ok(row1Match && row1Match[0].includes('Alpha criteria 1'));
+        assert.ok(row1Match && !row1Match[0].includes('Story Beta Title'));
+
+        assert.ok(row2Match && row2Match[0].includes('Story Beta Title'));
+        assert.ok(row2Match && row2Match[0].includes('Statement Beta content.'));
+        assert.ok(row2Match && row2Match[0].includes('Beta criteria 1'));
+        assert.ok(row2Match && !row2Match[0].includes('Story Alpha Title'));
+    }
+});
+
+test('story readiness differentiates duplicate local Story item IDs under different PBIs', () => {
+    const context = loadFrontend();
+    const pbi1Story = {
+        story_id: 201,
+        source_story_item_id: 'US-0001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Authentication Story',
+        statement: 'As a user, I want authentication.',
+        acceptance_criteria: ['Auth criterion'],
+        content_status: 'consistent',
+        story_points: 3,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const pbi2Story = {
+        story_id: 202,
+        source_story_item_id: 'US-0001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000002',
+        title: 'Reporting Story',
+        statement: 'As an admin, I want reporting.',
+        acceptance_criteria: ['Reporting criterion'],
+        content_status: 'consistent',
+        story_points: 5,
+        rank: '2',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'User Authentication System' },
+                { backlog_item_id: 'PBI-000002', requirement: 'Admin Reporting Module' },
+            ],
+        },
+        storyDependencies: dependencyProjection([pbi1Story, pbi2Story], [], []),
+    };
+
+    const markup = context.storyReadinessMarkup([pbi1Story, pbi2Story], appState);
+    assert.ok(markup.includes('Authentication Story'));
+    assert.ok(markup.includes('User Authentication System'));
+    assert.ok(markup.includes('Reporting Story'));
+    assert.ok(markup.includes('Admin Reporting Module'));
+    assert.ok(markup.includes('(PBI-000001)'));
+    assert.ok(markup.includes('(PBI-000002)'));
+});
+
+test('story readiness falls back to lifecycleState when context lacks storyPending', () => {
+    const context = loadFrontend();
+    const story = {
+        story_id: 301,
+        source_story_item_id: 'US-001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Fallback Story Title',
+        statement: 'Fallback Statement.',
+        acceptance_criteria: ['Fallback criterion'],
+        content_status: 'consistent',
+        story_points: 2,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+
+    context.__testDeps = dependencyProjection([story], [], []);
+    vm.runInContext(`lifecycleState = {
+        storyPending: {
+            items: [{ backlog_item_id: 'PBI-000001', requirement: 'Requirement from lifecycleState' }],
+        },
+        storyDependencies: __testDeps,
+    };`, context);
+    delete context.__testDeps;
+
+    const markup = context.storyReadinessMarkup([story], {});
+    assert.ok(markup.includes('Fallback Story Title'));
+    assert.ok(markup.includes('Parent Backlog context:'));
+    assert.ok(markup.includes('Requirement from lifecycleState'));
+});
+
+test('story readiness keeps controls locked when current projection has null evidence scope even with valid lifecycleState', () => {
+    const context = loadFrontend();
+    const story = {
+        story_id: 302,
+        source_story_item_id: 'US-001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Freshness Story Title',
+        statement: 'Freshness Statement.',
+        acceptance_criteria: ['Freshness criterion'],
+        content_status: 'consistent',
+        story_points: 2,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+
+    // lifecycleState has older valid scope
+    context.__testDeps = dependencyProjection([story], [], []);
+    vm.runInContext(`lifecycleState = {
+        storyDependencies: __testDeps,
+    };`, context);
+    delete context.__testDeps;
+
+    // Current projection is supplied with structural_evidence_scope: null
+    const currentContext = {
+        storyDependencies: {
+            stories: [story],
+            edges: [],
+            structural_evidence_scope: null,
+        },
+    };
+
+    const markup = context.storyReadinessMarkup([story], currentContext);
+    // Scope must be unavailable and controls must remain locked
+    assert.ok(markup.includes('data-story-evidence-scope-unavailable="true"'), 'Unavailable evidence banner must be present');
+    assert.ok(markup.includes('data-story-selection-id="302" data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-story-selection-intent="select" disabled aria-disabled="true" aria-busy="true"'), 'Select button must be disabled and bound to durable ID and fingerprint');
+});
+
+test('story readiness keeps controls locked when current projection has missing or invalid evidence scope', () => {
+    const context = loadFrontend();
+    const story = {
+        story_id: 303,
+        source_story_item_id: 'US-001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Invalid Scope Story Title',
+        statement: 'Statement.',
+        acceptance_criteria: ['Criterion'],
+        content_status: 'consistent',
+        story_points: 2,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+
+    context.__testDeps = dependencyProjection([story], [], []);
+    vm.runInContext(`lifecycleState = {
+        storyDependencies: __testDeps,
+    };`, context);
+    delete context.__testDeps;
+
+    // Missing structural_evidence_scope property
+    const missingScopeMarkup = context.storyReadinessMarkup([story], {
+        storyDependencies: { stories: [story], edges: [] },
+    });
+    assert.ok(missingScopeMarkup.includes('data-story-evidence-scope-unavailable="true"'));
+    assert.ok(missingScopeMarkup.includes('data-story-selection-id="303" data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-story-selection-intent="select" disabled aria-disabled="true" aria-busy="true"'));
+
+    // Invalid structural_evidence_scope
+    const invalidScopeMarkup = context.storyReadinessMarkup([story], {
+        storyDependencies: {
+            stories: [story],
+            edges: [],
+            structural_evidence_scope: { proves: ['bogus'], does_not_prove: [] },
+        },
+    });
+    assert.ok(invalidScopeMarkup.includes('data-story-evidence-scope-unavailable="true"'));
+    assert.ok(invalidScopeMarkup.includes('data-story-selection-id="303" data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-story-selection-intent="select" disabled aria-disabled="true" aria-busy="true"'));
+});
+
+test('story readiness unlocks controls when context is omitted and lifecycleState has valid evidence scope', () => {
+    const context = loadFrontend();
+    const story = {
+        story_id: 304,
+        source_story_item_id: 'US-001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: 'Omitted Context Story Title',
+        statement: 'Statement.',
+        acceptance_criteria: ['Criterion'],
+        content_status: 'consistent',
+        story_points: 2,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+
+    context.__testDeps = dependencyProjection([story], [], []);
+    vm.runInContext(`lifecycleState = {
+        storyDependencies: __testDeps,
+    };`, context);
+    delete context.__testDeps;
+
+    // Call with omitted context / empty object
+    const markup = context.storyReadinessMarkup([story]);
+    assert.ok(markup.includes('data-story-evidence-scope="true"'));
+    assert.ok(!markup.includes('data-story-evidence-scope-unavailable="true"'));
+    assert.ok(markup.includes('data-story-selection-id="304" data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-story-selection-intent="select" aria-label='));
+    assert.ok(!markup.includes('data-story-selection-id="304" data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-story-selection-intent="select" disabled'));
+});
+
+test('story readiness safely escapes HTML and special characters in content', () => {
+    const context = loadFrontend();
+    const dangerous = {
+        story_id: 401,
+        source_story_item_id: 'US-001<xss>',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: '<script>alert("title")</script> & "special"',
+        statement: "As a <user>, I want 'safe' tags & <b>bold</b>.",
+        acceptance_criteria: ['<img src=x onerror=alert(1)> & "criterion"'],
+        content_status: 'consistent',
+        story_points: 3,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Parent <requirement> & "context"' },
+            ],
+        },
+        storyDependencies: dependencyProjection([dangerous], [], []),
+    };
+
+    const markup = context.storyReadinessMarkup([dangerous], appState);
+    assert.ok(!markup.includes('<script>'));
+    assert.ok(!markup.includes('<img src=x'));
+    assert.ok(!markup.includes('<b>bold</b>'));
+    assert.ok(!markup.includes('<xss>'));
+
+    assert.ok(markup.includes('&lt;script&gt;alert(&quot;title&quot;)&lt;/script&gt;'));
+    assert.ok(markup.includes('&lt;img src=x onerror=alert(1)&gt;'));
+    assert.ok(markup.includes('&lt;b&gt;bold&lt;/b&gt;'));
+    assert.ok(markup.includes('Parent &lt;requirement&gt; &amp; &quot;context&quot;'));
+});
+
 test('story readiness renders selected and deferred intent separately and preserves selected intent through stale evidence', () => {
     const context = loadFrontend();
     const stories = [
