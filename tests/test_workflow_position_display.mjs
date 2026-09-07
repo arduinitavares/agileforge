@@ -2318,6 +2318,70 @@ test('story readiness renders distinct sibling Story titles, statements, criteri
     assert.ok(markup.includes('data-story-statement="true"'));
 });
 
+test('story readiness preserves accepted whitespace and still rejects blank content', async (t) => {
+    const acceptedTitle = '  Exact accepted title\t ';
+    const acceptedStatement = '\nAs a user, I want exact text, so that review is faithful.\n';
+    const acceptedCriterion = ' \tGiven exact input\n  Then preserve its meaning.\n ';
+    const baseStory = {
+        story_id: 101,
+        source_story_item_id: 'US-0001',
+        is_superseded: false,
+        backlog_item_id: 'PBI-000001',
+        title: acceptedTitle,
+        statement: acceptedStatement,
+        description: 'Do not substitute this description.',
+        acceptance_criteria: [acceptedCriterion],
+        content_status: 'consistent',
+        story_points: 3,
+        rank: '1',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: `sha256:${'a'.repeat(64)}`,
+        selected_scope_fingerprint: `sha256:${'b'.repeat(64)}`,
+        dependency_safe: false,
+        sprint_candidate: false,
+        content_accepted: true,
+        validation_status: 'validated',
+        validation_failures: [],
+        readiness_blockers: [],
+    };
+    for (const [name, overrides] of [
+        ['canonical statement', {}],
+        ['missing statement with description fallback', { statement: null, description: acceptedStatement }],
+        ['blank statement with description fallback', { statement: ' \t\n', description: acceptedStatement }],
+    ]) {
+        await t.test(name, () => {
+            const context = loadFrontend();
+            const stories = [{ ...baseStory, ...overrides }];
+            const markup = context.storyReadinessMarkup(stories, {
+                storyDependencies: dependencyProjection(stories, [], []),
+            });
+            assert.equal(markup.match(/data-story-title="true">([\s\S]*?)<\/h4>/)?.[1], acceptedTitle);
+            assert.equal(markup.match(/data-story-statement="true">([\s\S]*?)<\/p>/)?.[1], acceptedStatement);
+            assert.ok(markup.includes(`>${acceptedCriterion}</li>`));
+            assert.ok(!markup.includes('data-story-content-error="true"'));
+        });
+    }
+    for (const [name, overrides] of [
+        ['blank title', { title: ' \t\n' }],
+        ['blank statement and description', { statement: ' \t\n', description: ' \t\n' }],
+        ['missing statement and blank description', { statement: null, description: ' \t\n' }],
+    ]) {
+        await t.test(name, () => {
+            const context = loadFrontend();
+            const stories = [{ ...baseStory, ...overrides }];
+            const markup = context.storyReadinessMarkup(stories, {
+                storyDependencies: dependencyProjection(stories, [], []),
+            });
+            assert.ok(markup.includes('data-story-content-error="true"'));
+            assert.ok(!markup.includes('data-story-title="true"'));
+            assert.ok(!markup.includes('data-story-statement="true"'));
+            assert.ok(!markup.includes('data-story-criteria-details="true"'));
+        });
+    }
+});
+
 test('story readiness explicitly reports missing or inconsistent content without substituting parent requirement', () => {
     const context = loadFrontend();
     const missing = {

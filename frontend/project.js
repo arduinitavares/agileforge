@@ -2769,10 +2769,10 @@ function storyReadinessMarkup(stories, context = {}) {
             ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}"${controlsLocked ? ' disabled aria-disabled="true" aria-busy="true"' : ''} aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
             : '';
 
-        const storyTitle = typeof story?.title === 'string' && story.title.trim() ? story.title.trim() : '';
+        const storyTitle = typeof story?.title === 'string' && story.title.trim() ? story.title : '';
         const storyStatement = typeof story?.statement === 'string' && story.statement.trim()
-            ? story.statement.trim()
-            : (typeof story?.description === 'string' && story.description.trim() ? story.description.trim() : '');
+            ? story.statement
+            : (typeof story?.description === 'string' && story.description.trim() ? story.description : '');
         const criteria = Array.isArray(story?.acceptance_criteria)
             ? story.acceptance_criteria.filter((c) => typeof c === 'string' && c.trim())
             : [];
@@ -2799,16 +2799,16 @@ function storyReadinessMarkup(stories, context = {}) {
         const displayStatement = isContentConsistent ? storyStatement : '';
         const displayCriteria = isContentConsistent ? criteria : [];
         const titleMarkup = displayTitle
-            ? `<h4 class="text-sm font-semibold text-slate-900" data-story-title="true">${escapeWorkflowText(displayTitle)}</h4>`
+            ? `<h4 class="whitespace-pre-wrap break-anywhere text-sm font-semibold text-slate-900" data-story-title="true">${escapeWorkflowText(displayTitle)}</h4>`
             : '';
         const statementMarkup = displayStatement
-            ? `<p class="text-xs text-slate-700 leading-relaxed" data-story-statement="true">${escapeWorkflowText(displayStatement)}</p>`
+            ? `<p class="whitespace-pre-wrap break-anywhere text-xs text-slate-700 leading-relaxed" data-story-statement="true">${escapeWorkflowText(displayStatement)}</p>`
             : '';
         const criteriaMarkup = displayCriteria.length > 0
             ? `<details class="mt-1 text-xs text-slate-700" data-story-criteria-details="true">
                 <summary class="cursor-pointer font-medium text-slate-800 hover:text-slate-950">Acceptance Criteria (${displayCriteria.length})</summary>
                 <ul role="list" class="mt-1 max-h-60 overflow-y-auto list-disc pl-5 space-y-0.5">
-                    ${displayCriteria.map((criterion) => `<li>${escapeWorkflowText(criterion)}</li>`).join('')}
+                    ${displayCriteria.map((criterion) => `<li class="whitespace-pre-wrap break-anywhere">${escapeWorkflowText(criterion)}</li>`).join('')}
                 </ul>
             </details>`
             : '';

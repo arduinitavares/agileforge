@@ -5261,10 +5261,17 @@ def test_issue_213_correction_reconciles_stale_and_successful_outcomes(
     context.close()
 
 
+@pytest.mark.parametrize("viewport_width", [1280, 390])
 def test_story_readiness_renders_distinct_sibling_story_content(
     dashboard_harness: DashboardHarness,
+    viewport_width: int,
 ) -> None:
-    """Render distinct title, statement, criteria, and parent context."""
+    """Preserve distinct accepted text and whitespace at desktop and mobile widths."""
+    accepted_title: str = "  Parse comma separated numbers\t "
+    accepted_statement: str = (
+        "\nAs a user, I want comma parsing so that totals compute.\n"
+    )
+    accepted_criterion: str = "  Returns sum for 1,2\n  " + "X" * 160 + "\t "
     fake = _delivery_ready_fake([])
     fake.backlog_candidate = {
         "backlog_items": [
@@ -5278,11 +5285,11 @@ def test_story_readiness_renders_distinct_sibling_story_content(
         "story_id": 101,
         "source_story_item_id": "US-001",
         "backlog_item_id": "PBI-000001",
-        "title": "Parse comma separated numbers",
-        "statement": "As a user, I want comma parsing so that totals compute.",
-        "description": "As a user, I want comma parsing so that totals compute.",
+        "title": accepted_title,
+        "statement": accepted_statement,
+        "description": accepted_statement,
         "acceptance_criteria": [
-            "Returns sum for 1,2",
+            accepted_criterion,
             "Returns 0 for empty string",
         ],
         "content_status": "consistent",
@@ -5334,6 +5341,7 @@ def test_story_readiness_renders_distinct_sibling_story_content(
     fake.stories = [story_1, story_2]
 
     context, page = _open_project_page(dashboard_harness, fake)
+    page.set_viewport_size({"width": viewport_width, "height": 900})
 
     readiness = page.locator('[data-story-readiness-section="true"]')
     expect(readiness).to_be_visible()
@@ -5389,6 +5397,16 @@ def test_story_readiness_renders_distinct_sibling_story_content(
     # Expand acceptance criteria accordion and capture visual evidence
     row_1.locator('[data-story-criteria-details="true"] summary').click()
     expect(row_1.locator('[data-story-criteria-details="true"] ul')).to_be_visible()
+    for locator, accepted_text in (
+        (row_1.locator('[data-story-title="true"]'), accepted_title),
+        (row_1.locator('[data-story-statement="true"]'), accepted_statement),
+        (details_1.locator("li").first, accepted_criterion),
+    ):
+        expect(locator).to_have_css("white-space", "pre-wrap")
+        assert locator.text_content() == accepted_text
+        assert locator.evaluate(
+            "element => element.scrollWidth <= element.clientWidth + 1"
+        )
     screenshot_path = Path(tempfile.gettempdir()) / "story_readiness_panel.png"
     readiness.screenshot(path=str(screenshot_path))
 
