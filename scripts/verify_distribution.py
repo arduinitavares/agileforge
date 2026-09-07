@@ -654,10 +654,14 @@ def _verify_schema(database: Path) -> None:
     if not database.is_file():
         message = f"installed API did not bootstrap the business database: {database}"
         raise DistributionVerificationError(message)
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+    finally:
+        connection.close()
     tables = {str(row[0]) for row in rows}
     missing = EXPECTED_BUSINESS_TABLES.difference(tables)
     forbidden = FORBIDDEN_BUSINESS_TABLES.intersection(tables)

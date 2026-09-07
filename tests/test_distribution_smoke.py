@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import gc
 import io
 import os
 import re
 import shutil
+import sqlite3
 import subprocess  # nosec B404
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 
@@ -33,6 +35,144 @@ from services.agent_workbench.version import agileforge_version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+
+class _TrackingConnection(sqlite3.Connection):
+    """Record whether the verifier closes each SQLite connection it opens."""
+
+    instances: ClassVar[list[_TrackingConnection]] = []
+    closed: bool
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+
+def _tracked_sqlite_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    deny_table_query: bool = False,
+) -> list[_TrackingConnection]:
+    """Make verifier connections observable while retaining real SQLite behavior."""
+    original_connect = sqlite3.connect
+    _TrackingConnection.instances = []
+
+    def tracked_connect(database: str | Path) -> _TrackingConnection:
+        connection = original_connect(database, factory=_TrackingConnection)
+        connection.closed = False
+        if deny_table_query:
+            connection.set_authorizer(_deny_sqlite_master_reads)
+        _TrackingConnection.instances.append(connection)
+        return connection
+
+    monkeypatch.setattr(distribution_verifier.sqlite3, "connect", tracked_connect)
+    return _TrackingConnection.instances
+
+
+def _deny_sqlite_master_reads(
+    action: int,
+    argument_one: str | None,
+    argument_two: str | None,
+    database: str | None,
+    trigger: str | None,
+) -> int:
+    """Reject the metadata read that schema verification requires."""
+    del argument_two, database, trigger
+    if action == sqlite3.SQLITE_READ and argument_one == "sqlite_master":
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _create_business_schema(database: Path, tables: frozenset[str]) -> None:
+    """Create the supplied business-table names in a disposable SQLite database."""
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            for table in tables:
+                connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+    finally:
+        connection.close()
+
+
+def _assert_closed_connection(
+    connection: _TrackingConnection,
+    database: Path,
+) -> None:
+    """Prove the tracked connection is closed and releases its Windows handle."""
+    assert connection.closed is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    if os.name == "nt":
+        database.unlink()
+
+
+@pytest.mark.parametrize(
+    ("tables", "expected_error"),
+    [
+        (distribution_verifier.EXPECTED_BUSINESS_TABLES, None),
+        (
+            distribution_verifier.EXPECTED_BUSINESS_TABLES - {"projects"},
+            r"missing=\['projects'\]",
+        ),
+        (
+            distribution_verifier.EXPECTED_BUSINESS_TABLES | {"products"},
+            r"forbidden=\['products'\]",
+        ),
+    ],
+)
+def test_schema_verification_closes_connections_after_valid_and_invalid_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tables: frozenset[str],
+    expected_error: str | None,
+) -> None:
+    """Close the verifier connection after every schema-validation outcome."""
+    database = tmp_path / "business.sqlite3"
+    _create_business_schema(database, tables)
+    connections = _tracked_sqlite_connections(monkeypatch)
+
+    garbage_collection_enabled = gc.isenabled()
+    if os.name == "nt":
+        gc.disable()
+    try:
+        if expected_error is None:
+            distribution_verifier._verify_schema(database)
+        else:
+            with pytest.raises(DistributionVerificationError, match=expected_error):
+                distribution_verifier._verify_schema(database)
+
+        assert len(connections) == 1
+        _assert_closed_connection(connections[0], database)
+    finally:
+        if os.name == "nt":
+            gc.collect()
+            if garbage_collection_enabled:
+                gc.enable()
+
+
+def test_schema_verification_closes_connection_when_table_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Close the verifier connection when its SQLite metadata query raises."""
+    database = tmp_path / "business.sqlite3"
+    _create_business_schema(database, distribution_verifier.EXPECTED_BUSINESS_TABLES)
+    connections = _tracked_sqlite_connections(monkeypatch, deny_table_query=True)
+
+    garbage_collection_enabled = gc.isenabled()
+    if os.name == "nt":
+        gc.disable()
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match=r"sqlite_master.*prohibited"):
+            distribution_verifier._verify_schema(database)
+
+        assert len(connections) == 1
+        _assert_closed_connection(connections[0], database)
+    finally:
+        if os.name == "nt":
+            gc.collect()
+            if garbage_collection_enabled:
+                gc.enable()
 
 
 def _checkout_file_state(checkout: Path) -> dict[str, tuple[int, bytes]]:
