@@ -110,6 +110,9 @@ jobs:
           uv run --locked pytest tests/windows/test_dev_ui_runtime_windows.py
           tests/dev_runtime/test_dev_server.py
           tests/dev_runtime/test_dev_main.py
+          tests/dev_runtime/test_cli_forwarding.py
+          tests/dev_runtime/test_dev_secrets_file.py
+          tests/windows/test_dev_secrets_windows.py
           tests/dev_runtime/test_profiles.py -q
           --junitxml=windows-ui-runtime.xml
       - name: Require the real regression to execute
@@ -121,4 +124,10 @@ jobs:
           })
           if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')) {
             throw 'The real Windows ownership regression did not execute exactly once.'
+          }
+          $secretsCases = @($results.SelectNodes('//testcase') | Where-Object {
+            $_.name -eq 'test_windows_secrets_regular_file_uses_native_handle'
+          })
+          if ($secretsCases.Count -ne 1 -or $secretsCases[0].SelectSingleNode('skipped')) {
+            throw 'The real Windows secrets-file regression did not execute exactly once.'
           }

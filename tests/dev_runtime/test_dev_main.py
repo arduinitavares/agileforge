@@ -660,9 +660,7 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         temp_directory = str(paths.root.resolve())
         expected_environment["TEMP"] = temp_directory
         expected_environment["TMP"] = temp_directory
-    expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
-        module._resolve_git_executable()
-    )
+    expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = module._resolve_git_executable()
     assert schema_environment is not None
     assert schema_environment == expected_environment
     for secret_value in parent_values.values():
@@ -890,6 +888,7 @@ def test_info_secrets_file_reports_presence_without_credential_value(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Reuse descriptor-safe secret precedence and emit only a presence boolean."""
     module = _module()
@@ -926,18 +925,15 @@ def test_info_secrets_file_reports_presence_without_credential_value(
     )
 
     captured = capsys.readouterr()
-    if not hasattr(os, "O_NOFOLLOW"):
-        assert exit_code == 1
-        assert "secrets file must be a regular file" in captured.out
-        assert credential not in captured.out
-        assert credential not in captured.err
-        return
-
     payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["provider_credentials"] == {"OPEN_ROUTER_API_KEY": True}
     assert credential not in captured.out
     assert credential not in captured.err
+    assert credential not in caplog.text
+    for artifact in (checkout / ".agileforge").rglob("*"):
+        if artifact.is_file():
+            assert credential.encode() not in artifact.read_bytes()
     assert payload["child_runtime_environment"]["MODEL_CONFIG_PATH"] == str(
         checkout / "config" / "models.yaml"
     )
@@ -1252,11 +1248,7 @@ def test_real_launcher_child_environment_configures_windows_temp_for_sqlite_spil
         assert payload["can_create_temp_file"] is True
         assert "TEMP" in child_environment
         assert "TMP" in child_environment
-        assert (
-            child_environment["TEMP"]
-            == child_environment["TMP"]
-            == expected_root
-        )
+        assert child_environment["TEMP"] == child_environment["TMP"] == expected_root
         assert payload["temp"] == payload["tmp"] == expected_root
         assert Path(expected_root).is_absolute()
         assert Path(expected_root).is_dir()
