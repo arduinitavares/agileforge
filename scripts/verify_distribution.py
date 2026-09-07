@@ -98,6 +98,7 @@ class IsolationLayout:
     tool_dir: Path
     bin_dir: Path
     home: Path
+    temp_dir: Path
     state_root: Path
     cwd: Path
     business_database: Path
@@ -111,6 +112,7 @@ class IsolationLayout:
             tool_dir=root / "tools",
             bin_dir=root / "bin",
             home=root / "home",
+            temp_dir=root / "temp",
             state_root=root / "state",
             cwd=root / "cwd",
             business_database=root / "state" / "business.sqlite3",
@@ -121,6 +123,7 @@ class IsolationLayout:
             layout.tool_dir,
             layout.bin_dir,
             layout.home,
+            layout.temp_dir,
             layout.state_root,
             layout.cwd,
         ):
@@ -243,6 +246,13 @@ def isolated_environment(
         for name in _PASSTHROUGH_ENVIRONMENT
         if parent_environment.get(name)
     }
+    if sys.platform == "win32":
+        for name, value in parent_environment.items():
+            if name.casefold() == "systemroot" and value:
+                environment["SystemRoot"] = value
+                break
+        environment["TEMP"] = str(layout.temp_dir)
+        environment["TMP"] = str(layout.temp_dir)
     parent_home = parent_environment.get("HOME")
     cache_root = (
         Path(parent_home).expanduser() / ".cache" / "uv"

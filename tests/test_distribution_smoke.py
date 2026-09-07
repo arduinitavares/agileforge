@@ -221,6 +221,66 @@ def test_isolated_environment_excludes_credentials_from_child_output(
     assert layout.cwd != layout.tool_dir
 
 
+@pytest.mark.parametrize(
+    ("parent_system_root_name", "parent_system_root_value", "expected_system_root"),
+    [
+        ("SystemRoot", "C:/Windows", "C:/Windows"),
+        ("SYSTEMROOT", "D:/Windows", "D:/Windows"),
+        ("SystemRoot", "", None),
+        ("SYSTEMROOT", "", None),
+    ],
+)
+def test_isolated_environment_preserves_windows_system_root_only_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parent_system_root_name: str,
+    parent_system_root_value: str,
+    expected_system_root: str | None,
+) -> None:
+    """Keep the Windows runtime root required by isolated child processes."""
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    parent_environment = {
+        "PATH": "C:/Windows/System32",
+        parent_system_root_name: parent_system_root_value,
+        "TEMP": "C:/parent-temp",
+        "TMP": "C:/parent-tmp",
+    }
+    layout = IsolationLayout.create(tmp_path / "wheel")
+
+    environment = isolated_environment(
+        layout,
+        parent_environment=parent_environment,
+    )
+
+    if expected_system_root is None:
+        assert "SystemRoot" not in environment
+    else:
+        assert environment["SystemRoot"] == expected_system_root
+    assert environment["TEMP"] == str(layout.temp_dir)
+    assert environment["TMP"] == str(layout.temp_dir)
+    assert layout.temp_dir.is_dir()
+
+
+def test_isolated_environment_keeps_non_windows_system_root_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Leave the non-Windows child environment policy unchanged."""
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "linux")
+
+    environment = isolated_environment(
+        IsolationLayout.create(tmp_path / "wheel"),
+        parent_environment={
+            "PATH": "/usr/bin",
+            "SystemRoot": "C:/Windows",
+        },
+    )
+
+    assert "SystemRoot" not in environment
+    assert "TEMP" not in environment
+    assert "TMP" not in environment
+
+
 def _set_dashboard_databases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(
         "AGILEFORGE_DB_URL",
