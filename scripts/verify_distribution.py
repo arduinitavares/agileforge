@@ -45,6 +45,7 @@ _PASSTHROUGH_ENVIRONMENT = (
 )
 _API_READY_TIMEOUT_SECONDS = 30.0
 _API_STOP_TIMEOUT_SECONDS = 5.0
+_INSTALLED_PYTHON_INSPECTION_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 0.05
 _HTTP_TIMEOUT_SECONDS = 1.0
 _PACKAGE_NAME = "agileforge"
@@ -83,6 +84,17 @@ assert create_args.group == "project"
 assert create_args.project_action == "create"
 assert create_args.name == "Distribution Probe"
 assert create_args.command_handler.__name__ == "_create_project"
+"""
+_INSTALLED_PYTHON_RUNTIME_PROBE = """
+import json
+import sys
+
+print(json.dumps({
+    "executable": sys.executable,
+    "base_executable": getattr(sys, "_base_executable", None),
+    "prefix": sys.prefix,
+    "base_prefix": sys.base_prefix,
+}))
 """
 
 
@@ -283,6 +295,7 @@ def _run_checked(
     *,
     cwd: Path,
     environment: Mapping[str, str],
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(  # noqa: S603  # nosec B603
         tuple(command),
@@ -291,6 +304,7 @@ def _run_checked(
         check=False,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
     if completed.returncode != 0:
         rendered = " ".join(command)
@@ -400,6 +414,124 @@ def _installed_python(layout: IsolationLayout) -> Path:
         message = f"installed tool interpreter was not found: {interpreter}"
         raise DistributionVerificationError(message)
     return interpreter
+
+
+def _inspect_installed_python(
+    interpreter: Path,
+    *,
+    layout: IsolationLayout,
+    environment: Mapping[str, str],
+) -> dict[str, object]:
+    """Read interpreter identity from the installed venv itself."""
+    inspection_environment = {
+        name: value
+        for name, value in environment.items()
+        if name.casefold() != "__pyvenv_launcher__"
+    }
+    try:
+        completed = _run_checked(
+            (str(interpreter), "-I", "-c", _INSTALLED_PYTHON_RUNTIME_PROBE),
+            cwd=layout.cwd,
+            environment=inspection_environment,
+            timeout=_INSTALLED_PYTHON_INSPECTION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired, DistributionVerificationError) as error:
+        message = f"installed Python runtime inspection failed: {error}"
+        raise DistributionVerificationError(message) from error
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        message = "installed Python runtime inspection returned invalid JSON"
+        raise DistributionVerificationError(message) from error
+    if not isinstance(payload, dict):
+        message = "installed Python runtime inspection returned a non-object payload"
+        raise DistributionVerificationError(message)
+    return cast("dict[str, object]", payload)
+
+
+def _absolute_runtime_path(
+    runtime: Mapping[str, object],
+    field: str,
+    *,
+    description: str,
+    require_file: bool,
+) -> Path:
+    """Return one absolute existing path reported by the installed interpreter."""
+    value = runtime.get(field)
+    if not isinstance(value, str) or not value:
+        message = f"installed runtime requires a valid {description}"
+        raise DistributionVerificationError(message)
+    path = Path(value)
+    exists_as_expected = path.is_file() if require_file else path.is_dir()
+    if not path.is_absolute() or not exists_as_expected:
+        message = f"installed runtime requires an absolute existing {description}"
+        raise DistributionVerificationError(message)
+    return path.resolve(strict=True)
+
+
+def _installed_api_python(
+    layout: IsolationLayout,
+    *,
+    environment: Mapping[str, str],
+) -> tuple[Path, dict[str, str]]:
+    """Own the installed serving interpreter directly on native Windows."""
+    interpreter = _installed_python(layout)
+    child_environment = dict(environment)
+    if sys.platform != "win32":
+        return interpreter, child_environment
+
+    runtime = _inspect_installed_python(
+        interpreter,
+        layout=layout,
+        environment=child_environment,
+    )
+    reported_executable = _absolute_runtime_path(
+        runtime,
+        "executable",
+        description="installed Python executable",
+        require_file=True,
+    )
+    expected_interpreter = interpreter.resolve(strict=True)
+    if reported_executable != expected_interpreter:
+        message = (
+            "installed Python executable mismatch: "
+            f"expected {expected_interpreter}, got {reported_executable}"
+        )
+        raise DistributionVerificationError(message)
+    reported_prefix = _absolute_runtime_path(
+        runtime,
+        "prefix",
+        description="installed Python prefix",
+        require_file=False,
+    )
+    expected_prefix = (layout.tool_dir / _PACKAGE_NAME).resolve(strict=True)
+    if reported_prefix != expected_prefix:
+        message = (
+            "installed Python prefix mismatch: "
+            f"expected {expected_prefix}, got {reported_prefix}"
+        )
+        raise DistributionVerificationError(message)
+    base_executable = _absolute_runtime_path(
+        runtime,
+        "base_executable",
+        description="base Python executable",
+        require_file=True,
+    )
+    _absolute_runtime_path(
+        runtime,
+        "base_prefix",
+        description="base Python prefix",
+        require_file=False,
+    )
+    child_environment = {
+        name: value
+        for name, value in child_environment.items()
+        if name.casefold() != "__pyvenv_launcher__"
+    }
+    if base_executable == expected_interpreter:
+        return expected_interpreter, child_environment
+    child_environment["__PYVENV_LAUNCHER__"] = str(expected_interpreter)
+    return base_executable, child_environment
 
 
 def _installed_cli(layout: IsolationLayout) -> Path:
@@ -543,8 +675,12 @@ def _verify_installed_api(
     environment: Mapping[str, str],
 ) -> None:
     port = _select_loopback_port()
+    interpreter, child_environment = _installed_api_python(
+        layout,
+        environment=environment,
+    )
     command = (
-        str(_installed_python(layout)),
+        str(interpreter),
         "-I",
         "-m",
         "uvicorn",
@@ -560,7 +696,7 @@ def _verify_installed_api(
         process = subprocess.Popen(  # noqa: S603  # nosec B603
             command,
             cwd=layout.cwd,
-            env=dict(environment),
+            env=child_environment,
             stdout=child_log,
             stderr=subprocess.STDOUT,
             text=True,

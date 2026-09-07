@@ -108,6 +108,7 @@ jobs:
       - name: Verify real Windows venv and run ownership regressions
         run: >-
           uv run --locked pytest tests/windows/test_dev_ui_runtime_windows.py
+          tests/windows/test_distribution_runtime_windows.py
           tests/dev_runtime/test_dev_server.py
           tests/dev_runtime/test_dev_main.py
           tests/dev_runtime/test_profiles.py -q
@@ -116,9 +117,15 @@ jobs:
         shell: pwsh
         run: |
           [xml]$results = Get-Content -LiteralPath windows-ui-runtime.xml -Raw
-          $cases = @($results.SelectNodes('//testcase') | Where-Object {
-            $_.name -eq 'test_real_windows_ui_owns_the_serving_interpreter'
-          })
-          if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')) {
-            throw 'The real Windows ownership regression did not execute exactly once.'
+          $requiredCases = @(
+            'test_real_windows_ui_owns_the_serving_interpreter'
+            'test_real_windows_distribution_owns_the_installed_serving_interpreter'
+          )
+          foreach ($name in $requiredCases) {
+            $cases = @($results.SelectNodes('//testcase') | Where-Object {
+              $_.name -eq $name
+            })
+            if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')) {
+              throw "The real Windows ownership regression $name did not execute exactly once."
+            }
           }

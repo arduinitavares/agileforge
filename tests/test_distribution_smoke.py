@@ -373,6 +373,180 @@ def test_installed_dashboard_config_validation_binds_child_and_databases(
             typed_verify(invalid, expected_process_id=1234, layout=layout)
 
 
+def _installed_python_fixture(layout: IsolationLayout) -> Path:
+    executable = "python.exe" if os.name == "nt" else "python"
+    scripts_directory = "Scripts" if os.name == "nt" else "bin"
+    interpreter = layout.tool_dir / "agileforge" / scripts_directory / executable
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    return interpreter
+
+
+def test_installed_api_python_keeps_non_windows_launch_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep the portable installed-API command on its existing interpreter."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "linux")
+
+    def unexpected_inspection(*_args: object, **_kwargs: object) -> object:
+        message = "non-Windows launch must not inspect a base interpreter"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        unexpected_inspection,
+        raising=False,
+    )
+    environment = {"AGILEFORGE_DB_URL": "fixture"}
+
+    selected, copied = distribution_verifier._installed_api_python(
+        layout,
+        environment=environment,
+    )
+
+    assert selected == interpreter
+    assert copied == environment
+    assert copied is not environment
+
+
+def test_installed_api_python_uses_verified_installed_venv_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Select the base reported by the installed venv and retain its identity."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    base_executable = tmp_path / "base-python.exe"
+    base_executable.touch()
+    base_prefix = tmp_path / "base-prefix"
+    base_prefix.mkdir()
+    runtime: dict[str, object] = {
+        "executable": str(interpreter),
+        "base_executable": str(base_executable),
+        "prefix": str(interpreter.parents[1]),
+        "base_prefix": str(base_prefix),
+    }
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        lambda *_args, **_kwargs: runtime,
+        raising=False,
+    )
+    environment = {
+        "AGILEFORGE_DB_URL": "fixture",
+        "__PYVENV_LAUNCHER__": "ambient-must-not-leak",
+    }
+    before = dict(environment)
+
+    selected, copied = distribution_verifier._installed_api_python(
+        layout,
+        environment=environment,
+    )
+
+    assert selected == base_executable
+    assert copied == {
+        "AGILEFORGE_DB_URL": "fixture",
+        "__PYVENV_LAUNCHER__": str(interpreter),
+    }
+    assert environment == before
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value", "expected_message"),
+    [
+        ("executable", "other-python.exe", "installed Python executable"),
+        ("base_executable", None, "base Python executable"),
+        ("base_executable", "relative.exe", "base Python executable"),
+        ("base_executable", "missing", "base Python executable"),
+        ("base_executable", "directory", "base Python executable"),
+        ("prefix", "wrong-prefix", "installed Python prefix"),
+        ("base_prefix", "relative-base-prefix", "base Python prefix"),
+    ],
+)
+def test_installed_api_python_rejects_unverified_windows_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    invalid_value: object,
+    expected_message: str,
+) -> None:
+    """Reject an unavailable or foreign base interpreter before API startup."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    base_executable = tmp_path / "base-python.exe"
+    base_executable.touch()
+    other_executable = tmp_path / "other-python.exe"
+    other_executable.touch()
+    base_prefix = tmp_path / "base-prefix"
+    base_prefix.mkdir()
+    wrong_prefix = tmp_path / "wrong-prefix"
+    wrong_prefix.mkdir()
+    replacements: dict[str, object] = {
+        "other-python.exe": str(tmp_path / "other-python.exe"),
+        "missing": str(tmp_path / "missing.exe"),
+        "directory": str(tmp_path),
+        "wrong-prefix": str(tmp_path / "wrong-prefix"),
+        "relative-base-prefix": "relative-base-prefix",
+    }
+    runtime: dict[str, object] = {
+        "executable": str(interpreter),
+        "base_executable": str(base_executable),
+        "prefix": str(interpreter.parents[1]),
+        "base_prefix": str(base_prefix),
+    }
+    runtime[field] = replacements.get(cast("str", invalid_value), invalid_value)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        lambda *_args, **_kwargs: runtime,
+        raising=False,
+    )
+
+    with pytest.raises(DistributionVerificationError, match=expected_message):
+        distribution_verifier._installed_api_python(
+            layout,
+            environment={},
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("interpreter could not start"),
+        subprocess.TimeoutExpired(("python",), timeout=5),
+    ],
+)
+def test_installed_api_python_reports_inspection_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: OSError | subprocess.TimeoutExpired,
+) -> None:
+    """Fail before API startup when the installed interpreter cannot report itself."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    _installed_python_fixture(layout)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+
+    def fail_inspection(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(distribution_verifier.subprocess, "run", fail_inspection)
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="installed Python runtime inspection failed",
+    ):
+        distribution_verifier._installed_api_python(
+            layout,
+            environment={},
+        )
+
+
 def test_installed_parser_probe_covers_navigation_and_public_transition() -> None:
     """Keep installed smoke coverage on current graph parser entry points."""
     assert '["workflow", "next", "--project-id", "1"]' in _RESOURCE_PROBE
