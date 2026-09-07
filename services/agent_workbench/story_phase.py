@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
@@ -48,6 +48,7 @@ from services.specs.story_validation_service import (
     require_current_story_validation_evidence,
     validate_story_with_specification_in_session,
 )
+from services.story_artifact_lineage import build_story_artifact_lineage_nodes
 from services.story_rank import parse_story_rank
 from workflow.fingerprints import canonical_hash, canonical_json
 
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from services.contracts.backlog import BacklogItem
-    from services.planning_lineage import Decision
     from services.specs.accepted_specification import AcceptedSpecification
     from workflow.contracts import JsonObject
 
@@ -145,38 +145,7 @@ def _story_lineage_nodes(
             col(StoryArtifactDecision.project_id) == project_id
         )
     ).all()
-    artifacts_by_id = {
-        _required_id(row.story_artifact_id, label="Story artifact"): row
-        for row in artifacts
-    }
-    decisions_by_artifact: dict[int, Decision] = {}
-    for decision in decisions:
-        artifact = artifacts_by_id.get(decision.story_artifact_id)
-        if (
-            artifact is None
-            or artifact.content_fingerprint != decision.artifact_fingerprint
-            or decision.story_artifact_id in decisions_by_artifact
-            or decision.decision not in {"accepted", "feedback", "rejected"}
-        ):
-            message = "Stored Story decision lineage is invalid."
-            raise ValueError(message)
-        decisions_by_artifact[decision.story_artifact_id] = cast(
-            "Decision", decision.decision
-        )
-    return tuple(
-        ArtifactLineageNode(
-            artifact_id=artifact_id,
-            chain_key=(
-                row.project_id,
-                row.source_backlog_artifact_id,
-                row.backlog_item_id,
-            ),
-            version_number=row.version_number,
-            supersedes_artifact_id=row.supersedes_story_artifact_id,
-            decision=decisions_by_artifact.get(artifact_id),
-        )
-        for artifact_id, row in artifacts_by_id.items()
-    )
+    return build_story_artifact_lineage_nodes(artifacts, decisions)
 
 
 def _story_parent_context(  # noqa: PLR0913
@@ -568,10 +537,8 @@ def record_story_draft_in_session(
             or superseded.source_backlog_artifact_id
             != inputs.source_backlog_artifact_id
             or superseded.backlog_item_id != inputs.backlog_item_id
-            or superseded.story_artifact_id
-            != replacement_source.story_artifact_id
-            or superseded.content_fingerprint
-            != replacement_source.artifact_fingerprint
+            or superseded.story_artifact_id != replacement_source.story_artifact_id
+            or superseded.content_fingerprint != replacement_source.artifact_fingerprint
             or superseded_decision is None
             or superseded_decision.artifact_fingerprint
             != replacement_source.artifact_fingerprint
@@ -1001,12 +968,9 @@ def _acceptance_evidence_is_current(
         evidence = require_current_story_validation_evidence(session, story=story)
     except ValueError:
         return False
-    return (
-        evidence.mode == "structural"
-        and evidence.validated_at.replace(tzinfo=None) == accepted_at.replace(
-            tzinfo=None
-        )
-    )
+    return evidence.mode == "structural" and evidence.validated_at.replace(
+        tzinfo=None
+    ) == accepted_at.replace(tzinfo=None)
 
 
 def repair_story_readiness_in_session(

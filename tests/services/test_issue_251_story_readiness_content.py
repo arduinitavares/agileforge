@@ -3,12 +3,19 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass
+from threading import Event, get_ident
 from typing import TYPE_CHECKING, cast
 
-from sqlmodel import Session, col, select
+import pytest
+from sqlalchemy import event
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
 from models.core import UserStory
 from models.workflow import StoryArtifact, StoryArtifactDecision
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
@@ -30,12 +37,289 @@ from tests.workflow.test_planning_transitions import (
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
+    from collections.abc import Iterator
+    from pathlib import Path
+    from sqlite3 import Connection as SQLiteConnection
+
+    from sqlalchemy.engine import Connection, Engine
 
     from workflow.contracts import JsonObject
+    from workflow.domain import WorkflowDomain
+    from workflow.facts import WorkflowFactSnapshot
 
 EXPECTED_STORY_COUNT = 2
 EXPECTED_CRITERIA_COUNT = 2
+
+
+@dataclass
+class _ReadTransactionTrace:
+    """Capture the real SQLite reader transaction and pool return state."""
+
+    thread_id: int
+    connection_id: int | None = None
+    active_transaction_seen: bool = False
+    checked_in: bool = False
+    active_at_checkin: bool | None = None
+
+    def record_select(
+        self,
+        connection: Connection,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if get_ident() != self.thread_id or not statement.lstrip().upper().startswith(
+            "SELECT"
+        ):
+            return
+        driver_connection = cast(
+            "SQLiteConnection", connection.connection.dbapi_connection
+        )
+        if self.connection_id is None:
+            self.connection_id = id(driver_connection)
+        if id(driver_connection) == self.connection_id:
+            self.active_transaction_seen |= driver_connection.in_transaction
+
+    def record_checkin(
+        self,
+        driver_connection: SQLiteConnection | None,
+        _connection_record: object,
+    ) -> None:
+        if driver_connection is None or id(driver_connection) != self.connection_id:
+            return
+        self.checked_in = True
+        self.active_at_checkin = driver_connection.in_transaction
+
+
+@contextmanager
+def _trace_read_transaction(engine: Engine) -> Iterator[_ReadTransactionTrace]:
+    trace = _ReadTransactionTrace(thread_id=get_ident())
+    select_listener = trace.record_select
+    checkin_listener = trace.record_checkin
+    event.listen(engine, "before_cursor_execute", select_listener)
+    event.listen(engine, "checkin", checkin_listener)
+    try:
+        yield trace
+    finally:
+        event.remove(engine, "before_cursor_execute", select_listener)
+        event.remove(engine, "checkin", checkin_listener)
+
+
+@pytest.fixture
+def file_backed_story_engine(tmp_path: Path) -> Iterator[Engine]:
+    """Provide separate SQLite connections with concurrent WAL reads and writes."""
+    database_path = tmp_path / "story-readiness.sqlite3"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql(
+            "PRAGMA journal_mode=WAL"
+        ).scalar_one()
+    assert journal_mode == "wal"
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def _assert_read_transaction_released(trace: _ReadTransactionTrace) -> None:
+    """Prove the reader used a transaction and returned it rolled back to the pool."""
+    assert trace.connection_id is not None
+    assert trace.active_transaction_seen is True
+    assert trace.checked_in is True
+    assert trace.active_at_checkin is False
+
+
+def _assert_correction_snapshots(
+    *,
+    result: JsonObject,
+    service: DurableReadProjectionService,
+    project_id: int,
+    source_story_ids: tuple[int, ...],
+    replacement_story_ids: tuple[int, ...],
+) -> None:
+    data = _data(result)
+    stories = cast("list[JsonObject]", data["stories"])
+    assert [story["story_id"] for story in stories] == list(source_story_ids)
+    assert stories[0]["title"] == "Original Story"
+    assert stories[0]["content_status"] == "consistent"
+    assert (
+        stories[0]["selected_scope_fingerprint"] == data["selected_scope_fingerprint"]
+    )
+    assert data["selected_story_ids"] == []
+
+    fresh_data = _data(service.story_dependencies_inspect(project_id=project_id))
+    fresh_stories = cast("list[JsonObject]", fresh_data["stories"])
+    assert [story["story_id"] for story in fresh_stories] == list(replacement_story_ids)
+    assert fresh_stories[0]["title"] == "Corrected Story"
+    assert fresh_stories[0]["content_status"] == "consistent"
+    assert (
+        fresh_stories[0]["selected_scope_fingerprint"]
+        == fresh_data["selected_scope_fingerprint"]
+    )
+
+
+def test_story_dependencies_inspect_file_backed_stable_read_and_cleanup(
+    file_backed_story_engine: Engine,
+) -> None:
+    """Return stable accepted content and release the explicit read transaction."""
+    engine = file_backed_story_engine
+    project_id = _seed_accepted_backlog(
+        engine, requirements=("Stable Story readiness",)
+    )
+    domain = _domain(engine)
+    _record_and_accept_roadmap(
+        domain, project_id, requirements=("Stable Story readiness",)
+    )
+    _artifact_id, story_ids = _record_and_accept_story_set(
+        domain,
+        project_id,
+        backlog_item_id="PBI-000001",
+        content=_story_content(title="Stable Story", item_count=1),
+        idempotency_suffix="file-backed-stable",
+    )
+
+    with _trace_read_transaction(engine) as trace:
+        result = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+            project_id=project_id
+        )
+
+    data = _data(result)
+    stories = cast("list[JsonObject]", data["stories"])
+    assert [story["story_id"] for story in stories] == list(story_ids)
+    assert stories[0]["title"] == "Stable Story"
+    assert stories[0]["content_status"] == "consistent"
+    assert (
+        stories[0]["selected_scope_fingerprint"] == data["selected_scope_fingerprint"]
+    )
+    _assert_read_transaction_released(trace)
+
+
+def test_story_dependencies_inspect_keeps_one_snapshot_during_accepted_correction(
+    file_backed_story_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never combine pre-correction workflow facts with post-correction content."""
+    engine = file_backed_story_engine
+    project_id = _seed_accepted_backlog(
+        engine, requirements=("Correct Story readiness",)
+    )
+    domain = _domain(engine)
+    _record_and_accept_roadmap(
+        domain, project_id, requirements=("Correct Story readiness",)
+    )
+    source_artifact_id, source_story_ids = _record_and_accept_story_set(
+        domain,
+        project_id,
+        backlog_item_id="PBI-000001",
+        content=_story_content(title="Original Story", item_count=1),
+        idempotency_suffix="atomic-source",
+    )
+
+    snapshot_loaded = Event()
+    replacement_finished = Event()
+    reader_thread_id = get_ident()
+    reader_connection_ids: set[int] = set()
+    reader_transaction_states: set[bool] = set()
+    writer_connection_ids: set[int] = set()
+    original_load = WorkflowFactRepository.load
+    original_begin_write = type(domain)._begin_write
+    interleaved = False
+
+    def load_with_interleaving(
+        repository: WorkflowFactRepository,
+        loaded_project_id: int,
+    ) -> WorkflowFactSnapshot:
+        nonlocal interleaved
+        snapshot = original_load(repository, loaded_project_id)
+        if get_ident() == reader_thread_id and not interleaved:
+            interleaved = True
+            driver_connection = cast(
+                "SQLiteConnection",
+                repository._session.connection().connection.dbapi_connection,
+            )
+            reader_connection_ids.add(id(driver_connection))
+            reader_transaction_states.add(driver_connection.in_transaction)
+            snapshot_loaded.set()
+            assert replacement_finished.wait(timeout=10)
+        return snapshot
+
+    def track_writer_connection(
+        writer_domain: WorkflowDomain,
+        session: Session,
+    ) -> None:
+        driver_connection = session.connection().connection.dbapi_connection
+        writer_connection_ids.add(id(driver_connection))
+        original_begin_write(writer_domain, session)
+
+    monkeypatch.setattr(WorkflowFactRepository, "load", load_with_interleaving)
+    monkeypatch.setattr(type(domain), "_begin_write", track_writer_connection)
+
+    def accept_replacement() -> tuple[int, tuple[int, ...]]:
+        assert snapshot_loaded.wait(timeout=10)
+        try:
+            return _record_and_accept_story_set(
+                _domain(engine),
+                project_id,
+                backlog_item_id="PBI-000001",
+                content=_story_content(title="Corrected Story", item_count=1),
+                idempotency_suffix="atomic-replacement",
+                supersedes_story_artifact_id=source_artifact_id,
+            )
+        finally:
+            replacement_finished.set()
+
+    service = DurableReadProjectionService(engine=engine)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        replacement_future = executor.submit(accept_replacement)
+        result = service.story_dependencies_inspect(project_id=project_id)
+        _replacement_artifact_id, replacement_story_ids = replacement_future.result()
+
+    assert reader_connection_ids
+    assert reader_transaction_states == {True}
+    assert writer_connection_ids
+    assert reader_connection_ids.isdisjoint(writer_connection_ids)
+    _assert_correction_snapshots(
+        result=result,
+        service=service,
+        project_id=project_id,
+        source_story_ids=source_story_ids,
+        replacement_story_ids=replacement_story_ids,
+    )
+
+
+def test_story_dependencies_inspect_releases_read_transaction_on_load_failure(
+    file_backed_story_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release the read transaction when workflow fact loading fails."""
+    engine = file_backed_story_engine
+    project_id = _seed_accepted_backlog(engine)
+
+    def fail_load(
+        _repository: WorkflowFactRepository,
+        _project_id: int,
+    ) -> WorkflowFactSnapshot:
+        message = "forced read failure"
+        raise WorkflowFactLoadError(message)
+
+    monkeypatch.setattr(WorkflowFactRepository, "load", fail_load)
+
+    with _trace_read_transaction(engine) as trace:
+        result = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+            project_id=project_id
+        )
+
+    assert result["ok"] is False
+    errors = cast("list[JsonObject]", result["errors"])
+    assert errors[0]["code"] == "PROJECT_FACTS_UNAVAILABLE"
+    assert errors[0]["message"] == "forced read failure"
+    _assert_read_transaction_released(trace)
 
 
 def test_story_dependencies_inspect_supplies_distinct_sibling_story_content(
@@ -159,9 +443,7 @@ def test_story_dependencies_inspect_reports_inconsistent_content(
     engine: Engine,
 ) -> None:
     """Explicitly report inconsistent Story content without breaking projection."""
-    project_id = _seed_accepted_backlog(
-        engine, requirements=("Calculate operations",)
-    )
+    project_id = _seed_accepted_backlog(engine, requirements=("Calculate operations",))
     domain = _domain(engine)
     _record_and_accept_roadmap(
         domain, project_id, requirements=("Calculate operations",)
@@ -362,9 +644,7 @@ def test_story_dependencies_inspect_reports_inconsistent_when_title_altered(
     engine: Engine,
 ) -> None:
     """Expose inconsistency when a nonblank title changes after acceptance."""
-    project_id = _seed_accepted_backlog(
-        engine, requirements=("Title mismatch test",)
-    )
+    project_id = _seed_accepted_backlog(engine, requirements=("Title mismatch test",))
     domain = _domain(engine)
     _record_and_accept_roadmap(
         domain, project_id, requirements=("Title mismatch test",)
@@ -495,9 +775,7 @@ def test_story_dependencies_inspect_reports_inconsistent_when_title_whitespace_a
     engine: Engine,
 ) -> None:
     """Expose inconsistency when title has whitespace altered post-acceptance."""
-    project_id = _seed_accepted_backlog(
-        engine, requirements=("Title whitespace test",)
-    )
+    project_id = _seed_accepted_backlog(engine, requirements=("Title whitespace test",))
     domain = _domain(engine)
     _record_and_accept_roadmap(
         domain, project_id, requirements=("Title whitespace test",)

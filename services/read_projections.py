@@ -38,7 +38,11 @@ from services.contracts.specification_source import (
     SpecificationSourceDocument,
     source_bundle_fingerprint,
 )
-from services.contracts.story import STORY_POINTS_BY_EFFORT, CanonicalStoryOutput
+from services.contracts.story import (
+    STORY_POINTS_BY_EFFORT,
+    CanonicalStoryItem,
+    CanonicalStoryOutput,
+)
 from services.packet_renderer import PacketRenderError, render_packet
 from services.phases.sprint_metrics import (
     build_durable_sprint_metrics,
@@ -76,6 +80,7 @@ from services.sprint_ownership import (
     resolve_sprint_owner,
     sprint_owner_projection,
 )
+from services.story_artifact_lineage import build_story_artifact_lineage_nodes
 from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
@@ -96,7 +101,7 @@ from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import current_task_content_fingerprint
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from typing import Never
 
     from sqlalchemy.engine import Engine
@@ -886,6 +891,9 @@ class _ResolvedStoryContent:
     criteria: list[JsonValue] | None
     content_status: Literal["consistent", "missing", "inconsistent"]
     content_error: str | None
+
+
+type _StoredStoryContent = tuple[str, str, list[str]]
 
 
 @dataclass(frozen=True)
@@ -2410,13 +2418,98 @@ class DurableReadProjectionService:
             and decision.decision == "accepted"
             and decision.story_artifact_id == artifact.story_artifact_id
             and decision.artifact_fingerprint == artifact.content_fingerprint
-            and artifact.content_fingerprint
-            == item.source_story_artifact_fingerprint
+            and artifact.content_fingerprint == item.source_story_artifact_fingerprint
             and artifact.story_artifact_id in context.accepted_leaf_artifact_ids
         )
 
     @staticmethod
-    def _resolve_story_content(  # noqa: PLR0911
+    def _inconsistent_story_content(error: str) -> _ResolvedStoryContent:
+        return _ResolvedStoryContent(
+            title=None,
+            statement=None,
+            criteria=None,
+            content_status="inconsistent",
+            content_error=error,
+        )
+
+    @staticmethod
+    def _load_stored_story_content(
+        story_row: UserStory,
+    ) -> _StoredStoryContent | _ResolvedStoryContent:
+        title = story_row.title
+        if not title or not title.strip():
+            return DurableReadProjectionService._inconsistent_story_content(
+                "Accepted Story title is blank or missing."
+            )
+        statement = story_row.story_description
+        if not statement or not statement.strip():
+            return DurableReadProjectionService._inconsistent_story_content(
+                "Accepted Story statement is blank or missing."
+            )
+        try:
+            criteria = _canonical_acceptance_criteria(
+                story_row.acceptance_criteria_json
+            )
+        except ValueError:
+            return DurableReadProjectionService._inconsistent_story_content(
+                "Stored Story acceptance criteria are invalid."
+            )
+        return title, statement, criteria
+
+    @staticmethod
+    def _accepted_story_item(
+        *,
+        item: StoryFact,
+        artifact: StoryArtifact | None,
+        context: _StoryReadinessContext,
+    ) -> CanonicalStoryItem | None:
+        canonical_output = (
+            context.canonical_outputs.get(artifact.story_artifact_id)
+            if artifact is not None and artifact.story_artifact_id is not None
+            else None
+        )
+        matching_envelopes = (
+            [
+                envelope
+                for envelope in canonical_output.story_items
+                if envelope.item.story_item_id == item.source_story_item_id
+                and envelope.item_fingerprint == item.source_story_item_fingerprint
+            ]
+            if canonical_output is not None
+            else []
+        )
+        if len(matching_envelopes) != 1:
+            return None
+        return matching_envelopes[0].item
+
+    @staticmethod
+    def _canonical_story_content_error(
+        *,
+        stored: _StoredStoryContent,
+        canonical_item: CanonicalStoryItem,
+    ) -> str | None:
+        title, statement, criteria = stored
+        mismatches = (
+            (
+                title != canonical_item.story_title,
+                "Accepted Story title does not match accepted artifact item.",
+            ),
+            (
+                statement != canonical_item.statement,
+                "Accepted Story statement does not match accepted artifact item.",
+            ),
+            (
+                criteria != list(canonical_item.acceptance_criteria),
+                (
+                    "Accepted Story acceptance criteria do not match"
+                    " accepted artifact item."
+                ),
+            ),
+        )
+        return next((message for mismatch, message in mismatches if mismatch), None)
+
+    @staticmethod
+    def _resolve_story_content(
         *,
         item: StoryFact,
         story_row: UserStory | None,
@@ -2440,107 +2533,28 @@ class DurableReadProjectionService:
             decision=decision,
             context=context,
         ):
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error=(
-                    "Accepted Story content does not match"
-                    " accepted artifact provenance."
-                ),
+            return DurableReadProjectionService._inconsistent_story_content(
+                "Accepted Story content does not match accepted artifact provenance."
             )
-        if not story_row.title or not story_row.title.strip():
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error="Accepted Story title is blank or missing.",
-            )
-        if (
-            not story_row.story_description
-            or not story_row.story_description.strip()
-        ):
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error="Accepted Story statement is blank or missing.",
-            )
-        try:
-            parsed_criteria = _canonical_acceptance_criteria(
-                story_row.acceptance_criteria_json
-            )
-        except ValueError:
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error="Stored Story acceptance criteria are invalid.",
-            )
-
-        canonical_output = (
-            context.canonical_outputs.get(artifact.story_artifact_id)
-            if artifact is not None and artifact.story_artifact_id is not None
-            else None
+        stored = DurableReadProjectionService._load_stored_story_content(story_row)
+        if isinstance(stored, _ResolvedStoryContent):
+            return stored
+        canonical_item = DurableReadProjectionService._accepted_story_item(
+            item=item,
+            artifact=artifact,
+            context=context,
         )
-        matching_envelopes = (
-            [
-                env
-                for env in canonical_output.story_items
-                if env.item.story_item_id == item.source_story_item_id
-                and env.item_fingerprint == item.source_story_item_fingerprint
-            ]
-            if canonical_output is not None
-            else []
+        if canonical_item is None:
+            return DurableReadProjectionService._inconsistent_story_content(
+                "Accepted Story content does not match accepted artifact provenance."
+            )
+        content_error = DurableReadProjectionService._canonical_story_content_error(
+            stored=stored,
+            canonical_item=canonical_item,
         )
-        if len(matching_envelopes) != 1:
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error=(
-                    "Accepted Story content does not match"
-                    " accepted artifact provenance."
-                ),
-            )
-        canonical_item = matching_envelopes[0].item
-        if story_row.title != canonical_item.story_title:
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error=(
-                    "Accepted Story title does not match"
-                    " accepted artifact item."
-                ),
-            )
-        if story_row.story_description != canonical_item.statement:
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error=(
-                    "Accepted Story statement does not match"
-                    " accepted artifact item."
-                ),
-            )
-        if parsed_criteria != list(canonical_item.acceptance_criteria):
-            return _ResolvedStoryContent(
-                title=None,
-                statement=None,
-                criteria=None,
-                content_status="inconsistent",
-                content_error=(
-                    "Accepted Story acceptance criteria"
-                    " do not match accepted artifact item."
-                ),
+        if content_error is not None:
+            return DurableReadProjectionService._inconsistent_story_content(
+                content_error
             )
 
         criteria_values: list[JsonValue] = _JSON_VALUE_LIST.validate_python(
@@ -2556,22 +2570,15 @@ class DurableReadProjectionService:
 
     @staticmethod
     def _load_story_readiness_artifact_context(
-        session: Session,
         *,
-        project_id: int,
         artifacts_by_id: dict[int, StoryArtifact],
+        decisions: Sequence[StoryArtifactDecision],
     ) -> _StoryReadinessContext:
         """Resolve accepted leaf IDs and load canonical outputs for artifacts."""
-        from services.agent_workbench.story_phase import (  # noqa: PLC0415
-            _story_lineage_nodes,
-        )
-        from services.planning_lineage import (  # noqa: PLC0415
-            PlanningLineageError,
-            validate_artifact_lineage,
-        )
-
         try:
-            lineage_nodes = _story_lineage_nodes(session, project_id=project_id)
+            lineage_nodes = build_story_artifact_lineage_nodes(
+                artifacts_by_id.values(), decisions
+            )
             validate_artifact_lineage(lineage_nodes)
         except (PlanningLineageError, ValueError):
             lineage_nodes = ()
@@ -2617,27 +2624,30 @@ class DurableReadProjectionService:
 
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         """Return durable dependency edges and reviewed sets."""
-        snapshot_or_error = self._snapshot(project_id)
-        if isinstance(snapshot_or_error, dict):
-            return snapshot_or_error
-        snapshot = snapshot_or_error
-        active_stories = tuple(
-            item for item in snapshot.stories if not item.is_superseded
-        )
-        selected = selected_scope_stories(snapshot)
-        scope_fingerprints = {
-            item.selected_scope_fingerprint for item in active_stories
-        }
-        if len(scope_fingerprints) > 1 or None in scope_fingerprints:
-            return _error(
-                "PROJECT_FACTS_UNAVAILABLE",
-                "Current selected Story scope fingerprint is unavailable.",
-                project_id=project_id,
-            )
-        selected_scope_fingerprint = (
-            None if not scope_fingerprints else next(iter(scope_fingerprints))
-        )
         with Session(self._engine) as session:
+            if session.get_bind().dialect.name == "sqlite":
+                # sqlite3 legacy mode does not begin a transaction for SELECT.
+                session.connection().exec_driver_sql("BEGIN")
+            snapshot_or_error = self._snapshot_in_session(session, project_id)
+            if isinstance(snapshot_or_error, dict):
+                return snapshot_or_error
+            snapshot = snapshot_or_error
+            active_stories = tuple(
+                item for item in snapshot.stories if not item.is_superseded
+            )
+            selected = selected_scope_stories(snapshot)
+            scope_fingerprints = {
+                item.selected_scope_fingerprint for item in active_stories
+            }
+            if len(scope_fingerprints) > 1 or None in scope_fingerprints:
+                return _error(
+                    "PROJECT_FACTS_UNAVAILABLE",
+                    "Current selected Story scope fingerprint is unavailable.",
+                    project_id=project_id,
+                )
+            selected_scope_fingerprint = (
+                None if not scope_fingerprints else next(iter(scope_fingerprints))
+            )
             story_rows = {
                 row.story_id: row
                 for row in session.exec(
@@ -2647,28 +2657,29 @@ class DurableReadProjectionService:
                 ).all()
                 if row.story_id is not None
             }
+            artifacts = session.exec(
+                select(StoryArtifact).where(
+                    col(StoryArtifact.project_id) == project_id,
+                )
+            ).all()
             artifacts_by_id = {
                 row.story_artifact_id: row
-                for row in session.exec(
-                    select(StoryArtifact).where(
-                        col(StoryArtifact.project_id) == project_id,
-                    )
-                ).all()
+                for row in artifacts
                 if row.story_artifact_id is not None
             }
+            decisions = session.exec(
+                select(StoryArtifactDecision).where(
+                    col(StoryArtifactDecision.project_id) == project_id,
+                )
+            ).all()
             decisions_by_artifact_id = {
                 row.story_artifact_id: row
-                for row in session.exec(
-                    select(StoryArtifactDecision).where(
-                        col(StoryArtifactDecision.project_id) == project_id,
-                    )
-                ).all()
+                for row in decisions
                 if row.story_artifact_id is not None
             }
             readiness_context = self._load_story_readiness_artifact_context(
-                session,
-                project_id=project_id,
                 artifacts_by_id=artifacts_by_id,
+                decisions=decisions,
             )
 
         serialized_stories: list[JsonValue] = []
@@ -2708,9 +2719,7 @@ class DurableReadProjectionService:
             _validated(rev.model_dump(mode="json"))
             for rev in snapshot.story_dependency_reviews
         ]
-        selected_story_ids: list[JsonValue] = [
-            story.story_id for story in selected
-        ]
+        selected_story_ids: list[JsonValue] = [story.story_id for story in selected]
 
         return _success(
             {
@@ -3261,9 +3270,7 @@ class DurableReadProjectionService:
         with Session(self._engine) as session:
             sprint_row = session.get(Sprint, sprint_id)
             team_row = (
-                None
-                if sprint_row is None
-                else session.get(Team, sprint_row.team_id)
+                None if sprint_row is None else session.get(Team, sprint_row.team_id)
             )
         if (
             sprint_row is None
@@ -3695,6 +3702,27 @@ class DurableReadProjectionService:
                     str(error),
                     project_id=project_id,
                 )
+
+    @staticmethod
+    def _snapshot_in_session(
+        session: Session,
+        project_id: int,
+    ) -> WorkflowFactSnapshot | JsonObject:
+        project = session.get(Project, project_id)
+        if project is None:
+            return _error(
+                "PROJECT_NOT_FOUND",
+                f"Project {project_id} was not found.",
+                project_id=project_id,
+            )
+        try:
+            return WorkflowFactRepository(session).load(project_id)
+        except WorkflowFactLoadError as error:
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                str(error),
+                project_id=project_id,
+            )
 
     def _project(self, project_id: int) -> _ProjectReadContext | _ProjectReadFailure:
         """Establish one Project identity before any project-scoped read."""

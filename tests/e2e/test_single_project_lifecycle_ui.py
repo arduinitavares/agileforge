@@ -523,9 +523,7 @@ class FakeLifecycle:
             )
             return _HTTP_OK, self._success(preview)
         if suffix == "/specifications/source":
-            assert headers.get("x-agileforge-expected-source") == "sha256:" + (
-                "a" * 64
-            )
+            assert headers.get("x-agileforge-expected-source") == "sha256:" + ("a" * 64)
         if suffix in {
             "/backlog/generate",
             "/roadmap/generate",
@@ -5381,8 +5379,12 @@ def test_story_readiness_renders_distinct_sibling_story_content(
     expect(details_2).to_contain_text("Handles //;\\n1;2 delimiter syntax")
 
     # Selection controls operational
-    expect(row_1.locator('button[data-story-selection-intent="select"]')).to_be_enabled()
-    expect(row_2.locator('button[data-story-selection-intent="select"]')).to_be_enabled()
+    expect(
+        row_1.locator('button[data-story-selection-intent="select"]')
+    ).to_be_enabled()
+    expect(
+        row_2.locator('button[data-story-selection-intent="select"]')
+    ).to_be_enabled()
 
     # Expand acceptance criteria accordion and capture visual evidence
     row_1.locator('[data-story-criteria-details="true"] summary').click()
