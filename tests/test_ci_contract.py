@@ -313,6 +313,45 @@ def test_windows_job_runs_only_provider_free_evidence_contracts(
         assert forbidden not in source
 
 
+def test_windows_ui_job_runs_real_distribution_ownership_regression(
+    workflow: dict[str, object],
+) -> None:
+    """Keep the native installed-venv PID regression in the Windows job."""
+    job = _job(workflow, "windows-ui-runtime")
+    commands = [
+        " ".join(run.split())
+        for step in _steps(job)
+        if isinstance((run := step.get("run")), str) and "pytest" in run
+    ]
+    expected = (
+        "uv run --locked pytest "
+        "tests/windows/test_dev_ui_runtime_windows.py "
+        "tests/windows/test_distribution_runtime_windows.py "
+        "tests/dev_runtime/test_dev_server.py "
+        "tests/dev_runtime/test_dev_main.py "
+        "tests/dev_runtime/test_cli_forwarding.py "
+        "tests/dev_runtime/test_dev_secrets_file.py "
+        "tests/windows/test_dev_secrets_windows.py "
+        "tests/dev_runtime/test_profiles.py -q "
+        "--junitxml=windows-ui-runtime.xml"
+    )
+
+    assert job["runs-on"] == "windows-latest"
+    assert commands == [expected]
+    guard = _runs(job)
+    required_cases = (
+        "test_real_windows_ui_owns_the_serving_interpreter",
+        "test_real_windows_distribution_owns_the_installed_serving_interpreter",
+        "test_windows_secrets_regular_file_uses_native_handle",
+    )
+    for case in required_cases:
+        assert guard.count(f"'{case}'") == 1
+    assert "$cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')" in guard
+    assert (
+        "$secretsCases.Count -ne 1 -or $secretsCases[0].SelectSingleNode('skipped')"
+    ) in guard
+
+
 def test_workflow_has_no_provider_secrets_or_live_markers() -> None:
     """Keep CI offline from provider credentials and live integrations."""
     source = WORKFLOW_PATH.read_text(encoding="utf-8").lower()
