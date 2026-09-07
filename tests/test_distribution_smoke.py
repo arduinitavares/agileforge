@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import gc
 import io
 import os
 import re
 import shutil
+import sqlite3
 import subprocess  # nosec B404
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 
@@ -33,6 +35,144 @@ from services.agent_workbench.version import agileforge_version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+
+class _TrackingConnection(sqlite3.Connection):
+    """Record whether the verifier closes each SQLite connection it opens."""
+
+    instances: ClassVar[list[_TrackingConnection]] = []
+    closed: bool
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+
+def _tracked_sqlite_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    deny_table_query: bool = False,
+) -> list[_TrackingConnection]:
+    """Make verifier connections observable while retaining real SQLite behavior."""
+    original_connect = sqlite3.connect
+    _TrackingConnection.instances = []
+
+    def tracked_connect(database: str | Path) -> _TrackingConnection:
+        connection = original_connect(database, factory=_TrackingConnection)
+        connection.closed = False
+        if deny_table_query:
+            connection.set_authorizer(_deny_sqlite_master_reads)
+        _TrackingConnection.instances.append(connection)
+        return connection
+
+    monkeypatch.setattr(distribution_verifier.sqlite3, "connect", tracked_connect)
+    return _TrackingConnection.instances
+
+
+def _deny_sqlite_master_reads(
+    action: int,
+    argument_one: str | None,
+    argument_two: str | None,
+    database: str | None,
+    trigger: str | None,
+) -> int:
+    """Reject the metadata read that schema verification requires."""
+    del argument_two, database, trigger
+    if action == sqlite3.SQLITE_READ and argument_one == "sqlite_master":
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _create_business_schema(database: Path, tables: frozenset[str]) -> None:
+    """Create the supplied business-table names in a disposable SQLite database."""
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            for table in tables:
+                connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+    finally:
+        connection.close()
+
+
+def _assert_closed_connection(
+    connection: _TrackingConnection,
+    database: Path,
+) -> None:
+    """Prove the tracked connection is closed and releases its Windows handle."""
+    assert connection.closed is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    if os.name == "nt":
+        database.unlink()
+
+
+@pytest.mark.parametrize(
+    ("tables", "expected_error"),
+    [
+        (distribution_verifier.EXPECTED_BUSINESS_TABLES, None),
+        (
+            distribution_verifier.EXPECTED_BUSINESS_TABLES - {"projects"},
+            r"missing=\['projects'\]",
+        ),
+        (
+            distribution_verifier.EXPECTED_BUSINESS_TABLES | {"products"},
+            r"forbidden=\['products'\]",
+        ),
+    ],
+)
+def test_schema_verification_closes_connections_after_valid_and_invalid_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tables: frozenset[str],
+    expected_error: str | None,
+) -> None:
+    """Close the verifier connection after every schema-validation outcome."""
+    database = tmp_path / "business.sqlite3"
+    _create_business_schema(database, tables)
+    connections = _tracked_sqlite_connections(monkeypatch)
+
+    garbage_collection_enabled = gc.isenabled()
+    if os.name == "nt":
+        gc.disable()
+    try:
+        if expected_error is None:
+            distribution_verifier._verify_schema(database)
+        else:
+            with pytest.raises(DistributionVerificationError, match=expected_error):
+                distribution_verifier._verify_schema(database)
+
+        assert len(connections) == 1
+        _assert_closed_connection(connections[0], database)
+    finally:
+        if os.name == "nt":
+            gc.collect()
+            if garbage_collection_enabled:
+                gc.enable()
+
+
+def test_schema_verification_closes_connection_when_table_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Close the verifier connection when its SQLite metadata query raises."""
+    database = tmp_path / "business.sqlite3"
+    _create_business_schema(database, distribution_verifier.EXPECTED_BUSINESS_TABLES)
+    connections = _tracked_sqlite_connections(monkeypatch, deny_table_query=True)
+
+    garbage_collection_enabled = gc.isenabled()
+    if os.name == "nt":
+        gc.disable()
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match=r"sqlite_master.*prohibited"):
+            distribution_verifier._verify_schema(database)
+
+        assert len(connections) == 1
+        _assert_closed_connection(connections[0], database)
+    finally:
+        if os.name == "nt":
+            gc.collect()
+            if garbage_collection_enabled:
+                gc.enable()
 
 
 def _checkout_file_state(checkout: Path) -> dict[str, tuple[int, bytes]]:
@@ -221,6 +361,66 @@ def test_isolated_environment_excludes_credentials_from_child_output(
     assert layout.cwd != layout.tool_dir
 
 
+@pytest.mark.parametrize(
+    ("parent_system_root_name", "parent_system_root_value", "expected_system_root"),
+    [
+        ("SystemRoot", "C:/Windows", "C:/Windows"),
+        ("SYSTEMROOT", "D:/Windows", "D:/Windows"),
+        ("SystemRoot", "", None),
+        ("SYSTEMROOT", "", None),
+    ],
+)
+def test_isolated_environment_preserves_windows_system_root_only_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parent_system_root_name: str,
+    parent_system_root_value: str,
+    expected_system_root: str | None,
+) -> None:
+    """Keep the Windows runtime root required by isolated child processes."""
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    parent_environment = {
+        "PATH": "C:/Windows/System32",
+        parent_system_root_name: parent_system_root_value,
+        "TEMP": "C:/parent-temp",
+        "TMP": "C:/parent-tmp",
+    }
+    layout = IsolationLayout.create(tmp_path / "wheel")
+
+    environment = isolated_environment(
+        layout,
+        parent_environment=parent_environment,
+    )
+
+    if expected_system_root is None:
+        assert "SystemRoot" not in environment
+    else:
+        assert environment["SystemRoot"] == expected_system_root
+    assert environment["TEMP"] == str(layout.temp_dir)
+    assert environment["TMP"] == str(layout.temp_dir)
+    assert layout.temp_dir.is_dir()
+
+
+def test_isolated_environment_keeps_non_windows_system_root_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Leave the non-Windows child environment policy unchanged."""
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "linux")
+
+    environment = isolated_environment(
+        IsolationLayout.create(tmp_path / "wheel"),
+        parent_environment={
+            "PATH": "/usr/bin",
+            "SystemRoot": "C:/Windows",
+        },
+    )
+
+    assert "SystemRoot" not in environment
+    assert "TEMP" not in environment
+    assert "TMP" not in environment
+
+
 def _set_dashboard_databases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(
         "AGILEFORGE_DB_URL",
@@ -311,6 +511,180 @@ def test_installed_dashboard_config_validation_binds_child_and_databases(
         invalid = {**valid, field: value}
         with pytest.raises(DistributionVerificationError, match=field):
             typed_verify(invalid, expected_process_id=1234, layout=layout)
+
+
+def _installed_python_fixture(layout: IsolationLayout) -> Path:
+    executable = "python.exe" if os.name == "nt" else "python"
+    scripts_directory = "Scripts" if os.name == "nt" else "bin"
+    interpreter = layout.tool_dir / "agileforge" / scripts_directory / executable
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    return interpreter
+
+
+def test_installed_api_python_keeps_non_windows_launch_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep the portable installed-API command on its existing interpreter."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "linux")
+
+    def unexpected_inspection(*_args: object, **_kwargs: object) -> object:
+        message = "non-Windows launch must not inspect a base interpreter"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        unexpected_inspection,
+        raising=False,
+    )
+    environment = {"AGILEFORGE_DB_URL": "fixture"}
+
+    selected, copied = distribution_verifier._installed_api_python(
+        layout,
+        environment=environment,
+    )
+
+    assert selected == interpreter
+    assert copied == environment
+    assert copied is not environment
+
+
+def test_installed_api_python_uses_verified_installed_venv_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Select the base reported by the installed venv and retain its identity."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    base_executable = tmp_path / "base-python.exe"
+    base_executable.touch()
+    base_prefix = tmp_path / "base-prefix"
+    base_prefix.mkdir()
+    runtime: dict[str, object] = {
+        "executable": str(interpreter),
+        "base_executable": str(base_executable),
+        "prefix": str(interpreter.parents[1]),
+        "base_prefix": str(base_prefix),
+    }
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        lambda *_args, **_kwargs: runtime,
+        raising=False,
+    )
+    environment = {
+        "AGILEFORGE_DB_URL": "fixture",
+        "__PYVENV_LAUNCHER__": "ambient-must-not-leak",
+    }
+    before = dict(environment)
+
+    selected, copied = distribution_verifier._installed_api_python(
+        layout,
+        environment=environment,
+    )
+
+    assert selected == base_executable
+    assert copied == {
+        "AGILEFORGE_DB_URL": "fixture",
+        "__PYVENV_LAUNCHER__": str(interpreter),
+    }
+    assert environment == before
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value", "expected_message"),
+    [
+        ("executable", "other-python.exe", "installed Python executable"),
+        ("base_executable", None, "base Python executable"),
+        ("base_executable", "relative.exe", "base Python executable"),
+        ("base_executable", "missing", "base Python executable"),
+        ("base_executable", "directory", "base Python executable"),
+        ("prefix", "wrong-prefix", "installed Python prefix"),
+        ("base_prefix", "relative-base-prefix", "base Python prefix"),
+    ],
+)
+def test_installed_api_python_rejects_unverified_windows_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    invalid_value: object,
+    expected_message: str,
+) -> None:
+    """Reject an unavailable or foreign base interpreter before API startup."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    interpreter = _installed_python_fixture(layout)
+    base_executable = tmp_path / "base-python.exe"
+    base_executable.touch()
+    other_executable = tmp_path / "other-python.exe"
+    other_executable.touch()
+    base_prefix = tmp_path / "base-prefix"
+    base_prefix.mkdir()
+    wrong_prefix = tmp_path / "wrong-prefix"
+    wrong_prefix.mkdir()
+    replacements: dict[str, object] = {
+        "other-python.exe": str(tmp_path / "other-python.exe"),
+        "missing": str(tmp_path / "missing.exe"),
+        "directory": str(tmp_path),
+        "wrong-prefix": str(tmp_path / "wrong-prefix"),
+        "relative-base-prefix": "relative-base-prefix",
+    }
+    runtime: dict[str, object] = {
+        "executable": str(interpreter),
+        "base_executable": str(base_executable),
+        "prefix": str(interpreter.parents[1]),
+        "base_prefix": str(base_prefix),
+    }
+    runtime[field] = replacements.get(cast("str", invalid_value), invalid_value)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+    monkeypatch.setattr(
+        distribution_verifier,
+        "_inspect_installed_python",
+        lambda *_args, **_kwargs: runtime,
+        raising=False,
+    )
+
+    with pytest.raises(DistributionVerificationError, match=expected_message):
+        distribution_verifier._installed_api_python(
+            layout,
+            environment={},
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("interpreter could not start"),
+        subprocess.TimeoutExpired(("python",), timeout=5),
+    ],
+)
+def test_installed_api_python_reports_inspection_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: OSError | subprocess.TimeoutExpired,
+) -> None:
+    """Fail before API startup when the installed interpreter cannot report itself."""
+    layout = IsolationLayout.create(tmp_path / "wheel")
+    _installed_python_fixture(layout)
+    monkeypatch.setattr(distribution_verifier.sys, "platform", "win32")
+
+    def fail_inspection(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(distribution_verifier.subprocess, "run", fail_inspection)
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="installed Python runtime inspection failed",
+    ):
+        distribution_verifier._installed_api_python(
+            layout,
+            environment={},
+        )
 
 
 def test_installed_parser_probe_covers_navigation_and_public_transition() -> None:
