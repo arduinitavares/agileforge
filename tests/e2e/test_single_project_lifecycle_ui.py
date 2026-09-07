@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -14,8 +15,9 @@ import pytest
 from git import Actor, Repo
 from playwright.sync_api import expect, sync_playwright
 
+from cli.dev_main import _launcher_child_environment
 from cli.dev_main import main as dev_main
-from cli.dev_profiles import load_profile, profile_environment, reset_profile
+from cli.dev_profiles import load_profile, reset_profile
 from cli.dev_server import (
     ExpectedUIRuntime,
     select_loopback_port,
@@ -521,9 +523,7 @@ class FakeLifecycle:
             )
             return _HTTP_OK, self._success(preview)
         if suffix == "/specifications/source":
-            assert headers.get("x-agileforge-expected-source") == "sha256:" + (
-                "a" * 64
-            )
+            assert headers.get("x-agileforge-expected-source") == "sha256:" + ("a" * 64)
         if suffix in {
             "/backlog/generate",
             "/roadmap/generate",
@@ -2096,7 +2096,7 @@ def dashboard_harness() -> Iterator[DashboardHarness]:
     )
     assert status == 0
     profile = load_profile(_PROJECT_ROOT, profile_name)
-    environment = profile_environment(profile)
+    environment = _launcher_child_environment(profile)
     environment[LAUNCHER_CHILD_ENV] = LAUNCHER_CHILD_VALUE
     launch_nonce = uuid4().hex
     environment[UI_LAUNCH_NONCE_ENV] = launch_nonce
@@ -5258,4 +5258,209 @@ def test_issue_213_correction_reconciles_stale_and_successful_outcomes(
     )
     _assert_issue_213_corrected_pending(second)
     assert fake.api_errors == []
+    context.close()
+
+
+@pytest.mark.parametrize("viewport_width", [1280, 390])
+def test_story_readiness_renders_distinct_sibling_story_content(
+    dashboard_harness: DashboardHarness,
+    viewport_width: int,
+) -> None:
+    """Preserve distinct accepted text and whitespace at desktop and mobile widths."""
+    accepted_title: str = "  Parse comma separated numbers\t "
+    accepted_statement: str = (
+        "\nAs a user, I want comma parsing so that totals compute.\n"
+    )
+    accepted_criterion: str = "  Returns sum for 1,2\n  " + "X" * 160 + "\t "
+    fake = _delivery_ready_fake([])
+    fake.backlog_candidate = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Calculate operations for strings",
+            },
+        ]
+    }
+    story_1: JsonObject = {
+        "story_id": 101,
+        "source_story_item_id": "US-001",
+        "backlog_item_id": "PBI-000001",
+        "title": accepted_title,
+        "statement": accepted_statement,
+        "description": accepted_statement,
+        "acceptance_criteria": [
+            accepted_criterion,
+            "Returns 0 for empty string",
+        ],
+        "content_status": "consistent",
+        "content_error": None,
+        "status": "to_do",
+        "story_points": 3,
+        "rank": "0|hzzzzz:01",
+        "is_superseded": False,
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("a"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
+        "sprint_candidate": False,
+        "content_accepted": True,
+        "readiness_blockers": [],
+        "validation_status": "validated",
+        "validation_failures": [],
+    }
+    story_2: JsonObject = {
+        "story_id": 102,
+        "source_story_item_id": "US-002",
+        "backlog_item_id": "PBI-000001",
+        "title": "Support custom delimiters",
+        "statement": "As a user, I want custom delimiters so that semicolons work.",
+        "description": "As a user, I want custom delimiters so that semicolons work.",
+        "acceptance_criteria": [
+            "Handles //;\\n1;2 delimiter syntax",
+        ],
+        "content_status": "consistent",
+        "content_error": None,
+        "status": "to_do",
+        "story_points": 5,
+        "rank": "0|hzzzzz:02",
+        "is_superseded": False,
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("c"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
+        "sprint_candidate": False,
+        "content_accepted": True,
+        "readiness_blockers": [],
+        "validation_status": "validated",
+        "validation_failures": [],
+    }
+    fake.stories = [story_1, story_2]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    page.set_viewport_size({"width": viewport_width, "height": 900})
+
+    readiness = page.locator('[data-story-readiness-section="true"]')
+    expect(readiness).to_be_visible()
+
+    row_1 = readiness.locator('[data-story-readiness-row="101"]')
+    row_2 = readiness.locator('[data-story-readiness-row="102"]')
+    expect(row_1).to_be_visible()
+    expect(row_2).to_be_visible()
+
+    # Story identifiers and parent PBI
+    expect(row_1).to_contain_text("US-001")
+    expect(row_1).to_contain_text("PBI-000001")
+    expect(row_2).to_contain_text("US-002")
+    expect(row_2).to_contain_text("PBI-000001")
+
+    # Distinct titles and statements rendered in each row
+    expect(row_1).to_contain_text("Parse comma separated numbers")
+    expect(row_1).to_contain_text(
+        "As a user, I want comma parsing so that totals compute."
+    )
+    expect(row_2).to_contain_text("Support custom delimiters")
+    expect(row_2).to_contain_text(
+        "As a user, I want custom delimiters so that semicolons work."
+    )
+
+    # Distinct titles not swapped
+    expect(row_1).not_to_contain_text("Support custom delimiters")
+    expect(row_2).not_to_contain_text("Parse comma separated numbers")
+
+    # Retained parent requirement is labeled as parent context,
+    # not standalone story description
+    expect(row_1).to_contain_text("Parent Backlog context")
+    expect(row_2).to_contain_text("Parent Backlog context")
+
+    # Acceptance criteria accessible via expandable details
+    details_1 = row_1.locator('[data-story-criteria-details="true"]')
+    expect(details_1).to_be_visible()
+    expect(details_1).to_contain_text("Returns sum for 1,2")
+    expect(details_1).to_contain_text("Returns 0 for empty string")
+
+    details_2 = row_2.locator('[data-story-criteria-details="true"]')
+    expect(details_2).to_be_visible()
+    expect(details_2).to_contain_text("Handles //;\\n1;2 delimiter syntax")
+
+    # Selection controls operational
+    expect(
+        row_1.locator('button[data-story-selection-intent="select"]')
+    ).to_be_enabled()
+    expect(
+        row_2.locator('button[data-story-selection-intent="select"]')
+    ).to_be_enabled()
+
+    # Expand acceptance criteria accordion and capture visual evidence
+    row_1.locator('[data-story-criteria-details="true"] summary').click()
+    expect(row_1.locator('[data-story-criteria-details="true"] ul')).to_be_visible()
+    for locator, accepted_text in (
+        (row_1.locator('[data-story-title="true"]'), accepted_title),
+        (row_1.locator('[data-story-statement="true"]'), accepted_statement),
+        (details_1.locator("li").first, accepted_criterion),
+    ):
+        expect(locator).to_have_css("white-space", "pre-wrap")
+        assert locator.text_content() == accepted_text
+        assert locator.evaluate(
+            "element => element.scrollWidth <= element.clientWidth + 1"
+        )
+    screenshot_path = Path(tempfile.gettempdir()) / "story_readiness_panel.png"
+    readiness.screenshot(path=str(screenshot_path))
+
+    context.close()
+
+
+def test_story_readiness_explicitly_reports_missing_content(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Report missing Story content explicitly without substituting parent wording."""
+    fake = _delivery_ready_fake([])
+    fake.backlog_candidate = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Parent requirement text",
+            },
+        ]
+    }
+    missing_story: JsonObject = {
+        "story_id": 105,
+        "source_story_item_id": "US-005",
+        "backlog_item_id": "PBI-000001",
+        "title": None,
+        "statement": None,
+        "description": None,
+        "acceptance_criteria": None,
+        "content_status": "missing",
+        "content_error": "Accepted Story content is missing from the database.",
+        "status": "to_do",
+        "story_points": 3,
+        "rank": "0|hzzzzz:05",
+        "is_superseded": False,
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("a"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
+        "sprint_candidate": False,
+        "content_accepted": False,
+        "readiness_blockers": [],
+        "validation_status": "validated",
+        "validation_failures": [],
+    }
+    fake.stories = [missing_story]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    row = page.locator('[data-story-readiness-row="105"]')
+    expect(row).to_be_visible()
+    expect(row.locator('[data-story-content-error="true"]')).to_be_visible()
+    expect(row).to_contain_text("Accepted Story content is missing from the database.")
+    # Controls remain preserved
+    expect(row.locator('button[data-story-selection-intent="select"]')).to_be_enabled()
+
     context.close()

@@ -2714,9 +2714,19 @@ function storyReadinessMarkup(stories, context = {}) {
     const completedStories = allActiveStories.filter(isStoryCompleted);
     const activeStories = allActiveStories.filter((s) => !isStoryCompleted(s));
 
-    const pendingItems = Array.isArray(context?.storyPending?.items) ? context.storyPending.items : [];
+    const pendingItems = Array.isArray(context?.storyPending?.items)
+        ? context.storyPending.items
+        : (Array.isArray(lifecycleState?.storyPending?.items)
+            ? lifecycleState.storyPending.items
+            : []);
+    const hasCurrentDependencies = Boolean(
+        context && typeof context === 'object' && 'storyDependencies' in context,
+    );
+    const authoritativeDependencies = hasCurrentDependencies
+        ? context.storyDependencies
+        : lifecycleState?.storyDependencies;
     const evidenceScope = parseStructuralEvidenceScope(
-        context?.storyDependencies?.structural_evidence_scope,
+        authoritativeDependencies?.structural_evidence_scope,
     );
     const controlsLocked = storyMutationLocked() || evidenceScope === null;
 
@@ -2742,7 +2752,9 @@ function storyReadinessMarkup(stories, context = {}) {
         const projection = parseStoryReadinessProjection(story);
         const pbiId = story?.backlog_item_id || '';
         const pending = pbiId ? pendingItems.find((item) => item?.backlog_item_id === pbiId) : null;
-        const requirement = pending?.requirement || '';
+        const requirement = typeof pending?.requirement === 'string' && pending.requirement.trim()
+            ? pending.requirement.trim()
+            : '';
         const storyIdText = story?.source_story_item_id || `Story #${story?.story_id ?? '?'}`;
         if (!projection) {
             return `<div class="py-3" data-story-readiness-row="${escapeWorkflowText(story?.story_id ?? 'unknown')}"><p role="alert" class="text-sm text-red-700">Story state unavailable. Dependent Sprint-selection controls are locked until a complete current projection is available.</p><button type="button" disabled aria-disabled="true" class="${BUTTON_SECONDARY}">Sprint selection unavailable</button></div>`;
@@ -2756,8 +2768,67 @@ function storyReadinessMarkup(stories, context = {}) {
         const reconcile = (isMissingEvidence || isStaleEvidence)
             ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}"${controlsLocked ? ' disabled aria-disabled="true" aria-busy="true"' : ''} aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
             : '';
+
+        const storyTitle = typeof story?.title === 'string' && story.title.trim() ? story.title : '';
+        const storyStatement = typeof story?.statement === 'string' && story.statement.trim()
+            ? story.statement
+            : (typeof story?.description === 'string' && story.description.trim() ? story.description : '');
+        const criteria = Array.isArray(story?.acceptance_criteria)
+            ? story.acceptance_criteria.filter((c) => typeof c === 'string' && c.trim())
+            : [];
+        const contentStatus = story?.content_status || '';
+        const contentError = story?.content_error || (
+            contentStatus === 'missing'
+                ? 'Accepted Story content is missing from the database.'
+                : (contentStatus === 'inconsistent'
+                    ? 'Accepted Story content does not match accepted artifact provenance.'
+                    : (!storyTitle && !storyStatement
+                        ? 'Accepted Story content is missing or unavailable.'
+                        : (!storyTitle
+                            ? 'Accepted Story title is missing.'
+                            : (!storyStatement
+                                ? 'Accepted Story statement is missing.'
+                                : ''))))
+        );
+
+        const contentErrorMarkup = contentError
+            ? `<div role="alert" class="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800" data-story-content-error="true">${escapeWorkflowText(contentError)}</div>`
+            : '';
+        const isContentConsistent = contentStatus === 'consistent' && !contentError;
+        const displayTitle = isContentConsistent ? storyTitle : '';
+        const displayStatement = isContentConsistent ? storyStatement : '';
+        const displayCriteria = isContentConsistent ? criteria : [];
+        const titleMarkup = displayTitle
+            ? `<h4 class="whitespace-pre-wrap break-anywhere text-sm font-semibold text-slate-900" data-story-title="true">${escapeWorkflowText(displayTitle)}</h4>`
+            : '';
+        const statementMarkup = displayStatement
+            ? `<p class="whitespace-pre-wrap break-anywhere text-xs text-slate-700 leading-relaxed" data-story-statement="true">${escapeWorkflowText(displayStatement)}</p>`
+            : '';
+        const criteriaMarkup = displayCriteria.length > 0
+            ? `<details class="mt-1 text-xs text-slate-700" data-story-criteria-details="true">
+                <summary class="cursor-pointer font-medium text-slate-800 hover:text-slate-950">Acceptance Criteria (${displayCriteria.length})</summary>
+                <ul role="list" class="mt-1 max-h-60 overflow-y-auto list-disc pl-5 space-y-0.5">
+                    ${displayCriteria.map((criterion) => `<li class="whitespace-pre-wrap break-anywhere">${escapeWorkflowText(criterion)}</li>`).join('')}
+                </ul>
+            </details>`
+            : '';
+        const parentRequirementMarkup = requirement
+            ? `<p class="text-xs text-slate-500 italic"><span class="font-medium not-italic text-slate-600">Parent Backlog context:</span> ${escapeWorkflowText(requirement)}</p>`
+            : '';
+
         return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col gap-3" data-story-readiness-row="${story.story_id}">
-            <div class="min-w-0 space-y-1"><div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}</div>${requirement ? `<p class="text-xs text-slate-600">${escapeWorkflowText(requirement)}</p>` : ''}<p class="text-xs text-slate-500">Rank: ${escapeWorkflowText(story.rank || '-')} · Points: ${escapeWorkflowText(story.story_points ?? '-')}</p></div>
+            <div class="min-w-0 space-y-1.5">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
+                    ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
+                </div>
+                ${titleMarkup}
+                ${statementMarkup}
+                ${contentErrorMarkup}
+                ${criteriaMarkup}
+                ${parentRequirementMarkup}
+                <p class="text-xs text-slate-500">Rank: ${escapeWorkflowText(story.rank || '-')} · Points: ${escapeWorkflowText(story.story_points ?? '-')}</p>
+            </div>
             <ul role="list" class="flex flex-wrap gap-2 text-xs"><li class="rounded-full border border-slate-300 px-2 py-0.5">${eligibilityLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${selectionLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.dependency_safe ? 'Dependency confirmed' : 'Dependencies not confirmed'}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.sprint_candidate ? 'Sprint candidate' : 'Not a Sprint candidate'}</li></ul>
             ${diagnostics}
             <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection, controlsLocked)}</div>
