@@ -505,13 +505,27 @@ def test_stop_ui_terminates_then_kills_only_after_timeout() -> None:
     )
 
 
+@pytest.mark.parametrize("with_secrets_file", [False, True])
 def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     monkeypatch: pytest.MonkeyPatch,
     checkout: Path,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    *,
+    with_secrets_file: bool,
 ) -> None:
     """Reuse a validated development database and emit one readiness object."""
     _create_profile(checkout)
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    credential = "dummy-ui-credential-sentinel"
+    secrets_file = tmp_path / "provider.env"
+    secrets_file.write_text(
+        f"OPEN_ROUTER_API_KEY={credential}\nMODEL_CONFIG_PATH=forbidden-ui-config\n",
+        encoding="utf-8",
+    )
+    secrets_arguments = (
+        ["--secrets-file", str(secrets_file)] if with_secrets_file else []
+    )
     profile = profile_paths(checkout, "local")
     connection = sqlite3.connect(profile.business_database)
     try:
@@ -545,13 +559,16 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
                     "--port",
                     str(_UI_PORT),
                     "--json",
+                    *secrets_arguments,
                 ],
                 checkout_root=checkout,
                 runner=runner,
             )
             == 0
         )
-        payload = json.loads(capsys.readouterr().out)
+        captured = capsys.readouterr()
+        assert credential not in captured.out + captured.err
+        payload = json.loads(captured.out)
         assert payload["status"] == "ready"
         assert payload["profile"] == "local"
         assert payload["port"] == _UI_PORT
@@ -562,6 +579,13 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     assert first_nonce != second_nonce
     assert started_environments[0] == started_environments[1]
     assert started_environments[0]["AGILEFORGE_LAUNCHER_CHILD"] == "1"
+    assert started_environments[0].get("OPEN_ROUTER_API_KEY") == (
+        credential if with_secrets_file else None
+    )
+    assert "forbidden-ui-config" not in started_environments[0].values()
+    for artifact in (checkout / ".agileforge").rglob("*"):
+        if artifact.is_file():
+            assert credential.encode() not in artifact.read_bytes()
     connection = sqlite3.connect(profile.business_database)
     try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [(41,)]

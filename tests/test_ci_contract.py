@@ -329,6 +329,9 @@ def test_windows_ui_job_runs_real_distribution_ownership_regression(
         "tests/windows/test_distribution_runtime_windows.py "
         "tests/dev_runtime/test_dev_server.py "
         "tests/dev_runtime/test_dev_main.py "
+        "tests/dev_runtime/test_cli_forwarding.py "
+        "tests/dev_runtime/test_dev_secrets_file.py "
+        "tests/windows/test_dev_secrets_windows.py "
         "tests/dev_runtime/test_profiles.py -q "
         "--junitxml=windows-ui-runtime.xml"
     )
@@ -336,10 +339,17 @@ def test_windows_ui_job_runs_real_distribution_ownership_regression(
     assert job["runs-on"] == "windows-latest"
     assert commands == [expected]
     guard = _runs(job)
-    assert "test_real_windows_ui_owns_the_serving_interpreter" in guard
-    assert (
-        "test_real_windows_distribution_owns_the_installed_serving_interpreter" in guard
+    required_cases = (
+        "test_real_windows_ui_owns_the_serving_interpreter",
+        "test_real_windows_distribution_owns_the_installed_serving_interpreter",
+        "test_windows_secrets_regular_file_uses_native_handle",
     )
+    for case in required_cases:
+        assert guard.count(f"'{case}'") == 1
+    assert "$cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')" in guard
+    assert (
+        "$secretsCases.Count -ne 1 -or $secretsCases[0].SelectSingleNode('skipped')"
+    ) in guard
 
 
 def test_workflow_has_no_provider_secrets_or_live_markers() -> None:

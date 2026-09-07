@@ -40,6 +40,7 @@ from cli.dev_profiles import (
     resolve_checkout_root,
     touch_profile_last_used,
 )
+from cli.dev_secrets import SecretsFileError, open_secrets_file
 from cli.dev_server import (
     LOOPBACK_HOST,
     ExpectedUIRuntime,
@@ -759,31 +760,18 @@ def _forwarded_arguments(raw_arguments: Sequence[str]) -> tuple[str, ...]:
 def _provider_environment(secrets_file: Path | None) -> dict[str, str]:
     file_value: str | None = None
     if secrets_file is not None:
-        no_follow_flag = getattr(os, "O_NOFOLLOW", None)
-        if not isinstance(no_follow_flag, int):
-            message = f"secrets file must be a regular file: {secrets_file}"
-            raise DeveloperCommandError(message)
-        descriptor: int | None = None
         try:
-            try:
-                descriptor = os.open(secrets_file, os.O_RDONLY | no_follow_flag)
-            except OSError:
-                message = f"secrets file must be a regular file: {secrets_file}"
-                raise DeveloperCommandError(message) from None
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                message = f"secrets file must be a regular file: {secrets_file}"
-                raise DeveloperCommandError(message)
-            stream = os.fdopen(descriptor, mode="r", encoding="utf-8")
-            descriptor = None
-            with stream:
+            with open_secrets_file(secrets_file) as stream:
                 values = dotenv_values(
                     stream=stream,
                     verbose=False,
                     interpolate=False,
                 )
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        except SecretsFileError as error:
+            raise DeveloperCommandError(str(error)) from None
+        except (OSError, UnicodeError):
+            message = "secrets file could not be read as UTF-8 dotenv"
+            raise DeveloperCommandError(message) from None
         file_value = values.get(_PROVIDER_CREDENTIAL)
 
     if _PROVIDER_CREDENTIAL in os.environ:
@@ -797,7 +785,18 @@ def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
     redacted = value
     for secret in secret_values:
         if secret:
-            redacted = redacted.replace(secret, "[REDACTED]")
+            captured = secret.replace("\r\n", "\n").replace("\r", "\n")
+            variants: list[str] = list(dict.fromkeys((secret, captured)))
+            if sys.platform == "win32":
+                windows_text = secret.replace("\n", "\r\n")
+                captured_windows_text = windows_text.replace("\r\n", "\n").replace(
+                    "\r", "\n"
+                )
+                if captured_windows_text not in variants:
+                    variants.append(captured_windows_text)
+            variants.sort(key=str.__len__, reverse=True)
+            for variant in variants:
+                redacted = redacted.replace(variant, "[REDACTED]")
     return redacted
 
 
@@ -937,7 +936,7 @@ def _run_cli(
             return ExitCode.ERROR
         return result.exit_code
 
-    sys.stdout.write(result.stdout)
+    sys.stdout.write(_redact_text(result.stdout, secret_values))
     _emit_cli_provenance(profile, current_commit=current_commit)
     sys.stderr.write(_redact_text(result.stderr, secret_values))
     return result.exit_code

@@ -29,6 +29,10 @@ _INVALID_CHILD_EXIT = 13
 _INVALID_CHILD_RESULT = {"ok": False, "error": "invalid_production_cli_output"}
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
 _WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
+_WINDOWS_TEXT_WRITER_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows text writers expand LF before capture",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,59 @@ class DevCliRunner:
                 stdout=f"{_git(self.checkout, 'rev-parse', 'HEAD')}\n",
             )
         return self.child_result
+
+
+@dataclass(slots=True)
+class LocalCredentialEchoRunner:
+    """Run one local dummy child through the production text-capture boundary."""
+
+    checkout: Path
+    writer: str
+    calls: list[tuple[tuple[str, ...], Path, dict[str, str] | None]] = field(
+        default_factory=list
+    )
+
+    def run(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+    ) -> dev_main.CommandResult:
+        """Return real normalized child streams without invoking a provider."""
+        copied_env = None if env is None else dict(env)
+        self.calls.append((arguments, cwd, copied_env))
+        if arguments == ("git", "-C", str(self.checkout), "rev-parse", "HEAD"):
+            return dev_main.CommandResult(
+                arguments=arguments,
+                exit_code=0,
+                stdout=f"{_git(self.checkout, 'rev-parse', 'HEAD')}\n",
+            )
+        assert copied_env is not None
+        if self.writer == "bytes":
+            child = (
+                "import os, sys\n"
+                "value = os.environ['OPEN_ROUTER_API_KEY'].encode('utf-8')\n"
+                "sys.stdout.buffer.write(value)\n"
+                "sys.stdout.buffer.flush()\n"
+                "sys.stderr.buffer.write(value)\n"
+                "sys.stderr.buffer.flush()\n"
+            )
+        else:
+            assert self.writer == "text"
+            child = (
+                "import os, sys\n"
+                "value = os.environ['OPEN_ROUTER_API_KEY']\n"
+                "sys.stdout.write(value)\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.write(value)\n"
+                "sys.stderr.flush()\n"
+            )
+        return dev_main.SubprocessCommandRunner().run(
+            (sys.executable, "-c", child),
+            cwd=cwd,
+            env=copied_env,
+        )
 
 
 def _git(checkout: Path, *arguments: str) -> str:
@@ -286,10 +343,6 @@ def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(
         runner=runner,
         clock=_clock(),
     )
-    if not hasattr(os, "O_NOFOLLOW"):
-        assert exit_code == 1
-        return
-
     assert exit_code == 0
 
     child_environment = runner.calls[-1][2]
@@ -337,8 +390,12 @@ def test_cli_reads_secrets_from_one_no_follow_descriptor(
     ) -> dict[str, str | None]:
         nonlocal swap_count
         swap_count += 1
-        selected.unlink()
-        selected.symlink_to(alternate)
+        if sys.platform == "win32":
+            with pytest.raises(PermissionError):
+                alternate.replace(selected)
+        else:
+            selected.unlink()
+            selected.symlink_to(alternate)
         return real_dotenv_values(
             dotenv_path=dotenv_path,
             stream=stream,
@@ -367,10 +424,6 @@ def test_cli_reads_secrets_from_one_no_follow_descriptor(
     )
 
     child_environment = runner.calls[-1][2]
-    if not hasattr(os, "O_NOFOLLOW"):
-        assert exit_code == 1
-        return
-
     assert exit_code == 0
     assert swap_count == 1
     assert child_environment is not None
@@ -456,6 +509,154 @@ def test_cli_raw_mode_preserves_child_streams_and_exit_code(
     assert f"Commit: {commit}" in captured.err
     assert "Profile: local (development)" in captured.err
     assert "production diagnostic" in captured.err
+
+
+def test_cli_raw_mode_redacts_credentials_from_both_streams(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child echo must not disclose its provider credential in raw stdout."""
+    credential = "dummy-raw-echo-sentinel"
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential)
+    runner = _runner(checkout, stdout=f"output {credential}\n", stderr=credential)
+    assert (
+        dev_main.main(
+            ["cli", "--profile", "local", "--", "project", "list"],
+            checkout_root=checkout,
+            runner=runner,
+            clock=_clock(),
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == "output [REDACTED]\n"
+    assert credential not in captured.err
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(("\r", r"\r", "file", "bytes"), id="bytes-file-cr"),
+        pytest.param(("\n", r"\n", "file", "bytes"), id="bytes-file-lf"),
+        pytest.param(("\r\n", r"\r\n", "file", "bytes"), id="bytes-file-crlf"),
+        pytest.param(("\r", r"\r", "environment", "bytes"), id="bytes-env-cr"),
+        pytest.param(("\n", r"\n", "environment", "bytes"), id="bytes-env-lf"),
+        pytest.param(("\r\n", r"\r\n", "environment", "bytes"), id="bytes-env-crlf"),
+        pytest.param(
+            ("\r", r"\r", "file", "text"),
+            id="text-file-cr",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+        pytest.param(
+            ("\n", r"\n", "file", "text"),
+            id="text-file-lf",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+        pytest.param(
+            ("\r\n", r"\r\n", "file", "text"),
+            id="text-file-crlf",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+        pytest.param(
+            ("\r", r"\r", "environment", "text"),
+            id="text-env-cr",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+        pytest.param(
+            ("\n", r"\n", "environment", "text"),
+            id="text-env-lf",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+        pytest.param(
+            ("\r\n", r"\r\n", "environment", "text"),
+            id="text-env-crlf",
+            marks=_WINDOWS_TEXT_WRITER_ONLY,
+        ),
+    ],
+)
+def test_cli_raw_mode_redacts_newline_normalized_credentials_from_real_child(
+    checkout: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, str, str],
+) -> None:
+    """Universal-newline capture must not disclose an accepted credential."""
+    line_ending, dotenv_escape, source, writer = case
+    before = "dummy-before-newline"
+    after = "dummy-after-newline"
+    credential = f"{before}{line_ending}{after}"
+    arguments = ["cli", "--profile", "local"]
+    if source == "file":
+        monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+        selected = tmp_path / "provider.env"
+        selected.write_text(
+            f'OPEN_ROUTER_API_KEY="{before}{dotenv_escape}{after}"\n',
+            encoding="utf-8",
+        )
+        arguments.extend(("--secrets-file", str(selected)))
+    else:
+        monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential)
+    arguments.extend(("--", "project", "list"))
+    runner = LocalCredentialEchoRunner(checkout=checkout, writer=writer)
+
+    assert (
+        dev_main.main(
+            arguments,
+            checkout_root=checkout,
+            runner=runner,
+            clock=_clock(),
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == "[REDACTED]"
+    assert captured.err.endswith("[REDACTED]")
+    assert before not in captured.out + captured.err
+    assert after not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("command", ["info", "cli"])
+def test_malformed_secrets_are_safe_at_the_command_boundary(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Malformed credential input must not leak or launch a production child."""
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    credential = "dummy-malformed-command-sentinel"
+    selected = checkout.parent / "provider.env"
+    selected.write_bytes(f"OPEN_ROUTER_API_KEY={credential}".encode() + b"\xff")
+    arguments = [
+        command,
+        "--profile",
+        "local",
+        "--secrets-file",
+        str(selected),
+        "--json",
+    ]
+    if command == "cli":
+        arguments.extend(["--", "project", "list"])
+    runner = _runner(checkout)
+    assert (
+        dev_main.main(arguments, checkout_root=checkout, runner=runner, clock=_clock())
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert (
+        json.loads(captured.out)["error"]
+        == "secrets file could not be read as UTF-8 dotenv"
+    )
+    assert credential not in captured.out + captured.err + caplog.text
+    assert len(runner.calls) == 1  # Only Git provenance, no production child.
+    for artifact in (checkout / ".agileforge").rglob("*"):
+        if artifact.is_file():
+            assert credential.encode() not in artifact.read_bytes()
+    selected.unlink()
 
 
 @pytest.mark.parametrize("json_output", [False, True], ids=["raw", "json"])
@@ -551,12 +752,6 @@ def test_cli_json_mode_wraps_provenance_and_redacts_secret(
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    if not hasattr(os, "O_NOFOLLOW"):
-        assert exit_code == 1
-        assert "secrets file must be a regular file" in payload["error"]
-        assert credential_value not in captured.out
-        return
-
     profile = dev_main.load_profile(checkout, "local")
     assert exit_code == _JSON_FAILURE_EXIT
     assert captured.err == ""
