@@ -1,6 +1,6 @@
 # Issue #260: Retry one completed Sprint
 
-Status: clarified behavior agreed in conversation; written design awaiting review.
+Status: written design approved by the user on 2026-09-09; implementation authorized.
 
 Issue: https://github.com/arduinitavares/agileforge/issues/260
 
