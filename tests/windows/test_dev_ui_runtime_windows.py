@@ -30,6 +30,7 @@ from models.db import ensure_business_db_ready
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+    from typing import Never
 
     from cli.dev_profiles import RuntimeProfile
 
@@ -205,6 +206,64 @@ def test_real_ui_lifecycle_starts_once_and_cleans_up(
             server.stop_ui(child)
             _assert_port_closed(child.port)
         _assert_stopped(processes)
+
+
+def test_real_windows_pre_identity_failure_cleans_acquired_child(
+    profile: RuntimeProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail after child acquisition and verify production finally cleans up."""
+
+    class InjectedError(RuntimeError):
+        """Stop before the launcher readiness identity is consumed."""
+
+    captured_children: list[server.UIChild] = []
+    captured_processes: list[psutil.Process] = []
+
+    def inject_failure(child: server.UIChild) -> None:
+        captured_children.append(child)
+        captured_processes.extend(_processes(child))
+        raise InjectedError
+
+    def fail_wait_for_readiness(
+        _child: server.UIChild,
+        *,
+        expected: server.ExpectedUIRuntime,
+        timeout: float,
+        poll_interval: float = 0.05,
+    ) -> Never:
+        del _child, expected, timeout, poll_interval
+        message = "wait_for_readiness called unexpectedly before handoff"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(main, "_ui_child_handoff", inject_failure)
+    monkeypatch.setattr(main, "wait_for_readiness", fail_wait_for_readiness)
+
+    port = server.select_loopback_port()
+    request = main.UiRequest(profile.name, None, False, str(port), False, True, 30)
+
+    try:
+        message = "lifecycle yielded unexpectedly after handoff failure"
+        with (
+            pytest.raises(InjectedError),
+            main._ready_ui_lifecycle(
+                profile=profile,
+                current_commit=profile.checkout.commit,
+                environment=main._launcher_child_environment(profile),
+                request=request,
+            ),
+        ):
+            raise AssertionError(message)
+
+        assert len(captured_children) == 1
+        child = captured_children[0]
+        assert captured_processes
+        assert child.process.poll() is not None
+        _assert_stopped(captured_processes)
+        _assert_port_closed(port)
+    finally:
+        for child in captured_children:
+            if child.process.poll() is None:
+                server.stop_ui(child)
 
 
 @pytest.mark.parametrize(

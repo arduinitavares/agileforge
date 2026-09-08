@@ -469,6 +469,10 @@ def test_safe_environment_excludes_credentials(tmp_path: Path) -> None:
     assert sensitive not in repr(environment)
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="POSIX process-group smoke adapter requires os.killpg",
+)
 def test_process_group_maps_existing_stop_policy_to_term_and_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -641,6 +645,10 @@ def _current_sha(checkout: Path) -> str:
     ).stdout.strip()
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="POSIX process-group smoke adapter requires os.killpg",
+)
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_real_script_runs_complete_launcher_lifecycle() -> None:
     """Execute the repository command against the real attached launcher."""
@@ -680,6 +688,10 @@ def test_real_script_runs_complete_launcher_lifecycle() -> None:
     assert not any(base.glob(f"{profile}.ui-*"))
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="POSIX process-group smoke adapter requires os.killpg",
+)
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_real_pre_identity_failure_cleans_process_group_and_profiles() -> None:
     """Fail after real child-profile creation and prove complete cleanup."""
