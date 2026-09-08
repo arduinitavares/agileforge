@@ -149,12 +149,18 @@ def _error(code: RepositoryProbeErrorCode, path: Path) -> RepositoryProbeError:
     return RepositoryProbeError(code, str(path))
 
 
+def _validate_no_embedded_nul(raw_path: bytes) -> None:
+    """Ensure encoded path bytes do not contain an embedded NUL byte."""
+    if b"\x00" in raw_path:
+        message = "Path contains embedded NUL byte."
+        raise ValueError(message)
+
+
 def _normalize_path(path: Path | str) -> Path:
     """Resolve one filesystem path through the platform error handler."""
     try:
         raw_path = os.fsencode(os.fspath(path))
-        if b"\x00" in raw_path:
-            raise ValueError("Path contains embedded NUL byte.")
+        _validate_no_embedded_nul(raw_path)
         normalized = Path(os.fsdecode(raw_path)).expanduser().resolve()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
         raise RepositoryProbeError(

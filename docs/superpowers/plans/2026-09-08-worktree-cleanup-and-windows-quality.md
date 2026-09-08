@@ -210,3 +210,11 @@ No new GitHub issues or PRs were created while preparing this plan. If tracking 
 - Git attributes and newline conversion: https://github.com/git/htmldocs/blob/gh-pages/gitattributes.adoc
 - Self-contained bundles and clone-based restoration: https://github.com/git/htmldocs/blob/gh-pages/git-bundle.adoc
 - Existing CI definition: `.github/workflows/ci.yml` at `844fc0d3`.
+
+## Execution notes
+
+This document records the approved plan. Final outcomes are recorded in the maintenance PR checks and the private recovery report.
+
+- **Task 8:** The launcher smoke adapter uses POSIX process groups. Its tests are now scoped to POSIX, with a native Windows regression covering cleanup after child acquisition and before identity handoff.
+- **Task 10:** [pyrepo-check PR #3](https://github.com/arduinitavares/pyrepo-check/pull/3), merged at `8651b8b377bb96f8cf9705a5bb76e6380a308007`, repairs default ownership for private Windows writers. Both canonical CI jobs pin that verified revision.
+- **Acceptance:** CI now includes a full Windows canonical gate and requires the security and ownership regressions to execute. Final acceptance requires the Windows and Linux canonical gates and the macOS launcher smoke check to pass.
