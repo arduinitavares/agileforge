@@ -11,6 +11,7 @@ import sqlite3
 import subprocess  # nosec B404
 import sys
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -851,46 +852,50 @@ def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkou
         lambda output: (sys.executable, str(fake_uv), *build_command(output)[1:]),
     )
 
-    artifacts = typed_build(
-        checkout_root=checkout,
-        temporary_root=tmp_path / "distribution-workspace",
-        parent_environment=build_environment,
-    )
+    with tempfile.TemporaryDirectory(
+        prefix="agileforge-distributions-",
+    ) as directory:
+        artifacts = typed_build(
+            checkout_root=checkout,
+            temporary_root=Path(directory),
+            parent_environment=build_environment,
+        )
 
-    after_status = _git_status_with_ignored(checkout)
-    assert after_status == before_status
-    assert _checkout_file_state(checkout) == before_files
-    wheel_path = next(
-        artifact.path for artifact in artifacts if artifact.kind == "wheel"
-    )
-    with zipfile.ZipFile(wheel_path) as wheel:
-        names = set(wheel.namelist())
-        assert "cli/stale_shadow.py" not in names
-        assert "build/lib/cli/stale_shadow.py" not in names
-        assert tracked_marker.encode() in wheel.read("cli/__init__.py")
-        assert all(
-            b"STALE_EGG_INFO_SENTINEL" not in wheel.read(name)
-            for name in names
-            if not name.endswith("/")
+        assert _git_status_with_ignored(checkout) == before_status
+        assert _checkout_file_state(checkout) == before_files
+        wheel_path = next(
+            artifact.path for artifact in artifacts if artifact.kind == "wheel"
         )
-    sdist_path = next(
-        artifact.path for artifact in artifacts if artifact.kind == "sdist"
-    )
-    with tarfile.open(sdist_path, mode="r:gz") as source_distribution:
-        files = [
-            member for member in source_distribution.getmembers() if member.isfile()
-        ]
-        assert not any(member.name.endswith("/cli/stale_shadow.py") for member in files)
-        init_member = next(
-            member for member in files if member.name.endswith("/cli/__init__.py")
+        with zipfile.ZipFile(wheel_path) as wheel:
+            names = set(wheel.namelist())
+            assert "cli/stale_shadow.py" not in names
+            assert "build/lib/cli/stale_shadow.py" not in names
+            assert tracked_marker.encode() in wheel.read("cli/__init__.py")
+            assert all(
+                b"STALE_EGG_INFO_SENTINEL" not in wheel.read(name)
+                for name in names
+                if not name.endswith("/")
+            )
+        sdist_path = next(
+            artifact.path for artifact in artifacts if artifact.kind == "sdist"
         )
-        init_stream = source_distribution.extractfile(init_member)
-        assert init_stream is not None
-        assert tracked_marker.encode() in init_stream.read()
-        for member in files:
-            stream = source_distribution.extractfile(member)
-            assert stream is not None
-            assert b"STALE_EGG_INFO_SENTINEL" not in stream.read()
+        with tarfile.open(sdist_path, mode="r:gz") as source_distribution:
+            files = [
+                member for member in source_distribution.getmembers() if member.isfile()
+            ]
+            assert not any(
+                member.name.endswith("/cli/stale_shadow.py") for member in files
+            )
+            init_member = next(
+                member for member in files if member.name.endswith("/cli/__init__.py")
+            )
+            init_stream = source_distribution.extractfile(init_member)
+            assert init_stream is not None
+            assert tracked_marker.encode() in init_stream.read()
+            for member in files:
+                stream = source_distribution.extractfile(member)
+                assert stream is not None
+                assert b"STALE_EGG_INFO_SENTINEL" not in stream.read()
 
 
 def test_built_distributions_pass_isolated_smoke_and_preserve_checkout() -> None:

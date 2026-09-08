@@ -153,6 +153,8 @@ def _normalize_path(path: Path | str) -> Path:
     """Resolve one filesystem path through the platform error handler."""
     try:
         raw_path = os.fsencode(os.fspath(path))
+        if b"\x00" in raw_path:
+            raise ValueError("Path contains embedded NUL byte.")
         normalized = Path(os.fsdecode(raw_path)).expanduser().resolve()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
         raise RepositoryProbeError(
