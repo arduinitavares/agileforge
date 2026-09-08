@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -33,6 +35,7 @@ from services.vision_evidence_reader import (
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
     from typing import Never
 
@@ -326,6 +329,7 @@ def test_conflicting_valid_specs_are_both_collected_with_a_stable_warning(
 
 def test_unreadable_and_escape_paths_warn_without_becoming_evidence(
     collector: VisionEvidenceCollector,
+    create_symlink: Callable[[Path, Path | str], None],
     engine: Engine,
     repository: Path,
     tmp_path: Path,
@@ -334,7 +338,7 @@ def test_unreadable_and_escape_paths_warn_without_becoming_evidence(
     (repository / "README.md").write_bytes(b"\xff\xfe")
     outside = tmp_path / "outside.md"
     outside.write_text("outside\n", encoding="utf-8")
-    (repository / "CONTEXT.md").symlink_to(outside)
+    create_symlink(repository / "CONTEXT.md", outside)
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
 
@@ -352,6 +356,7 @@ def test_unreadable_and_escape_paths_warn_without_becoming_evidence(
 
 def test_stable_in_worktree_symlink_uses_the_approved_source_identity(
     collector: VisionEvidenceCollector,
+    create_symlink: Callable[[Path, Path | str], None],
     engine: Engine,
     repository: Path,
 ) -> None:
@@ -361,7 +366,7 @@ def test_stable_in_worktree_symlink_uses_the_approved_source_identity(
     target.write_text("Approved technical specification.\n", encoding="utf-8")
     logical_source = repository / "docs/spec/spec.md"
     logical_source.parent.mkdir(parents=True)
-    logical_source.symlink_to("../../specs/spec.md")
+    create_symlink(logical_source, "../../specs/spec.md")
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
 
@@ -386,7 +391,7 @@ def test_stable_in_worktree_symlink_uses_the_approved_source_identity(
     ],
 )
 def test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets(
-    collector: VisionEvidenceCollector,
+    create_symlink: Callable[[Path, Path | str], None],
     engine: Engine,
     repository: Path,
     target_path: str,
@@ -396,11 +401,14 @@ def test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets(
     target = repository / target_path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    (repository / "README.md").symlink_to(target_path)
+    create_symlink(repository / "README.md", target_path)
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
 
-    bundle = collector.collect(project_id)
+    bundle = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).collect(project_id)
 
     assert "file:README.md" not in {item.evidence_id for item in bundle.items}
     assert content.strip() not in bundle.model_dump_json()
@@ -409,6 +417,7 @@ def test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets(
 
 def test_json_spec_symlink_rejects_approved_markdown_target(
     collector: VisionEvidenceCollector,
+    create_symlink: Callable[[Path, Path | str], None],
     engine: Engine,
     repository: Path,
 ) -> None:
@@ -418,7 +427,7 @@ def test_json_spec_symlink_rejects_approved_markdown_target(
     target.write_text("Approved Markdown specification.\n", encoding="utf-8")
     logical_source = repository / "docs/spec/spec.json"
     logical_source.parent.mkdir(parents=True)
-    logical_source.symlink_to("../../specs/spec.md")
+    create_symlink(logical_source, "../../specs/spec.md")
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
 
@@ -428,6 +437,10 @@ def test_json_spec_symlink_rejects_approved_markdown_target(
     assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "win32",
+    reason="requires POSIX descriptor instrumentation",
+)
 def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -455,12 +468,16 @@ def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
 
     bundle = collector.collect(project_id)
 
-    assert bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
+    assert 0 < bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
     readme_item = next(item for item in bundle.items if item.kind == "readme")
     assert readme_item.truncated is True
     assert len(str(readme_item.content).encode("utf-8")) == MAX_EVIDENCE_ITEM_BYTES
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "win32",
+    reason="requires POSIX descriptor instrumentation",
+)
 def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -498,7 +515,8 @@ def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
         caught.value.code
         is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
     )
-    assert bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
+    assert grew
+    assert 0 < bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
 
 
 def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
@@ -570,6 +588,10 @@ def test_missing_nonblocking_open_capability_fails_before_leaf_open(
     assert [warning.code for warning in warnings] == ["EVIDENCE_UNREADABLE"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "win32",
+    reason="requires POSIX descriptor instrumentation",
+)
 def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -585,6 +607,7 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
     original_open = posix_reader_module.os.open
+    swapped = False
 
     def swap_then_open(
         path: Path | str,
@@ -593,19 +616,26 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
         *,
         dir_fd: int | None = None,
     ) -> int:
+        nonlocal swapped
         if str(path) in {str(readme), readme.name}:
             readme.unlink()
             readme.symlink_to(outside)
+            swapped = True
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(posix_reader_module.os, "open", swap_then_open)
 
     bundle = collector.collect(project_id)
 
+    assert swapped
     assert "outside" not in bundle.model_dump_json()
     assert [warning.code for warning in bundle.warnings] == ["EVIDENCE_UNREADABLE"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "win32",
+    reason="requires POSIX descriptor instrumentation",
+)
 def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -647,6 +677,7 @@ def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
 
     bundle = collector.collect(project_id)
 
+    assert swapped
     assert bundle.items[-1].evidence_id == "file:docs/spec/spec.md"
     assert bundle.items[-1].content == "inside"
     assert "outside" not in bundle.model_dump_json()
@@ -1083,6 +1114,10 @@ def test_change_during_collection_discards_partial_evidence(
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "win32",
+    reason="requires POSIX descriptor instrumentation",
+)
 @pytest.mark.parametrize("operation", ["read", "stat"])
 def test_post_open_races_fail_with_the_closed_repository_changed_error(
     engine: Engine,
@@ -1100,24 +1135,26 @@ def test_post_open_races_fail_with_the_closed_repository_changed_error(
         engine=engine,
         repository_probe=_ChangingProbe(observed, observed),
     )
+    executed = False
 
     if operation == "read":
 
         def failed_read(descriptor: int, size: int) -> bytes:
+            nonlocal executed
             del descriptor, size
+            executed = True
             raise OSError
 
         monkeypatch.setattr(posix_reader_module.os, "read", failed_read)
     else:
         original_read = posix_reader_module.os.read
-        deleted = False
 
         def delete_after_read(descriptor: int, size: int) -> bytes:
-            nonlocal deleted
+            nonlocal executed
             content = original_read(descriptor, size)
-            if content and not deleted:
+            if content and not executed:
                 readme.unlink()
-                deleted = True
+                executed = True
             return content
 
         monkeypatch.setattr(posix_reader_module.os, "read", delete_after_read)
@@ -1125,6 +1162,7 @@ def test_post_open_races_fail_with_the_closed_repository_changed_error(
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         collector.collect(project_id)
 
+    assert executed
     assert (
         caught.value.code
         is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION

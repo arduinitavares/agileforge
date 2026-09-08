@@ -286,13 +286,26 @@ def test_probe_omits_local_and_malformed_remote_locations(
     assert remote_url not in repr(result)
 
 
+@pytest.mark.parametrize(
+    "raw_name",
+    [
+        "日本語.txt".encode(),
+        pytest.param(
+            b"surrogate-\xff.txt",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="POSIX surrogateescape filenames are not supported on Windows",
+            ),
+        ),
+    ],
+)
 def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    raw_name: bytes,
 ) -> None:
     """Expose surrogateescaped Git status through the public probe result."""
-    raw_name = b"surrogate-\xff.txt"
-    surrogate_path = os.fsdecode(raw_name)
+    decoded_path = os.fsdecode(raw_name)
     unicode_path = "cafe\u00e9.txt"
     worktree_path = str(tmp_path)
     common_git_dir = str(tmp_path / ".git")
@@ -304,7 +317,7 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
             is_valid=lambda: True,
         ),
         index=SimpleNamespace(diff=lambda _other: ()),
-        untracked_files=(unicode_path, surrogate_path),
+        untracked_files=(unicode_path, decoded_path),
         remotes=(),
         working_tree_dir=worktree_path,
         common_dir=common_git_dir,
@@ -329,7 +342,7 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
                 RepositoryStatusEntry(
                     area="untracked",
                     change="added",
-                    path=surrogate_path,
+                    path=decoded_path,
                 ),
             ),
             key=lambda entry: os.fsencode(entry.path),

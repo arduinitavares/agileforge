@@ -9,20 +9,61 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+import services
 import services.vision_evidence_reader as reader_module
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from typing import Any, Never
 
     from services.vision_evidence_reader import RepositoryEvidenceCapabilityCode
 
 
+@pytest.fixture
+def isolate_windows_evidence_module() -> Iterator[None]:
+    """Isolate lazy import of services.vision_evidence_windows and restore state."""
+    module_name = "services.vision_evidence_windows"
+    attr_name = "vision_evidence_windows"
+
+    had_sys_module = module_name in sys.modules
+    saved_entries = (
+        {module_name: sys.modules[module_name]} if had_sys_module else {}
+    )
+
+    had_pkg_attr = hasattr(services, attr_name)
+    original_pkg_attr = getattr(services, attr_name, None)
+
+    sys.modules.pop(module_name, None)
+    if hasattr(services, attr_name):
+        delattr(services, attr_name)
+
+    try:
+        yield
+    finally:
+        sys.modules.pop(module_name, None)
+        if hasattr(services, attr_name):
+            delattr(services, attr_name)
+
+        if had_sys_module:
+            sys.modules.update(saved_entries)
+            assert module_name in sys.modules
+            assert sys.modules.get(module_name) is saved_entries[module_name]
+        else:
+            assert module_name not in sys.modules
+
+        if had_pkg_attr:
+            setattr(services, attr_name, original_pkg_attr)
+            assert getattr(services, attr_name, None) is original_pkg_attr
+        else:
+            assert not hasattr(services, attr_name)
+
+
+@pytest.mark.usefixtures("isolate_windows_evidence_module")
 def test_reader_factory_selects_posix_without_loading_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep non-Windows collection independent of the native Windows adapter."""
-    sys.modules.pop("services.vision_evidence_windows", None)
     monkeypatch.setattr(reader_module.sys, "platform", "darwin")
 
     reader = reader_module.repository_evidence_reader()
@@ -35,11 +76,11 @@ def test_reader_factory_selects_posix_without_loading_windows(
     assert "services.vision_evidence_windows" not in sys.modules
 
 
+@pytest.mark.usefixtures("isolate_windows_evidence_module")
 def test_reader_factory_selects_windows_lazily(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Select the isolated Windows adapter only for the Windows platform."""
-    sys.modules.pop("services.vision_evidence_windows", None)
     monkeypatch.setattr(reader_module.sys, "platform", "win32")
 
     reader = reader_module.repository_evidence_reader()

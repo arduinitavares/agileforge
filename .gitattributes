@@ -1,0 +1,9 @@
+# Preserve exact blob bytes without newline conversion for hash-pinned test fixtures.
+tests/fixtures/specification_structuring/string-calculator-negative-diagnostic/** -text
+tests/fixtures/issue_200/** -text
+tests/fixtures/issue_210/gold/** -text
+tests/fixtures/issue_210/legacy_authority/** -text
+tests/fixtures/issue_210/baseline-business-schema.sql -text
+
+# Shell entrypoint requires LF line endings across platforms.
+agileforge-dev text eol=lf

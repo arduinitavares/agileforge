@@ -1289,14 +1289,17 @@ def test_loader_loads_initial_and_revision_vision_chains_with_turn_one(
 
 
 async def _persist_trace_session(service: DatabaseSessionService) -> None:
-    """Persist one ADK session in the configured trace store."""
-    session = await service.create_session(
-        app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
-        user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
-        session_id="product-definition-trace",
-        state={"product_goal_interview_turn_id": 1},
-    )
-    assert session.id == "product-definition-trace"
+    """Persist one ADK session in the configured trace store and close the service."""
+    try:
+        session = await service.create_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id="product-definition-trace",
+            state={"product_goal_interview_turn_id": 1},
+        )
+        assert session.id == "product-definition-trace"
+    finally:
+        await service.close()
 
 
 def test_loader_keeps_interview_turn_after_configured_adk_trace_database_is_deleted(

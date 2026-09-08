@@ -452,9 +452,22 @@ def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
     finally:
         for process in reversed(ui_launchers):
             _stop_launcher(process)
+        # Windows requires core.longpaths to delete the deep .venv dependency tree.
+        git_longpaths: tuple[str, ...] = (
+            ("-c", "core.longpaths=true") if os.name == "nt" else ()
+        )
         for path in reversed(added_worktrees):
             _run(
-                ("git", "-C", str(clone), "worktree", "remove", "--force", str(path)),
+                (
+                    "git",
+                    *git_longpaths,
+                    "-C",
+                    str(clone),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(path),
+                ),
                 cwd=clone,
             )
         _run(("git", "-C", str(clone), "worktree", "prune"), cwd=clone)
