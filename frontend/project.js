@@ -2118,10 +2118,15 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
         && Number.isInteger(candidate?.supersedes_backlog_artifact_id)
         ? `Corrected Backlog candidate v${escapeWorkflowText(candidate.version_number)} (#${escapeWorkflowText(candidate.backlog_artifact_id)}), replacing #${escapeWorkflowText(candidate.supersedes_backlog_artifact_id)}`
         : null;
+    const sprintPlanIdentity = scope === 'sprint'
+        && positiveInteger(candidate?.sprint_plan_artifact_id)
+        ? `<p class="mt-1 text-xs text-slate-600" data-sprint-plan-identity="true">Plan #${escapeWorkflowText(candidate.sprint_plan_artifact_id)} · Pending review</p>`
+        : '';
     const tabIndex = scope === 'backlog' ? ' tabindex="-1"' : '';
 
     return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}"${tabIndex}>
         <h3 class="text-sm font-semibold">${correctedIdentity ? `${correctedIdentity} - ` : ''}${escapeWorkflowText(label)}</h3>
+        ${sprintPlanIdentity}
         ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-story-evidence">Story proposal cannot be accepted: required INVEST, sizing, or ordering evidence is missing or malformed. Acceptance is disabled.${sentinelFieldMarkup}</div>` : ''}
         <div class="mt-3 space-y-4">${content}</div>
         <div class="mt-4 flex flex-wrap gap-2">
@@ -3287,9 +3292,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
             const cardTitle = pbiId ? `Story review for ${pbiId}` : `Story review ${index + 1}`;
             return planningReviewCardMarkup(cardTitle, item, 'story', index);
         }),
-        context?.sprintStatus?.kind === 'ready'
-            ? ''
-            : planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
+        planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
     ].filter(Boolean);
 
     const stories = Array.isArray(context?.storyDependencies?.stories)

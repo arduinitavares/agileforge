@@ -1690,6 +1690,274 @@ class SprintContinuityLifecycle(FakeLifecycle):
 
 
 @dataclass
+class Issue259Lifecycle(SprintContinuityLifecycle):
+    """Synthetic lifecycle for issue #259 pending Sprint review."""
+
+    review_requests: list[JsonObject] = field(default_factory=list)
+    sprint_plan_decision_fingerprint: str = field(
+        default_factory=lambda: _fingerprint("f")
+    )
+    pending_plan_id: int = 42
+    sprint_plan_decision_state: str = "pending"
+
+    def __post_init__(self) -> None:
+        """Initialize synthetic issue #259 lifecycle state."""
+        super().__post_init__()
+        assert self.project is not None
+        self.project["name"] = "Issue 259 Pending Sprint Review"
+        self.sprint_plan_accepted = False
+        self._seed_pending_plan_candidate()
+
+    def _seed_pending_plan_candidate(self) -> None:
+        owner: JsonObject = {
+            "kind": "solo_project",
+            "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+            "label": (
+                "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                "Solo operator for Exact Project"
+            ),
+            "display_label": "Solo operator for Exact Project",
+        }
+        self.sprint_plan_candidate = {
+            "sprint_plan_artifact_id": self.pending_plan_id,
+            "artifact_fingerprint": _fingerprint("9"),
+            "sprint_owner": owner,
+            "sprint_goal": "Deliver the next distinct scope.",
+            "selected_stories": [
+                {
+                    "story_id": 102,
+                    "story_item_id": "US-0102",
+                    "story_title": "Next distinct Story",
+                    "persona": "Operator",
+                    "requirement": "Review distinct pending plan.",
+                    "acceptance_criteria": ["Verify the next scope."],
+                    "specification_evidence": [],
+                    "invest_assessment": _valid_invest_assessment_payload(),
+                    "estimated_effort": "S",
+                    "story_points": 5,
+                    "effort_rationale": "Single focused increment.",
+                    "order_rationale": "High priority increment.",
+                    "tasks": [
+                        {
+                            "description": "Implement the next distinct Task.",
+                            "task_kind": "implementation",
+                            "checklist_items": ["Verify the next scope."],
+                            "specification_evidence": [],
+                        }
+                    ],
+                }
+            ],
+            "total_points": 5,
+            "task_count": 1,
+        }
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        if self.sprint_plan_decision_state == "accepted":
+            owner: JsonObject = {
+                "kind": "solo_project",
+                "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+                "label": (
+                    "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                    "Solo operator for Exact Project"
+                ),
+                "display_label": "Solo operator for Exact Project",
+            }
+            plan: JsonObject = {
+                "sprint_id": 32,
+                "status": "planned",
+                "goal": "Deliver the next distinct scope.",
+                "owner": owner,
+                "sprint_plan_artifact_id": 42,
+                "sprint_plan_artifact_decision_id": 52,
+                "plan_fingerprint": _fingerprint("9"),
+                "candidate_set_fingerprint": self._candidate_fingerprint(),
+                "task_content_fingerprint": self._task_fingerprint(),
+                "acceptance": {
+                    "rationale": "Reviewed the distinct next plan.",
+                    "reviewer": "operator@example.com",
+                    "decided_at": "2026-09-08T12:00:00Z",
+                },
+                "selected_stories": [
+                    {
+                        "story_id": 102,
+                        "story_item_id": "US-0102",
+                        "title": "Next distinct Story",
+                        "story_points": 5,
+                        "task_count": 1,
+                    }
+                ],
+                "total_points": 5,
+                "task_count": 1,
+            }
+            data: JsonObject = {
+                "project_id": _PROJECT_ID,
+                "sprint": {
+                    "sprint_id": 32,
+                    "status": "planned",
+                    "completed_at": None,
+                },
+                "accepted_plan": plan,
+                "start": None,
+                "tasks": [
+                    {
+                        "task_id": 81,
+                        "sprint_id": 32,
+                        "story_id": 102,
+                        "description": "Implement the next distinct Task.",
+                        "status": "To Do",
+                        "fact_fingerprint": _fingerprint("e"),
+                    }
+                ],
+                "review": None,
+                "closure": None,
+            }
+            return _HTTP_OK, self._success(data)
+
+        _status_code, envelope = super()._sprint_status_response()
+        data = cast("JsonObject", envelope["data"])
+        data["sprint"] = {
+            "sprint_id": 31,
+            "status": "completed",
+            "completed_at": "2026-09-08T00:00:00Z",
+        }
+        accepted_plan = cast("JsonObject", data["accepted_plan"])
+        accepted_plan["status"] = "completed"
+        data["start"] = {
+            "start_id": 61,
+            "sprint_id": 31,
+            "sprint_plan_artifact_id": 41,
+            "sprint_plan_artifact_decision_id": 51,
+            "plan_fingerprint": self._plan_fingerprint(),
+            "candidate_set_fingerprint": self._candidate_fingerprint(),
+            "task_content_fingerprint": self._task_fingerprint(),
+        }
+        return _HTTP_OK, self._success(data)
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        assert suffix not in {"/sprint/start", "/sprint/generate"}
+        if suffix != "/sprint/decide":
+            return super()._mutate(suffix, body, headers)
+
+        self._assert_fields(body, {"decision", "rationale"})
+        assert "x-agileforge-expected-instance" not in headers
+        assert body["decision"] in {"accepted", "feedback", "rejected"}
+
+        expected_decision = headers.get("x-agileforge-expected-decision")
+        if expected_decision != self.sprint_plan_decision_fingerprint:
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "error": {
+                        "code": "STALE_POSITION",
+                        "message": (
+                            "The candidate changed after this review opened. "
+                            "Reload and review the current candidate."
+                        ),
+                    }
+                }
+            }
+
+        self.review_requests.append(dict(body))
+        decision = cast("str", body["decision"])
+        self.sprint_plan_decision_state = decision
+        self.sprint_plan_accepted = True
+        return _HTTP_OK, self._mutation_result()
+
+    def _position_projection(self) -> JsonObject:
+        if self.sprint_plan_decision_state == "accepted":
+            decision: JsonObject = {
+                "node_id": "planning.sprint.start",
+                "child_graph_id": "planning",
+                "request_kind": "start_sprint",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": None,
+                "reason_code": "SPRINT_READY_TO_START",
+                "decision_fingerprint": _fingerprint("d"),
+                "fact_references": [
+                    {
+                        "fact_type": "sprint_plan",
+                        "fact_id": "42",
+                        "fingerprint": _fingerprint("9"),
+                    },
+                    {
+                        "fact_type": "candidate_set",
+                        "fact_id": str(_PROJECT_ID),
+                        "fingerprint": self._candidate_fingerprint(),
+                    },
+                    {
+                        "fact_type": "sprint_plan_tasks",
+                        "fact_id": "32",
+                        "fingerprint": self._task_fingerprint(),
+                    },
+                ],
+            }
+            action: JsonObject = {
+                "node_id": "planning.sprint.start",
+                "instance_key": None,
+                "request_kind": "start_sprint",
+                "endpoint": "sprint/start",
+                "transport": "semantic",
+            }
+            return cast(
+                "JsonObject",
+                {
+                    "graph_version": "agileforge.workflow.hidden",
+                    "fact_fingerprint": _fingerprint("f"),
+                    "decisions": [decision],
+                    "terminal": False,
+                    "actions": [],
+                    "_actions": [action],
+                },
+            )
+        if self.sprint_plan_decision_state == "pending":
+            pending_decision: JsonObject = {
+                "node_id": "planning.sprint.review",
+                "child_graph_id": "planning",
+                "request_kind": "decide_sprint_plan",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": None,
+                "reason_code": "SPRINT_PLAN_REVIEW_REQUIRED",
+                "decision_fingerprint": self.sprint_plan_decision_fingerprint,
+                "fact_references": [],
+            }
+            pending_action: JsonObject = {
+                "node_id": "planning.sprint.review",
+                "instance_key": None,
+                "request_kind": "decide_sprint_plan",
+                "endpoint": "sprint/decide",
+                "transport": "semantic",
+            }
+            return cast(
+                "JsonObject",
+                {
+                    "graph_version": "agileforge.workflow.hidden",
+                    "fact_fingerprint": _fingerprint("f"),
+                    "decisions": [pending_decision],
+                    "terminal": False,
+                    "actions": [],
+                    "_actions": [pending_action],
+                },
+            )
+        return cast(
+            "JsonObject",
+            {
+                "graph_version": "agileforge.workflow.hidden",
+                "fact_fingerprint": _fingerprint("f"),
+                "decisions": [],
+                "terminal": False,
+                "actions": [],
+                "_actions": [],
+            },
+        )
+
+
+@dataclass
 class BacklogFeedbackLifecycle(FakeLifecycle):
     """Durable #213 Backlog correction lifecycle shared by routed pages."""
 
@@ -3205,6 +3473,109 @@ def test_issue_227_accepted_sprint_survives_reload_and_starts_exactly_once(
     assert fake.api_errors == []
 
     context.close()
+
+
+@pytest.mark.parametrize("decision", ["accepted", "feedback", "rejected"])
+def test_issue_259_pending_next_plan_survives_reload_and_confirms_decision(
+    dashboard_harness: DashboardHarness,
+    decision: str,
+) -> None:
+    """Pending next-Sprint plan survives reload and submits each human decision."""
+    fake = Issue259Lifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        completed = page.locator('[data-sprint-status="completed"]')
+        review = page.locator('[data-planning-review-card="sprint"]')
+        expect(completed).to_contain_text("Sprint #31 is complete")
+        expect(review).to_contain_text("Plan #42")
+        expect(review).to_contain_text("Pending review")
+        expect(review).to_contain_text("Deliver the next distinct scope.")
+        expect(review).to_contain_text("Next distinct Story")
+        expect(review).to_contain_text("(derived: 5 pts)")
+        expect(review).to_contain_text("Implement the next distinct Task.")
+        expect(page.locator('[data-direct-action="start_sprint"]')).to_have_count(0)
+        assert fake.review_requests == []
+        page.reload(wait_until="networkidle")
+        expect(completed).to_be_visible()
+        expect(review).to_be_visible()
+        for choice in ("accepted", "feedback", "rejected"):
+            expect(review.locator(f'[data-review-decision="{choice}"]')).to_be_enabled()
+        review.locator(f'[data-review-decision="{decision}"]').click()
+        expect(page.locator("#human-action-dialog")).to_be_visible()
+        assert fake.review_requests == []
+        page.locator("#human-action-rationale").fill("Reviewed the distinct next plan.")
+        page.locator("#human-action-submit").click()
+        expect(page.locator("#human-action-dialog")).not_to_be_visible()
+        expect(review).to_have_count(0)
+        assert len(fake.review_requests) == 1
+        assert fake.review_requests[0]["decision"] == decision
+        assert (
+            fake.review_requests[0]["rationale"]
+            == "Reviewed the distinct next plan."
+        )
+        assert fake.api_errors == []
+        assert fake.start_requests == []
+
+        if decision == "accepted":
+            planned = page.locator('[data-sprint-status="planned"]')
+            expect(planned).to_be_visible()
+            expect(planned).to_contain_text("Sprint #32 is planned")
+            expect(planned).to_contain_text("Deliver the next distinct scope.")
+            expect(page.locator('[data-sprint-status="active"]')).to_have_count(0)
+        else:
+            expect(completed).to_be_visible()
+            expect(completed).to_contain_text("Sprint #31 is complete")
+            expect(page.locator('[data-sprint-status="planned"]')).to_have_count(0)
+            expect(page.locator('[data-sprint-status="active"]')).to_have_count(0)
+    finally:
+        context.close()
+
+
+def test_issue_259_stale_confirmation_preserves_current_review(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Stale confirmation rejection preserves current review and refreshes."""
+    fake = Issue259Lifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        completed = page.locator('[data-sprint-status="completed"]')
+        review = page.locator('[data-planning-review-card="sprint"]')
+        expect(completed).to_contain_text("Sprint #31 is complete")
+        expect(review).to_contain_text("Plan #42")
+        expect(review).to_contain_text("Pending review")
+        expect(page.locator('[data-direct-action="start_sprint"]')).to_have_count(0)
+
+        review.locator('[data-review-decision="accepted"]').click()
+        expect(page.locator("#human-action-dialog")).to_be_visible()
+        assert fake.review_requests == []
+
+        # Advance candidate to Plan 43 before human submit
+        fake.pending_plan_id = 43
+        fake.sprint_plan_decision_fingerprint = _fingerprint("8")
+        fake._seed_pending_plan_candidate()
+
+        page.locator("#human-action-rationale").fill("Reviewed the distinct next plan.")
+        page.locator("#human-action-submit").click()
+
+        expect(page.locator("#human-action-dialog")).not_to_be_visible()
+        assert fake.review_requests == []
+        assert fake.start_requests == []
+
+        error_locator = page.locator("#project-error")
+        expect(error_locator).to_be_visible()
+        expect(error_locator).to_contain_text("This review changed")
+        expect(error_locator).to_contain_text(
+            "The candidate changed after this review opened"
+        )
+
+        expect(completed).to_be_visible()
+        expect(completed).to_contain_text("Sprint #31 is complete")
+        expect(review).to_be_visible()
+        expect(review).to_contain_text("Plan #43")
+        expect(review).to_contain_text("Pending review")
+        expect(page.locator('[data-direct-action="start_sprint"]')).to_have_count(0)
+    finally:
+        context.close()
 
 
 def _story_generation_action(instance_key: str) -> JsonObject:

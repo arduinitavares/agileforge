@@ -1375,6 +1375,260 @@ test('Sprint status failure locks correction generation instead of contradicting
     assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
 });
 
+function completedSprintStatus() {
+    const status = acceptedSprintStatus();
+    status.sprint.status = 'completed';
+    status.sprint.completed_at = '2026-09-08T00:00:00Z';
+    status.accepted_plan.status = 'completed';
+    status.start = {
+        start_id: 81,
+        sprint_id: status.sprint.sprint_id,
+        sprint_plan_artifact_id: status.accepted_plan.sprint_plan_artifact_id,
+        sprint_plan_artifact_decision_id: status.accepted_plan.sprint_plan_artifact_decision_id,
+        plan_fingerprint: status.accepted_plan.plan_fingerprint,
+        candidate_set_fingerprint: status.accepted_plan.candidate_set_fingerprint,
+        task_content_fingerprint: status.accepted_plan.task_content_fingerprint,
+    };
+    return status;
+}
+
+function validPendingSprintPlanReview(owner, overrides = {}) {
+    const candidate = {
+        sprint_plan_artifact_id: 42,
+        artifact_fingerprint: `sha256:${'9'.repeat(64)}`,
+        sprint_owner: owner,
+        sprint_goal: 'Deliver the next distinct scope.',
+        selected_stories: [{
+            ...storyReview('backlog_item:PBI-000003').review.candidate.story_items[0],
+            story_title: 'Next distinct Story',
+            story_points: 5,
+            tasks: [{
+                description: 'Implement the next distinct Task.',
+                task_kind: 'implementation',
+                checklist_items: ['Verify the next scope.'],
+                specification_evidence: [],
+            }],
+        }],
+        ...(overrides.candidate ?? {}),
+    };
+    return {
+        binding: overrides.binding !== undefined
+            ? overrides.binding
+            : {
+                decision_fingerprint: `sha256:${'f'.repeat(64)}`,
+                instance_key: null,
+            },
+        review: {
+            phase: 'sprint_plan',
+            project_id: 7,
+            candidate,
+            review: { state: 'pending', ...(overrides.reviewState ?? {}) },
+        },
+    };
+}
+
+test('issue 259: completed Sprint and distinct pending plan coexist', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const status = acceptedSprintStatus();
+    status.sprint.status = 'completed';
+    status.sprint.completed_at = '2026-09-08T00:00:00Z';
+    status.accepted_plan.status = 'completed';
+    status.start = {
+        start_id: 81,
+        sprint_id: status.sprint.sprint_id,
+        sprint_plan_artifact_id: status.accepted_plan.sprint_plan_artifact_id,
+        sprint_plan_artifact_decision_id: status.accepted_plan.sprint_plan_artifact_decision_id,
+        plan_fingerprint: status.accepted_plan.plan_fingerprint,
+        candidate_set_fingerprint: status.accepted_plan.candidate_set_fingerprint,
+        task_content_fingerprint: status.accepted_plan.task_content_fingerprint,
+    };
+    assert.ok(await context.validateSprintStatusProjection(status, 7));
+    const selected = {
+        binding: {
+            decision_fingerprint: `sha256:${'f'.repeat(64)}`,
+            instance_key: null,
+        },
+        review: {
+            phase: 'sprint_plan',
+            project_id: 7,
+            candidate: {
+                sprint_plan_artifact_id: 42,
+                artifact_fingerprint: `sha256:${'9'.repeat(64)}`,
+                sprint_owner: owner,
+                sprint_goal: 'Deliver the next distinct scope.',
+                selected_stories: [{
+                    ...storyReview('backlog_item:PBI-000003').review.candidate.story_items[0],
+                    story_title: 'Next distinct Story',
+                    story_points: 5,
+                    tasks: [{
+                        description: 'Implement the next distinct Task.',
+                        task_kind: 'implementation',
+                        checklist_items: ['Verify the next scope.'],
+                        specification_evidence: [],
+                    }],
+                }],
+            },
+            review: { state: 'pending' },
+        },
+    };
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selected },
+        [],
+        { sprintStatus: { kind: 'ready', data: status } },
+    );
+    assert.ok(markup.includes('data-sprint-status="completed"'));
+    assert.ok(markup.includes('Sprint #31 is complete'));
+    assert.ok(markup.includes('Ship accepted scope.'));
+    assert.ok(markup.includes('data-planning-review-card="sprint"'));
+    assert.ok(markup.includes('data-sprint-plan-identity="true"'));
+    assert.ok(markup.includes('Plan #42'));
+    assert.ok(markup.includes('Pending review'));
+    assert.ok(markup.includes('Deliver the next distinct scope.'));
+    assert.ok(markup.includes('Next distinct Story'));
+    assert.ok(markup.includes('(derived: 5 pts)'));
+    assert.ok(markup.includes('Implement the next distinct Task.'));
+    for (const decision of ['accepted', 'feedback', 'rejected']) {
+        assert.ok(markup.includes(`data-review-decision="${decision}"`));
+    }
+    assert.ok(!markup.includes('data-direct-action="start_sprint"'));
+});
+
+test('issue 259: no Sprint (kind absent) and valid pending plan render review and controls', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const selected = validPendingSprintPlanReview(owner);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selected },
+        [],
+        { sprintStatus: { kind: 'absent' } },
+    );
+    assert.ok(markup.includes('data-planning-review-card="sprint"'));
+    assert.ok(markup.includes('Deliver the next distinct scope.'));
+    for (const decision of ['accepted', 'feedback', 'rejected']) {
+        assert.ok(markup.includes(`data-review-decision="${decision}"`));
+    }
+    assert.ok(!markup.includes('data-direct-action="start_sprint"'));
+});
+
+test('issue 259: planned, active, or completed Sprint without pending review does not render Sprint review card', async () => {
+    const context = loadFrontend();
+    const planned = acceptedSprintStatus();
+    const active = {
+        ...planned,
+        sprint: { ...planned.sprint, status: 'active' },
+        accepted_plan: { ...planned.accepted_plan, status: 'active' },
+    };
+    const completed = completedSprintStatus();
+
+    for (const data of [planned, active, completed]) {
+        const markup = context.deliveryPanelMarkup(
+            { decisions: [] },
+            { backlog: {}, sprintPlan: {} },
+            [],
+            { sprintStatus: { kind: 'ready', data } },
+        );
+        assert.ok(!markup.includes('data-planning-review-card="sprint"'));
+    }
+});
+
+test('issue 259: completed Sprint with non-pending review state does not render Sprint review card', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const status = completedSprintStatus();
+
+    for (const state of ['accepted', 'feedback', 'rejected']) {
+        const selected = validPendingSprintPlanReview(owner, { reviewState: { state } });
+        const markup = context.deliveryPanelMarkup(
+            { decisions: [] },
+            { backlog: {}, sprintPlan: selected },
+            [],
+            { sprintStatus: { kind: 'ready', data: status } },
+        );
+        assert.ok(!markup.includes('data-planning-review-card="sprint"'));
+    }
+});
+
+test('issue 259: completed Sprint with missing review binding does not render Sprint review card', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const status = completedSprintStatus();
+    const selected = validPendingSprintPlanReview(owner, { binding: null });
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selected },
+        [],
+        { sprintStatus: { kind: 'ready', data: status } },
+    );
+    assert.ok(!markup.includes('data-planning-review-card="sprint"'));
+});
+
+test('issue 259: completed Sprint with missing candidate or invalid owner does not render Sprint review card', async () => {
+    const context = loadFrontend();
+    const status = completedSprintStatus();
+    const selectedMissingCandidate = {
+        binding: { decision_fingerprint: `sha256:${'f'.repeat(64)}`, instance_key: null },
+        review: { phase: 'sprint_plan', project_id: 7, candidate: null, review: { state: 'pending' } },
+    };
+    const markupMissing = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selectedMissingCandidate },
+        [],
+        { sprintStatus: { kind: 'ready', data: status } },
+    );
+    assert.ok(!markupMissing.includes('data-planning-review-card="sprint"'));
+
+    const invalidOwner = { id: 'team:invalid', label: 'Invalid Team' };
+    const selectedInvalidOwner = validPendingSprintPlanReview(invalidOwner);
+    const markupInvalidOwner = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selectedInvalidOwner },
+        [],
+        { sprintStatus: { kind: 'ready', data: status } },
+    );
+    assert.ok(!markupInvalidOwner.includes('data-planning-review-card="sprint"'));
+});
+
+test('issue 259: invalid or missing plan display ID does not render plan identity label but preserves review card', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const status = completedSprintStatus();
+
+    for (const invalidId of [null, undefined, 0, -1, '42', 'abc']) {
+        const selected = validPendingSprintPlanReview(owner, {
+            candidate: { sprint_plan_artifact_id: invalidId },
+        });
+        const markup = context.deliveryPanelMarkup(
+            { decisions: [] },
+            { backlog: {}, sprintPlan: selected },
+            [],
+            { sprintStatus: { kind: 'ready', data: status } },
+        );
+        assert.ok(!markup.includes('data-sprint-plan-identity="true"'));
+        assert.ok(markup.includes('data-planning-review-card="sprint"'));
+    }
+});
+
+test('issue 259: Sprint status error does not suppress independently valid pending review and has no start', async () => {
+    const context = loadFrontend();
+    const owner = await validatedSprintOwner(context);
+    const selected = validPendingSprintPlanReview(owner);
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] },
+        { backlog: {}, sprintPlan: selected },
+        [],
+        { sprintStatus: { kind: 'error' } },
+    );
+    assert.ok(markup.includes('Sprint status unavailable'));
+    assert.ok(markup.includes('data-planning-review-card="sprint"'));
+    assert.ok(markup.includes('data-sprint-plan-identity="true"'));
+    assert.ok(markup.includes('Plan #42'));
+    assert.ok(markup.includes('Deliver the next distinct scope.'));
+    assert.ok(!markup.includes('data-direct-action="start_sprint"'));
+});
+
 test('delivery generation submits the exact rendered Story selector', async () => {
     const requests = [];
     const context = loadFrontend(async (url, options = {}) => {
