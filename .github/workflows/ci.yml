@@ -29,7 +29,7 @@ jobs:
         run: uv python install 3.13.15
       - name: Install pyrepo-check controller
         run: |
-          uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@40119c00d4efc469655dec16b1a976e1b3298d7d"
+          uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@a417a5f788811146cbc9ac19547749cb172f6cd2"
           echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
       - name: Verify lock
         run: uv lock --check
@@ -84,14 +84,65 @@ jobs:
       - name: Install Python 3.13.15
         run: uv python install 3.13.15
       - name: Run secure Windows evidence suites
+        env:
+          AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
         run: >-
-          uv run --locked pytest tests/windows/test_vision_evidence_windows.py
-          tests/windows/test_specification_source_windows.py
+          uv run --locked pytest
           tests/services/test_vision_evidence_reader.py
+          tests/windows/test_vision_evidence_windows.py
+          tests/services/test_vision_evidence.py
+          tests/test_socket_marker_contract.py
+          tests/windows/test_specification_source_windows.py
           tests/services/test_specification_source_registration.py
           tests/services/test_specification_source_application.py
           tests/adapters/test_vision_bootstrap_api.py
           tests/adapters/test_cli_workflow_domain.py -q
+          --junitxml=windows-vision-evidence.xml
+      - name: Require the real evidence security cases to execute
+        shell: pwsh
+        run: |
+          [xml]$results = Get-Content -LiteralPath windows-vision-evidence.xml -Raw
+          $requiredCases = @(
+            'test_reader_factory_selects_posix_without_loading_windows'
+            'test_reader_factory_selects_windows_lazily'
+            'test_windows_reader_rejects_leaf_replacement_after_resolution'
+            'test_windows_reader_retains_parent_or_blocks_intermediate_replacement'
+            'test_windows_reader_detects_change_during_bounded_read'
+            'test_windows_reader_detects_leaf_deletion_after_read'
+            'test_windows_reader_bounds_materially_large_source'
+            'test_windows_reader_omits_source_after_native_read_failure'
+            'test_unreadable_and_escape_paths_warn_without_becoming_evidence'
+            'test_stable_in_worktree_symlink_uses_the_approved_source_identity'
+            'test_json_spec_symlink_rejects_approved_markdown_target'
+            'test_lone_enable_socket_marker_fails_during_collection'
+            'test_enable_socket_with_integration_marker_is_valid'
+          )
+          foreach ($name in $requiredCases) {
+            $cases = @($results.SelectNodes('//testcase') | Where-Object {
+              $_.name -eq $name
+            })
+            if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped') -or $cases[0].SelectSingleNode('failure') -or $cases[0].SelectSingleNode('error')) {
+              throw "The required evidence security case $name did not execute successfully exactly once."
+            }
+          }
+          $paramCases = @($results.SelectNodes('//testcase') | Where-Object {
+            $_.name.StartsWith('test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets[')
+          })
+          if ($paramCases.Count -ne 4) {
+            throw "Expected exactly 4 parameterized symlink cases, found $($paramCases.Count)."
+          }
+          foreach ($case in $paramCases) {
+            if ($case.SelectSingleNode('skipped') -or $case.SelectSingleNode('failure') -or $case.SelectSingleNode('error')) {
+              throw "Parameterized symlink case $($case.name) did not execute successfully."
+            }
+          }
+      - name: Upload evidence results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-vision-evidence-results
+          path: windows-vision-evidence.xml
+          if-no-files-found: warn
 
   windows-ui-runtime:
     name: Windows UI runtime ownership
@@ -123,6 +174,7 @@ jobs:
           $requiredCases = @(
             'test_real_windows_ui_owns_the_serving_interpreter'
             'test_real_windows_distribution_owns_the_installed_serving_interpreter'
+            'test_real_windows_pre_identity_failure_cleans_acquired_child'
           )
           foreach ($name in $requiredCases) {
             $cases = @($results.SelectNodes('//testcase') | Where-Object {
@@ -138,3 +190,51 @@ jobs:
           if ($secretsCases.Count -ne 1 -or $secretsCases[0].SelectSingleNode('skipped')) {
             throw 'The real Windows secrets-file regression did not execute exactly once.'
           }
+      - name: Upload UI runtime results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-ui-runtime-results
+          path: windows-ui-runtime.xml
+          if-no-files-found: warn
+
+  windows-full-gate:
+    name: Windows Python 3.13 full gate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.12.8"
+          python-version: "3.13.15"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Install Python 3.13.15
+        run: uv python install 3.13.15
+      - name: Install pyrepo-check controller
+        shell: pwsh
+        run: |
+          uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@a417a5f788811146cbc9ac19547749cb172f6cd2"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv tool dir --bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Verify lock
+        run: uv lock --check
+      - name: Install Playwright Chromium
+        run: uv run --locked python -m playwright install chromium
+      - name: Run canonical full gate
+        shell: pwsh
+        env:
+          AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
+        run: |
+          sh ./agileforge-dev check 2>&1 | Tee-Object -FilePath windows-canonical.log
+          $gateExit = $LASTEXITCODE
+          exit $gateExit
+      - name: Upload canonical log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-canonical-output
+          path: windows-canonical.log
+          if-no-files-found: warn
