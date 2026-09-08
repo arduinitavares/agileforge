@@ -505,14 +505,8 @@ def registered_source(
         encoding="utf-8",
         newline="",
     )
-    (repository / "CONTEXT.md").write_text(
-        "Context only from registration.\n",
-        encoding="utf-8",
-    )
-    (repository / ADR_PATH).write_text(
-        "# Exact source decision\n",
-        encoding="utf-8",
-    )
+    (repository / "CONTEXT.md").write_bytes(b"Context only from registration.\n")
+    (repository / ADR_PATH).write_bytes(b"# Exact source decision\n")
     with Repo.init(repository) as repo:
         with repo.config_writer() as config:
             config.set_value("user", "name", "Structuring Test")
