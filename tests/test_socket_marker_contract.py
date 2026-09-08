@@ -1,5 +1,6 @@
 """Collection contract for tests that fully enable sockets."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -8,15 +9,13 @@ pytest_plugins = ("pytester",)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PROJECT_CONFTEST = _PROJECT_ROOT / "tests" / "conftest.py"
-_PROJECT_FRONTEND = _PROJECT_ROOT / "frontend"
 
 
 def test_lone_enable_socket_marker_fails_during_collection(
     pytester: pytest.Pytester,
 ) -> None:
     """Reject enable_socket before its test body can execute."""
-    pytester.path.joinpath("conftest.py").symlink_to(_PROJECT_CONFTEST)
-    pytester.path.joinpath("frontend").symlink_to(_PROJECT_FRONTEND)
+    shutil.copyfile(_PROJECT_CONFTEST, pytester.path / "conftest.py")
     pytester.makepyfile(
         test_lone_enable_socket="""
         import pytest
@@ -44,8 +43,7 @@ def test_enable_socket_with_integration_marker_is_valid(
     pytester: pytest.Pytester,
 ) -> None:
     """Accept full socket access when the test is explicitly an integration test."""
-    pytester.path.joinpath("conftest.py").symlink_to(_PROJECT_CONFTEST)
-    pytester.path.joinpath("frontend").symlink_to(_PROJECT_FRONTEND)
+    shutil.copyfile(_PROJECT_CONFTEST, pytester.path / "conftest.py")
     pytester.makeini(
         """
         [pytest]

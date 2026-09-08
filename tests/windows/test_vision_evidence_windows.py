@@ -14,6 +14,7 @@ from sqlmodel import Session
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.repository import RepositoryBinding
+from services.contracts.vision_evidence import MAX_EVIDENCE_ITEM_BYTES
 from services.vision_evidence import (
     VisionEvidenceCollectionError,
     VisionEvidenceCollector,
@@ -23,6 +24,7 @@ from services.vision_evidence_windows import (
     WindowsRepositoryEvidenceReader,
     _WindowsApi,
     _WindowsCapabilityError,
+    _WindowsNativeError,
 )
 from workflow.fingerprints import canonical_json
 
@@ -322,13 +324,15 @@ def test_windows_reader_detects_change_during_bounded_read(
     _bind_repository(engine, project_id, windows_repository)
     original = WindowsRepositoryEvidenceReader._read_handle
     changed = False
+    observed_limit: int | None = None
 
     def change_after_read(
         self: WindowsRepositoryEvidenceReader,
         handle: int,
         byte_limit: int,
     ) -> bytes:
-        nonlocal changed
+        nonlocal changed, observed_limit
+        observed_limit = byte_limit
         content = original(self, handle, byte_limit)
         if content and not changed:
             readme.write_text("changed during read\n", encoding="utf-8")
@@ -347,6 +351,8 @@ def test_windows_reader_detects_change_during_bounded_read(
             repository_probe=GitPythonRepositoryProbe(),
         ).collect(project_id)
 
+    assert changed
+    assert observed_limit == MAX_EVIDENCE_ITEM_BYTES + 1
     assert (
         caught.value.code
         is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
@@ -391,6 +397,7 @@ def test_windows_reader_detects_leaf_deletion_after_read(
             repository_probe=_StableProbe(observed),
         ).collect(project_id)
 
+    assert deleted
     assert (
         caught.value.code
         is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
@@ -504,3 +511,91 @@ def test_windows_capability_probes_directory_relative_open(
 
     assert capability.available is True
     assert observed == [("", True)]
+
+
+def test_windows_reader_bounds_materially_large_source(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Read a materially oversized source through Windows handles within bounds."""
+    readme = windows_repository / "README.md"
+    readme.write_text("A" * (2 * 1024 * 1024), encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id, windows_repository)
+
+    original_read = WindowsRepositoryEvidenceReader._read_handle
+    observed_limits: list[int] = []
+    observed_byte_counts: list[int] = []
+
+    def wrapped_read(
+        self: WindowsRepositoryEvidenceReader,
+        handle: int,
+        byte_limit: int,
+    ) -> bytes:
+        observed_limits.append(byte_limit)
+        content = original_read(self, handle, byte_limit)
+        observed_byte_counts.append(len(content))
+        return content
+
+    monkeypatch.setattr(
+        WindowsRepositoryEvidenceReader,
+        "_read_handle",
+        wrapped_read,
+    )
+
+    bundle = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).collect(project_id)
+
+    assert observed_limits == [MAX_EVIDENCE_ITEM_BYTES + 1]
+    assert observed_byte_counts == [MAX_EVIDENCE_ITEM_BYTES + 1]
+
+    readme_item = next(item for item in bundle.items if item.kind == "readme")
+    assert readme_item.truncated is True
+    assert len(str(readme_item.content).encode("utf-8")) == MAX_EVIDENCE_ITEM_BYTES
+
+
+def test_windows_reader_omits_source_after_native_read_failure(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_repository: Path,
+) -> None:
+    """Omit an allowlisted file when reading its native handle fails."""
+    readme = windows_repository / "README.md"
+    readme.write_text("sentinel content\n", encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id, windows_repository)
+
+    executed = False
+
+    def deny_read(
+        self: WindowsRepositoryEvidenceReader,
+        handle: int,
+        byte_limit: int,
+    ) -> bytes:
+        nonlocal executed
+        del self, handle, byte_limit
+        executed = True
+        raise _WindowsNativeError(_WINDOWS_ERROR_ACCESS_DENIED)
+
+    monkeypatch.setattr(
+        WindowsRepositoryEvidenceReader,
+        "_read_handle",
+        deny_read,
+    )
+
+    bundle = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    ).collect(project_id)
+
+    assert executed
+    assert "file:README.md" not in {item.evidence_id for item in bundle.items}
+    assert all(item.relative_path != "README.md" for item in bundle.items)
+    assert "sentinel content" not in bundle.model_dump_json()
+    assert any(
+        warning.code == "EVIDENCE_UNREADABLE" and warning.source == "README.md"
+        for warning in bundle.warnings
+    )

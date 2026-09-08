@@ -4,7 +4,7 @@ import importlib
 import os
 import socket
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from pathlib import Path
 from sqlite3 import Connection
@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 _ORIGINAL_SOCKET: type[socket.socket] = socket.socket
+_WIN_ERROR_PRIVILEGE_NOT_HELD: int = 1314
 
 
 def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
@@ -182,3 +183,28 @@ def session(engine: Engine) -> Iterator[Session]:  # pylint: disable=redefined-o
     # Use _session to avoid redefining the 'session' fixture name
     with Session(engine) as _session:
         yield _session
+
+
+@pytest.fixture
+def create_symlink() -> Callable[[Path, Path | str], None]:
+    """Create a symlink, skipping or failing on Windows if unprivileged."""
+
+    def _create_symlink(link: Path, target: Path | str) -> None:
+        try:
+            link.symlink_to(target)
+        except OSError as error:
+            if (
+                os.name == "nt"
+                and getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD
+            ):
+                if os.environ.get("AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS") == "1":
+                    pytest.fail(
+                        "Windows SeCreateSymbolicLinkPrivilege not held and "
+                        "AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS is set.",  # ty: ignore[invalid-argument-type]
+                    )
+                pytest.skip(
+                    "Windows SeCreateSymbolicLinkPrivilege not held.",  # ty: ignore[too-many-positional-arguments]
+                )
+            raise
+
+    return _create_symlink
