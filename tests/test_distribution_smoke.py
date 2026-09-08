@@ -38,6 +38,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 
+# Two isolated Windows dependency installations need headroom.
+_DISTRIBUTION_SMOKE_TIMEOUT_SECONDS: int = 600 if sys.platform == "win32" else 180
+
+
 class _TrackingConnection(sqlite3.Connection):
     """Record whether the verifier closes each SQLite connection it opens."""
 
@@ -926,7 +930,7 @@ def test_built_distributions_pass_isolated_smoke_and_preserve_checkout() -> None
         check=False,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=_DISTRIBUTION_SMOKE_TIMEOUT_SECONDS,
     )
     after = subprocess.run(  # noqa: S603  # nosec B603
         status_command,
