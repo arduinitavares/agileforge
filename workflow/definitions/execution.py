@@ -37,6 +37,7 @@ from workflow.graph import (
 )
 from workflow.sprint_retry_eligibility import (
     evaluate_sprint_retry_eligibility,
+    retry_start_contract_is_current,
     sprint_retry_eligibility_payload,
 )
 
@@ -1207,6 +1208,21 @@ def _retry_start_rule(snapshot: WorkflowFactSnapshot) -> tuple[RuleEvaluation, .
     if len(planned) != 1:
         return (RuleEvaluation(RuleCategory.SATISFIED, "RETRY_START_NOT_PENDING"),)
     retry = planned[0]
+    if not retry_start_contract_is_current(
+        snapshot,
+        sprint_id=retry.sprint_id,
+        retry_contract_fingerprint=retry.contract_fingerprint,
+    ):
+        return (
+            RuleEvaluation(
+                RuleCategory.BLOCKED,
+                "SPRINT_RETRY_START_CONTRACT_STALE",
+                instance_key=execution_instance_key(
+                    "sprint", retry.sprint_id, retry.retry_attempt_id
+                ),
+                fact_references=_retry_references(snapshot, retry.sprint_id),
+            ),
+        )
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,

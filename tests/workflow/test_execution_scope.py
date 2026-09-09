@@ -13,7 +13,7 @@ from tests.workflow.execution_fixtures import (
     seed_started_execution,
     seed_started_execution_with_transitive_dependency,
 )
-from tests.workflow.test_execution_transitions import (
+from tests.workflow.execution_retry_support import (
     _complete_execution_sprint,
     _triage_execution_sprint,
 )
@@ -32,6 +32,7 @@ from workflow.execution_scope import (
     ExecutionScopeError,
     current_execution_scope,
     resolve_execution_scope,
+    retry_blocks_planning,
 )
 from workflow.facts import (
     SprintClosureFact,
@@ -465,8 +466,9 @@ def test_current_scope_allows_one_valid_review_on_an_active_retry() -> None:
     assert scope.sprint_reviews == reviewed.sprint_reviews
 
 
-def test_current_scope_allows_a_validly_closed_original_or_retry_before_triage(
-) -> None:
+def test_current_scope_allows_a_validly_closed_original_or_retry_before_triage() -> (
+    None
+):
     """Close and triage are separate current states for original and retry work."""
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
@@ -811,3 +813,27 @@ def test_shared_sprint_lineage_selector_keeps_the_current_started_stream() -> No
     accepted = next(item for item in stream if item.activated_sprint_id == sprint_id)
 
     assert plan_has_matching_sprint_start(snapshot, accepted)
+
+
+@pytest.mark.parametrize("include_triage", [False, True])
+def test_completed_retry_blocks_planning_until_its_own_triage_resolves(
+    include_triage: bool,
+) -> None:
+    """Completed retry evidence remains a planning lock until retry triage exists."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry = _closed_retry(
+        snapshot,
+        _started_retry(
+            snapshot,
+            retry_attempt_id=17,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            task_id=task_id,
+        ),
+        include_triage=include_triage,
+    )
+
+    assert retry_blocks_planning(
+        snapshot.model_copy(update={"sprint_retries": (retry,)})
+    ) is (not include_triage)

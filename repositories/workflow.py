@@ -4125,6 +4125,9 @@ class WorkflowFactRepository:
             "planning.roadmap.generate",
             "planning.story.generate",
             "specification.structure",
+            "vision.bootstrap",
+            "vision.interview",
+            "goal.interview",
         )
         attempts = self._session.exec(
             select(WorkflowNodeAttempt)
@@ -4216,9 +4219,14 @@ class WorkflowFactRepository:
                     and row.request_fingerprint == expected_fingerprint
                 )
                 if not valid_identity:
-                    integrity: Literal["linked", "malformed", "unassignable"] = (
-                        "unassignable"
-                    )
+                    if isinstance(request, CreateProject):
+                        integrity: Literal["linked", "malformed", "unassignable"] = (
+                            "unassignable"
+                        )
+                    elif request.project_id != project_id:
+                        continue
+                    else:
+                        integrity = "malformed"
                 elif isinstance(request, CreateProject):
                     # A valid project-creation receipt has no durable Project
                     # owner yet, so it cannot guard retries in an existing one.

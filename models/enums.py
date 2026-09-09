@@ -78,6 +78,8 @@ class WorkflowEventType(StrEnum):
     SPRINT_STARTED = "sprint_started"
     SPRINT_COMPLETED = "sprint_completed"
     POST_SPRINT_TRIAGE_RECORDED = "post_sprint_triage_recorded"
+    SPRINT_RETRY_PLANNED = "sprint_retry_planned"
+    SPRINT_RETRY_STARTED = "sprint_retry_started"
     TLX_PROMPT_TRIGGERED = "tlx_prompt_triggered"
 
 

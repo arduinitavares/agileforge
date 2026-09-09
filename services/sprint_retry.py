@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
 from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.sprint_retry import (
     SprintRetryAttempt,
@@ -14,12 +16,12 @@ from models.sprint_retry import (
     SprintRetryStoryState,
     SprintRetryTaskState,
 )
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.sprint_retry_eligibility import (
     SprintRetryBlocker,
     SprintRetryEligibility,
     evaluate_sprint_retry_eligibility,
-    source_sprint_contract_is_current,
+    retry_start_contract_is_current,
     sprint_retry_eligibility_payload,
 )
 
@@ -232,6 +234,25 @@ def retry_sprint_in_session(
                 status="To Do",
             )
         )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_RETRY_PLANNED,
+            timestamp=now,
+            project_id=preview.project_id,
+            sprint_id=preview.sprint_id,
+            duration_seconds=0.0,
+            event_metadata=canonical_json(
+                {
+                    "action": "sprint_retry_planned",
+                    "actor": request.actor.strip(),
+                    "idempotency_key": request.idempotency_key,
+                    "ordinal": attempt.ordinal,
+                    "retry_attempt_id": attempt.retry_attempt_id,
+                    "source_sprint_id": preview.sprint_id,
+                }
+            ),
+        )
+    )
     session.flush()
     return SprintRetryResult(
         retry_attempt_id=attempt.retry_attempt_id, status="Planned"
@@ -277,6 +298,26 @@ def start_sprint_retry_in_session(
             started_at=now,
         )
     )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_RETRY_STARTED,
+            timestamp=now,
+            project_id=retry.project_id,
+            sprint_id=retry.sprint_id,
+            duration_seconds=0.0,
+            event_metadata=canonical_json(
+                {
+                    "action": "sprint_retry_started",
+                    "actor": request.actor.strip(),
+                    "decision_fingerprint": request.decision_fingerprint,
+                    "idempotency_key": request.idempotency_key,
+                    "ordinal": retry.ordinal,
+                    "retry_attempt_id": retry.retry_attempt_id,
+                    "source_sprint_id": retry.sprint_id,
+                }
+            ),
+        )
+    )
     session.flush()
     return SprintRetryResult(retry_attempt_id=request.retry_attempt_id, status="Active")
 
@@ -286,6 +327,10 @@ def _require_live_start_guard(
     retry: SprintRetryAttempt,
 ) -> None:
     """Use the same current-source contract proof as retry eligibility."""
-    if not source_sprint_contract_is_current(snapshot, sprint_id=retry.sprint_id):
+    if not retry_start_contract_is_current(
+        snapshot,
+        sprint_id=retry.sprint_id,
+        retry_contract_fingerprint=retry.contract_fingerprint,
+    ):
         message = "Retry start selected requirements or dependencies changed."
         raise ValueError(message)

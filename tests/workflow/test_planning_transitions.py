@@ -12,6 +12,7 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     NoReturn,
+    NotRequired,
     TypedDict,
     Unpack,
     cast,
@@ -159,6 +160,7 @@ class _DependencyEdgePayload(TypedDict):
 class _SprintDraftOptions(TypedDict):
     team_name: str
     idempotency_key: str
+    assert_empty_execution: NotRequired[bool]
 
 
 def _copy_dependency_edge(item: _DependencyEdgePayload) -> _DependencyEdgePayload:
@@ -471,17 +473,22 @@ def _story_content(
     return _JSON_OBJECT.validate_python(output.model_dump(mode="json"))
 
 
-def _sprint_plan(story_id: int) -> JsonObject:
+def _sprint_plan(
+    story_id: int,
+    *,
+    story_item_id: str = "US-0001",
+    spec_item_ids: tuple[str, ...] = ("REQ.planning-1",),
+) -> JsonObject:
     return {
         "sprint_goal": "Persist planning workflow facts.",
         "selected_stories": [
             {
                 "story_id": story_id,
-                "story_item_id": "US-0001",
+                "story_item_id": story_item_id,
                 "tasks": [
                     {
                         "description": "Implement planning persistence",
-                        "relevant_spec_item_ids": ["REQ.planning-1"],
+                        "relevant_spec_item_ids": list(spec_item_ids),
                         "task_kind": "implementation",
                         "artifact_targets": ["planning workflow handler"],
                         "workstream_tags": ["workflow"],
@@ -875,7 +882,12 @@ def _record_sprint_plan_draft(
         snapshot.stories,
         snapshot.story_dependencies,
     )
-    plan = _sprint_plan(story_id)
+    story = next(item for item in snapshot.stories if item.story_id == story_id)
+    plan = _sprint_plan(
+        story_id,
+        story_item_id=story.source_story_item_id,
+        spec_item_ids=story.spec_item_ids,
+    )
     specification = accepted_current_spec(snapshot)
     assert specification is not None
     position = domain.position(project_id)
@@ -890,11 +902,13 @@ def _record_sprint_plan_draft(
         )
     )
     assert recorded.ok is True
-    with Session(engine) as session:
-        assert session.exec(select(Team).where(Team.name == team_name)).first() is None
-        assert session.exec(select(Sprint)).first() is None
-        assert session.exec(select(SprintStory)).first() is None
-        assert session.exec(select(Task)).first() is None
+    if options.get("assert_empty_execution", True):
+        with Session(engine) as session:
+            team = session.exec(select(Team).where(Team.name == team_name)).first()
+            assert team is None
+            assert session.exec(select(Sprint)).first() is None
+            assert session.exec(select(SprintStory)).first() is None
+            assert session.exec(select(Task)).first() is None
     return (
         _output_int(recorded, "sprint_plan_artifact_id"),
         candidate_fingerprint,

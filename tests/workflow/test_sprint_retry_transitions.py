@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from models.core import Project, UserStoryDependency
+from models.core import Project, Sprint, Task, UserStoryDependency
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.product_definition import VisionArtifact
 from models.repository import RepositoryBinding
 from models.sprint_retry import (
     SprintRetryAttempt,
@@ -17,11 +21,14 @@ from models.sprint_retry import (
     SprintRetryTaskState,
 )
 from models.workflow import (
+    PostSprintTriage,
+    SprintPlanArtifact,
+    SprintStart,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from repositories.workflow import WorkflowFactRepository
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.sprint_phase import (
     ActiveSprintRetryExistsError,
     RecordSprintPlanInput,
@@ -39,12 +46,17 @@ from services.story_dependencies import (
     StoryDependencyGraphError,
     apply_story_dependencies_in_session,
 )
+from tests.vision_lineage_fixtures import seed_accepted_vision_revision
 from tests.workflow.execution_fixtures import (
+    record_following_execution_sprint_plan,
     seed_started_execution_with_transitive_dependency,
+    seed_started_execution_with_unselected_story,
+    start_following_execution_sprint,
 )
-from tests.workflow.test_execution_transitions import (
+from tests.workflow.execution_retry_support import (
     _close_execution_sprint,
     _complete_execution_sprint,
+    _domain,
     _triage_execution_sprint,
 )
 from workflow.clock import FixedClock
@@ -68,15 +80,100 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from services.contracts.sprint import SprintPlannerOutput
+    from workflow.facts import WorkflowFactSnapshot
 
 
 FIRST_RETRY_ORDINAL = 2
+RETRY_PLANNED_EVENT = WorkflowEventType.SPRINT_RETRY_PLANNED
+RETRY_STARTED_EVENT = WorkflowEventType.SPRINT_RETRY_STARTED
+
+
+def _raw_rows(engine: Engine) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Capture every preexisting persisted column in deterministic SQLite row order."""
+    with engine.connect() as connection:
+        return {
+            table_name: tuple(
+                tuple(row)
+                for row in connection.execute(
+                    text(f"SELECT * FROM {table_name} ORDER BY rowid")  # noqa: S608
+                )
+            )
+            for table_name in inspect(engine).get_table_names()
+        }
+
+
+def _assert_preexisting_rows_unchanged(
+    before: dict[str, tuple[tuple[object, ...], ...]],
+    after: dict[str, tuple[tuple[object, ...], ...]],
+) -> None:
+    """Compare stored values for rows that existed before the guarded transition."""
+    assert after.keys() == before.keys()
+    for table_name, rows in before.items():
+        assert after[table_name][: len(rows)] == rows
+
+
+def _retry_state_rows(engine: Engine) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Capture retry-owned records and audit rows that must not appear on reject."""
+    rows = _raw_rows(engine)
+    return {
+        table_name: table_rows
+        for table_name, table_rows in rows.items()
+        if table_name.startswith("sprint_retry_") or table_name == "workflow_events"
+    }
 
 
 def _file_engine(path: Path) -> Engine:
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     SQLModel.metadata.create_all(engine)
     return engine
+
+
+def _append_accepted_vision_drift(session: Session, *, project_id: int) -> None:
+    """Append an accepted Vision successor without a matching Goal/Spec revision."""
+    source = session.exec(
+        select(VisionArtifact).where(VisionArtifact.project_id == project_id)
+    ).one()
+    seed_accepted_vision_revision(
+        session,
+        project_id=project_id,
+        superseded_vision=source,
+        statement="Accepted revised Vision before replacement Specification.",
+    )
+
+
+def _positioned_retry_request(
+    domain: WorkflowDomain,
+    *,
+    engine: Engine,
+    project_id: int,
+    sprint_id: int,
+    idempotency_key: str,
+) -> RetrySprint:
+    """Capture one exact retry request before a later durable guard arrives."""
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    assert preview.blockers == ()
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "execution.sprint.retry"
+    )
+    return RetrySprint(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=idempotency_key,
+        actor="owner@example.com",
+        instance_key=f"sprint:{sprint_id}",
+        sprint_id=sprint_id,
+        confirm=True,
+        rationale="Fresh evidence.",
+        expected_state_fingerprint=preview.expected_state_fingerprint,
+    )
 
 
 def test_retry_preview_is_read_only_for_exact_completed_triaged_sprint(
@@ -197,6 +294,23 @@ def test_confirmed_retry_creates_planned_scope_then_requires_explicit_start(
             )
             == 1
         )
+        planned_events = session.exec(
+            select(WorkflowEvent).where(
+                WorkflowEvent.project_id == project_id,
+                WorkflowEvent.event_type == RETRY_PLANNED_EVENT,
+            )
+        ).all()
+        assert len(planned_events) == 1
+        assert planned_events[0].event_metadata == canonical_json(
+            {
+                "actor": "owner@example.com",
+                "action": "sprint_retry_planned",
+                "idempotency_key": "retry-sprint-once",
+                "ordinal": FIRST_RETRY_ORDINAL,
+                "retry_attempt_id": retry_id,
+                "source_sprint_id": sprint_id,
+            }
+        )
     start_position = retry_domain.position(project_id)
     start_decision = next(
         item
@@ -218,6 +332,295 @@ def test_confirmed_retry_creates_planned_scope_then_requires_explicit_start(
     )
     assert started.ok is True
     assert started.output["status"] == "Active"
+    with Session(engine) as session:
+        events = session.exec(
+            select(WorkflowEvent).where(WorkflowEvent.project_id == project_id)
+        ).all()
+        assert [event.event_type for event in events].count(RETRY_PLANNED_EVENT) == 1
+        assert [event.event_type for event in events].count(RETRY_STARTED_EVENT) == 1
+
+
+def test_accepted_root_drift_rejects_preview_and_positioned_retry_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Current accepted Vision/Goal/Spec authority must still match Sprint start."""
+    engine = _file_engine(tmp_path / "retry-accepted-root-drift.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "execution.sprint.retry"
+    )
+    request = RetrySprint(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key="retry-after-accepted-root-drift",
+        actor="owner@example.com",
+        instance_key=f"sprint:{sprint_id}",
+        sprint_id=sprint_id,
+        confirm=True,
+        rationale="Fresh evidence.",
+        expected_state_fingerprint=preview.expected_state_fingerprint,
+    )
+    with Session(engine) as session:
+        _append_accepted_vision_drift(session, project_id=project_id)
+        before = session.exec(
+            select(SprintRetryAttempt).where(
+                SprintRetryAttempt.project_id == project_id
+            )
+        ).all()
+    result = domain.transition(request)
+    assert result.ok is False
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        assert {
+            item.code
+            for item in build_sprint_retry_preview(
+                session, snapshot=snapshot, sprint_id=sprint_id
+            ).blockers
+        } >= {"SOURCE_CONTRACT_CHANGED"}
+        assert (
+            session.exec(
+                select(SprintRetryAttempt).where(
+                    SprintRetryAttempt.project_id == project_id
+                )
+            ).all()
+            == before
+        )
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == RETRY_PLANNED_EVENT,
+                )
+            ).all()
+            == []
+        )
+
+
+def test_accepted_root_drift_rejects_positioned_retry_start_without_writes(
+    tmp_path: Path,
+) -> None:
+    """A planned retry cannot start after the accepted root authority changes."""
+    engine = _file_engine(tmp_path / "retry-start-accepted-root-drift.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    position = domain.position(project_id)
+    retry_decision = next(
+        item for item in position.decisions if item.node_id == "execution.sprint.retry"
+    )
+    planned = domain.transition(
+        RetrySprint(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=retry_decision.decision_fingerprint,
+            idempotency_key="plan-before-root-drift",
+            actor="owner@example.com",
+            instance_key=f"sprint:{sprint_id}",
+            sprint_id=sprint_id,
+            confirm=True,
+            rationale="Fresh evidence.",
+            expected_state_fingerprint=preview.expected_state_fingerprint,
+        )
+    )
+    assert planned.ok is True
+    retry_id = planned.output["retry_attempt_id"]
+    assert isinstance(retry_id, int)
+    start_position = domain.position(project_id)
+    start_decision = next(
+        item
+        for item in start_position.decisions
+        if item.node_id == "execution.sprint.retry.start"
+    )
+    request = StartSprintRetry(
+        project_id=project_id,
+        graph_version=start_position.graph_version,
+        fact_fingerprint=start_position.fact_fingerprint,
+        decision_fingerprint=start_decision.decision_fingerprint,
+        idempotency_key="start-after-root-drift",
+        actor="owner@example.com",
+        instance_key=start_decision.instance_key,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry_id,
+    )
+    with Session(engine) as session:
+        _append_accepted_vision_drift(session, project_id=project_id)
+    fresh = domain.position(project_id)
+    assert "execution.sprint.retry.start" in fresh.blocked_nodes
+    assert all(
+        not (
+            item.node_id == "execution.sprint.retry.start"
+            and item.category.value == "available"
+        )
+        for item in fresh.decisions
+    )
+    result = domain.transition(request)
+    assert result.ok is False
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        assert retry.status == "Planned"
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == RETRY_STARTED_EVENT,
+                )
+            ).all()
+            == []
+        )
+        assert retry.status == "Planned"
+
+
+def test_fresh_retry_start_position_blocks_stored_contract_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A planned retry cannot start when its persisted contract no longer matches."""
+    engine = _file_engine(tmp_path / "retry-start-contract-mismatch.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    position = domain.position(project_id)
+    plan_decision = next(
+        item for item in position.decisions if item.node_id == "execution.sprint.retry"
+    )
+    planned = domain.transition(
+        RetrySprint(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=plan_decision.decision_fingerprint,
+            idempotency_key="plan-before-contract-mismatch",
+            actor="owner@example.com",
+            instance_key=f"sprint:{sprint_id}",
+            sprint_id=sprint_id,
+            confirm=True,
+            rationale="Fresh evidence.",
+            expected_state_fingerprint=preview.expected_state_fingerprint,
+        )
+    )
+    assert planned.ok is True
+    retry_id = planned.output["retry_attempt_id"]
+    assert isinstance(retry_id, int)
+    start_position = domain.position(project_id)
+    start_decision = next(
+        item
+        for item in start_position.decisions
+        if item.node_id == "execution.sprint.retry.start"
+    )
+    request = StartSprintRetry(
+        project_id=project_id,
+        graph_version=start_position.graph_version,
+        fact_fingerprint=start_position.fact_fingerprint,
+        decision_fingerprint=start_decision.decision_fingerprint,
+        idempotency_key="start-after-contract-mismatch",
+        actor="owner@example.com",
+        instance_key=start_decision.instance_key,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry_id,
+    )
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        retry.contract_fingerprint = canonical_hash("changed retry contract")
+        session.add(retry)
+        session.commit()
+
+    fresh = domain.position(project_id)
+    assert "execution.sprint.retry.start" in fresh.blocked_nodes
+    result = domain.transition(request)
+    assert result.ok is False
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        before = snapshot.model_dump(mode="json")
+        with pytest.raises(
+            ValueError, match="selected requirements or dependencies changed"
+        ):
+            start_sprint_retry_in_session(
+                session,
+                request=request,
+                snapshot=snapshot,
+                now=datetime(2026, 9, 9, tzinfo=UTC),
+            )
+        session.rollback()
+        assert (
+            WorkflowFactRepository(session).load(project_id).model_dump(mode="json")
+            == before
+        )
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        assert retry.status == "Planned"
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == RETRY_STARTED_EVENT,
+                )
+            ).all()
+            == []
+        )
+
+
+@pytest.mark.parametrize("drift", ["task", "plan", "decision"])
+def test_corrupted_original_contract_fails_closed_before_retry_start(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    """Historical Task/plan/decision corruption remains rejected by fact loading."""
+    engine = _file_engine(tmp_path / f"retry-corrupt-original-{drift}.sqlite")
+    domain, project_id, sprint_id, _story_id, task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        if drift == "task":
+            task = session.get_one(Task, task_id)
+            task.description = f"{task.description} changed after completion"
+            session.add(task)
+        elif drift == "plan":
+            plan = session.exec(
+                select(SprintPlanArtifact).where(
+                    SprintPlanArtifact.project_id == project_id
+                )
+            ).one()
+            plan.candidate_set_fingerprint = "sha256:changed-plan-candidate"
+            session.add(plan)
+        else:
+            start = session.exec(
+                select(SprintStart).where(SprintStart.sprint_id == sprint_id)
+            ).one()
+            start.decision_fingerprint = "sha256:changed-start-decision"
+            session.add(start)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        domain.position(project_id)
 
 
 def test_distinct_retry_keys_from_one_preview_create_one_attempt(
@@ -318,8 +721,14 @@ def test_retry_failure_after_progress_rolls_back_receipt_and_marker(
     original = retry_handler.retry_sprint_in_session
     error_message = "Injected failure after retry progress insertion."
 
-    def fail_after_progress(*args: object, **kwargs: object) -> object:
-        original(*args, **kwargs)
+    def fail_after_progress(
+        session: Session,
+        *,
+        request: RetrySprint,
+        snapshot: WorkflowFactSnapshot,
+        now: datetime,
+    ) -> object:
+        original(session, request=request, snapshot=snapshot, now=now)
         raise RuntimeError(error_message)
 
     monkeypatch.setattr(retry_handler, "retry_sprint_in_session", fail_after_progress)
@@ -358,6 +767,16 @@ def test_retry_failure_after_progress_rolls_back_receipt_and_marker(
             ).all()
             == []
         )
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == RETRY_PLANNED_EVENT,
+                )
+            ).all()
+            == []
+        )
+
 
 def test_retry_success_clears_only_its_receipt_marker(tmp_path: Path) -> None:
     """Successful retry leaves session marker state clean for the next receipt."""
@@ -904,6 +1323,404 @@ def test_pending_receipts_are_typed_guard_facts_and_own_marker_is_exact(
         } >= {"INCOMPLETE_TRANSITION"}
 
 
+def test_parseable_tampered_receipt_is_malformed_only_for_its_project(
+    tmp_path: Path,
+) -> None:
+    """A known Project owner confines malformed pending receipt blocking."""
+    engine = _file_engine(tmp_path / "retry-malformed-receipt-owner.sqlite")
+    domain, first_project_id, first_sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(
+        domain, project_id=first_project_id, sprint_id=first_sprint_id
+    )
+    with Session(engine) as session:
+        second = Project(name="retry-malformed-receipt-other-project")
+        session.add(second)
+        session.commit()
+        assert second.project_id is not None
+        second_project_id = second.project_id
+    request = RetrySprint(
+        project_id=first_project_id,
+        graph_version="graph",
+        fact_fingerprint="facts",
+        decision_fingerprint="decision",
+        idempotency_key="tampered-known-owner",
+        actor="owner@example.com",
+        instance_key=f"sprint:{first_sprint_id}",
+        sprint_id=first_sprint_id,
+        confirm=True,
+        rationale="Fresh evidence.",
+        expected_state_fingerprint="expected",
+    )
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind=request.kind,
+                idempotency_key=request.idempotency_key,
+                request_fingerprint="tampered-fingerprint",
+                request_json=canonical_json(request.model_dump(mode="json")),
+                started_at=datetime(2026, 9, 9, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    with Session(engine) as session:
+        first = WorkflowFactRepository(session).load(first_project_id)
+        second = WorkflowFactRepository(session).load(second_project_id)
+        assert first.incomplete_transitions[0].integrity == "malformed"
+        assert second.incomplete_transitions == ()
+        assert build_sprint_retry_preview(
+            session, snapshot=first, sprint_id=first_sprint_id
+        ).blockers
+
+
+@pytest.mark.parametrize("drift", ["receipt", "triage", "repository"])
+def test_positioned_retry_rejects_guard_drift_without_undoing_it(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    """A stale positioned retry preserves injected transition/authority state."""
+    engine = _file_engine(tmp_path / f"retry-positioned-{drift}.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "execution.sprint.retry"
+    )
+    request = RetrySprint(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=f"positioned-before-{drift}",
+        actor="owner@example.com",
+        instance_key=f"sprint:{sprint_id}",
+        sprint_id=sprint_id,
+        confirm=True,
+        rationale="Fresh evidence.",
+        expected_state_fingerprint=preview.expected_state_fingerprint,
+    )
+    with Session(engine) as session:
+        if drift == "receipt":
+            pending = request.model_copy(update={"idempotency_key": "other-pending"})
+            session.add(
+                WorkflowTransitionReceipt(
+                    request_kind=pending.kind,
+                    idempotency_key=pending.idempotency_key,
+                    request_fingerprint=canonical_hash(pending.model_dump(mode="json")),
+                    request_json=canonical_json(pending.model_dump(mode="json")),
+                    started_at=datetime(2026, 9, 9, tzinfo=UTC),
+                )
+            )
+        elif drift == "triage":
+            triage = session.exec(
+                select(PostSprintTriage).where(PostSprintTriage.sprint_id == sprint_id)
+            ).one()
+            session.delete(triage)
+        else:
+            binding = RepositoryBinding(
+                project_id=project_id,
+                worktree_path="C:/positioned-drift",
+                common_git_dir="C:/positioned-git",
+                head_sha="b" * 40,
+                branch_name="main",
+                detached_head=False,
+                dirty=False,
+                status_fingerprint="sha256:" + ("b" * 64),
+                remotes_json="[]",
+                warnings_json="[]",
+                probe_version="test",
+                recorded_by="owner@example.com",
+            )
+            session.add(binding)
+            session.flush()
+            project = session.get_one(Project, project_id)
+            project.active_repository_binding_id = binding.repository_binding_id
+            session.add(project)
+        session.commit()
+    before = _raw_rows(engine)
+    retry_before = _retry_state_rows(engine)
+
+    result = domain.transition(request)
+    assert result.ok is False
+    _assert_preexisting_rows_unchanged(before, _raw_rows(engine))
+    assert _retry_state_rows(engine) == retry_before
+
+
+def test_exact_older_completed_sprint_is_not_substituted_after_later_lineage(
+    tmp_path: Path,
+) -> None:
+    """An older valid source stays exact and is rejected after a later Sprint ends."""
+    engine = _file_engine(tmp_path / "retry-exact-older-source.sqlite")
+    (
+        project_id,
+        first_sprint_id,
+        first_story_id,
+        future_story_id,
+        first_task_id,
+        _dependency_id,
+    ) = seed_started_execution_with_unselected_story(engine)
+    first_domain = _domain(engine)
+    _close_execution_sprint(
+        first_domain,
+        project_id=project_id,
+        sprint_id=first_sprint_id,
+        story_id=first_story_id,
+        task_id=first_task_id,
+    )
+    _triage_execution_sprint(
+        first_domain, project_id=project_id, sprint_id=first_sprint_id
+    )
+    request = _positioned_retry_request(
+        first_domain,
+        engine=engine,
+        project_id=project_id,
+        sprint_id=first_sprint_id,
+        idempotency_key="retry-before-later-completed-sprint",
+    )
+
+    second_sprint_id, second_task_id = start_following_execution_sprint(
+        engine,
+        project_id=project_id,
+        story_id=future_story_id,
+        started_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
+        idempotency_suffix="-later-completed",
+    )
+    second_domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 4, 12, tzinfo=UTC)),
+    )
+    _close_execution_sprint(
+        second_domain,
+        project_id=project_id,
+        sprint_id=second_sprint_id,
+        story_id=future_story_id,
+        task_id=second_task_id,
+        idempotency_suffix="-later-completed",
+    )
+    _triage_execution_sprint(
+        second_domain, project_id=project_id, sprint_id=second_sprint_id
+    )
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        completed = tuple(
+            item for item in snapshot.sprints if item.status == "completed"
+        )
+        assert tuple(item.sprint_id for item in completed) == (
+            first_sprint_id,
+            second_sprint_id,
+        )
+        assert completed[0].completed_at != completed[1].completed_at
+        older_preview = build_sprint_retry_preview(
+            session, snapshot=snapshot, sprint_id=first_sprint_id
+        )
+        latest_preview = build_sprint_retry_preview(
+            session, snapshot=snapshot, sprint_id=second_sprint_id
+        )
+        assert older_preview.sprint_id == first_sprint_id
+        assert latest_preview.sprint_id == second_sprint_id
+        assert latest_preview.blockers == ()
+        assert {item.code for item in older_preview.blockers} >= {"SPRINT_NOT_CURRENT"}
+    before = _raw_rows(engine)
+    retry_before = _retry_state_rows(engine)
+
+    rejected = first_domain.transition(request)
+    assert rejected.ok is False
+    _assert_preexisting_rows_unchanged(before, _raw_rows(engine))
+    assert _retry_state_rows(engine) == retry_before
+
+
+@pytest.mark.parametrize(
+    ("later_state", "expected_blocker"),
+    [
+        ("draft", None),
+        ("accepted", "LIVE_SPRINT_EXISTS"),
+        ("generation", "IN_FLIGHT_SPRINT_PLAN_GENERATION"),
+    ],
+)
+def test_positioned_retry_preserves_later_planning_state(
+    tmp_path: Path,
+    later_state: str,
+    expected_blocker: str | None,
+) -> None:
+    """Later draft, accepted, and unplanned generation state rejects stale retry."""
+    engine = _file_engine(tmp_path / f"retry-later-planning-{later_state}.sqlite")
+    (
+        project_id,
+        sprint_id,
+        story_id,
+        future_story_id,
+        task_id,
+        _dependency_id,
+    ) = seed_started_execution_with_unselected_story(engine)
+    domain = _domain(engine)
+    _close_execution_sprint(
+        domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    request = _positioned_retry_request(
+        domain,
+        engine=engine,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        idempotency_key=f"retry-before-later-{later_state}",
+    )
+
+    if later_state == "draft":
+        record_following_execution_sprint_plan(
+            engine,
+            project_id=project_id,
+            story_id=future_story_id,
+            recorded_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
+            idempotency_suffix="-later-draft",
+        )
+    elif later_state == "accepted":
+        start_following_execution_sprint(
+            engine,
+            project_id=project_id,
+            story_id=future_story_id,
+            started_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
+            idempotency_suffix="-later-accepted",
+        )
+    else:
+        with Session(engine) as session:
+            snapshot = WorkflowFactRepository(session).load(project_id)
+            source = next(
+                item for item in snapshot.sprints if item.sprint_id == sprint_id
+            )
+            assert source.completed_at is not None
+            session.add(
+                WorkflowNodeAttempt(
+                    project_id=project_id,
+                    node_id="planning.sprint.plan",
+                    instance_key=None,
+                    graph_version="test",
+                    fact_fingerprint="facts",
+                    business_fact_fingerprint=business_fact_fingerprint(snapshot),
+                    decision_fingerprint="decision",
+                    normalized_input_json="{}",
+                    input_fingerprint="sha256:later-unplanned-generation",
+                    model_id="test",
+                    execution_settings_json="{}",
+                    idempotency_key="later-unplanned-generation",
+                    actor="owner@example.com",
+                    started_at=source.completed_at,
+                    lease_expires_at=source.completed_at + timedelta(days=1),
+                    attempt_fingerprint="later-unplanned-generation",
+                )
+            )
+            session.commit()
+
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+        assert preview.blockers
+        if expected_blocker is not None:
+            assert expected_blocker in {item.code for item in preview.blockers}
+    before = _raw_rows(engine)
+    retry_before = _retry_state_rows(engine)
+
+    rejected = domain.transition(request)
+    assert rejected.ok is False
+    _assert_preexisting_rows_unchanged(before, _raw_rows(engine))
+    assert _retry_state_rows(engine) == retry_before
+
+
+def test_ambiguous_later_sprint_lifecycle_timestamp_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A duplicate terminal stream marker rejects a captured retry without repair."""
+    engine = _file_engine(tmp_path / "retry-ambiguous-lifecycle-marker.sqlite")
+    (
+        project_id,
+        first_sprint_id,
+        first_story_id,
+        future_story_id,
+        first_task_id,
+        _dependency_id,
+    ) = seed_started_execution_with_unselected_story(engine)
+    first_domain = _domain(engine)
+    _close_execution_sprint(
+        first_domain,
+        project_id=project_id,
+        sprint_id=first_sprint_id,
+        story_id=first_story_id,
+        task_id=first_task_id,
+    )
+    _triage_execution_sprint(
+        first_domain, project_id=project_id, sprint_id=first_sprint_id
+    )
+    request = _positioned_retry_request(
+        first_domain,
+        engine=engine,
+        project_id=project_id,
+        sprint_id=first_sprint_id,
+        idempotency_key="retry-before-ambiguous-lifecycle-marker",
+    )
+    second_sprint_id, second_task_id = start_following_execution_sprint(
+        engine,
+        project_id=project_id,
+        story_id=future_story_id,
+        started_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
+        idempotency_suffix="-ambiguous-lifecycle",
+    )
+    second_domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 8, 4, 12, tzinfo=UTC)),
+    )
+    _close_execution_sprint(
+        second_domain,
+        project_id=project_id,
+        sprint_id=second_sprint_id,
+        story_id=future_story_id,
+        task_id=second_task_id,
+        idempotency_suffix="-ambiguous-lifecycle",
+    )
+    _triage_execution_sprint(
+        second_domain, project_id=project_id, sprint_id=second_sprint_id
+    )
+    with Session(engine) as session:
+        first = session.get_one(Sprint, first_sprint_id)
+        second = session.get_one(Sprint, second_sprint_id)
+        assert first.completed_at is not None
+        assert second.completed_at is not None
+        second.completed_at = first.completed_at
+        session.add(second)
+        session.commit()
+    before = _raw_rows(engine)
+    retry_before = _retry_state_rows(engine)
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=first_sprint_id,
+        )
+        assert {item.code for item in preview.blockers} >= {"EXECUTION_SCOPE_INVALID"}
+
+    rejected = first_domain.transition(request)
+    assert rejected.ok is False
+    _assert_preexisting_rows_unchanged(before, _raw_rows(engine))
+    assert _retry_state_rows(engine) == retry_before
+
+
 def test_retry_preview_hash_changes_for_valid_triage_correction(tmp_path: Path) -> None:
     """A valid terminal-evidence correction requires a fresh retry preview."""
     engine = _file_engine(tmp_path / "retry-triage-preview.sqlite")
@@ -1057,10 +1874,20 @@ def test_retry_generation_guards_only_block_relevant_unresolved_work(
         assert expected_code in codes
 
 
+@pytest.mark.parametrize(
+    ("node_id", "instance_key"),
+    [
+        ("planning.story.generate", "backlog_item:PBI-000001"),
+        ("vision.interview", "revision:1"),
+        ("goal.interview", "goal:1"),
+    ],
+)
 def test_current_provider_generation_requires_canonical_recovery(
     tmp_path: Path,
+    node_id: str,
+    instance_key: str,
 ) -> None:
-    """Current Story generation failures block retry until exact canonical recovery."""
+    """Current provider failures block retry until exact canonical recovery."""
     engine = _file_engine(tmp_path / "retry-provider-generation.sqlite")
     domain, project_id, sprint_id, _story_id, _task_id, _review = (
         _complete_execution_sprint(engine)
@@ -1074,8 +1901,8 @@ def test_current_provider_generation_requires_canonical_recovery(
         started_at = source.completed_at
         common = {
             "project_id": project_id,
-            "node_id": "planning.story.generate",
-            "instance_key": "backlog_item:PBI-000001",
+            "node_id": node_id,
+            "instance_key": instance_key,
             "graph_version": "test",
             "fact_fingerprint": "facts",
             "business_fact_fingerprint": business,
@@ -1147,6 +1974,60 @@ def test_current_provider_generation_requires_canonical_recovery(
             sprint_id=sprint_id,
         )
     assert recovered.blockers == ()
+
+
+@pytest.mark.parametrize(
+    ("node_id", "instance_key"),
+    [
+        ("vision.interview", "revision:1"),
+        ("goal.interview", "goal:1"),
+    ],
+)
+def test_current_vision_or_goal_provider_generation_in_flight_blocks_retry(
+    tmp_path: Path,
+    node_id: str,
+    instance_key: str,
+) -> None:
+    """In-flight reachable provider work remains a retry blocker."""
+    engine = _file_engine(tmp_path / f"retry-provider-in-flight-{node_id}.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        source = next(item for item in snapshot.sprints if item.sprint_id == sprint_id)
+        assert source.completed_at is not None
+        session.add(
+            WorkflowNodeAttempt(
+                project_id=project_id,
+                node_id=node_id,
+                instance_key=instance_key,
+                graph_version="test",
+                fact_fingerprint="facts",
+                business_fact_fingerprint=business_fact_fingerprint(snapshot),
+                decision_fingerprint="decision",
+                normalized_input_json="{}",
+                input_fingerprint="sha256:provider-input",
+                model_id="test",
+                execution_settings_json="{}",
+                idempotency_key=f"in-flight-{node_id}",
+                actor="owner@example.com",
+                started_at=source.completed_at,
+                lease_expires_at=source.completed_at + timedelta(days=1),
+                attempt_fingerprint=f"in-flight-{node_id}",
+            )
+        )
+        session.commit()
+    with Session(engine) as session:
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=WorkflowFactRepository(session).load(project_id),
+            sprint_id=sprint_id,
+        )
+    assert {item.code for item in preview.blockers} >= {
+        "UNRESOLVED_PROVIDER_GENERATION"
+    }
 
 
 def test_retry_forged_late_success_cannot_recover_the_completed_source_plan(

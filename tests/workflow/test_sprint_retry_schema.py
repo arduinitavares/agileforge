@@ -16,7 +16,7 @@ from models.db import (
     ensure_business_db_ready,
 )
 from repositories.workflow import WorkflowFactRepository
-from tests.workflow.test_execution_transitions import (
+from tests.workflow.execution_retry_support import (
     _complete_execution_sprint,
     _triage_execution_sprint,
 )

@@ -20,13 +20,17 @@ from tests.workflow.test_planning_transitions import (
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
 )
+from workflow.clock import FixedClock
+from workflow.definitions.planning import planning_graph
+from workflow.domain import WorkflowDomain
 from workflow.requests import DecideSprintPlan, StartSprint
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.engine import Engine
 
     from workflow.contracts import JsonObject
-    from workflow.domain import WorkflowDomain
 
 type _SprintPlanBinding = tuple[int, str, JsonObject, str]
 
@@ -182,6 +186,68 @@ def seed_started_execution_with_unselected_story(
             task_id,
             dependency_id,
         )
+
+
+def start_following_execution_sprint(
+    engine: Engine,
+    *,
+    project_id: int,
+    story_id: int,
+    started_at: datetime,
+    idempotency_suffix: str,
+) -> tuple[int, int]:
+    """Plan and start one later selected Story with a monotonic lifecycle clock."""
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=planning_graph(),
+        clock=FixedClock(now_value=started_at),
+    )
+    plan_binding = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=f"Following execution Sprint {idempotency_suffix}",
+        idempotency_key=f"following-execution-sprint-plan{idempotency_suffix}",
+        assert_empty_execution=False,
+    )
+    sprint_id = _accept_and_start_sprint(
+        domain,
+        project_id=project_id,
+        plan_binding=plan_binding,
+        idempotency_suffix=idempotency_suffix,
+    )
+    with Session(engine) as session:
+        task = session.exec(select(Task).where(Task.story_id == story_id)).one()
+        task.status = TaskStatus.IN_PROGRESS
+        session.add(task)
+        session.commit()
+        return sprint_id, _required_identity(task.task_id, "Task")
+
+
+def record_following_execution_sprint_plan(
+    engine: Engine,
+    *,
+    project_id: int,
+    story_id: int,
+    recorded_at: datetime,
+    idempotency_suffix: str,
+) -> None:
+    """Record one later plan without creating a Sprint lifecycle row."""
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=planning_graph(),
+        clock=FixedClock(now_value=recorded_at),
+    )
+    _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=f"Following draft Sprint {idempotency_suffix}",
+        idempotency_key=f"following-draft-sprint-plan{idempotency_suffix}",
+        assert_empty_execution=False,
+    )
 
 
 def seed_started_execution_with_transitive_dependency(

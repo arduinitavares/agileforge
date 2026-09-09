@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     execution_contract,
@@ -63,6 +64,15 @@ def source_sprint_contract_is_current(
     if len(starts) != 1:
         return False
     start = starts[0]
+    product_definition = select_product_definition_state(snapshot)
+    current_spec = product_definition.accepted_spec
+    if (
+        product_definition.has_conflict
+        or current_spec is None
+        or current_spec.spec_version_id != start.spec_version_id
+        or current_spec.spec_hash != start.spec_hash
+    ):
+        return False
     try:
         live_dependencies = selected_story_dependency_snapshot(
             snapshot,
@@ -87,6 +97,22 @@ def source_sprint_contract_is_current(
         and live_dependencies.rows_fingerprint == start.dependency_rows_fingerprint
         and live_dependencies.rows == start.dependency_rows_snapshot
     )
+
+
+def retry_start_contract_is_current(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    sprint_id: int,
+    retry_contract_fingerprint: str,
+) -> bool:
+    """Return whether a planned retry still has the exact source contract."""
+    if not source_sprint_contract_is_current(snapshot, sprint_id=sprint_id):
+        return False
+    try:
+        current_contract = execution_contract(snapshot, sprint_id)
+    except ExecutionIntegrityError:
+        return False
+    return current_contract.fingerprint == retry_contract_fingerprint
 
 
 def evaluate_sprint_retry_eligibility(  # noqa: C901, PLR0912, PLR0915
