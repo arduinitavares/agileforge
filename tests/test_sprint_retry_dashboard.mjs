@@ -128,6 +128,13 @@ function completedSprintRetryState() {
                 fact_fingerprint: fingerprint('f'),
                 instance_key: 'task:71',
             }],
+            stories: [{
+                story_id: 101,
+                status: 'Done',
+                sprint_ids: [sprintId],
+                source_story_item_id: 'US-0101',
+                instance_key: 'story:101',
+            }],
             current_retry: null,
             effective_status: 'completed',
             review: { review_id: 81, status: 'completed' },
@@ -163,13 +170,23 @@ function response(data, status = 200) {
 function element(textContent = '') {
     const attributes = new Map();
     const listeners = {};
+    const classes = new Set();
     return {
         textContent,
+        innerHTML: '',
         value: '',
         disabled: false,
         dataset: {},
         style: {},
-        classList: { toggle() {}, add() {}, remove() {} },
+        classList: {
+            toggle(name, force) {
+                if (force === undefined ? !classes.has(name) : force) classes.add(name);
+                else classes.delete(name);
+            },
+            add(...names) { names.forEach((name) => classes.add(name)); },
+            remove(...names) { names.forEach((name) => classes.delete(name)); },
+            contains(name) { return classes.has(name); },
+        },
         setAttribute(name, value) { attributes.set(name, String(value)); },
         removeAttribute(name) { attributes.delete(name); },
         getAttribute(name) { return attributes.get(name) ?? null; },
@@ -224,6 +241,7 @@ function retryHarness({
         'human-action-kicker': element(),
         'human-action-title': element(),
         'human-action-description': element(),
+        'human-action-retry-details': element(),
         'human-action-rationale-group': element(),
         'human-action-rationale': element(),
         'human-action-rationale-label': element(),
@@ -367,6 +385,11 @@ function plannedRetryStartState() {
         status: 'To Do',
         instance_key: 'retry:101:task:71',
     };
+    state.status.stories[0] = {
+        ...state.status.stories[0],
+        status: 'To Do',
+        instance_key: 'retry:101:story:101',
+    };
     state.position.decisions = [{
         node_id: 'execution.sprint.retry.start',
         instance_key: 'retry:101:sprint:31',
@@ -405,6 +428,11 @@ function activeRetryState() {
         decision_fingerprint: fingerprint('4'),
         started_by: 'dashboard-ui',
         started_at: '2026-09-09T10:30:00Z',
+    };
+    state.status.stories[0] = {
+        ...state.status.stories[0],
+        status: 'To Do',
+        instance_key: 'retry:101:story:101',
     };
     state.position.decisions = [{
         node_id: 'execution.task.complete',
@@ -458,6 +486,32 @@ function activeRetryState() {
     return state;
 }
 
+function completedRetryState() {
+    const state = activeRetryState();
+    state.status.current_retry = {
+        ...state.status.current_retry,
+        status: 'completed',
+    };
+    state.status.effective_status = 'completed';
+    state.status.tasks[0] = {
+        ...state.status.tasks[0],
+        status: 'Done',
+    };
+    state.status.stories[0] = {
+        ...state.status.stories[0],
+        status: 'Done',
+    };
+    state.position.decisions = [];
+    state.actions = [];
+    state.history.execution_attempts[1] = {
+        ...state.history.execution_attempts[1],
+        status: 'completed',
+        task_completions: [{ task_id: 71, status: 'Done' }],
+        story_completions: [{ story_id: 101, status: 'Done' }],
+    };
+    return state;
+}
+
 test('opening the exact retry control previews by GET before any retry mutation', async () => {
     const harness = retryHarness();
 
@@ -485,8 +539,113 @@ test('a blocked preview explains its blocker and exposes no confirmation', async
 
     assert.equal(harness.previewGets().length, 1);
     assert.equal(harness.retryPosts().length, 0);
-    assert.match(harness.elements['human-action-description'].textContent, /already active/);
+    assert.match(harness.elements['human-action-retry-details'].innerHTML, /already active/);
     assert.equal(harness.elements['human-action-submit'].disabled, true);
+});
+
+test('a retry preview exposes every exact scope identifier and structured blocker subject', async () => {
+    const harness = retryHarness({
+        previews: [retryPreview({
+            story_ids: [101, 102],
+            task_ids: [71, 72],
+            blockers: [{
+                code: 'RETRY_ALREADY_LIVE',
+                reason: 'A retry attempt is already active.',
+                subject_type: 'retry_attempt',
+                subject_id: 101,
+            }, {
+                code: 'RETRY_PROVENANCE_MISSING',
+                reason: 'No prior retry provenance was recorded.',
+                subject_type: 'repository_provenance',
+                subject_id: null,
+            }],
+        })],
+    });
+
+    await harness.open();
+
+    const details = harness.elements['human-action-retry-details'].innerHTML;
+    assert.match(details, /Story #101/);
+    assert.match(details, /Story #102/);
+    assert.match(details, /Task #71/);
+    assert.match(details, /Task #72/);
+    assert.match(details, /RETRY_ALREADY_LIVE/);
+    assert.match(details, /retry_attempt #101/);
+    assert.match(details, /RETRY_PROVENANCE_MISSING/);
+    assert.match(details, /repository_provenance/);
+    assert.match(details, /no subject ID/);
+    assert.equal(harness.retryPosts().length, 0);
+});
+
+test('retry preview separates its exact scope and every blocker into accessible rows', async () => {
+    const harness = retryHarness({
+        previews: [retryPreview({
+        story_ids: [101, 102],
+        task_ids: [71, 72],
+        blockers: [{
+            code: 'RETRY_ALREADY_LIVE',
+            reason: 'A retry attempt is already active.',
+            subject_type: 'retry_attempt',
+            subject_id: 101,
+        }, {
+            code: 'RETRY_PROVENANCE_MISSING',
+            reason: 'No prior retry provenance was recorded.',
+            subject_type: 'repository_provenance',
+            subject_id: null,
+        }],
+        })],
+    });
+
+    await harness.open();
+
+    const markup = harness.elements['human-action-retry-details'].innerHTML;
+    assert.match(markup, /<ul[^>]+aria-label="Retry scope"/);
+    assert.match(markup, /<li[^>]*>Story #101<\/li>/);
+    assert.match(markup, /<li[^>]*>Story #102<\/li>/);
+    assert.match(markup, /<li[^>]*>Task #71<\/li>/);
+    assert.match(markup, /<li[^>]*>Task #72<\/li>/);
+    assert.match(markup, /<ul[^>]+aria-label="Retry blockers"/);
+    assert.match(markup, /data-sprint-retry-blocker="RETRY_ALREADY_LIVE"/);
+    assert.match(markup, /data-sprint-retry-blocker="RETRY_PROVENANCE_MISSING"/);
+    assert.equal((markup.match(/data-sprint-retry-blocker=/g) ?? []).length, 2);
+    assert.equal(
+        harness.elements['human-action-retry-details'].classList.contains('hidden'),
+        false,
+    );
+    harness.context.openHumanDialog({
+        kind: 'goal-outcome',
+        title: 'A different dialog',
+        description: 'The retry details must not carry over.',
+        field: 'none',
+        required: false,
+        hideRationale: true,
+    });
+    assert.equal(harness.elements['human-action-retry-details'].innerHTML, '');
+    assert.equal(
+        harness.elements['human-action-retry-details'].classList.contains('hidden'),
+        true,
+    );
+});
+
+test('retry preview details escape malicious blocker fields', async () => {
+    const harness = retryHarness({
+        previews: [retryPreview({
+            blockers: [{
+                code: '<script>alert(1)</script>',
+                reason: '<img src=x onerror=alert(1)>',
+                subject_type: '<subject>',
+                subject_id: null,
+            }],
+        })],
+    });
+
+    await harness.open();
+
+    const markup = harness.elements['human-action-retry-details'].innerHTML;
+    assert.match(markup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.match(markup, /&lt;subject&gt;/);
+    assert.doesNotMatch(markup, /<script>|<img /);
 });
 
 test('a preview that arrives after Project selection changes cannot revive the stale retry dialog', async () => {
@@ -644,6 +803,27 @@ test('a successful retry POST remains locked until reload confirms its exact cre
     assert.equal(vm.runInContext('activeDeliveryUnreconciled', harness.context), true);
 });
 
+test('retry creation accepts its exact authoritative attempt after forward progress to active', async () => {
+    const active = activeRetryState();
+    const harness = retryHarness({ afterRetryState: active });
+
+    await harness.open();
+    harness.elements['human-action-rationale'].value = 'Re-execute the approved work';
+    await harness.context.submitHumanAction();
+
+    assert.equal(harness.retryPosts().length, 1);
+    assert.equal(vm.runInContext('activeDeliveryUnreconciled', harness.context), false);
+    assert.equal(vm.runInContext('activeSprintRetryMutation', harness.context), null);
+    assert.equal(
+        vm.runInContext('lifecycleState.sprintStatus.data.current_retry.retry_attempt_id', harness.context),
+        101,
+    );
+    assert.equal(
+        vm.runInContext('lifecycleState.sprintStatus.data.effective_status', harness.context),
+        'active',
+    );
+});
+
 test('dismissing a pending retry confirmation cannot dispatch another dashboard action', async () => {
     let resolveRetry;
     const harness = retryHarness({
@@ -722,6 +902,7 @@ test('current retry progress and preserved original history render', () => {
             task_instance_keys: ['task:71'],
             start: state.status.original_start,
             task_completions: [{ task_id: 71, status: 'Done' }],
+            story_completions: [{ story_id: 101, status: 'Done' }],
             review: { review_id: 81 },
             closure: { closure_id: 91 },
             triage: [],
@@ -735,6 +916,7 @@ test('current retry progress and preserved original history render', () => {
             task_instance_keys: ['retry:101:task:71'],
             start: state.status.start,
             task_completions: [],
+            story_completions: [],
             review: null,
             closure: null,
             triage: [],
@@ -751,8 +933,10 @@ test('current retry progress and preserved original history render', () => {
     assert.match(markup, /Attempt 2/);
     assert.match(markup, /Task #71/);
     assert.match(markup, /To Do/);
-    assert.match(markup, /Original completion history/);
+    assert.match(markup, /Execution attempt history/);
     assert.match(markup, /Attempt 1/);
+    assert.match(markup, /Story #101/);
+    assert.match(markup, /To Do/);
     const execution = context.sprintExecutionProjection(
         state.status,
         state.position,
@@ -763,6 +947,148 @@ test('current retry progress and preserved original history render', () => {
     assert.equal(execution.items[0].task.instance_key, 'retry:101:task:71');
     assert.equal(execution.items[0].decision.instance_key, 'retry:101:task:71');
     assert.equal(execution.items[0].action.instance_key, 'retry:101:task:71');
+});
+
+test('effective retry progress keeps terminal Tasks and Stories visible without actions', () => {
+    const context = loadFrontend();
+    const state = completedRetryState();
+
+    const markup = context.sprintStatusMarkup(
+        { kind: 'ready', data: state.status },
+        state.position,
+        state.actions,
+        { sprintHistory: state.history },
+    );
+
+    assert.match(markup, /Attempt 2 is completed/);
+    assert.match(markup, /Task #71/);
+    assert.match(markup, /Story #101/);
+    assert.match(markup, /Done/);
+    assert.match(markup, /Execution attempt history/);
+    assert.match(markup, /Attempt 1/);
+});
+
+test('execution history rejects wrong-owner and malformed retry identities', () => {
+    const context = loadFrontend();
+    const state = activeRetryState();
+    const wrongOwner = { ...state.history, project_id: 8 };
+    const malformedRetry = {
+        ...state.history,
+        execution_attempts: state.history.execution_attempts.map((attempt) => (
+            attempt.retry_attempt_id === 101
+                ? { ...attempt, sprint_instance_key: 'retry:999:sprint:31' }
+                : attempt
+        )),
+    };
+
+    const wrongOwnerMarkup = context.sprintStatusMarkup(
+        { kind: 'ready', data: state.status },
+        state.position,
+        state.actions,
+        { sprintHistory: wrongOwner },
+    );
+    const malformedRetryMarkup = context.sprintStatusMarkup(
+        { kind: 'ready', data: state.status },
+        state.position,
+        state.actions,
+        { sprintHistory: malformedRetry },
+    );
+
+    assert.doesNotMatch(wrongOwnerMarkup, /data-sprint-execution-history/);
+    assert.doesNotMatch(malformedRetryMarkup, /data-sprint-execution-history/);
+});
+
+test('execution history rejects duplicate retry lineage and wrong task bindings', () => {
+    const context = loadFrontend();
+    const duplicate = activeRetryState();
+    duplicate.status.current_retry = {
+        ...duplicate.status.current_retry,
+        ordinal: 3,
+        predecessor_retry_attempt_id: 101,
+    };
+    duplicate.history.execution_attempts[1] = {
+        ...duplicate.history.execution_attempts[1],
+        status: 'completed',
+    };
+    duplicate.history.execution_attempts.push({
+        ...duplicate.history.execution_attempts[1],
+        ordinal: 3,
+        status: 'active',
+        predecessor_retry_attempt_id: 101,
+    });
+    const selfPredecessor = activeRetryState();
+    selfPredecessor.status.current_retry = {
+        ...selfPredecessor.status.current_retry,
+        predecessor_retry_attempt_id: 101,
+    };
+    selfPredecessor.history.execution_attempts[1] = {
+        ...selfPredecessor.history.execution_attempts[1],
+        predecessor_retry_attempt_id: 101,
+    };
+    const wrongTaskKey = activeRetryState();
+    wrongTaskKey.history.execution_attempts[1] = {
+        ...wrongTaskKey.history.execution_attempts[1],
+        task_instance_keys: ['retry:101:task:72'],
+    };
+
+    for (const state of [duplicate, selfPredecessor, wrongTaskKey]) {
+        const markup = context.sprintStatusMarkup(
+            { kind: 'ready', data: state.status },
+            state.position,
+            state.actions,
+            { sprintHistory: state.history },
+        );
+        assert.doesNotMatch(markup, /data-sprint-execution-history/);
+    }
+});
+
+test('retry creation remains locked after a different or cross-Project reload', async () => {
+    const different = activeRetryState();
+    different.status.current_retry = {
+        ...different.status.current_retry,
+        retry_attempt_id: 102,
+        sprint_instance_key: 'retry:102:sprint:31',
+    };
+    different.status.start = {
+        ...different.status.start,
+        retry_attempt_id: 102,
+    };
+    different.status.tasks[0] = {
+        ...different.status.tasks[0],
+        instance_key: 'retry:102:task:71',
+    };
+    different.status.stories[0] = {
+        ...different.status.stories[0],
+        instance_key: 'retry:102:story:101',
+    };
+    different.position.decisions[0] = {
+        ...different.position.decisions[0],
+        instance_key: 'retry:102:task:71',
+    };
+    different.actions[0] = {
+        ...different.actions[0],
+        instance_key: 'retry:102:task:71',
+    };
+    different.history.execution_attempts[1] = {
+        ...different.history.execution_attempts[1],
+        retry_attempt_id: 102,
+        sprint_instance_key: 'retry:102:sprint:31',
+        task_instance_keys: ['retry:102:task:71'],
+    };
+    const crossProject = activeRetryState();
+    crossProject.status.project_id = 8;
+
+    for (const afterRetryState of [different, crossProject]) {
+        const harness = retryHarness({ afterRetryState });
+        await harness.open();
+        harness.elements['human-action-rationale'].value = 'Re-execute the approved work';
+        await assert.rejects(
+            harness.context.submitHumanAction(),
+            /Controls remain locked/,
+        );
+        assert.equal(harness.retryPosts().length, 1);
+        assert.equal(vm.runInContext('activeDeliveryUnreconciled', harness.context), true);
+    }
 });
 
 test('planned retry uses its server-scoped start action without original start fields', () => {
@@ -844,4 +1170,59 @@ test('retry start confirmation posts the exact server-scoped key and graph decis
     assert.equal(harness.previewGets().length, 0);
     await submission;
     assert.equal(harness.dialog.open, false);
+});
+
+test('retry start accepts its exact authoritative attempt after forward progress to completed', async () => {
+    const state = plannedRetryStartState();
+    const completed = completedRetryState();
+    const harness = retryHarness({
+        state,
+        buttonAction: state.actions[0],
+        afterStartState: completed,
+        startResponse: async () => response({ data: {} }),
+    });
+
+    await harness.open();
+    await harness.context.submitHumanAction();
+
+    assert.equal(
+        harness.requests.filter((request) => request.method === 'POST'
+            && request.url.endsWith('/sprint/start')).length,
+        1,
+    );
+    assert.equal(vm.runInContext('activeDeliveryUnreconciled', harness.context), false);
+    assert.equal(vm.runInContext('activeSprintMutation', harness.context), null);
+    assert.equal(
+        vm.runInContext('lifecycleState.sprintStatus.data.current_retry.retry_attempt_id', harness.context),
+        101,
+    );
+    assert.equal(
+        vm.runInContext('lifecycleState.sprintStatus.data.effective_status', harness.context),
+        'completed',
+    );
+});
+
+test('retry start remains locked after a cross-Project reload', async () => {
+    const state = plannedRetryStartState();
+    const crossProject = activeRetryState();
+    crossProject.status.project_id = 8;
+    const harness = retryHarness({
+        state,
+        buttonAction: state.actions[0],
+        afterStartState: crossProject,
+        startResponse: async () => response({ data: {} }),
+    });
+
+    await harness.open();
+    await assert.rejects(
+        harness.context.submitHumanAction(),
+        /Controls remain locked/,
+    );
+
+    assert.equal(
+        harness.requests.filter((request) => request.method === 'POST'
+            && request.url.endsWith('/sprint/start')).length,
+        1,
+    );
+    assert.equal(vm.runInContext('activeDeliveryUnreconciled', harness.context), true);
 });

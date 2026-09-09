@@ -1430,6 +1430,7 @@ async function validateSprintStatusProjection(value, projectId) {
     const acceptance = reviewObject(plan?.acceptance);
     const stories = reviewItems(plan?.selected_stories);
     const tasks = reviewItems(data?.tasks);
+    const effectiveStories = reviewItems(data?.stories);
     if (
         data?.project_id !== projectId
         || !positiveInteger(sprint?.sprint_id)
@@ -1533,6 +1534,24 @@ async function validateSprintStatusProjection(value, projectId) {
             task.instance_key
                 !== `retry:${currentRetry.retry_attempt_id}:task:${task.task_id}`
         ) return null;
+    }
+    if (!effectiveStories || effectiveStories.length !== stories.length) return null;
+    const planStoriesById = new Map(stories.map((story) => [story.story_id, story]));
+    const effectiveStoryIds = new Set();
+    for (const story of effectiveStories) {
+        const planned = planStoriesById.get(story?.story_id);
+        if (
+            !planned
+            || effectiveStoryIds.has(story.story_id)
+            || typeof story?.status !== 'string'
+            || !story.status.trim()
+            || story?.source_story_item_id !== planned.story_item_id
+            || !Array.isArray(story?.sprint_ids)
+            || !story.sprint_ids.includes(sprint.sprint_id)
+            || story.instance_key
+                !== `retry:${currentRetry.retry_attempt_id}:story:${story.story_id}`
+        ) return null;
+        effectiveStoryIds.add(story.story_id);
     }
     const effectiveStart = data.start;
     if (currentRetry.status === 'planned') {
@@ -3286,16 +3305,99 @@ function sprintAcceptedPlanEvidenceMarkup(plan) {
     </details>`;
 }
 
-function sprintExecutionHistoryMarkup(history, sprintId) {
-    const attempts = (Array.isArray(history?.execution_attempts)
-        ? history.execution_attempts
-        : []).filter((attempt) => attempt?.sprint_id === sprintId
-        && positiveInteger(attempt?.ordinal)
-        && typeof attempt?.status === 'string');
+function sprintRetryProgressMarkup(status, plan) {
+    const retry = retrySprintScope(status)?.retry;
+    if (!retry) return '';
+    const titles = new Map((Array.isArray(plan?.selected_stories) ? plan.selected_stories : [])
+        .map((story) => [story?.story_id, story?.title]));
+    const tasks = Array.isArray(status?.tasks) ? status.tasks : [];
+    const stories = Array.isArray(status?.stories) ? status.stories : [];
+    return `<div class="mt-4 space-y-3" data-sprint-retry-progress="true">
+        <p class="text-sm font-semibold text-slate-800">Current retry progress</p>
+        <ul class="space-y-2">${tasks.map((task) => `<li data-sprint-retry-task-id="${task.task_id}" class="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-slate-800"><strong>Task #${task.task_id}</strong> · Status: ${escapeWorkflowText(task.status)}</li>`).join('')}</ul>
+        <ul class="space-y-2">${stories.map((story) => `<li data-sprint-retry-story-id="${story.story_id}" class="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-slate-800"><strong>Story #${story.story_id}</strong>${titles.get(story.story_id) ? ` · ${escapeWorkflowText(titles.get(story.story_id))}` : ''} · Status: ${escapeWorkflowText(story.status)}</li>`).join('')}</ul>
+    </div>`;
+}
+
+function sprintExecutionHistoryMarkup(history, status) {
+    const projectId = status?.project_id;
+    const sprint = reviewObject(status?.sprint);
+    const sprintId = sprint?.sprint_id;
+    if (
+        !positiveInteger(projectId)
+        || !positiveInteger(sprintId)
+        || history?.project_id !== projectId
+        || !Array.isArray(history?.execution_attempts)
+    ) return '';
+    const taskIds = new Set((Array.isArray(status?.tasks) ? status.tasks : [])
+        .map((task) => task?.task_id).filter(positiveInteger));
+    const attempts = history.execution_attempts
+        .filter((attempt) => attempt?.sprint_id === sprintId)
+        .sort((left, right) => left.ordinal - right.ordinal);
     if (!attempts.length) return '';
-    attempts.sort((left, right) => left.ordinal - right.ordinal);
+    const taskKeysMatch = (attempt, retryId) => {
+        const expected = new Set([...taskIds].map((taskId) => (
+            retryId === null ? `task:${taskId}` : `retry:${retryId}:task:${taskId}`
+        )));
+        const actual = Array.isArray(attempt?.task_instance_keys)
+            ? attempt.task_instance_keys
+            : null;
+        return actual !== null
+            && actual.length === expected.size
+            && actual.every((key) => expected.has(key))
+            && new Set(actual).size === actual.length;
+    };
+    const evidenceArraysPresent = (attempt) => (
+        Array.isArray(attempt?.task_completions)
+        && Array.isArray(attempt?.story_completions)
+        && Array.isArray(attempt?.triage)
+    );
+    const original = attempts.filter((attempt) => attempt?.retry_attempt_id === null);
+    if (
+        original.length !== 1
+        || original[0]?.ordinal !== 1
+        || original[0]?.status !== sprint.status
+        || original[0]?.predecessor_retry_attempt_id !== null
+        || original[0]?.sprint_instance_key !== `sprint:${sprintId}`
+        || !taskKeysMatch(original[0], null)
+        || !evidenceArraysPresent(original[0])
+    ) return '';
+    const retries = attempts.filter((attempt) => attempt?.retry_attempt_id !== null);
+    const retryScope = reviewObject(status?.current_retry);
+    if (!retryScope && retries.length) return '';
+    if (retryScope && !retries.length) return '';
+    const retryIds = new Set();
+    for (let index = 0; index < retries.length; index += 1) {
+        const retry = retries[index];
+        const retryId = retry?.retry_attempt_id;
+        const prior = retries[index - 1];
+        if (
+            !positiveInteger(retryId)
+            || retryIds.has(retryId)
+            || retry.ordinal !== index + 2
+            || !['planned', 'active', 'completed'].includes(retry.status)
+            || retry.predecessor_retry_attempt_id
+                !== (prior ? prior.retry_attempt_id : null)
+            || retry.sprint_instance_key !== `retry:${retryId}:sprint:${sprintId}`
+            || !taskKeysMatch(retry, retryId)
+            || !evidenceArraysPresent(retry)
+            || (prior && prior.status !== 'completed')
+        ) return '';
+        retryIds.add(retryId);
+    }
+    if (retryScope) {
+        const current = retries.at(-1);
+        if (
+            current?.retry_attempt_id !== retryScope.retry_attempt_id
+            || current.ordinal !== retryScope.ordinal
+            || current.status !== retryScope.status
+            || current.predecessor_retry_attempt_id
+                !== retryScope.predecessor_retry_attempt_id
+            || current.sprint_instance_key !== retryScope.sprint_instance_key
+        ) return '';
+    }
     return `<details class="mt-4 rounded-lg border border-slate-200 bg-white p-3" data-sprint-execution-history="true" open>
-        <summary class="cursor-pointer text-sm font-semibold text-slate-800">Original completion history</summary>
+        <summary class="cursor-pointer text-sm font-semibold text-slate-800">Execution attempt history</summary>
         <ul class="mt-3 space-y-2 text-sm text-slate-700">${attempts.map((attempt) => `
             <li class="rounded border border-slate-200 bg-slate-50 px-3 py-2" data-sprint-attempt-ordinal="${attempt.ordinal}">
                 <strong>Attempt ${attempt.ordinal}</strong> · ${escapeWorkflowText(attempt.status)}
@@ -3394,9 +3496,10 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
             <div><dt class="font-semibold text-slate-600">Tasks</dt><dd>${plan.task_count}</dd></div>
         </dl>
         <div class="mt-4 flex flex-wrap items-start gap-3">${startMarkup}${retryMarkup}</div>
+        ${sprintRetryProgressMarkup(status, plan)}
         ${executionMarkup}
         ${sprintAcceptedPlanEvidenceMarkup(plan)}
-        ${sprintExecutionHistoryMarkup(context.sprintHistory, sprint.sprint_id)}
+        ${sprintExecutionHistoryMarkup(context.sprintHistory, status)}
         ${correctionMarkup}
     </section>`;
 }
@@ -4323,10 +4426,10 @@ function sprintStartConfirmed(state, binding) {
         return Boolean(
             data?.sprint?.sprint_id === binding.sprintId
             && data.sprint.status === 'completed'
-            && data.effective_status === 'active'
+            && ['active', 'completed'].includes(data.effective_status)
             && retry?.retry_attempt_id === binding.retryAttemptId
             && retry.ordinal === binding.ordinal
-            && retry.status === 'active'
+            && ['active', 'completed'].includes(retry.status)
             && retry.sprint_instance_key === binding.instanceKey
             && start?.retry_attempt_id === binding.retryAttemptId
             && isSha256Fingerprint(start.contract_fingerprint)
@@ -4679,6 +4782,15 @@ function openHumanDialog(config) {
     setText('human-action-kicker', config.kicker ?? 'Human decision');
     setText('human-action-title', config.title);
     setText('human-action-description', config.description);
+    const retryDetails = document.getElementById('human-action-retry-details');
+    if (retryDetails) {
+        retryDetails.innerHTML = '';
+        retryDetails.classList.add('hidden');
+        if (config.retryPreview) {
+            retryDetails.innerHTML = retryPreviewDialogMarkup(config.retryPreview);
+            retryDetails.classList.remove('hidden');
+        }
+    }
     const rationaleGroup = document.getElementById('human-action-rationale-group');
     const rationale = document.getElementById('human-action-rationale');
     const rationaleLabel = document.getElementById('human-action-rationale-label');
@@ -4744,14 +4856,26 @@ function retryPreviewForScope(value, projectId, sprintId) {
 }
 
 function retryPreviewDescription(preview) {
-    const storyCount = preview.story_ids.length;
-    const taskCount = preview.task_ids.length;
-    const scope = `Sprint #${preview.sprint_id} will create Attempt ${preview.next_ordinal} for ${storyCount} ${storyCount === 1 ? 'Story' : 'Stories'} and ${taskCount} ${taskCount === 1 ? 'Task' : 'Tasks'}.`;
-    const preservation = ` ${preview.preserved_history}`;
-    const blockerText = preview.blockers.length === 0
-        ? ''
-        : ` Retry is unavailable: ${preview.blockers.map((blocker) => blocker.reason).join(' ')}`;
-    return `${scope}${preservation}${blockerText}`;
+    return `Sprint #${preview.sprint_id} will create Attempt ${preview.next_ordinal}. ${preview.preserved_history}`;
+}
+
+function retryPreviewDialogMarkup(preview) {
+    const scopeItems = [
+        ...preview.story_ids.map((storyId) => `Story #${storyId}`),
+        ...preview.task_ids.map((taskId) => `Task #${taskId}`),
+    ];
+    const blockers = preview.blockers.map((blocker) => {
+        const subject = blocker.subject_id === null
+            ? `${blocker.subject_type}, no subject ID`
+            : `${blocker.subject_type} #${blocker.subject_id}`;
+        return `<li class="rounded border border-amber-200 bg-amber-50 px-3 py-2" data-sprint-retry-blocker="${escapeWorkflowText(blocker.code)}">
+            <strong>${escapeWorkflowText(blocker.code)}</strong>: ${escapeWorkflowText(blocker.reason)}
+            <span class="text-slate-600">(${escapeWorkflowText(subject)})</span>
+        </li>`;
+    }).join('');
+    return `<ul class="space-y-1" aria-label="Retry scope">${scopeItems.map((item) => (
+        `<li>${escapeWorkflowText(item)}</li>`
+    )).join('')}</ul>${blockers ? `<ul class="space-y-2" aria-label="Retry blockers">${blockers}</ul>` : ''}`;
 }
 
 function retryPreviewTarget(state, control) {
@@ -4782,14 +4906,30 @@ function sprintRetryConfirmed(state, mutation) {
         : null;
     const retry = reviewObject(data?.current_retry);
     const start = sprintStartBinding(data, state?.position, state?.actions);
-    return Boolean(
+    const forwardStart = reviewObject(data?.start);
+    const exactRetry = Boolean(
         mutation?.retryAttemptId
         && data?.sprint?.sprint_id === mutation.sprintId
         && data.sprint.status === 'completed'
-        && data.effective_status === 'planned'
         && retry?.retry_attempt_id === mutation.retryAttemptId
-        && retry.status === 'planned'
         && retry.sprint_instance_key === `retry:${mutation.retryAttemptId}:sprint:${mutation.sprintId}`
+        && data.effective_status === retry.status
+    );
+    if (!exactRetry) return false;
+    if (['active', 'completed'].includes(retry.status)) {
+        return Boolean(
+            reviewObject(forwardStart)
+            && forwardStart.retry_attempt_id === mutation.retryAttemptId
+            && isSha256Fingerprint(forwardStart.contract_fingerprint)
+            && isSha256Fingerprint(forwardStart.decision_fingerprint)
+            && typeof forwardStart.started_by === 'string'
+            && forwardStart.started_by.trim()
+            && typeof forwardStart.started_at === 'string'
+            && forwardStart.started_at.trim()
+        );
+    }
+    return Boolean(
+        retry.status === 'planned'
         && start?.kind === 'retry'
         && start.retryAttemptId === mutation.retryAttemptId
         && start.sprintId === mutation.sprintId
@@ -4836,6 +4976,7 @@ async function openSprintRetryPreview(button) {
         preview,
         title: `Retry Sprint #${target.sprintId}`,
         description: retryPreviewDescription(preview),
+        retryPreview: preview,
         label: 'Retry rationale',
         required: true,
         submitLabel: 'Retry Sprint',
