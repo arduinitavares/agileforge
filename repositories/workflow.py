@@ -53,7 +53,7 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
-from repositories.sprint_retry import load_sprint_retry_facts
+from repositories.sprint_retry import SprintRetryFactLoadError, load_sprint_retry_facts
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     specification_structuring_fact_fingerprint,
@@ -113,6 +113,7 @@ from workflow.execution_integrity import (
     StoryClosurePayload,
     TaskEvidencePayload,
     canonical_dependency_rows_snapshot,
+    canonical_task_evidence_payload,
     dependency_rows_fingerprint,
     sprint_start_audit_metadata,
     story_completion_fingerprint,
@@ -474,7 +475,7 @@ class WorkflowFactRepository:
             sprints,
         )
 
-        return WorkflowFactSnapshot(
+        base_snapshot = WorkflowFactSnapshot(
             project=project,
             review_decisions=tuple(
                 sorted(
@@ -520,11 +521,19 @@ class WorkflowFactRepository:
             sprint_reviews=sprint_reviews,
             sprint_closures=sprint_closures,
             post_sprint_triage=self._post_sprint_triage(project_id, sprints),
-            sprint_retries=load_sprint_retry_facts(
-                self._session, project_id=project_id
-            ),
+            sprint_retries=(),
             node_attempts=node_attempts,
         )
+        try:
+            retries = load_sprint_retry_facts(
+                self._session,
+                project_id=project_id,
+                snapshot=base_snapshot,
+                query_options=self._query_options(),
+            )
+        except SprintRetryFactLoadError as exc:
+            raise self._error(str(exc)) from exc
+        return base_snapshot.model_copy(update={"sprint_retries": retries})
 
     def _query_options(self) -> dict[str, object]:
         """Isolate canonical reads from pending caller identity-map state."""
@@ -3693,21 +3702,14 @@ class WorkflowFactRepository:
                 message = "Task completion evidence targets a cross-Project task."
                 raise self._error(message)
             try:
-                artifact_refs = tuple(
-                    _STRING_LIST.validate_json(row.artifact_refs_json)
+                evidence = canonical_task_evidence_payload(
+                    outcome_summary=row.outcome_summary,
+                    artifact_refs_json=row.artifact_refs_json,
+                    acceptance_result=row.acceptance_result,
+                    checklist_result_json=row.checklist_result_json,
                 )
-                checklist_result = _JSON_OBJECT.validate_json(row.checklist_result_json)
-            except ValidationError as exc:
-                message = "Task completion evidence JSON is invalid."
-                raise self._error(message) from exc
-            if (
-                artifact_refs != tuple(sorted(set(artifact_refs)))
-                or canonical_json(list(artifact_refs)) != row.artifact_refs_json
-                or canonical_json(checklist_result) != row.checklist_result_json
-                or row.acceptance_result not in {"partially_met", "fully_met"}
-            ):
-                message = "Task completion evidence is not canonical."
-                raise self._error(message)
+            except ExecutionIntegrityError as exc:
+                raise self._error(str(exc)) from exc
             fact = TaskCompletionFact.model_validate(
                 {
                     "completion_id": self._required_id(
@@ -3716,10 +3718,10 @@ class WorkflowFactRepository:
                     ),
                     "task_id": row.task_id,
                     "sprint_id": row.sprint_id,
-                    "outcome_summary": row.outcome_summary,
-                    "artifact_refs": artifact_refs,
-                    "acceptance_result": row.acceptance_result,
-                    "checklist_result": checklist_result,
+                    "outcome_summary": evidence.outcome_summary,
+                    "artifact_refs": evidence.artifact_refs,
+                    "acceptance_result": evidence.acceptance_result,
+                    "checklist_result": evidence.checklist_result,
                     "evidence_fingerprint": row.evidence_fingerprint,
                 }
             )
