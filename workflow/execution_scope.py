@@ -178,6 +178,26 @@ def resolve_execution_scope(
     )
 
 
+def retry_blocks_planning(snapshot: WorkflowFactSnapshot) -> bool:
+    """Return whether any retry still owns delivery and planning must wait."""
+    if not snapshot.sprint_retries:
+        return False
+    for retry in snapshot.sprint_retries:
+        if retry.status in {"planned", "active"}:
+            return True
+        try:
+            scope = resolve_execution_scope(
+                snapshot,
+                sprint_id=retry.sprint_id,
+                retry_attempt_id=retry.retry_attempt_id,
+            )
+            _require_current_closed_attempt(snapshot, scope)
+            _require_resolved_triage(scope.post_sprint_triage)
+        except ExecutionScopeError:
+            return True
+    return False
+
+
 def current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None:
     """Select the sole live attempt or proven terminal attempt for the project."""
     retries = _validated_retries(snapshot)

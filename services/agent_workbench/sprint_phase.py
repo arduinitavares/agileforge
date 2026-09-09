@@ -60,6 +60,7 @@ from workflow.execution_integrity import (
     sprint_review_fingerprint,
     sprint_start_audit_metadata,
 )
+from workflow.execution_scope import retry_blocks_planning
 from workflow.fingerprints import canonical_json
 from workflow.planning_integrity import (
     current_task_content_fingerprint,
@@ -82,6 +83,18 @@ class ActiveSprintExistsError(ValueError):
 
 class StaleSpecificationError(ValueError):
     """New Sprint work targets a superseded Specification."""
+
+
+class ActiveSprintRetryExistsError(ValueError):
+    """A planned or active retry owns the Project delivery lifecycle."""
+
+
+def _require_no_live_sprint_retry(session: Session, *, project_id: int) -> None:
+    """Reject direct planning writes while retry delivery is still current."""
+    snapshot = WorkflowFactRepository(session).load(project_id)
+    if retry_blocks_planning(snapshot):
+        message = "The current Sprint retry must finish with valid triage first."
+        raise ActiveSprintRetryExistsError(message)
 
 
 @dataclass(frozen=True)
@@ -338,6 +351,7 @@ def record_sprint_plan_in_session(
     inputs: RecordSprintPlanInput,
 ) -> SprintPlanArtifact:
     """Persist one immutable plan artifact and no operational delivery rows."""
+    _require_no_live_sprint_retry(session, project_id=inputs.project_id)
     plan, _candidates, candidate_fingerprint = _validated_plan_candidates(
         session,
         inputs=inputs,
@@ -616,6 +630,8 @@ def record_sprint_plan_decision_in_session(
     if inputs.decision not in {"accepted", "rejected", "feedback"}:
         message = "Sprint plan decision is invalid."
         raise ValueError(message)
+    if inputs.decision == "accepted":
+        _require_no_live_sprint_retry(session, project_id=artifact.project_id)
     artifact_id = artifact.sprint_plan_artifact_id
     if artifact_id is None:
         message = "Sprint plan artifact has no durable identity."
@@ -908,6 +924,7 @@ def _selected_dependency_review_id(
 
 def start_sprint_in_session(session: Session, inputs: SprintStartInput) -> Sprint:
     """Start the exact Sprint resolved only through its current accepted plan."""
+    _require_no_live_sprint_retry(session, project_id=inputs.project_id)
     command = _resolve_sprint_start(session, inputs)
     sprint = session.get(Sprint, command.sprint_id)
     plan = session.get(SprintPlanArtifact, command.sprint_plan_artifact_id)

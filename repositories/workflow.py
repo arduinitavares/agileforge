@@ -52,6 +52,7 @@ from models.workflow import (
     TaskCompletionEvidence,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
 )
 from repositories.sprint_retry import SprintRetryFactLoadError, load_sprint_retry_facts
 from services.contracts.specification_authoring import (
@@ -122,6 +123,7 @@ from workflow.execution_integrity import (
 )
 from workflow.facts import (
     BacklogItemFact,
+    IncompleteTransitionFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
@@ -131,6 +133,7 @@ from workflow.facts import (
     ProductGoalInterviewTurnFact,
     ProductGoalOutcomeFact,
     ProjectFact,
+    ProviderGenerationGuardFact,
     ReviewDecisionFact,
     SpecificationCandidateFact,
     SpecificationDecisionFact,
@@ -138,6 +141,7 @@ from workflow.facts import (
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
+    SprintPlanGenerationGuardFact,
     SprintReviewFact,
     SprintStartFact,
     StoryCompletionFact,
@@ -171,6 +175,7 @@ from workflow.planning_integrity import (
     planned_task_content_fingerprint,
     selected_dependency_active_closure,
 )
+from workflow.requests import CreateProject, RecordRepositoryBinding, TransitionRequest
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -184,6 +189,7 @@ _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
 _DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
 _DEPENDENCY_ROW_LIST = TypeAdapter(list[StoryDependencyFact])
+_TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _ReviewArtifactType = Literal[
     "vision",
@@ -533,7 +539,18 @@ class WorkflowFactRepository:
             )
         except SprintRetryFactLoadError as exc:
             raise self._error(str(exc)) from exc
-        return base_snapshot.model_copy(update={"sprint_retries": retries})
+        guarded = base_snapshot.model_copy(update={"sprint_retries": retries})
+        return guarded.model_copy(
+            update={
+                "sprint_plan_generation_guards": self._sprint_plan_generation_guards(
+                    project_id
+                ),
+                "provider_generation_guards": self._provider_generation_guards(
+                    project_id
+                ),
+                "incomplete_transitions": self._incomplete_transitions(project_id),
+            }
+        )
 
     def _query_options(self) -> dict[str, object]:
         """Isolate canonical reads from pending caller identity-map state."""
@@ -3416,10 +3433,7 @@ class WorkflowFactRepository:
                 message = "Story dependency review edges are not canonical."
                 raise self._error(message)
             selected = set(story_ids)
-            if any(
-                edge.dependent_story_id not in selected
-                for edge in reviewed_edges
-            ):
+            if any(edge.dependent_story_id not in selected for edge in reviewed_edges):
                 message = "Story dependency review dependent leaves selected scope."
                 raise self._error(message)
             if any(
@@ -3482,9 +3496,7 @@ class WorkflowFactRepository:
             )
         )
         selected_ids = tuple(story.story_id for story in selected)
-        scope_fingerprints = {
-            story.selected_scope_fingerprint for story in stories
-        }
+        scope_fingerprints = {story.selected_scope_fingerprint for story in stories}
         if None in scope_fingerprints or len(scope_fingerprints) != 1:
             message = "Story selected-scope projection fingerprints conflict."
             raise self._error(message)
@@ -3517,12 +3529,10 @@ class WorkflowFactRepository:
                 and review.dependency_fingerprint
                 == dependency_review_fingerprint(current_edges)
             ):
-                dependency_safe, dependency_blockers = (
-                    self._selected_dependency_safety(
-                        selected_id_set,
-                        stories,
-                        dependencies,
-                    )
+                dependency_safe, dependency_blockers = self._selected_dependency_safety(
+                    selected_id_set,
+                    stories,
+                    dependencies,
                 )
         facts: list[StoryFact] = []
         for story in stories:
@@ -4013,6 +4023,232 @@ class WorkflowFactRepository:
             )
             for row in attempts
         )
+
+    def _sprint_plan_generation_guards(
+        self, project_id: int
+    ) -> tuple[SprintPlanGenerationGuardFact, ...]:
+        """Project retry guards derived from exact durable plan attempts."""
+        attempts = self._session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id) == "planning.sprint.plan",
+            )
+            .order_by(
+                col(WorkflowNodeAttempt.started_at),
+                col(WorkflowNodeAttempt.workflow_node_attempt_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        outcomes = {
+            row.workflow_node_attempt_id: row
+            for row in self._session.exec(
+                select(WorkflowNodeAttemptOutcome).where(
+                    col(WorkflowNodeAttemptOutcome.project_id) == project_id
+                ),
+                execution_options=self._query_options(),
+            ).all()
+        }
+        # Reuse the canonical plan loader: a row is only linked when it is a
+        # valid Project-owned plan fact and the terminal attempt output names
+        # its exact durable identity and content fingerprint.
+        plans = {
+            item.artifact_id: item
+            for item in self._planning_artifacts(project_id).facts
+            if item.artifact_type == "sprint_plan"
+        }
+        guards: list[SprintPlanGenerationGuardFact] = []
+        for attempt in attempts:
+            attempt_id = self._required_id(
+                attempt.workflow_node_attempt_id, "workflow node attempt"
+            )
+            outcome = outcomes.get(attempt_id)
+            status = None if outcome is None else self._attempt_outcome(outcome.status)
+            plan_id: int | None = None
+            plan_fingerprint: str | None = None
+            integrity: Literal["linked", "unlinked", "malformed"] = "unlinked"
+            if outcome is not None and status == "success":
+                try:
+                    output = self._canonical_json_object(
+                        outcome.output_json or "", "Sprint plan generation output"
+                    )
+                except WorkflowFactLoadError:
+                    integrity = "malformed"
+                else:
+                    output_id = output.get("sprint_plan_artifact_id")
+                    output_fingerprint = output.get("plan_fingerprint")
+                    if outcome.output_fingerprint != canonical_hash(output):
+                        integrity = "malformed"
+                    elif output_id is None and output_fingerprint is None:
+                        integrity = "unlinked"
+                    elif (
+                        isinstance(output_id, bool)
+                        or not isinstance(output_id, int)
+                        or output_id <= 0
+                        or not isinstance(output_fingerprint, str)
+                        or not output_fingerprint
+                    ):
+                        integrity = "malformed"
+                    else:
+                        plan = plans.get(output_id)
+                        if (
+                            plan is None
+                            or plan.artifact_fingerprint != output_fingerprint
+                        ):
+                            integrity = "malformed"
+                        else:
+                            plan_id = output_id
+                            plan_fingerprint = output_fingerprint
+                            integrity = "linked"
+            guards.append(
+                SprintPlanGenerationGuardFact(
+                    attempt_id=attempt_id,
+                    started_at=attempt.started_at,
+                    outcome=status,
+                    outcome_recorded_at=None
+                    if outcome is None
+                    else outcome.recorded_at,
+                    generated_plan_artifact_id=plan_id,
+                    generated_plan_fingerprint=plan_fingerprint,
+                    integrity=integrity,
+                    failure_code=None if outcome is None else outcome.failure_code,
+                )
+            )
+        return tuple(guards)
+
+    def _provider_generation_guards(
+        self, project_id: int
+    ) -> tuple[ProviderGenerationGuardFact, ...]:
+        """Project retry guards for non-Sprint provider generation attempts."""
+        node_ids = (
+            "backlog.generate",
+            "planning.roadmap.generate",
+            "planning.story.generate",
+            "specification.structure",
+        )
+        attempts = self._session.exec(
+            select(WorkflowNodeAttempt)
+            .where(
+                col(WorkflowNodeAttempt.project_id) == project_id,
+                col(WorkflowNodeAttempt.node_id).in_(node_ids),
+            )
+            .order_by(
+                col(WorkflowNodeAttempt.started_at),
+                col(WorkflowNodeAttempt.workflow_node_attempt_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        outcomes = {
+            row.workflow_node_attempt_id: row
+            for row in self._session.exec(
+                select(WorkflowNodeAttemptOutcome).where(
+                    col(WorkflowNodeAttemptOutcome.project_id) == project_id
+                ),
+                execution_options=self._query_options(),
+            ).all()
+        }
+        facts: list[ProviderGenerationGuardFact] = []
+        for attempt in attempts:
+            attempt_id = self._required_id(
+                attempt.workflow_node_attempt_id, "workflow node attempt"
+            )
+            outcome = outcomes.get(attempt_id)
+            status = None if outcome is None else self._attempt_outcome(outcome.status)
+            integrity: Literal["canonical", "malformed", "none"] = "none"
+            if status == "success" and outcome is not None:
+                try:
+                    output = self._canonical_json_object(
+                        outcome.output_json or "", "provider generation output"
+                    )
+                except WorkflowFactLoadError:
+                    integrity = "malformed"
+                else:
+                    integrity = (
+                        "canonical"
+                        if outcome.output_fingerprint == canonical_hash(output)
+                        else "malformed"
+                    )
+            facts.append(
+                ProviderGenerationGuardFact(
+                    attempt_id=attempt_id,
+                    node_id=attempt.node_id,
+                    instance_key=attempt.instance_key,
+                    business_fact_fingerprint=attempt.business_fact_fingerprint,
+                    input_fingerprint=attempt.input_fingerprint,
+                    started_at=attempt.started_at,
+                    outcome=status,
+                    outcome_recorded_at=(
+                        None if outcome is None else outcome.recorded_at
+                    ),
+                    integrity=integrity,
+                )
+            )
+        return tuple(facts)
+
+    def _incomplete_transitions(
+        self, project_id: int
+    ) -> tuple[IncompleteTransitionFact, ...]:
+        """Expose pending project receipts only to retry guards."""
+        active_marker = self._session.info.get("agileforge.active_transition_receipt")
+        rows = self._session.exec(
+            select(WorkflowTransitionReceipt)
+            .where(col(WorkflowTransitionReceipt.completed_at).is_(None))
+            .order_by(col(WorkflowTransitionReceipt.workflow_transition_receipt_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[IncompleteTransitionFact] = []
+        for row in rows:
+            receipt_id = row.workflow_transition_receipt_id
+            try:
+                payload = self._canonical_json_object(
+                    row.request_json, "transition receipt"
+                )
+                request = _TRANSITION_REQUEST.validate_python(payload)
+                canonical_payload = request.model_dump(mode="json")
+                expected_fingerprint = (
+                    request.semantic_fingerprint()
+                    if isinstance(request, CreateProject | RecordRepositoryBinding)
+                    else canonical_hash(canonical_payload)
+                )
+                valid_identity = (
+                    canonical_json(canonical_payload) == row.request_json
+                    and row.request_kind == request.kind
+                    and row.request_fingerprint == expected_fingerprint
+                )
+                if not valid_identity:
+                    integrity: Literal["linked", "malformed", "unassignable"] = (
+                        "unassignable"
+                    )
+                elif isinstance(request, CreateProject):
+                    # A valid project-creation receipt has no durable Project
+                    # owner yet, so it cannot guard retries in an existing one.
+                    continue
+                elif request.project_id != project_id or (
+                    isinstance(active_marker, dict)
+                    and active_marker
+                    == {
+                        "receipt_id": receipt_id,
+                        "request_kind": row.request_kind,
+                        "request_fingerprint": row.request_fingerprint,
+                    }
+                ):
+                    continue
+                else:
+                    integrity = "linked"
+            except (ValidationError, ValueError, WorkflowFactLoadError):
+                # Invalid receipts cannot be reliably assigned to a Project.
+                # They still block retry rather than disappearing from authority.
+                integrity = "unassignable"
+            facts.append(
+                IncompleteTransitionFact(
+                    receipt_id=receipt_id,
+                    request_kind=row.request_kind,
+                    request_fingerprint=row.request_fingerprint,
+                    started_at=row.started_at,
+                    integrity=integrity,
+                )
+            )
+        return tuple(facts)
 
     def _node_attempt_lookup(self, project_id: int) -> dict[int, str]:
         """Return exact attempt fingerprints for narrow input projections."""

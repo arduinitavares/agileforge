@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from workflow.contracts import FactReference, InputField, RecommendationKind
 from workflow.definitions.vision import select_vision_interview_state
+from workflow.execution_scope import retry_blocks_planning
 from workflow.graph import AgenticExecutionSpec, NodeSpec, RuleCategory, RuleEvaluation
 
 if TYPE_CHECKING:
@@ -136,6 +137,8 @@ def _unresolved_accepted_goals(
 def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
     """Return whether delivery has no active work or unresolved review."""
     if any(sprint.status == "active" for sprint in snapshot.sprints):
+        return False
+    if retry_blocks_planning(snapshot):
         return False
     completed_sprint_ids = {
         sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"

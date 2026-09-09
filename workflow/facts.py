@@ -463,10 +463,13 @@ class StoryFact(FrozenModel):
     sprint_selection_state_fingerprint: str
     sprint_selection_event_id: int | None = None
     sprint_selection_event_fingerprint: str | None = None
-    selected_scope_fingerprint: Annotated[
-        str,
-        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
-    ] | None = None
+    selected_scope_fingerprint: (
+        Annotated[
+            str,
+            Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+        ]
+        | None
+    ) = None
     dependency_safe: bool = False
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
@@ -631,6 +634,43 @@ class NodeAttemptFact(FrozenModel):
         return _normalize_utc(value)
 
 
+class SprintPlanGenerationGuardFact(FrozenModel):
+    """Retry-only provenance classification for one Sprint plan generation."""
+
+    attempt_id: int
+    started_at: _DATETIME
+    outcome: Literal["success", "failure", "obsolete"] | None
+    outcome_recorded_at: _DATETIME | None = None
+    generated_plan_artifact_id: int | None = None
+    generated_plan_fingerprint: str | None = None
+    integrity: Literal["linked", "unlinked", "malformed"]
+    failure_code: str | None = None
+
+
+class ProviderGenerationGuardFact(FrozenModel):
+    """Retry-only identity and terminal proof for non-Sprint provider work."""
+
+    attempt_id: int
+    node_id: str
+    instance_key: str | None
+    business_fact_fingerprint: str
+    input_fingerprint: str
+    started_at: _DATETIME
+    outcome: Literal["success", "failure", "obsolete"] | None
+    outcome_recorded_at: _DATETIME | None = None
+    integrity: Literal["canonical", "malformed", "none"]
+
+
+class IncompleteTransitionFact(FrozenModel):
+    """Retry-only projection of one pending transition receipt."""
+
+    receipt_id: int | None
+    request_kind: str | None
+    request_fingerprint: str | None
+    started_at: _DATETIME | None
+    integrity: Literal["linked", "malformed", "unassignable"]
+
+
 class WorkflowFactSnapshot(FrozenModel):
     """Complete immutable fact snapshot used to evaluate one project graph."""
 
@@ -665,3 +705,6 @@ class WorkflowFactSnapshot(FrozenModel):
     post_sprint_triage: tuple[PostSprintTriageFact, ...] = ()
     sprint_retries: tuple[SprintRetryFact, ...] = ()
     node_attempts: tuple[NodeAttemptFact, ...] = ()
+    sprint_plan_generation_guards: tuple[SprintPlanGenerationGuardFact, ...] = ()
+    provider_generation_guards: tuple[ProviderGenerationGuardFact, ...] = ()
+    incomplete_transitions: tuple[IncompleteTransitionFact, ...] = ()

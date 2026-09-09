@@ -119,7 +119,7 @@ if TYPE_CHECKING:
     from services.planning_lineage import Decision
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 33
+EXPECTED_REQUEST_VARIANT_COUNT = 35
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
@@ -1033,9 +1033,7 @@ def _apply_current_dependencies(
         for item in snapshot.stories
         if item.structurally_eligible
         and item.sprint_selection_state == "selected"
-        and not any(
-            sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids
-        )
+        and not any(sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids)
     )
     reviewed_edges = tuple(
         ReviewedDependencyEdge(
@@ -1552,8 +1550,7 @@ def test_dependency_transition_canonicalizes_selected_ids_independent_of_rank(
     selected = tuple(
         story
         for story in snapshot.stories
-        if story.structurally_eligible
-        and story.sprint_selection_state == "selected"
+        if story.structurally_eligible and story.sprint_selection_state == "selected"
     )
     assert tuple(story.story_id for story in selected) == (
         higher_story_id,
@@ -1864,9 +1861,7 @@ def test_solo_owner_acceptance_reuses_only_the_current_project_reserved_team(
         sprint = session.get(Sprint, sprint_id)
         assert sprint is not None
         assert sprint.team_id == team_id
-        persisted_team = session.exec(
-            select(Team).where(Team.name == team_name)
-        ).one()
+        persisted_team = session.exec(select(Team).where(Team.name == team_name)).one()
         assert persisted_team.team_id == team_id
 
 
@@ -3126,8 +3121,7 @@ def test_story_set_correction_records_identical_authorized_successor(
     assert source_content.story_items == replacement_content.story_items
     assert replacement_content.replacement_source is not None
     assert (
-        replacement_content.replacement_source.story_artifact_id
-        == source_artifact_id
+        replacement_content.replacement_source.story_artifact_id == source_artifact_id
     )
 
 
@@ -4143,8 +4137,7 @@ def test_backlog_correction_accepted_successor_starts_clean_roadmap_lineage(
     pos_failed = domain.position(project_id)
     roadmap_failed_dec = _decision(pos_failed, "planning.roadmap.generate")
     assert any(
-        ref.fact_type == "node_attempt"
-        for ref in roadmap_failed_dec.fact_references
+        ref.fact_type == "node_attempt" for ref in roadmap_failed_dec.fact_references
     )
 
     # 4. Record pending Backlog B superseding A

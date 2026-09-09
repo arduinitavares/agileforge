@@ -14,6 +14,7 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
+from workflow.execution_identity import execution_instance_key
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     StoryClosurePayload,
@@ -33,6 +34,10 @@ from workflow.graph import (
     RuleCategory,
     RuleEvaluation,
     WorkflowGraph,
+)
+from workflow.sprint_retry_eligibility import (
+    evaluate_sprint_retry_eligibility,
+    sprint_retry_eligibility_payload,
 )
 
 if TYPE_CHECKING:
@@ -1109,7 +1114,132 @@ def _triage_for_completed_history(
     )
 
 
+def _retry_references(
+    snapshot: WorkflowFactSnapshot, sprint_id: int
+) -> tuple[FactReference, ...]:
+    """Bind retry decisions to all retry-only guard facts."""
+    return (
+        FactReference(
+            fact_type="sprint_retry_target",
+            fact_id=str(sprint_id),
+            fingerprint=canonical_hash(
+                sprint_retry_eligibility_payload(
+                    evaluate_sprint_retry_eligibility(snapshot, sprint_id=sprint_id)
+                )
+            ),
+        ),
+        *(
+            FactReference(
+                fact_type="sprint_plan_generation_guard",
+                fact_id=str(item.attempt_id),
+                fingerprint=canonical_hash(item.model_dump(mode="json")),
+            )
+            for item in sorted(
+                snapshot.sprint_plan_generation_guards,
+                key=lambda item: canonical_hash(item.model_dump(mode="json")),
+            )
+        ),
+        *(
+            FactReference(
+                fact_type="provider_generation_guard",
+                fact_id=str(item.attempt_id),
+                fingerprint=canonical_hash(item.model_dump(mode="json")),
+            )
+            for item in sorted(
+                snapshot.provider_generation_guards,
+                key=lambda item: canonical_hash(item.model_dump(mode="json")),
+            )
+        ),
+        *(
+            FactReference(
+                fact_type="incomplete_transition",
+                fact_id=str(item.receipt_id),
+                fingerprint=canonical_hash(item.model_dump(mode="json")),
+            )
+            for item in sorted(
+                snapshot.incomplete_transitions,
+                key=lambda item: canonical_hash(item.model_dump(mode="json")),
+            )
+        ),
+    )
+
+
+def _retry_rule(snapshot: WorkflowFactSnapshot) -> tuple[RuleEvaluation, ...]:
+    """Offer retry only as an explicit optional action for its exact target."""
+    if any(item.status in {"planned", "active"} for item in snapshot.sprint_retries):
+        return (RuleEvaluation(RuleCategory.SATISFIED, "RETRY_ALREADY_LIVE"),)
+    candidates = tuple(item for item in snapshot.sprints if item.status == "completed")
+    values: list[RuleEvaluation] = []
+    for sprint in candidates:
+        eligibility = evaluate_sprint_retry_eligibility(
+            snapshot, sprint_id=sprint.sprint_id
+        )
+        references = _retry_references(snapshot, sprint.sprint_id)
+        if eligibility.blockers:
+            values.append(
+                RuleEvaluation(
+                    RuleCategory.BLOCKED,
+                    eligibility.blockers[0].code,
+                    instance_key=f"sprint:{sprint.sprint_id}",
+                    fact_references=references,
+                )
+            )
+        else:
+            values.append(
+                RuleEvaluation(
+                    RuleCategory.AVAILABLE,
+                    "SPRINT_RETRY_AVAILABLE",
+                    instance_key=f"sprint:{sprint.sprint_id}",
+                    fact_references=references,
+                    recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+                )
+            )
+    return tuple(values) or (
+        RuleEvaluation(RuleCategory.SATISFIED, "NO_COMPLETED_SPRINT_RETRY"),
+    )
+
+
+def _retry_start_rule(snapshot: WorkflowFactSnapshot) -> tuple[RuleEvaluation, ...]:
+    """Require a human to explicitly start the one planned retry."""
+    planned = tuple(
+        item for item in snapshot.sprint_retries if item.status == "planned"
+    )
+    if len(planned) != 1:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "RETRY_START_NOT_PENDING"),)
+    retry = planned[0]
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "SPRINT_RETRY_READY_TO_START",
+            instance_key=execution_instance_key(
+                "sprint", retry.sprint_id, retry.retry_attempt_id
+            ),
+            fact_references=_retry_references(snapshot, retry.sprint_id),
+        ),
+    )
+
+
 EXECUTION_NODES: tuple[NodeSpec, ...] = (
+    NodeSpec(
+        node_id="execution.sprint.retry",
+        child_graph_id="execution",
+        request_kind="retry_sprint",
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        required_inputs=(
+            InputField(name="confirm", value_type="boolean"),
+            InputField(name="rationale", value_type="string"),
+            InputField(name="expected_state_fingerprint", value_type="string"),
+        ),
+        evaluate_rule=lambda snapshot, _at: _retry_rule(snapshot),
+    ),
+    NodeSpec(
+        node_id="execution.sprint.retry.start",
+        child_graph_id="execution",
+        request_kind="start_sprint_retry",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(),
+        evaluate_rule=lambda snapshot, _at: _retry_start_rule(snapshot),
+    ),
     NodeSpec(
         node_id="execution.task.complete",
         child_graph_id="execution",

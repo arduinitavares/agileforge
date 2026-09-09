@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 33
+EXPECTED_REQUEST_VARIANT_COUNT = 35
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,
@@ -1237,9 +1237,9 @@ def test_sprint_start_dependency_snapshot_rejects_structural_corruption(
             rows.append(duplicate)
         elif corruption == "duplicate_endpoint":
             duplicate = dict(rows[0])
-            duplicate["dependency_id"] = max(
-                int(item["dependency_id"]) for item in rows
-            ) + 1
+            duplicate["dependency_id"] = (
+                max(int(item["dependency_id"]) for item in rows) + 1
+            )
             rows.append(duplicate)
         else:
             rows[1]["prerequisite_story_id"] = story_c_id + 10_000

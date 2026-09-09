@@ -25,6 +25,7 @@ from workflow.definitions.backlog import (
     current_backlog_lineage,
 )
 from workflow.definitions.product_goal import lifecycle_is_quiescent
+from workflow.execution_scope import retry_blocks_planning
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
     AgenticExecutionSpec,
@@ -722,6 +723,8 @@ def dependency_review_lifecycle_locked(snapshot: WorkflowFactSnapshot) -> bool:
     sprints_by_id = {item.sprint_id: item for item in snapshot.sprints}
     triaged_sprint_ids = {item.sprint_id for item in snapshot.post_sprint_triage}
     if any(item.status == "active" for item in snapshot.sprints):
+        return True
+    if retry_blocks_planning(snapshot):
         return True
     if any(
         item.status == "completed" and item.sprint_id not in triaged_sprint_ids
@@ -1530,6 +1533,14 @@ def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
         snapshot: WorkflowFactSnapshot,
         evaluated_at: datetime,
     ) -> tuple[RuleEvaluation, ...]:
+        if retry_blocks_planning(snapshot):
+            return _blocked(
+                "SPRINT_RETRY_LIFECYCLE_ACTIVE",
+                (
+                    "Planning waits until the current Sprint retry has valid "
+                    "terminal triage."
+                ),
+            )
         if backlog_correction_in_progress(snapshot, evaluated_at):
             return _blocked(
                 "BACKLOG_CORRECTION_IN_PROGRESS",

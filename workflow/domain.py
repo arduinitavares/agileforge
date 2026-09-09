@@ -70,6 +70,7 @@ from workflow.handlers import (
     validate_decide_backlog_review,
     validate_planning_review,
 )
+from workflow.handlers.sprint_retry import execute_sprint_retry_request
 from workflow.requests import (
     AbandonProductGoal,
     ApplyStoryDependencies,
@@ -100,10 +101,12 @@ from workflow.requests import (
     RecordVisionInterviewTurn,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetrySprint,
     RevalidateNodeAttempt,
     ReviewSprint,
     StartNodeAttempt,
     StartSprint,
+    StartSprintRetry,
     TransitionRequest,
 )
 
@@ -182,7 +185,13 @@ type _PlanningRequest = (
     | StartSprint
 )
 type _ExecutionRequest = (
-    CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
+    CompleteTask
+    | CloseStory
+    | ReviewSprint
+    | CloseSprint
+    | RecordPostSprintTriage
+    | RetrySprint
+    | StartSprintRetry
 )
 type _PositionedTransitionRequest = (
     GenerateVisionBootstrap
@@ -360,7 +369,19 @@ class WorkflowDomain:
         if claim.immediate_result is not None:
             return claim.immediate_result
         receipt = self._required_receipt(claim)
-        result = self._execute_request(session, request, evaluated_at)
+        previous_marker = session.info.get("agileforge.active_transition_receipt")
+        session.info["agileforge.active_transition_receipt"] = {
+            "receipt_id": receipt.workflow_transition_receipt_id,
+            "request_kind": receipt.request_kind,
+            "request_fingerprint": receipt.request_fingerprint,
+        }
+        try:
+            result = self._execute_request(session, request, evaluated_at)
+        finally:
+            if previous_marker is None:
+                session.info.pop("agileforge.active_transition_receipt", None)
+            else:
+                session.info["agileforge.active_transition_receipt"] = previous_marker
         self._complete_receipt(session, receipt, result, evaluated_at)
         return result
 
@@ -851,10 +872,7 @@ class WorkflowDomain:
         )
         completion_position = self._graph.evaluate(completion_snapshot, evaluated_at)
         decision = self._decision(completion_position, request)
-        if (
-            decision is None
-            or decision.category is not NodeCategory.AVAILABLE
-        ):
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return self._obsolete_attempt(
                 session,
                 project_id=request.project_id,
@@ -1196,6 +1214,10 @@ class WorkflowDomain:
             | RecordPostSprintTriage,
         ):
             result = execute_execution_request(session, request, decision, evaluated_at)
+        elif isinstance(request, RetrySprint | StartSprintRetry):
+            result = execute_sprint_retry_request(
+                session, request, decision, evaluated_at
+            )
         elif isinstance(
             request,
             RecordProductGoalInterviewTurn
