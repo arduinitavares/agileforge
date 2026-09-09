@@ -14,6 +14,7 @@ from repositories.workflow import WorkflowFactRepository
 from services.application import SprintRetryRequest, SprintStartRequest
 from services.contracts.sprint import SprintPlannerOutput
 from services.read_projections import DurableReadProjectionService
+from services.sprint_retry import build_sprint_retry_preview
 from tests.adapters.sprint_retry_fixtures import (
     durable_rows,
     retry_transport_fixture,
@@ -37,9 +38,10 @@ from tests.workflow.test_planning_transitions import (
     _seed_accepted_backlog,
 )
 from workflow.definitions.product_discovery import accepted_current_spec
-from workflow.requests import DecideSprintPlan, RecordSprintPlan
+from workflow.requests import DecideSprintPlan, RecordSprintPlan, RetrySprint
 
 if TYPE_CHECKING:
+    import pytest
     from sqlalchemy.engine import Engine
 
     from workflow.contracts import JsonObject
@@ -633,6 +635,118 @@ def test_retry_review_close_and_triage_survive_fresh_projection_reads(
         "completed"
     )
     assert len(cast("list[object]", final_data["triage"])) == 1
+
+
+def test_sprint_review_uses_one_snapshot_when_a_new_retry_is_created(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep terminal retry A facts together when planned retry B appears mid-read."""
+    source, sprint_id, _task_id, retry_attempt_id, reads, _original_evidence = (
+        _start_retry_through_application(engine)
+    )
+    project_id = source.project_id
+    for task_id, story_id, suffix in (
+        (source.first_task_id, source.first_story_id, "first"),
+        (source.second_task_id, source.second_story_id, "second"),
+    ):
+        complete_retry_task(
+            source.domain,
+            project_id=project_id,
+            retry_id=retry_attempt_id,
+            task_id=task_id,
+            suffix=f"issue-260-snapshot-{suffix}",
+        )
+        close_retry_story(
+            source.domain,
+            project_id=project_id,
+            retry_id=retry_attempt_id,
+            story_id=story_id,
+            suffix=f"issue-260-snapshot-{suffix}",
+        )
+    review_retry_sprint(
+        source.domain,
+        project_id=project_id,
+        retry_id=retry_attempt_id,
+        sprint_id=sprint_id,
+        suffix="issue-260-snapshot",
+    )
+    close_retry_sprint(
+        source.domain,
+        project_id=project_id,
+        retry_id=retry_attempt_id,
+        sprint_id=sprint_id,
+        suffix="issue-260-snapshot",
+    )
+    triage_retry_sprint(
+        source.domain,
+        project_id=project_id,
+        retry_id=retry_attempt_id,
+        sprint_id=sprint_id,
+        suffix="issue-260-snapshot",
+    )
+    with Session(engine) as session:
+        snapshot_a = WorkflowFactRepository(session).load(project_id)
+    retry_a = next(
+        item
+        for item in snapshot_a.sprint_retries
+        if item.retry_attempt_id == retry_attempt_id
+    )
+    expected_triage = [
+        item.model_dump(mode="json") for item in retry_a.post_sprint_triage
+    ]
+    assert len(expected_triage) == 1
+
+    original_snapshot = reads._snapshot
+    snapshot_calls = 0
+
+    def interleaved_snapshot(project_id: int) -> object:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            with Session(engine) as session:
+                latest_snapshot = WorkflowFactRepository(session).load(project_id)
+                preview = build_sprint_retry_preview(
+                    session,
+                    snapshot=latest_snapshot,
+                    sprint_id=sprint_id,
+                )
+            position = source.domain.position(project_id)
+            decision = next(
+                item
+                for item in position.decisions
+                if item.node_id == "execution.sprint.retry"
+                and item.instance_key == f"sprint:{sprint_id}"
+            )
+            created = source.domain.transition(
+                RetrySprint(
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    confirm=True,
+                    expected_state_fingerprint=preview.expected_state_fingerprint,
+                    rationale="A fresh retry begins after retry A was finalized.",
+                    actor="owner@example.com",
+                    idempotency_key="issue-260-snapshot-retry-b",
+                    graph_version=position.graph_version,
+                    fact_fingerprint=position.fact_fingerprint,
+                    decision_fingerprint=decision.decision_fingerprint,
+                    instance_key=decision.instance_key,
+                )
+            )
+            assert created.ok is True
+            return snapshot_a
+        return original_snapshot(project_id)
+
+    monkeypatch.setattr(reads, "_snapshot", interleaved_snapshot)
+
+    result = reads.sprint_review(project_id=project_id, sprint_id=sprint_id)
+
+    assert result["ok"] is True
+    data = cast("dict[str, object]", result["data"])
+    assert cast("dict[str, object]", data["current_retry"])["retry_attempt_id"] == (
+        retry_attempt_id
+    )
+    assert data["triage"] == expected_triage
 
 
 def test_pending_successor_plan_keeps_source_history_and_review_visible(

@@ -3327,7 +3327,7 @@ class DurableReadProjectionService:
         )
         return _success(metrics)
 
-    def sprint_status(  # noqa: PLR0911
+    def sprint_status(
         self,
         *,
         project_id: int,
@@ -3337,7 +3337,20 @@ class DurableReadProjectionService:
         snapshot_or_error = self._snapshot(project_id)
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
-        snapshot = snapshot_or_error
+        return self._sprint_status_from_snapshot(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            snapshot=snapshot_or_error,
+        )
+
+    def _sprint_status_from_snapshot(  # noqa: PLR0911
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None,
+        snapshot: WorkflowFactSnapshot,
+    ) -> JsonObject:
+        """Project one Sprint from one caller-owned durable snapshot."""
         sprint = self._select_sprint(snapshot.sprints, sprint_id)
         if sprint is None:
             return _error(
@@ -3892,16 +3905,21 @@ class DurableReadProjectionService:
         sprint_id: int | None = None,
     ) -> JsonObject:
         """Return review, closure, and triage facts for one Sprint."""
-        status = self.sprint_status(project_id=project_id, sprint_id=sprint_id)
+        snapshot_or_error = self._snapshot(project_id)
+        if isinstance(snapshot_or_error, dict):
+            return snapshot_or_error
+        snapshot = snapshot_or_error
+        status = self._sprint_status_from_snapshot(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            snapshot=snapshot,
+        )
         if status.get("ok") is not True:
             return status
         data = _result_data(status)
         sprint = data.get("sprint")
         selected_id = sprint.get("sprint_id") if isinstance(sprint, dict) else None
-        snapshot_or_error = self._snapshot(project_id)
-        if isinstance(snapshot_or_error, dict):
-            return snapshot_or_error
-        current_scope = _current_scope(snapshot_or_error)
+        current_scope = _current_scope(snapshot)
         if isinstance(current_scope, _ExecutionScopeReadFailure):
             return current_scope.error
         scope = (
@@ -3914,7 +3932,7 @@ class DurableReadProjectionService:
             for item in (
                 scope.post_sprint_triage
                 if scope is not None
-                else snapshot_or_error.post_sprint_triage
+                else snapshot.post_sprint_triage
             )
             if item.sprint_id == selected_id
         ]

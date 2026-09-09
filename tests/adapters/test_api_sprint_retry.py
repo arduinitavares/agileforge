@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
@@ -20,10 +20,89 @@ from tests.adapters.sprint_retry_fixtures import (
     retry_row_count,
     retry_transport_fixture,
 )
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     import pytest
     from sqlalchemy.engine import Engine
+
+    from workflow.contracts import JsonObject, WorkflowPosition
+
+
+def _expected_stale_retry_receipt(
+    *,
+    project_id: int,
+    sprint_id: int,
+    actor: str,
+    rationale: str,
+    position: WorkflowPosition,
+) -> tuple[JsonObject, JsonObject]:
+    """Build the exact domain receipt contract for one stale retry preview."""
+    stale_expected_fingerprint = "sha256:" + ("0" * 64)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.sprint.retry"
+        and item.instance_key == f"sprint:{sprint_id}"
+    )
+    request: JsonObject = {
+        "kind": "retry_sprint",
+        "project_id": project_id,
+        "graph_version": position.graph_version,
+        "fact_fingerprint": position.fact_fingerprint,
+        "decision_fingerprint": decision.decision_fingerprint,
+        "attempt_id": None,
+        "attempt_fingerprint": None,
+        "instance_key": decision.instance_key,
+        "idempotency_key": "api-retry-stale",
+        "actor": actor,
+        "correlation_id": None,
+        "sprint_id": sprint_id,
+        "confirm": True,
+        "rationale": rationale,
+        "expected_state_fingerprint": stale_expected_fingerprint,
+    }
+    result: JsonObject = {
+        "ok": False,
+        "replayed": False,
+        "applied_node_id": None,
+        "output": {},
+        "position": cast("JsonObject", position.model_dump(mode="json")),
+        "error": {
+            "code": "WORKFLOW_FACT_CONFLICT",
+            "message": "Sprint retry preview is stale or blocked.",
+            "blockers": [],
+        },
+    }
+    return request, result
+
+
+def _assert_rejected_retry_payloads(
+    client: TestClient,
+    *,
+    engine: Engine,
+    path: str,
+    payload: dict[str, object],
+    before: object,
+) -> None:
+    """Verify public validation rejects malformed retry input without writes."""
+    missing_confirmation = {
+        key: value for key, value in payload.items() if key != "confirm"
+    }
+    for invalid in (
+        missing_confirmation,
+        {**payload, "confirm": False},
+        {**payload, "confirm": 1},
+        {**payload, "confirm": "true"},
+    ):
+        response = client.post(path, json=invalid)
+        assert response.status_code == 422
+        assert durable_rows(engine) == before
+
+    for field in ("actor", "rationale"):
+        response = client.post(path, json={**payload, field: "  "})
+        assert response.status_code == 422
+        assert durable_rows(engine) == before
 
 
 def test_api_retry_preview_matches_cli_scope_and_does_not_write(
@@ -97,24 +176,25 @@ def test_api_retry_rejects_invalid_confirmation_and_stale_or_wrong_targets(
         "idempotency_key": "api-retry-transport",
     }
     path = f"/api/projects/{source.project_id}/sprint/retry"
+    stale_position = fixture.application.position(project_id=source.project_id)
+    stale_request, stale_result = _expected_stale_retry_receipt(
+        project_id=source.project_id,
+        sprint_id=source.source_sprint_id,
+        actor=cast("str", payload["actor"]),
+        rationale=cast("str", payload["rationale"]),
+        position=stale_position,
+    )
+    stale_expected_fingerprint = cast(
+        "str", stale_request["expected_state_fingerprint"]
+    )
 
-    missing_confirmation = {
-        key: value for key, value in payload.items() if key != "confirm"
-    }
-    for invalid in (
-        missing_confirmation,
-        {**payload, "confirm": False},
-        {**payload, "confirm": 1},
-        {**payload, "confirm": "true"},
-    ):
-        response = client.post(path, json=invalid)
-        assert response.status_code == 422
-        assert durable_rows(engine) == before
-
-    for field in ("actor", "rationale"):
-        response = client.post(path, json={**payload, field: "  "})
-        assert response.status_code == 422
-        assert durable_rows(engine) == before
+    _assert_rejected_retry_payloads(
+        client,
+        engine=engine,
+        path=path,
+        payload=payload,
+        before=before,
+    )
 
     wrong_sprint_path = (
         f"/api/projects/{source.project_id}/sprint/"
@@ -134,7 +214,7 @@ def test_api_retry_rejects_invalid_confirmation_and_stale_or_wrong_targets(
         path,
         json={
             **payload,
-            "expected_state_fingerprint": "sha256:" + ("0" * 64),
+            "expected_state_fingerprint": stale_expected_fingerprint,
             "idempotency_key": "api-retry-stale",
         },
     )
@@ -163,8 +243,10 @@ def test_api_retry_rejects_invalid_confirmation_and_stale_or_wrong_targets(
             )
         ).one()
     assert stale_receipt.completed_at is not None
+    assert stale_receipt.request_fingerprint == canonical_hash(stale_request)
+    assert json.loads(stale_receipt.request_json) == stale_request
     assert stale_receipt.result_json is not None
-    assert json.loads(stale_receipt.result_json)["ok"] is False
+    assert json.loads(stale_receipt.result_json) == stale_result
 
     applied = client.post(path, json=payload)
     assert applied.status_code == 200
