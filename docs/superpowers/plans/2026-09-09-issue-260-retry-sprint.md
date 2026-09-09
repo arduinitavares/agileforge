@@ -28,6 +28,8 @@
 - Use `uv run --locked --exact --python 3.13.15` for Python checks; only this checkout's `./agileforge-dev` for application commands. Its disposable `issue-260-execution` profile passed runtime/schema preflight after the retry audit-event changes; the earlier design and verification profiles are preserved.
 - Each task uses RED-GREEN-REFACTOR, preserves raw check output in its report, commits only its named work, and gets separate spec-compliance and quality verdicts. No worker subdelegation. Run checks through `.superpowers/sdd/2026-09-09-issue-260-retry-sprint/run-check.ps1` using a unique evidence name and the prescribed executable/argument array. The task-owned helper preserves command metadata, stdout/stderr and the native exit code without overwriting prior evidence. Retain tool session IDs, wait for the active run, and never start a duplicate because a tool yielded early. A missing completed `.exit` record is an unverified check.
 
+- For Tasks 6 and 7, the controller launches every pytest, behavioral Node suite, real-browser check, and canonical repository check through the capture helper, owns their sessions, and returns the evidence. The implementer freezes source/tests before each launch and may run captured short formatting, lint, type, and syntax checks. No duplicate launches or source/test edits while a controller check is active.
+
 ## File and interface map
 
 New `models/sprint_retry.py` owns persistence, `repositories/sprint_retry.py` owns fact loading, `workflow/execution_identity.py` owns stable action bindings, and `workflow/execution_scope.py` owns effective state. `services/sprint_retry.py` owns eligibility/preview/create/start. Existing execution services retain their semantic responsibilities and use the resolved scope. New small request/handler modules are permitted to avoid expanding the already large application/domain files beyond registration and delegation.
@@ -301,6 +303,7 @@ When connecting the current selector, add a regression for a valid newly drafted
 **Files:**
 - Modify: `services/application.py`, `services/read_projections.py`, `cli/main.py`, `cli/workflow_commands.py`, `api.py`, `docs/agent-cli-manual.md`.
 - Test: `tests/adapters/test_cli_sprint_retry.py`, `tests/adapters/test_api_sprint_retry.py`, `tests/adapters/test_cli_workflow_domain.py`, `tests/adapters/test_api_workflow_domain.py`, `tests/services/test_sprint_status_projection.py`.
+- Create test support: `tests/adapters/sprint_retry_fixtures.py` for shared synthetic transport setup and durable row snapshots reused by the CLI/API tests; capture original rows, retry progress, audit events, and receipts so no-write assertions cannot pass on counts alone. Do not import a concrete test module or duplicate fixture bodies.
 
 **Interfaces:**
 - Consumes: Task 3 preview/apply and Task 4 semantic lifecycle.
@@ -309,7 +312,7 @@ When connecting the current selector, add a regression for a valid newly drafted
 - Existing Sprint start accepts a retry instance binding, producing StartSprintRetry when bound; original unbound start remains StartSprint.
 - Projections add `current_retry` metadata (ID, ordinal, status, predecessor) and effective current progress; history includes explicitly attempt-bound entries while existing original records remain accessible.
 
-- [ ] **Step 1: Write failing transport parity tests.** For one synthetic database, compare preview scope/blockers/hash across CLI and API; GET and unconfirmed calls write nothing. Each successful transport apply routes through the real domain; stale hash returns existing conflict style. Tests verify all required fields and unknown/mismatched IDs fail.
+- [x] **Step 1: Write failing transport parity tests.** For one synthetic database, compare preview scope/blockers/hash across CLI and API; GET and unconfirmed calls write nothing. Each successful transport apply routes through the real domain; stale hash returns existing conflict style. Tests verify all required fields and unknown/mismatched IDs fail.
 
 ```python
 before = original_rows(engine)
@@ -321,8 +324,8 @@ assert load_attempts(engine) == []
 ```
 
 Use the API's actual envelope conventions and adapt assertion location to that documented envelope; do not introduce a special response envelope.
-- [ ] **Step 2: Run RED on new CLI/API tests.** Use the existing isolated transport fixtures, no server attached to operator data.
-- [ ] **Step 3: Implement application methods and transport registration.** Reuse decision preparation/fingerprint/receipt code. Register semantic command/API mappings, instance selectors, and optional retry reentry allowlists. The preview action carries no provider request. Resolve start using the supplied retry instance binding and expose its normal confirmation action.
+- [x] **Step 2: Run RED on new CLI/API tests.** Use the existing isolated transport fixtures, no server attached to operator data.
+- [x] **Step 3: Implement application methods and transport registration.** Reuse decision preparation/fingerprint/receipt code. Register semantic command/API mappings, instance selectors, and optional retry reentry allowlists. The preview action carries no provider request. Resolve start using the supplied retry instance binding and expose its normal confirmation action.
 
 ```python
 identity = parse_execution_instance_key(instance_key) if instance_key else None
@@ -332,9 +335,9 @@ if identity is not None and identity.retry_attempt_id is not None:
 return prepare_original_sprint_start()
 ```
 
-- [ ] **Step 4: Update read projections using scope.** Sprint status, current tasks, task show, review and timeline use scoped progress and name the attempt. Preserve original history entries and requirement text. Include required scoped action bindings so adapters never guess an attempt from latest numeric IDs.
-- [ ] **Step 5: Document exact supported commands and failures.** Explain executor-prepared branch/worktree, preview/confirmation, only latest eligible Sprint, new start and fresh evidence, old history preserved. Canonical Story/Task packet schemas remain unchanged: they carry original accepted requirements and source-execution status snapshots, while workflow position/next and the scoped Sprint/Task reads supply current retry progress and action bindings. Explain this distinction in the manual. No instructions suggesting cleanup or branch rollback.
-- [ ] **Step 6: GREEN and commit.** Run new transport tests, Sprint status and CLI/API workflow contract suites. `git commit -m "feat: expose Sprint retry across CLI API and projections"`.
+- [x] **Step 4: Update read projections using scope.** Sprint status, current tasks, task show, review and timeline use scoped progress and name the attempt. Preserve original history entries and requirement text. Include required scoped action bindings so adapters never guess an attempt from latest numeric IDs.
+- [x] **Step 5: Document exact supported commands and failures.** Explain executor-prepared branch/worktree, preview/confirmation, only latest eligible Sprint, new start and fresh evidence, old history preserved. Canonical Story/Task packet schemas remain unchanged: they carry original accepted requirements and source-execution status snapshots, while workflow position/next and the scoped Sprint/Task reads supply current retry progress and action bindings. Explain this distinction in the manual. No instructions suggesting cleanup or branch rollback.
+- [x] **Step 6: GREEN and commit.** Run new transport tests, Sprint status and CLI/API workflow contract suites. `git commit -m "feat: expose Sprint retry across CLI API and projections"`.
 
 ### Task 6: Add dashboard preview and confirmation with current/history display
 
