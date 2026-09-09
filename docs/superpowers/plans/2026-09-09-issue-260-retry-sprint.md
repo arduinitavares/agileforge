@@ -76,7 +76,7 @@ Persistence contract:
 
 `SprintRetryFact` holds the immutable attempt identity/audit metadata, status/times, ordered `(story_id, status)` and `(task_id, status)` tuples, optional typed start fact, and tuples of existing typed task/story/review/closure/triage facts nested inside this attempt. A new `SprintRetryStartFact` holds its persisted start fields. Nested facts use the original source sprint ID; the enclosing retry supplies identity. Load in deterministic identity order; use existing JSON validators for refs/checklists/triage. The loader must not overwrite original facts or silently drop malformed rows.
 
-- [ ] **Step 1: Add meaningful failing persistence tests.** Use the existing synthetic `_file_engine` and fixture builders, with raw SQL snapshots of old tables and direct invalid inserts.
+- [x] **Step 1: Add meaningful failing persistence tests.** Use the existing synthetic `_file_engine` and fixture builders, with raw SQL snapshots of old tables and direct invalid inserts.
 
 ```python
 def test_retry_fact_default_does_not_change_legacy_snapshot_hash(snapshot):
@@ -95,8 +95,8 @@ def test_two_live_attempts_in_a_project_are_rejected(session, retry_rows):
 
 Define fixtures locally with real Project/Sprint/Story/Task ownership. Also assert cross-attempt subject FK rejection, duplicate starts/evidence rejection, valid correction chain, and deterministic loader roundtrip. Use the repository's actual canonical hash helper signature for the first assertion.
 
-- [ ] **Step 2: Run RED and record actual output.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_models.py -q`; require failure from absent retry functionality, not fixture/setup defects.
-- [ ] **Step 3: Implement typed rows/facts/loader and static schema entries.** Mirror the existing evidence semantics and meaningful constraints; explicitly import the new model module in the manifest initialization list. Append loaded retry facts only after the original workflow snapshot has been loaded. Preserve old fact payloads.
+- [x] **Step 2: Run RED and record actual output.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_models.py -q`; require failure from absent retry functionality, not fixture/setup defects.
+- [x] **Step 3: Implement typed rows/facts/loader and static schema entries.** Mirror the existing evidence semantics and meaningful constraints; explicitly import the new model module in the manifest initialization list. Append loaded retry facts only after the original workflow snapshot has been loaded. Preserve old fact payloads.
 
 ```python
 payload = snapshot.model_dump(mode="json")
@@ -105,7 +105,7 @@ if not snapshot.sprint_retries:
 # Continue with the existing canonical snapshot hashing algorithm.
 ```
 
-- [ ] **Step 4: Add RED migration tests before writing the additive upgrade.** Build the baseline schema from the frozen old static manifest/metadata fixture. Insert synthetic history, snapshot rows, open through schema setup, and compare. Inject failure after the first new DDL statement and require every new table absent after rollback. Start two connections upgrading the same file and require exactly one complete current schema. Unknown extra columns and a single prematurely added retry table must fail closed.
+- [x] **Step 4: Add RED migration tests before writing the additive upgrade.** Build the baseline schema from the frozen old static manifest/metadata fixture. Insert synthetic history, snapshot rows, open through schema setup, and compare. Inject failure after the first new DDL statement and require every new table absent after rollback. Start two connections upgrading the same file and require exactly one complete current schema. Unknown extra columns and a single prematurely added retry table must fail closed.
 
 ```python
 before = snapshot_original_rows(engine)
@@ -115,20 +115,20 @@ assert inspect_schema(engine) == CURRENT_BUSINESS_SCHEMA_MANIFEST
 ```
 
 Test helpers must call the actual database entrypoint and compare explicit inspected structures; do not mock the migration outcome or derive expected manifests from the implementation under test.
-- [ ] **Step 5: Implement atomic exact-baseline upgrade.** Serialize with the existing SQLite write-lock conventions. Inspect inside the transaction. Accept empty/new schema, exact current schema, or exact immediately preceding schema only. Create only missing retry tables for the latter, validate, commit; rollback propagates failure. Preserve current strict rejection diagnostics for other shapes.
-- [ ] **Step 6: Run GREEN/refactor.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_models.py tests/workflow/test_sprint_retry_schema.py tests/workflow/test_workflow_models.py tests/workflow/test_fresh_project_schema.py -q`; run ruff and ty on affected boundaries. Record tests and remaining dependent integration scope.
-- [ ] **Step 7: Commit named files.** `git commit -m "feat: persist isolated Sprint retry attempts and evidence"` after staging only this task's files and checking the staged diff.
+- [x] **Step 5: Implement atomic exact-baseline upgrade.** Serialize with the existing SQLite write-lock conventions. Inspect inside the transaction. Accept empty/new schema, exact current schema, or exact immediately preceding schema only. Create only missing retry tables for the latter, validate, commit; rollback propagates failure. Preserve current strict rejection diagnostics for other shapes.
+- [x] **Step 6: Run GREEN/refactor.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_models.py tests/workflow/test_sprint_retry_schema.py tests/workflow/test_workflow_models.py tests/workflow/test_fresh_project_schema.py -q`; run ruff and ty on affected boundaries. Record tests and remaining dependent integration scope.
+- [x] **Step 7: Commit named files.** `git commit -m "feat: persist isolated Sprint retry attempts and evidence"` after staging only this task's files and checking the staged diff.
 
 **Task 1 review adjustment:** Fix round 1 also implements the targeted `ExecutionScope` / `resolve_execution_scope` foundation and shared scope-aware fingerprints described in Task 2, plus a shared canonical evidence payload parser and repository error normalization. These are required to validate durable retry evidence before accepting Task 1. Task 2 retains current-scope selection, lineage extraction, action identities, and request binding tests; it reuses the reviewed foundation.
 
 ### Task 2: Resolve retry execution scope without changing historical bindings
 
 **Files:**
-- Create: `workflow/execution_identity.py`, `workflow/execution_scope.py`, `workflow/sprint_lineage.py`, `tests/workflow/test_execution_scope.py`.
-- Modify: `workflow/execution_integrity.py`, `workflow/requests/execution.py`, `workflow/definitions/planning.py`, `tests/workflow/test_execution_requests.py` (create if absent).
+- Create: `workflow/execution_identity.py`, `workflow/sprint_lineage.py`.
+- Modify: `workflow/execution_scope.py`, `tests/workflow/test_execution_scope.py`, `workflow/execution_integrity.py`, `workflow/requests/execution.py`, `workflow/definitions/planning.py`, `tests/workflow/test_execution_requests.py` (create if absent).
 
 **Interfaces:**
-- Consumes: Task 1 `SprintRetryFact` and snapshot collection; existing `ExecutionContract` from `workflow.execution_integrity`.
+- Consumes: Task 1 `SprintRetryFact`, snapshot collection, targeted `ExecutionScope`/`resolve_execution_scope`, and shared Task/Story scope-aware fingerprint foundation. Extend this reviewed foundation; current-scope selection, action bindings, and review/close hash support remain this task.
 - Produces: frozen `ExecutionIdentity(kind: Literal['task', 'story', 'sprint'], entity_id: int, retry_attempt_id: int | None)`; `execution_instance_key(kind, entity_id, retry_attempt_id=None) -> str`; `parse_execution_instance_key(value: str) -> ExecutionIdentity`.
 - Produces: frozen `ExecutionScope` with `sprint_id`, `retry_attempt_id`, normalized lower-case `status`, `started_at`, `completed_at`, `contract`, selected `stories`, all effective `project_stories`, selected `tasks`, contract `dependencies`, `task_completions`, `story_completions`, `sprint_reviews`, `sprint_closures`, `post_sprint_triage`. Original start time comes from `SprintStartFact`; retry fact status follows the same lower-case normalization as `SprintFact`.
 - Produces: `resolve_execution_scope(snapshot: WorkflowFactSnapshot, *, sprint_id: int, retry_attempt_id: int | None = None) -> ExecutionScope` and `current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None`.
@@ -185,7 +185,7 @@ if identity.kind != "task" or identity.entity_id != request.task_id:
 - Consumes: Task 1 rows, Task 2 identities/scopes; existing session-bound workflow domain, receipts, facts repository and accepted-plan stream selectors.
 - Produces: frozen `SprintRetryPreview` with `project_id`, `sprint_id`, `predecessor_retry_attempt_id`, `next_ordinal`, exact Story/Task scope, preserved-history summary, repository provenance, `blockers`, `expected_state_fingerprint`.
 - Produces: `build_sprint_retry_preview(session: Session, *, snapshot: WorkflowFactSnapshot, sprint_id: int) -> SprintRetryPreview`; this function is read-only.
-- Produces: `RetrySprint` positioned request (`kind='retry_sprint'`, project/sprint, `confirm`, actor, rationale, expected-state fingerprint, idempotency plus existing graph/decision bindings) and `StartSprintRetry` positioned request (`kind='start_sprint_retry'`, project/sprint/retry identity, actor, idempotency and normal decision bindings). The class names denote operations; all serialized kind/graph request_kind values follow existing snake_case conventions.
+- Produces: `RetrySprint` positioned request (`kind='retry_sprint'`, project/sprint, `confirm`, actor, rationale, expected-state fingerprint, idempotency plus existing graph/decision bindings) and `StartSprintRetry` positioned request (`kind='start_sprint_retry'`, project/sprint/retry identity, actor, idempotency and normal decision bindings). The class names denote operations; all serialized kind/graph request_kind values follow existing snake_case conventions. Require literal true confirmation and nonblank actor/rationale at the new request boundary before the domain claims a receipt, so an unconfirmed invocation has no persistence effect; do not change legacy request models.
 - Graph nodes: `execution.sprint.retry` optional owner reentry, `execution.sprint.retry.start` human start of planned retry. Neither duplicates completion nodes.
 - Writes: `retry_sprint_in_session(session, *, request, snapshot, now)` and `start_sprint_retry_in_session(session, *, request, snapshot, now)` invoked only inside the established domain transaction.
 
