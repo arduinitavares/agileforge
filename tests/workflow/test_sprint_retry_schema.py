@@ -75,8 +75,9 @@ def _snapshot_original_rows(
         return {
             table: tuple(
                 tuple(row)
+                # Frozen baseline schema supplies the enumerated table name.
                 for row in connection.exec_driver_sql(
-                    f"SELECT * FROM {table} ORDER BY rowid"  # noqa: S608
+                    f"SELECT * FROM {table} ORDER BY rowid"  # noqa: S608  # nosec B608
                 ).all()
             )
             for table in tables
@@ -89,16 +90,18 @@ def _copy_original_history(source: Engine, target: Engine) -> None:
     with source.connect() as source_connection, target.begin() as target_connection:
         target_connection.exec_driver_sql("PRAGMA defer_foreign_keys = ON")
         for table in tables:
+            # Frozen baseline schema supplies the enumerated table name.
             rows = source_connection.exec_driver_sql(
-                f"SELECT * FROM {table} ORDER BY rowid"  # noqa: S608
+                f"SELECT * FROM {table} ORDER BY rowid"  # noqa: S608  # nosec B608
             ).all()
             if not rows:
                 continue
             columns = tuple(row["name"] for row in inspect(source).get_columns(table))
             quoted_columns = ", ".join(columns)
             placeholders = ", ".join("?" for _column in columns)
+            # Inspector metadata supplies table and column identifiers.
             statement = (
-                f"INSERT INTO {table} ({quoted_columns}) VALUES ({placeholders})"  # noqa: S608
+                f"INSERT INTO {table} ({quoted_columns}) VALUES ({placeholders})"  # noqa: S608  # nosec B608
             )
             for row in rows:
                 target_connection.exec_driver_sql(statement, tuple(row))

@@ -276,8 +276,9 @@ def _raw_rows(engine: Engine) -> dict[str, tuple[tuple[object, ...], ...]]:
         return {
             table_name: tuple(
                 tuple(row)
+                # The inspector supplies only fixture schema table identifiers.
                 for row in connection.execute(
-                    sql_text(f"SELECT * FROM {table_name} ORDER BY rowid")  # noqa: S608
+                    sql_text(f"SELECT * FROM {table_name} ORDER BY rowid")  # noqa: S608  # nosec B608
                 )
             )
             for table_name in inspect(engine).get_table_names()

@@ -467,6 +467,8 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "planning.sprint.start",
     )
     assert tuple(node.node_id for node in execution.nodes) == (
+        "execution.sprint.retry",
+        "execution.sprint.retry.start",
         "execution.task.complete",
         "execution.story.close",
         "execution.sprint.review",

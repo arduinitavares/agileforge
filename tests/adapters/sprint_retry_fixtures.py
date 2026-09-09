@@ -77,8 +77,9 @@ def _raw_table_rows(connection: Connection, table: Table) -> DurableTableRows:
         for index, column in enumerate(columns)
         if column.name in primary_key_names
     )
+    # The SQLModel metadata supplies this registered table identifier.
     rows = connection.execute(
-        text(f"SELECT * FROM {table.name} ORDER BY rowid")  # noqa: S608
+        text(f"SELECT * FROM {table.name} ORDER BY rowid")  # noqa: S608  # nosec B608
     )
     return {
         tuple(row[index] for index in primary_key_indexes): tuple(row) for row in rows

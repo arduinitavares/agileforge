@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,7 +11,18 @@ from workflow.fingerprints import canonical_hash
 from workflow.requests.execution import CompleteTask, RecordPostSprintTriage
 
 
-def _guards() -> dict[str, object]:
+class _RequestGuards(TypedDict):
+    """Precisely type the request fields expanded into both request models."""
+
+    project_id: int
+    graph_version: str
+    fact_fingerprint: str
+    decision_fingerprint: str
+    idempotency_key: str
+    actor: str
+
+
+def _guards() -> _RequestGuards:
     return {
         "project_id": 31,
         "graph_version": "agileforge.workflow.v2",

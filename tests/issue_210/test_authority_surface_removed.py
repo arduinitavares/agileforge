@@ -509,6 +509,43 @@ def _schema_preflight_is_exact(
     parents: dict[ast.AST, ast.AST],
     ensure: ast.FunctionDef,
 ) -> bool:
+    canonical = ast.parse(
+        '''
+def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
+    """Create or atomically upgrade only the exact pre-retry business schema."""
+    target_engine = engine_override or engine
+    if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        _assert_current_business_schema(target_engine)
+
+    with target_engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            observed = _inspect_business_schema_manifest(connection)
+            if not observed.table_names:
+                SQLModel.metadata.create_all(connection)
+            elif observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
+                pass
+            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
+                SQLModel.metadata.create_all(
+                    connection,
+                    tables=[
+                        SQLModel.metadata.tables[table_name]
+                        for table_name in sorted(_RETRY_TABLE_NAMES)
+                    ],
+                )
+            else:
+                _assert_current_business_schema(connection)
+            if (
+                _inspect_business_schema_manifest(connection)
+                != CURRENT_BUSINESS_SCHEMA_MANIFEST
+            ):
+                _assert_current_business_schema(connection)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+'''
+    ).body[0]
     assertion_calls = [
         node
         for node in ast.walk(tree)
@@ -529,25 +566,21 @@ def _schema_preflight_is_exact(
         if isinstance(node, ast.Call)
         and ast.unparse(node.func) == "SQLModel.metadata.create_all"
     ]
-    if len(assertion_calls) != 1 or len(assertion_loads) != 1 or len(create_calls) != 1:
+    expected_schema_guard_call_count = 3
+    expected_schema_guard_load_count = 3
+    expected_schema_ddl_call_count = 2
+    if (
+        not isinstance(canonical, ast.FunctionDef)
+        or len(assertion_calls) != expected_schema_guard_call_count
+        or len(assertion_loads) != expected_schema_guard_load_count
+        or len(create_calls) != expected_schema_ddl_call_count
+    ):
         return False
-    assertion_call = assertion_calls[0]
-    create_call = create_calls[0]
-    assertion_statement = parents.get(assertion_call)
-    create_statement = parents.get(create_call)
     return bool(
-        assertion_loads[0] is assertion_call.func
-        and isinstance(assertion_statement, ast.Expr)
-        and assertion_statement in ensure.body
-        and tuple(ast.unparse(argument) for argument in assertion_call.args)
-        == ("target_engine",)
-        and not assertion_call.keywords
-        and isinstance(create_statement, ast.Expr)
-        and create_statement in ensure.body
-        and tuple(ast.unparse(argument) for argument in create_call.args)
-        == ("target_engine",)
-        and not create_call.keywords
-        and ensure.body.index(assertion_statement) < ensure.body.index(create_statement)
+        ast.dump(ensure, include_attributes=False)
+        == ast.dump(canonical, include_attributes=False)
+        and all(call.func in assertion_loads for call in assertion_calls)
+        and _models_db_schema_guard_binding_is_exact(tree, parents, ensure)
     )
 
 
@@ -779,6 +812,31 @@ def _node_binds_module_name(
     if isinstance(node, (ast.Global, ast.Nonlocal)) and _node_binds_name(node, name):
         return True
     return _is_module_scope_node(node, parents) and _node_binds_name(node, name)
+
+
+def _models_db_schema_guard_binding_is_exact(
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    ensure: ast.FunctionDef,
+) -> bool:
+    """Require the initializer to use the sole production schema guard binding."""
+    guard_name = "_assert_current_business_schema"
+    guard = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == guard_name
+        ),
+        None,
+    )
+    if guard is None or ensure is guard:
+        return False
+    bindings = [
+        node
+        for node in ast.walk(tree)
+        if _node_binds_module_name(node, guard_name, parents)
+    ]
+    return bindings == [guard]
 
 
 def _fresh_schema_guard_binding_is_exact(tree: ast.Module) -> bool:
@@ -2117,6 +2175,150 @@ def read_retired_rows(target_engine):
     assert disconnected != source
     findings, _unused = _source_findings("models/db.py", disconnected)
     assert findings
+
+
+def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
+    """Require the reviewed atomic initializer, rather than a loose call ordering."""
+    source = (ROOT / "models/db.py").read_text(encoding="utf-8")
+    findings, unused = _source_findings("models/db.py", source)
+    assert findings == ()
+    assert not unused
+
+    pre_retry_create = """                SQLModel.metadata.create_all(
+                    connection,
+                    tables=[
+                        SQLModel.metadata.tables[table_name]
+                        for table_name in sorted(_RETRY_TABLE_NAMES)
+                    ],
+                )"""
+    post_create_validation = """            if (
+                _inspect_business_schema_manifest(connection)
+                != CURRENT_BUSINESS_SCHEMA_MANIFEST
+            ):
+                _assert_current_business_schema(connection)
+            connection.commit()"""
+    mutations: tuple[tuple[str, str | None, str], ...] = (
+        (
+            "ddl-before-rejection",
+            "            else:\n"
+            "                _assert_current_business_schema(connection)",
+            "            else:\n"
+            "                SQLModel.metadata.create_all(connection)\n"
+            "                _assert_current_business_schema(connection)",
+        ),
+        (
+            "bypassed-unsupported-manifest-guard",
+            "            else:\n"
+            "                _assert_current_business_schema(connection)",
+            "            else:\n                pass",
+        ),
+        (
+            "broadened-pre-retry-manifest",
+            "            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:",
+            "            elif observed.table_names <= "
+            "PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.table_names:",
+        ),
+        (
+            "unrestricted-retry-ddl",
+            pre_retry_create,
+            "                SQLModel.metadata.create_all(connection)",
+        ),
+        (
+            "missing-post-create-validation",
+            post_create_validation,
+            "            connection.commit()",
+        ),
+        (
+            "commit-before-post-create-validation",
+            post_create_validation,
+            "            connection.commit()\n"
+            + post_create_validation.removesuffix("            connection.commit()"),
+        ),
+        (
+            "weakened-transaction-lock",
+            '        connection.exec_driver_sql("BEGIN IMMEDIATE")',
+            '        connection.exec_driver_sql("BEGIN DEFERRED")',
+        ),
+        (
+            "inspect-before-transaction-lock",
+            '        connection.exec_driver_sql("BEGIN IMMEDIATE")\n        try:\n'
+            "            observed = _inspect_business_schema_manifest(connection)",
+            "        observed = _inspect_business_schema_manifest(connection)\n"
+            '        connection.exec_driver_sql("BEGIN IMMEDIATE")\n        try:\n'
+            "            observed = _inspect_business_schema_manifest(connection)",
+        ),
+        (
+            "missing-rollback",
+            "        except BaseException:\n"
+            "            connection.rollback()\n"
+            "            raise",
+            "        except BaseException:\n            raise",
+        ),
+        (
+            "narrowed-exception-scope",
+            "        except BaseException:\n"
+            "            connection.rollback()\n"
+            "            raise",
+            "        except RuntimeError:\n"
+            "            connection.rollback()\n"
+            "            raise",
+        ),
+        (
+            "missing-reraise",
+            "        except BaseException:\n"
+            "            connection.rollback()\n"
+            "            raise",
+            "        except BaseException:\n"
+            "            connection.rollback()\n"
+            "            return",
+        ),
+        (
+            "extra-module-guard-call",
+            None,
+            "\n_assert_current_business_schema(engine)\n",
+        ),
+        (
+            "extra-module-ddl-call",
+            None,
+            "\nSQLModel.metadata.create_all(engine)\n",
+        ),
+        (
+            "direct-module-guard-rebinding",
+            None,
+            "\n_assert_current_business_schema = lambda _target: None\n",
+        ),
+        (
+            "literal-module-guard-rebinding",
+            None,
+            '\nglobals()["_assert_current_business_schema"] = lambda _target: None\n',
+        ),
+        (
+            "literal-module-guard-deletion",
+            None,
+            '\ndel globals()["_assert_current_business_schema"]\n',
+        ),
+    )
+    for label, needle, replacement in mutations:
+        mutated = (
+            source + replacement
+            if needle is None
+            else source.replace(needle, replacement, 1)
+        )
+        assert mutated != source, label
+        ast.parse(mutated)
+        findings, _unused = _source_findings("models/db.py", mutated)
+        assert findings, label
+
+    normalized = source.replace(
+        "def ensure_business_db_ready(engine_override: Engine | None = None) -> None:",
+        "# Formatting and comments do not change the reviewed initializer.\n\n"
+        "def ensure_business_db_ready(engine_override: Engine | None = None) -> None:",
+        1,
+    )
+    assert normalized != source
+    findings, unused = _source_findings("models/db.py", normalized)
+    assert findings == ()
+    assert not unused
 
 
 def test_fresh_schema_allowance_requires_real_contamination_and_rejection() -> None:

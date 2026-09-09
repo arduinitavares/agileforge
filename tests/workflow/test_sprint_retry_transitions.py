@@ -95,8 +95,9 @@ def _raw_rows(engine: Engine) -> dict[str, tuple[tuple[object, ...], ...]]:
         return {
             table_name: tuple(
                 tuple(row)
+                # The inspector supplies only fixture schema table identifiers.
                 for row in connection.execute(
-                    text(f"SELECT * FROM {table_name} ORDER BY rowid")  # noqa: S608
+                    text(f"SELECT * FROM {table_name} ORDER BY rowid")  # noqa: S608  # nosec B608
                 )
             )
             for table_name in inspect(engine).get_table_names()
@@ -1592,7 +1593,7 @@ def test_positioned_retry_rejects_guard_drift_without_undoing_it(
     tmp_path: Path,
     drift: str,
 ) -> None:
-    """A stale positioned retry preserves injected transition/authority state."""
+    """A stale positioned retry preserves each injected guard-state change."""
     engine = _file_engine(tmp_path / f"retry-positioned-{drift}.sqlite")
     domain, project_id, sprint_id, _story_id, _task_id, _review = (
         _complete_execution_sprint(engine)
