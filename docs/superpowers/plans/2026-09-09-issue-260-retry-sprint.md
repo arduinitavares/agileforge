@@ -122,13 +122,13 @@ Test helpers must call the actual database entrypoint and compare explicit inspe
 ### Task 2: Resolve retry execution scope without changing historical bindings
 
 **Files:**
-- Create: `workflow/execution_identity.py`, `workflow/execution_scope.py`, `tests/workflow/test_execution_scope.py`.
-- Modify: `workflow/execution_integrity.py`, `workflow/requests/execution.py`, `tests/workflow/test_execution_requests.py` (create if absent).
+- Create: `workflow/execution_identity.py`, `workflow/execution_scope.py`, `workflow/sprint_lineage.py`, `tests/workflow/test_execution_scope.py`.
+- Modify: `workflow/execution_integrity.py`, `workflow/requests/execution.py`, `workflow/definitions/planning.py`, `tests/workflow/test_execution_requests.py` (create if absent).
 
 **Interfaces:**
 - Consumes: Task 1 `SprintRetryFact` and snapshot collection; existing `ExecutionContract` from `workflow.execution_integrity`.
 - Produces: frozen `ExecutionIdentity(kind: Literal['task', 'story', 'sprint'], entity_id: int, retry_attempt_id: int | None)`; `execution_instance_key(kind, entity_id, retry_attempt_id=None) -> str`; `parse_execution_instance_key(value: str) -> ExecutionIdentity`.
-- Produces: frozen `ExecutionScope` with `sprint_id`, `retry_attempt_id`, `status`, `started_at`, `completed_at`, `contract`, `stories`, `tasks`, `task_completions`, `story_completions`, `sprint_reviews`, `sprint_closures`, `post_sprint_triage`.
+- Produces: frozen `ExecutionScope` with `sprint_id`, `retry_attempt_id`, normalized lower-case `status`, `started_at`, `completed_at`, `contract`, selected `stories`, all effective `project_stories`, selected `tasks`, contract `dependencies`, `task_completions`, `story_completions`, `sprint_reviews`, `sprint_closures`, `post_sprint_triage`. Original start time comes from `SprintStartFact`; retry fact status follows the same lower-case normalization as `SprintFact`.
 - Produces: `resolve_execution_scope(snapshot: WorkflowFactSnapshot, *, sprint_id: int, retry_attempt_id: int | None = None) -> ExecutionScope` and `current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None`.
 - Existing execution fingerprint functions accept optional keyword-only `scope: ExecutionScope | None = None`, preserving byte-identical default behavior. Import scope only under `TYPE_CHECKING` in integrity to avoid a circular import.
 
@@ -158,6 +158,10 @@ def execution_instance_key(kind, entity_id, retry_attempt_id=None):
 ```
 
 Keep explicit type annotations and validate constructor inputs as well as parser input. Current scope rejects multiple live originals/retries; a planned retry outranks source completed execution. For terminal routing, use proven latest accepted-plan lineage and the highest valid linked retry ordinal, not arbitrary numeric Sprint IDs.
+
+An original planned Sprint has no `SprintStartFact` or `ExecutionContract`; keep it in the existing planning/start route and return no current execution scope until it starts. Count it when rejecting overlap with a live retry. Exact original-scope resolution requires original start lineage; retry planned scopes can resolve because their source Sprint already started. Read projections retain their existing original-planned branch.
+
+Share lineage without an import cycle: move `_sprint_stream_nodes`, `_sprint_stream_starts`, `_sprint_stream_lifecycle`, `_current_sprint_stream_artifacts`, and `_plan_has_matching_sprint_start` from `workflow/definitions/planning.py` to `workflow/sprint_lineage.py`, retaining their algorithms. Export `current_sprint_stream_artifacts` and `plan_has_matching_sprint_start` (same signatures without the leading underscore); import aliases into planning so current call sites remain unchanged. Scope and eligibility import the shared module, never the graph-definition module. Add characterization tests before this move, and run existing planning graph/transition tests after it. This lets planning rules later consume scope without a circular import.
 - [ ] **Step 4: Bind evidence hashes and existing request validation.** Retry contract hash wraps original immutable contract hash plus retry identity. Existing completion/triage request validators accept a matching scoped identity without adding serialized fields. Validate kind and exact requested subject. Hash defaults stay unchanged.
 
 ```python
@@ -172,16 +176,20 @@ if identity.kind != "task" or identity.entity_id != request.task_id:
 ### Task 3: Add guarded preview, transactional retry, and explicit start
 
 **Files:**
-- Create: `services/sprint_retry.py`, `workflow/requests/sprint_retry.py`, `workflow/handlers/sprint_retry.py`, `tests/workflow/test_sprint_retry_transitions.py`.
-- Modify: `workflow/requests/__init__.py`, `workflow/domain.py`, `workflow/definitions/execution.py`, `workflow/definitions/planning.py`, `services/sprint_phase.py`, `workflow/handlers/execution.py`.
+- Create: `services/sprint_retry.py`, `workflow/sprint_retry_eligibility.py`, `workflow/requests/sprint_retry.py`, `workflow/handlers/sprint_retry.py`, `tests/workflow/test_sprint_retry_transitions.py`.
+- Modify: `workflow/requests/__init__.py`, `workflow/domain.py`, `workflow/definitions/execution.py`, `workflow/definitions/planning.py`, `services/agent_workbench/sprint_phase.py`, `workflow/handlers/execution.py`, `workflow/facts.py`, `workflow/fingerprints.py`, `repositories/workflow.py`.
 
 **Interfaces:**
 - Consumes: Task 1 rows, Task 2 identities/scopes; existing session-bound workflow domain, receipts, facts repository and accepted-plan stream selectors.
 - Produces: frozen `SprintRetryPreview` with `project_id`, `sprint_id`, `predecessor_retry_attempt_id`, `next_ordinal`, exact Story/Task scope, preserved-history summary, repository provenance, `blockers`, `expected_state_fingerprint`.
 - Produces: `build_sprint_retry_preview(session: Session, *, snapshot: WorkflowFactSnapshot, sprint_id: int) -> SprintRetryPreview`; this function is read-only.
-- Produces: `RetrySprint` positioned request (`kind='RetrySprint'`, project/sprint, `confirm`, actor, rationale, expected-state fingerprint, idempotency plus existing graph/decision bindings) and `StartSprintRetry` positioned request (project/sprint/retry identity, actor, idempotency and normal decision bindings).
+- Produces: `RetrySprint` positioned request (`kind='retry_sprint'`, project/sprint, `confirm`, actor, rationale, expected-state fingerprint, idempotency plus existing graph/decision bindings) and `StartSprintRetry` positioned request (`kind='start_sprint_retry'`, project/sprint/retry identity, actor, idempotency and normal decision bindings). The class names denote operations; all serialized kind/graph request_kind values follow existing snake_case conventions.
 - Graph nodes: `execution.sprint.retry` optional owner reentry, `execution.sprint.retry.start` human start of planned retry. Neither duplicates completion nodes.
 - Writes: `retry_sprint_in_session(session, *, request, snapshot, now)` and `start_sprint_retry_in_session(session, *, request, snapshot, now)` invoked only inside the established domain transaction.
+
+Separate pure eligibility from persistence: `evaluate_sprint_retry_eligibility(snapshot: WorkflowFactSnapshot, *, sprint_id: int) -> SprintRetryEligibility` lives in `workflow/sprint_retry_eligibility.py` and returns exact source/predecessor/ordinal/contract and structured blockers. Both graph rules and the preview service consume it. The service adds descriptive current persisted repository provenance to the preview fingerprint.
+
+In-flight guard: add `IncompleteTransitionFact` (receipt identity, request kind/fingerprint, started time) and `WorkflowFactSnapshot.incomplete_transitions = ()`, omitted from old snapshot hashing when empty. The repository loads durable incomplete receipts belonging to this project by validating their canonical request JSON. Malformed unassignable receipt identity fails closed. The domain's own newly claimed receipt must be excluded during its transaction's fact reads: bracket `_execute_request` with an explicit session-local active receipt ID marker, restore it in `finally`, and have the receipt fact loader exclude only that exact row. This avoids self-blocking while preserving graph/preview parity for preexisting incomplete work; no committed receipt is changed or hidden globally. Test the marker's cleanup on exceptions and rejection of every other incomplete receipt.
 
 - [ ] **Step 1: Write failing preview/transition tests using synthetic complete/triaged execution.** Existing helpers: `_complete_execution_sprint`, `_triage_execution_sprint` in `tests/workflow/test_execution_transitions.py`; extract reusable helpers into a dedicated test support module if needed without changing their behavior.
 
@@ -195,12 +203,12 @@ result = apply_retry(domain, preview, key="retry-2")
 assert result.retry_attempt_id > 0
 assert original_rows(engine) == before
 assert retry_status(engine, result.retry_attempt_id) == "Planned"
-assert next_action(domain, project_id).request_kind == "StartSprintRetry"
+assert next_action(domain, project_id).request_kind == "start_sprint_retry"
 ```
 
 Helper implementations must use the real workflow domain, evaluated positioned bindings, and persisted rows. Define the helpers in the test file as part of this step.
 - [ ] **Step 2: Run RED.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_transitions.py -q`.
-- [ ] **Step 3: Implement one eligibility function and preview hash.** Prove source accepted plan/decision/start/closure, current resolved triage, original integrity, linked latest retry, exact approved content/dependency fingerprint, no competing delivery. Inspect later stream artifacts and node attempts from durable facts; inspect in-flight transition receipts within the session where absent from the snapshot. Block later drafts/accepted plans/generation/dependent artifacts, failed unresolved work, missing or conflicting lineage. Return named structured blockers. Include every eligibility input plus repository binding in the preview hash.
+- [ ] **Step 3: Implement one eligibility function and preview hash.** Prove source accepted plan/decision/start/closure, current resolved triage, original integrity, linked latest retry, exact approved content/dependency fingerprint, no competing delivery. Inspect later stream artifacts, node attempts and incomplete-transition facts. Historical execution contracts intentionally use stored dependency snapshots; retry eligibility must additionally compare the live selected dependency rows and current accepted requirements to that stored scope. Block later drafts/accepted plans/generation/dependent artifacts, failed unresolved work, missing or conflicting lineage. Return named structured blockers. Include every eligibility input plus repository binding in the preview hash.
 
 ```python
 # Required application sequence under the existing write transaction:
@@ -311,6 +319,7 @@ return prepare_original_sprint_start()
 - Modify: `frontend/project.js` and its existing Sprint markup/styles if needed.
 - Create: `tests/test_sprint_retry_dashboard.mjs`.
 - Test: `tests/test_dashboard_review_safety.mjs`, `tests/test_cockpit_action_synchronization.mjs`, `tests/test_workflow_position_display.mjs`.
+- Modify: `tests/e2e/test_single_project_lifecycle_ui.py`, `cli/dev_checks.py`, `tests/dev_runtime/test_dev_checks.py`, `.github/workflows/ci.yml` to cover the real browser flow and register the new Node suite in the existing quality/CI command lists.
 
 **Interfaces:**
 - Consumes: Task 5 preview endpoint, confirmed POST, retry metadata/history, scoped action bindings.
@@ -328,10 +337,10 @@ expect(retryPosts[0].expected_state_fingerprint).toBe(previewFingerprint);
 ```
 
 Use the project's existing browser harness syntax and selectors; bind to accessible labels rather than screenshot coordinates.
-- [ ] **Step 2: Run RED using the repository frontend test command discovered in its checked-in configuration.** Record that exact command and failing assertion in the report.
+- [ ] **Step 2: Run RED with `node --test tests/test_sprint_retry_dashboard.mjs`.** Record the failing assertion in the report. Node suites use node:test/VM/fake fetch; the real browser suite is separate Playwright pytest in `tests/e2e/test_single_project_lifecycle_ui.py` with the task-owned `dashboard_harness` fixture.
 - [ ] **Step 3: Implement the optional action and existing confirmation surface.** Fetch preview on opening, render approved scope and structured blockers, disable apply when blocked, retain captured fingerprint until confirmation. On stale conflict reload preview and require a new explicit confirmation. Prevent duplicate submissions while pending.
 - [ ] **Step 4: Update effective progress/history rendering.** Show `Attempt 2` with planned/start action then pending Task/Story progress, while original completion history remains readable. Pass the provided scoped bindings for every action. Reload must produce the same display from server state.
-- [ ] **Step 5: GREEN and browser verification.** Exercise blocked/cancel/confirm, stale preview, normal retry start and task completion display, original completion history, and reload. Use only a disposable synthetic server/profile. Capture evidence artifact paths; run related frontend regressions.
+- [ ] **Step 5: GREEN and browser verification.** Exercise blocked/cancel/confirm, stale preview, normal retry start and task completion display, original completion history, and reload. Use only a disposable synthetic server/profile. Add `test_issue_260_retry_sprint_requires_preview_confirmation_and_preserves_history` using the existing browser harness. Run `uv run --locked --exact --python 3.13.15 pytest tests/e2e/test_single_project_lifecycle_ui.py -k 'issue_260 or issue_259 or issue_227' -q` and `node --test tests/test_sprint_retry_dashboard.mjs tests/test_dashboard_review_safety.mjs tests/test_cockpit_action_synchronization.mjs tests/test_workflow_position_display.mjs`. Capture evidence artifact paths. Register the new Node file in `cli/dev_checks.py` and `.github/workflows/ci.yml`; update the corresponding exact argv test after observing RED.
 - [ ] **Step 6: Commit named files.** `git commit -m "feat: add owner-confirmed Sprint retry dashboard flow"`.
 
 ### Task 7: Prove preserved history, lifecycle parity, and final repository quality
@@ -345,6 +354,8 @@ Use the project's existing browser harness syntax and selectors; bind to accessi
 - Consumes: all prior public behavior and persisted state. Produces final integrated acceptance evidence and a passing canonical quality gate.
 
 - [ ] **Step 1: Add the decisive acceptance regression first.** Create two sequential completed/triaged Sprints from one accepted multi-Story artifact. Snapshot original rows/events/receipts and accepted content; retry exactly Sprint 2, finish every normal action, reload, and compare the historical subset. Unselected unrelated Story remains untouched. Misleading numeric ID/completion-time fixtures cannot change target eligibility.
+
+The existing `seed_started_execution_with_unselected_story` fixture creates separate Story artifacts; it does not satisfy this regression. Build one `CanonicalStoryOutput` containing at least three distinct `StoryItemEnvelope` identities, record/accept it once through normal Story transitions, and assert every scoped/unrelated Story has the same `source_story_artifact_id`. Execute Story 1 in Sprint 1 and Story 2 in Sprint 2, retaining Story 3 unselected. Adapt each Sprint plan's `story_item_id` to its actual accepted item. Advance the synthetic clock between cycles so lineage times are deliberately ordered.
 
 ```python
 original = capture_original_execution_and_requirements(engine)
@@ -360,13 +371,13 @@ assert first_sprint_id not in retry.selected_sprint_ids
 Implement test helper assertions against actual evaluation fields; the final condition should compare the retry's exact `sprint_id` where the public model uses a scalar. Capture original rows by their preexisting primary keys so newly appended audit events do not count as corruption.
 - [ ] **Step 2: Add no-side-effect and historical-compatibility assertions.** Patch actual provider invocation/Git mutation/rebind/file cleanup boundaries to fail if called during preview/apply/start/completion. Inspect original serialized request/fingerprint golden fixtures from before retry. Exercise profile reopen after additive schema upgrade, failure rollback, concurrency, and repeat retry.
 - [ ] **Step 3: Run focused acceptance suite and fix only reproduced defects through TDD.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_acceptance.py tests/workflow/test_sprint_retry_execution.py tests/workflow/test_sprint_retry_transitions.py -q`.
-- [ ] **Step 4: Run canonical checks once focused checks pass.** Load `pyrepo-check` skill if repository validation requires it; inspect `./agileforge-dev check --help` and checked-in configuration. At minimum run the README gate below, plus the repository distribution/schema and frontend/browser gates. Save raw logs rather than claiming successful process exit proves all subchecks passed.
+- [ ] **Step 4: Run canonical checks once focused checks pass.** The controller loaded `pyrepo-check` and verified its interface. `./agileforge-dev check --json` runs lock validation, `pyrepo-check --python 3.13.15 --all` (ruff/annotations/ty/bandit/pytest), registered Node suites, whitespace, and distribution verification. Run that once, plus formatting and all Node suites below; do not repeat whole pytest/ruff/ty after their successful canonical run without a new failure or code change. Real browser coverage is the explicit Task 6 command and is not implied by Chromium installation or Node tests. Save raw stage logs and inspect every reported result.
 
 ```text
-uv run --locked --exact --python 3.13.15 pytest -q
-uv run --locked --exact --python 3.13.15 ruff check .
-uv run --locked --exact --python 3.13.15 ty check
+sh ./agileforge-dev info --profile issue-260-design --json
+sh ./agileforge-dev check --json
 uv run --locked --exact --python 3.13.15 ruff format --check .
+node --test tests/*.mjs
 ```
 
 - [ ] **Step 5: Update acceptance checklist with commands/results and commit.** `git commit -m "test: prove Sprint retry history preservation and lifecycle parity"`. Verify clean worktree and original master unchanged.
