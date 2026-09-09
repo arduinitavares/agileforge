@@ -253,7 +253,9 @@ assert original_rows(engine) == before
 
 **Files:**
 - Create: `tests/workflow/retry_execution_fixtures.py` for shared persisted multi-Story execution setup and normal lifecycle helper actions, reusable by Task 7.
-- Modify: `services/task_execution_service.py`, `services/story_close_service.py`, `services/agent_workbench/sprint_phase.py`, `services/agent_workbench/post_sprint_triage.py`, `workflow/definitions/execution.py`, `workflow/handlers/execution.py`, `services/application.py`, `services/sprint_retry.py`.
+- Review fix support: extract the generic planning helpers used by that fixture into `tests/workflow/planning_fixtures.py` and update `tests/workflow/test_planning_transitions.py` to consume the same implementation; preserve defaults and accepted payloads, avoid duplicated helper bodies and private concrete-test imports.
+- Modify: `services/task_execution_service.py`, `services/story_close_service.py`, `services/agent_workbench/sprint_phase.py`, `services/agent_workbench/post_sprint_triage.py`, `workflow/definitions/execution.py`, `workflow/handlers/execution.py`, `services/application.py`.
+- Conditional prerequisite correction: `workflow/definitions/planning.py` and `tests/workflow/test_planning_graph.py`, limited to the reproduced selected-cohort planning guard described below.
 - Test: `tests/workflow/test_sprint_retry_execution.py`, `tests/workflow/test_execution_graph.py`, `tests/workflow/test_execution_transitions.py`, `tests/test_task_execution_service.py`, `tests/test_story_close_service.py`.
 
 **Interfaces:**
@@ -261,7 +263,7 @@ assert original_rows(engine) == before
 - Produces: existing CompleteTask/CloseStory/ReviewSprint/CloseSprint/RecordPostSprintTriage semantic operations working with original or retry scope. Transport-facing semantic input dataclasses may gain optional scope identity, but original positioned request serialization must remain stable.
 - `ExecutionActionSelectionService` resolves exact scoped subject/attempt from positioned bindings; no fallback from a stale retry key to current work.
 
-- [ ] **Step 1: Write failing lifecycle tests.** Start a retry of completed/triaged work; old Done state supplies no new completion. Complete each task using a new key, close its Story, review Sprint, explicitly close, then record triage. Compare all old records at each checkpoint and reload the domain from disk between transitions.
+- [x] **Step 1: Write failing lifecycle tests.** Start a retry of completed/triaged work; old Done state supplies no new completion. Complete each task using a new key, close its Story, review Sprint, explicitly close, then record triage. Compare all old records at each checkpoint and reload the domain from disk between transitions.
 
 ```python
 assert retry_scope.tasks[0].status == "To Do"
@@ -274,8 +276,10 @@ assert load_retry_scope(domain, retry_id).tasks[0].status == "Done"
 ```
 
 Implement helper actions using the real evaluated graph and existing request models. Add two inner dependent Tasks/Stories and one completed external dependency to prove proper isolation. Keep their reusable persisted setup in `tests/workflow/retry_execution_fixtures.py`; preserve existing fixture defaults. If the same fixture proves real next-plan availability after triage, retain a fourth unselected Story as a candidate rather than treating absence of candidates as successful planning. Task 7 still has its separately required one-artifact, three-Story, two-Sprint acceptance scenario.
-- [ ] **Step 2: Run RED.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_execution.py -q`.
-- [ ] **Step 3: Refactor shared validation to consume scope.** CompleteTask validates effective task status/checklist/references/dependencies, then writes original rows for original scope or retry evidence/progress for retry scope. Story close, review, close, and triage follow the same ownership choice after shared validations. Keep existing original transaction behavior and errors. No reset of Task/UserStory/Sprint or copy of previous evidence.
+
+The persisted setup exposed a preexisting planning guard that treats an unfinished prerequisite inside the exact reviewed selected cohort as external. Add a focused graph RED and make the smallest planning-only correction: exclude only canonical prerequisite blockers belonging to the selected cohort from the external-incomplete check. Keep readiness blockers on facts and preserve execution ordering, external and transitive prerequisite checks, proposed-edge rejection, and cycle rejection. Verify the persisted B/C setup then executes in dependency order; do not fake completed state or inject dependencies after Sprint start.
+- [x] **Step 2: Run RED.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_execution.py -q`.
+- [x] **Step 3: Refactor shared validation to consume scope.** CompleteTask validates effective task status/checklist/references/dependencies, then writes original rows for original scope or retry evidence/progress for retry scope. Story close, review, close, and triage follow the same ownership choice after shared validations. Keep existing original transaction behavior and errors. No reset of Task/UserStory/Sprint or copy of previous evidence.
 
 ```python
 identity = parse_execution_instance_key(request.instance_key)
@@ -286,11 +290,11 @@ scope = resolve_execution_scope(
 # original model only when scope.retry_attempt_id is None.
 ```
 
-- [ ] **Step 4: Route all existing graph rules through scope.** Replace raw active/completed selection in task/story/review/close/triage rules with the scope boundary. Keep original historical integrity checks on original facts; validate each retry's own evidence against its scoped contract. Bind action fingerprints and instance keys to the exact retry. Planning remains blocked until terminal valid triage; triage impact backlog/specification preserves existing downstream behavior.
-When connecting the current selector, add a regression for a valid newly drafted Sprint-plan stream with no accepted leaf after prior execution is fully triaged. Preserve the ordinary pending-plan review route. If reproduced, the narrow correction belongs in `workflow/execution_scope.py` with `tests/workflow/test_execution_scope.py`; do not catch all lineage errors or weaken malformed-history rejection.
+- [x] **Step 4: Route all existing graph rules through scope.** Replace raw active/completed selection in task/story/review/close/triage rules with the scope boundary. Keep original historical integrity checks on original facts; validate each retry's own evidence against its scoped contract. Bind action fingerprints and instance keys to the exact retry. Planning remains blocked until terminal valid triage; triage impact backlog/specification preserves existing downstream behavior.
+When connecting the current selector, add a regression for a valid newly drafted Sprint-plan stream with no accepted leaf after prior execution is fully triaged. Preserve the ordinary pending-plan review route. The persisted probe reproduced this boundary: after the current stream has passed lineage and lifecycle validation, catch only `ACCEPTED_LEAF_MISSING` from its accepted-leaf selection and return no current execution scope. Keep older completed history readable through explicit scope resolution; never substitute it as the current execution for a newer pending plan. The narrow correction belongs in `workflow/execution_scope.py` with `tests/workflow/test_execution_scope.py`, including malformed and multiple-pending-stream controls; do not catch all lineage errors or weaken malformed-history rejection.
 
-- [ ] **Step 5: Add replay and repeat-retry tests, then GREEN.** Original receipt replay is allowed to return original result but cannot mark retry progress. Captured attempt-2 actions cannot mutate attempt 3. Complete retry 2 and retry it again with ordinal 3 linked to 2; prove fresh To Do plus unchanged prior evidence, and normal next planning availability after valid completion/triage. Use a changed review binding and an old task key to prove rejection.
-- [ ] **Step 6: Run focused regressions and commit.** Run retry execution/transitions, existing execution graph/transitions and task/story/sprint service tests. `git commit -m "feat: require fresh evidence throughout Sprint retry execution"`.
+- [x] **Step 5: Add replay and repeat-retry tests, then GREEN.** Original receipt replay is allowed to return original result but cannot mark retry progress. Captured attempt-2 actions cannot mutate attempt 3. Complete retry 2 and retry it again with ordinal 3 linked to 2; prove fresh To Do plus unchanged prior evidence, and normal next planning availability after valid completion/triage. Use a changed review binding and an old task key to prove rejection.
+- [x] **Step 6: Run focused regressions and commit.** Run retry execution/transitions, existing execution graph/transitions and scope tests, and the owning Task/Story service tests. The existing execution-transition suite covers Sprint review, closure and triage service behavior. For the selected-cohort guard correction, also run the owning planning-graph suite and the existing dependency selection tests in `tests/test_sprint_selection.py`. Also run `tests/adapters/test_api_workflow_domain.py -k execution`, which owns the existing application selection, replay and transportability regressions for the methods changed here. `git commit -m "feat: require fresh evidence throughout Sprint retry execution"`.
 
 ### Task 5: Expose matching CLI, API, and read projections
 
@@ -329,7 +333,7 @@ return prepare_original_sprint_start()
 ```
 
 - [ ] **Step 4: Update read projections using scope.** Sprint status, current tasks, task show, review and timeline use scoped progress and name the attempt. Preserve original history entries and requirement text. Include required scoped action bindings so adapters never guess an attempt from latest numeric IDs.
-- [ ] **Step 5: Document exact supported commands and failures.** Explain executor-prepared branch/worktree, preview/confirmation, only latest eligible Sprint, new start and fresh evidence, old history preserved. No instructions suggesting cleanup or branch rollback.
+- [ ] **Step 5: Document exact supported commands and failures.** Explain executor-prepared branch/worktree, preview/confirmation, only latest eligible Sprint, new start and fresh evidence, old history preserved. Canonical Story/Task packet schemas remain unchanged: they carry original accepted requirements and source-execution status snapshots, while workflow position/next and the scoped Sprint/Task reads supply current retry progress and action bindings. Explain this distinction in the manual. No instructions suggesting cleanup or branch rollback.
 - [ ] **Step 6: GREEN and commit.** Run new transport tests, Sprint status and CLI/API workflow contract suites. `git commit -m "feat: expose Sprint retry across CLI API and projections"`.
 
 ### Task 6: Add dashboard preview and confirmation with current/history display
