@@ -770,6 +770,27 @@ test('a retry preview that resolves during a newer mutation cannot open a dialog
     assert.equal(harness.retryPosts().length, 0);
 });
 
+test('a retry preview invalidated by a completed newer mutation cannot open a dialog', async () => {
+    let resolvePreview;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((resolve) => { resolvePreview = resolve; }),
+    });
+
+    const opening = harness.context.openSprintRetryPreview(harness.retryButton);
+    assert.equal(harness.previewGets().length, 1);
+    const token = harness.context.setCockpitActionBusy(true, 'complete_task', {
+        token: 'newer-short-lived-action',
+    });
+    assert.equal(vm.runInContext('activeCockpitAction.token', harness.context), token);
+    harness.context.setCockpitActionBusy(false, 'complete_task', { token });
+    assert.equal(vm.runInContext('activeCockpitAction', harness.context), null);
+    resolvePreview(response({ data: retryPreview() }));
+
+    assert.equal(await opening, false);
+    assert.equal(harness.dialog.open, false);
+    assert.equal(harness.retryPosts().length, 0);
+});
+
 test('a native dialog close invalidates a pending retry preview', async () => {
     let resolvePreview;
     const harness = retryHarness({

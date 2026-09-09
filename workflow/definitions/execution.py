@@ -1732,7 +1732,7 @@ def _retry_start_rule(snapshot: WorkflowFactSnapshot) -> tuple[RuleEvaluation, .
         return (
             RuleEvaluation(
                 RuleCategory.BLOCKED,
-                "SPRINT_RETRY_START_AUTHORITY_STALE",
+                "SPRINT_RETRY_START_SCOPE_STALE",
                 instance_key=execution_instance_key(
                     "sprint", retry.sprint_id, retry.retry_attempt_id
                 ),

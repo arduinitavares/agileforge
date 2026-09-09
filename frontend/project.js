@@ -3697,6 +3697,7 @@ function setCockpitActionBusy(busy, requestKind = null, options = {}) {
     const description = document.getElementById('cockpit-action-description');
 
     if (busy) {
+        invalidateSprintRetryPreview();
         const config = DELIVERY_ACTION_CONFIG[requestKind];
         const busyText = options.busyLabel || config?.busyLabel || 'Executing...';
         const token = options.token || crypto.randomUUID();
