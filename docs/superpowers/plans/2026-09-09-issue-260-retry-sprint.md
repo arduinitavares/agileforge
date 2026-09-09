@@ -26,7 +26,7 @@
 - Use disposable synthetic repositories, profiles, and databases only. Never copy an operator's business or trace database into a test fixture.
 - Work only in `C:/Users/atavares/Projects/agileforge/.worktrees/issue-260`, branch `alex/issue-260-retry-sprint`. Original master at `da3dbf630e43a16561b335087888c0e688754925` stays untouched.
 - Use `uv run --locked --exact --python 3.13.15` for Python checks; only this checkout's `./agileforge-dev` for application commands. Its disposable `issue-260-design` profile already passed runtime/schema preflight.
-- Each task uses RED-GREEN-REFACTOR, preserves raw check output in its report, commits only its named work, and gets separate spec-compliance and quality verdicts. No worker subdelegation.
+- Each task uses RED-GREEN-REFACTOR, preserves raw check output in its report, commits only its named work, and gets separate spec-compliance and quality verdicts. No worker subdelegation. Save long-running check stdout/stderr and exit status to task-owned files from the start; retain tool session IDs, wait for the active run, and never start a duplicate because a tool yielded early. A finished process without recoverable results is an unverified check.
 
 ## File and interface map
 
@@ -119,6 +119,8 @@ Test helpers must call the actual database entrypoint and compare explicit inspe
 - [ ] **Step 6: Run GREEN/refactor.** `uv run --locked --exact --python 3.13.15 pytest tests/workflow/test_sprint_retry_models.py tests/workflow/test_sprint_retry_schema.py tests/workflow/test_workflow_models.py tests/workflow/test_fresh_project_schema.py -q`; run ruff and ty on affected boundaries. Record tests and remaining dependent integration scope.
 - [ ] **Step 7: Commit named files.** `git commit -m "feat: persist isolated Sprint retry attempts and evidence"` after staging only this task's files and checking the staged diff.
 
+**Task 1 review adjustment:** Fix round 1 also implements the targeted `ExecutionScope` / `resolve_execution_scope` foundation and shared scope-aware fingerprints described in Task 2, plus a shared canonical evidence payload parser and repository error normalization. These are required to validate durable retry evidence before accepting Task 1. Task 2 retains current-scope selection, lineage extraction, action identities, and request binding tests; it reuses the reviewed foundation.
+
 ### Task 2: Resolve retry execution scope without changing historical bindings
 
 **Files:**
@@ -177,7 +179,7 @@ if identity.kind != "task" or identity.entity_id != request.task_id:
 
 **Files:**
 - Create: `services/sprint_retry.py`, `workflow/sprint_retry_eligibility.py`, `workflow/requests/sprint_retry.py`, `workflow/handlers/sprint_retry.py`, `tests/workflow/test_sprint_retry_transitions.py`.
-- Modify: `workflow/requests/__init__.py`, `workflow/domain.py`, `workflow/definitions/execution.py`, `workflow/definitions/planning.py`, `services/agent_workbench/sprint_phase.py`, `workflow/handlers/execution.py`, `workflow/facts.py`, `workflow/fingerprints.py`, `repositories/workflow.py`.
+- Modify: `workflow/requests/__init__.py`, `workflow/domain.py`, `workflow/definitions/execution.py`, `workflow/definitions/planning.py`, `workflow/definitions/product_goal.py`, `services/agent_workbench/sprint_phase.py`, `workflow/handlers/execution.py`, `workflow/facts.py`, `workflow/fingerprints.py`, `repositories/workflow.py`.
 
 **Interfaces:**
 - Consumes: Task 1 rows, Task 2 identities/scopes; existing session-bound workflow domain, receipts, facts repository and accepted-plan stream selectors.
@@ -189,7 +191,11 @@ if identity.kind != "task" or identity.entity_id != request.task_id:
 
 Separate pure eligibility from persistence: `evaluate_sprint_retry_eligibility(snapshot: WorkflowFactSnapshot, *, sprint_id: int) -> SprintRetryEligibility` lives in `workflow/sprint_retry_eligibility.py` and returns exact source/predecessor/ordinal/contract and structured blockers. Both graph rules and the preview service consume it. The service adds descriptive current persisted repository provenance to the preview fingerprint.
 
-In-flight guard: add `IncompleteTransitionFact` (receipt identity, request kind/fingerprint, started time) and `WorkflowFactSnapshot.incomplete_transitions = ()`, omitted from old snapshot hashing when empty. The repository loads durable incomplete receipts belonging to this project by validating their canonical request JSON. Malformed unassignable receipt identity fails closed. The domain's own newly claimed receipt must be excluded during its transaction's fact reads: bracket `_execute_request` with an explicit session-local active receipt ID marker, restore it in `finally`, and have the receipt fact loader exclude only that exact row. This avoids self-blocking while preserving graph/preview parity for preexisting incomplete work; no committed receipt is changed or hidden globally. Test the marker's cleanup on exceptions and rejection of every other incomplete receipt.
+Retry guard facts: add a separate default-empty `SprintPlanGenerationGuardFact` projection with attempt ID, durable `started_at`, outcome/time, generated plan ID/fingerprint when linked, and explicit `linked`/`unlinked`/`malformed` integrity classification. Derive it from the exact `planning.sprint.plan` attempt/outcome rows; never infer order from lease expiry. Validate canonical output hashes and project-owned plan links where present. This is a retry guard, not a new requirement that the source plan was generated by a provider: valid directly recorded accepted plans remain eligible. Older incomplete provider provenance must not invalidate ordinary historical reads. Use the existing NodeAttemptFact business/input identity to distinguish a demonstrated superseding successful attempt from unresolved failure; do not label a lease expiry alone resolved. The existing validated current-stream selector proves later draft/accepted/started streams; guard metadata covers later generation that produced no plan.
+
+In-flight guard: add `IncompleteTransitionFact` with receipt identity, request kind/fingerprint, started time, and explicit malformed/unassignable classification. Load canonical project-owned pending receipts (or classify unassignable malformed receipts as retry blockers), without breaking ordinary historical reads. The domain's own newly claimed receipt must be excluded during its transaction's fact reads: bracket `_execute_request` with an explicit session-local active receipt ID marker, restore it in `finally`, and exclude only that exact validated row. Known non-Project creation requests do not belong to an existing Project. This avoids self-blocking while preserving graph/preview parity for every preexisting incomplete receipt; no committed receipt is changed or hidden globally.
+
+Both retry-only guard collections are ALWAYS excluded from general `fact_fingerprint` and `business_fact_fingerprint`, even when nonempty. Existing node-attempt facts still serve normal execution, and business fingerprints intentionally exclude attempts. Explicitly hash the complete sorted retry guards in retry preview state and retry-node `FactReference`s, so the positioned retry decision and transactional preview recheck detect guard changes. Add nonempty compatibility tests (including an ordinary provider continuation), guard-only stale-preview tests, exact-ID marker cleanup on success/failure, and other-receipt rejection tests. Do not add fields to legacy NodeAttemptFact or PlanningArtifactFact.
 
 - [ ] **Step 1: Write failing preview/transition tests using synthetic complete/triaged execution.** Existing helpers: `_complete_execution_sprint`, `_triage_execution_sprint` in `tests/workflow/test_execution_transitions.py`; extract reusable helpers into a dedicated test support module if needed without changing their behavior.
 
@@ -220,7 +226,7 @@ Helper implementations must use the real workflow domain, evaluated positioned b
 # 6. Existing domain persists event/success receipt and commits together.
 ```
 
-- [ ] **Step 4: Add retry/start dispatch and graph routing.** Register the two request classes in every closed union/dispatch table. Start verifies planned current retry and unchanged source contract, writes immutable start and changes only retry status. Block plan generation, plan acceptance/start, scope mutation while a retry is live. Retry remains optional and is not the default next action after terminal triage.
+- [ ] **Step 4: Add retry/start dispatch and graph routing.** Register the two request classes in every closed union/dispatch table. Start verifies planned current retry and unchanged source contract, writes immutable start and changes only retry status. Block plan generation, plan acceptance/start, and scope mutation while a retry is live. Extend the existing shared `workflow/definitions/product_goal.py:lifecycle_is_quiescent` guard for planned/active retries and completed retries awaiting valid triage, so root lifecycle operations do not incorrectly see the preserved original Completed Sprint as quiescent. Retry remains optional and is not the default next action after terminal triage.
 - [ ] **Step 5: Write and run concurrency/rollback RED before hardening.** Same key/same request returns original result; same key/changed request conflicts; two different keys from one preview yield one attempt; injected failure after progress insertion leaves no attempt/progress/event/success receipt. Stale repo provenance, stale content, older target, ambiguous IDs/timestamps, later plans/attempts, unresolved triage and in-flight transitions all reject without old-row changes.
 
 ```python
