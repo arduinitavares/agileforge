@@ -3926,7 +3926,7 @@ def _assert_issue_260_blocked_preview(
 ) -> None:
     fake.retry_preview_blockers = [
         {
-            "code": "RETRY_ALREADY_LIVE",
+            "code": 'x" data-injected="true',
             "reason": "A retry attempt is already active.",
             "subject_type": "retry_attempt",
             "subject_id": 101,
@@ -3941,7 +3941,8 @@ def _assert_issue_260_blocked_preview(
     retry.click()
     expect(dialog).to_be_visible()
     expect(dialog).to_contain_text("already active")
-    expect(dialog).to_contain_text("RETRY_ALREADY_LIVE")
+    expect(dialog).to_contain_text('x" data-injected="true')
+    expect(dialog.locator('[data-injected="true"]')).to_have_count(0)
     expect(dialog).to_contain_text("retry_attempt #101")
     expect(dialog).to_contain_text("RETRY_PROVENANCE_MISSING")
     expect(dialog).to_contain_text("repository_provenance, no subject ID")

@@ -319,7 +319,7 @@ function retryHarness({
                     get textContent() { return text; },
                     get innerHTML() {
                         return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
-                            .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+                            .replaceAll('>', '&gt;');
                     },
                 };
             },
@@ -605,8 +605,7 @@ test('retry preview separates its exact scope and every blocker into accessible 
     assert.match(markup, /<li[^>]*>Task #71<\/li>/);
     assert.match(markup, /<li[^>]*>Task #72<\/li>/);
     assert.match(markup, /<ul[^>]+aria-label="Retry blockers"/);
-    assert.match(markup, /data-sprint-retry-blocker="RETRY_ALREADY_LIVE"/);
-    assert.match(markup, /data-sprint-retry-blocker="RETRY_PROVENANCE_MISSING"/);
+    assert.match(markup, /data-sprint-retry-blocker="true"/);
     assert.equal((markup.match(/data-sprint-retry-blocker=/g) ?? []).length, 2);
     assert.equal(
         harness.elements['human-action-retry-details'].classList.contains('hidden'),
@@ -631,7 +630,7 @@ test('retry preview details escape malicious blocker fields', async () => {
     const harness = retryHarness({
         previews: [retryPreview({
             blockers: [{
-                code: '<script>alert(1)</script>',
+                code: 'x" data-injected="true <script>alert(1)</script>',
                 reason: '<img src=x onerror=alert(1)>',
                 subject_type: '<subject>',
                 subject_id: null,
@@ -642,7 +641,7 @@ test('retry preview details escape malicious blocker fields', async () => {
     await harness.open();
 
     const markup = harness.elements['human-action-retry-details'].innerHTML;
-    assert.match(markup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.match(markup, /x" data-injected="true &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
     assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
     assert.match(markup, /&lt;subject&gt;/);
     assert.doesNotMatch(markup, /<script>|<img /);

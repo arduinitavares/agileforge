@@ -4868,7 +4868,7 @@ function retryPreviewDialogMarkup(preview) {
         const subject = blocker.subject_id === null
             ? `${blocker.subject_type}, no subject ID`
             : `${blocker.subject_type} #${blocker.subject_id}`;
-        return `<li class="rounded border border-amber-200 bg-amber-50 px-3 py-2" data-sprint-retry-blocker="${escapeWorkflowText(blocker.code)}">
+        return `<li class="rounded border border-amber-200 bg-amber-50 px-3 py-2" data-sprint-retry-blocker="true">
             <strong>${escapeWorkflowText(blocker.code)}</strong>: ${escapeWorkflowText(blocker.reason)}
             <span class="text-slate-600">(${escapeWorkflowText(subject)})</span>
         </li>`;
