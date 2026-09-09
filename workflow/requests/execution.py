@@ -7,6 +7,7 @@ from typing import ClassVar, Literal, Self
 from pydantic import Field, model_validator
 
 from workflow.contracts import JsonObject
+from workflow.execution_identity import parse_execution_instance_key
 from workflow.requests.base import PositionedRequest
 
 
@@ -25,9 +26,9 @@ class CompleteTask(PositionedRequest):
     @model_validator(mode="after")
     def validate_task_instance(self) -> Self:
         """Require the instance guard to bind the exact Task."""
-        expected = f"task:{self.task_id}"
-        if self.instance_key != expected:
-            message = f"instance_key must be exactly {expected!r}."
+        identity = parse_execution_instance_key(self.instance_key)
+        if identity.kind != "task" or identity.entity_id != self.task_id:
+            message = "Task binding does not match the requested Task."
             raise ValueError(message)
         return self
 
@@ -47,9 +48,9 @@ class CloseStory(PositionedRequest):
     @model_validator(mode="after")
     def validate_story_instance(self) -> Self:
         """Require the instance guard to bind the exact Story."""
-        expected = f"story:{self.story_id}"
-        if self.instance_key != expected:
-            message = f"instance_key must be exactly {expected!r}."
+        identity = parse_execution_instance_key(self.instance_key)
+        if identity.kind != "story" or identity.entity_id != self.story_id:
+            message = "Story binding does not match the requested Story."
             raise ValueError(message)
         return self
 
@@ -85,9 +86,9 @@ class RecordPostSprintTriage(PositionedRequest):
     @model_validator(mode="after")
     def validate_sprint_instance(self) -> Self:
         """Require the instance guard to bind the exact completed Sprint."""
-        expected = f"sprint:{self.sprint_id}"
-        if self.instance_key != expected:
-            message = f"instance_key must be exactly {expected!r}."
+        identity = parse_execution_instance_key(self.instance_key)
+        if identity.kind != "sprint" or identity.entity_id != self.sprint_id:
+            message = "Sprint binding does not match the requested Sprint."
             raise ValueError(message)
         return self
 

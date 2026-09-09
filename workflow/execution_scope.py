@@ -1,13 +1,29 @@
 """Resolve immutable original or retry execution facts without graph selection."""
-# ruff: noqa: EM101, TRY003
+# ruff: noqa: C901, EM101, PLR2004, TRY003
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from workflow.execution_integrity import ExecutionContract, execution_contract
+from services.planning_lineage import (
+    PlanningLineageError,
+    select_current_accepted_artifact,
+)
+from workflow.execution_integrity import (
+    ExecutionContract,
+    ExecutionIntegrityError,
+    execution_contract,
+    sprint_close_fingerprint,
+    sprint_review_fingerprint,
+    triage_payload_fingerprint,
+)
 from workflow.fingerprints import canonical_hash
+from workflow.sprint_lineage import (
+    current_sprint_stream_artifacts,
+    plan_has_matching_sprint_start,
+    sprint_stream_nodes,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -15,6 +31,7 @@ if TYPE_CHECKING:
     from workflow.facts import (
         PostSprintTriageFact,
         SprintClosureFact,
+        SprintFact,
         SprintRetryFact,
         SprintReviewFact,
         StoryCompletionFact,
@@ -58,13 +75,14 @@ def resolve_execution_scope(
     retry_attempt_id: int | None = None,
 ) -> ExecutionScope:
     """Resolve exactly one original or retry attempt from durable snapshot facts."""
-    contract = execution_contract(snapshot, sprint_id)
+    try:
+        contract = execution_contract(snapshot, sprint_id)
+    except ExecutionIntegrityError as exc:
+        raise ExecutionScopeError("Execution contract is invalid.") from exc
     if retry_attempt_id is None:
-        sprint = next(
-            (item for item in snapshot.sprints if item.sprint_id == sprint_id), None
-        )
-        if sprint is None:
-            raise ExecutionScopeError("Execution Sprint is missing.")
+        sprint = _source_sprint(snapshot, sprint_id)
+        if sprint.status == "planned":
+            raise ExecutionScopeError("Original planned Sprint has not started.")
         start = contract.start
         return ExecutionScope(
             sprint_id=sprint_id,
@@ -100,9 +118,7 @@ def resolve_execution_scope(
             ),
         )
     retry = _retry(snapshot, sprint_id, retry_attempt_id)
-    if retry.contract_fingerprint != contract.fingerprint:
-        raise ExecutionScopeError("Retry execution contract fingerprint changed.")
-    _reject_duplicate_progress(retry)
+    _validate_retry(snapshot, retry, contract)
     task_statuses = dict(retry.task_statuses)
     story_statuses = dict(retry.story_statuses)
     task_ids = {item.task_id for item in contract.tasks}
@@ -162,6 +178,53 @@ def resolve_execution_scope(
     )
 
 
+def current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None:
+    """Select the sole live attempt or proven terminal attempt for the project."""
+    retries = _validated_retries(snapshot)
+    live_originals = tuple(
+        item for item in snapshot.sprints if item.status in {"planned", "active"}
+    )
+    live_retries = tuple(
+        item for item in retries if item.status in {"planned", "active"}
+    )
+    live_count = len(live_originals) + len(live_retries)
+    if live_count > 1:
+        raise ExecutionScopeError("multiple live original or retry attempts exist.")
+    if live_retries:
+        retry = live_retries[0]
+        _require_terminal_source(snapshot, retry.sprint_id)
+        return resolve_execution_scope(
+            snapshot,
+            sprint_id=retry.sprint_id,
+            retry_attempt_id=retry.retry_attempt_id,
+        )
+    if live_originals:
+        sprint = live_originals[0]
+        if sprint.status == "planned":
+            return None
+        return resolve_execution_scope(snapshot, sprint_id=sprint.sprint_id)
+
+    sprint_id = _current_terminal_sprint_id(snapshot)
+    if sprint_id is None:
+        return None
+    _require_terminal_source(snapshot, sprint_id)
+    terminal_retries = tuple(
+        item
+        for item in retries
+        if item.sprint_id == sprint_id and item.status == "completed"
+    )
+    if not terminal_retries:
+        return resolve_execution_scope(snapshot, sprint_id=sprint_id)
+    retry = max(terminal_retries, key=lambda item: item.ordinal)
+    scope = resolve_execution_scope(
+        snapshot,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry.retry_attempt_id,
+    )
+    _require_terminal_attempt(snapshot, scope)
+    return scope
+
+
 def _retry(
     snapshot: WorkflowFactSnapshot, sprint_id: int, retry_attempt_id: int
 ) -> SprintRetryFact:
@@ -173,6 +236,265 @@ def _retry(
     if len(matches) != 1:
         raise ExecutionScopeError("Retry attempt is missing or ambiguous.")
     return matches[0]
+
+
+def _source_sprint(snapshot: WorkflowFactSnapshot, sprint_id: int) -> SprintFact:
+    matches = tuple(item for item in snapshot.sprints if item.sprint_id == sprint_id)
+    if len(matches) != 1:
+        raise ExecutionScopeError("Execution Sprint is missing or ambiguous.")
+    return matches[0]
+
+
+def _validated_retries(snapshot: WorkflowFactSnapshot) -> tuple[SprintRetryFact, ...]:
+    """Validate every persisted retry chain before selecting any current attempt."""
+    retries = snapshot.sprint_retries
+    if len({item.retry_attempt_id for item in retries}) != len(retries):
+        raise ExecutionScopeError("Retry attempt identity is ambiguous.")
+    if len({(item.sprint_id, item.ordinal) for item in retries}) != len(retries):
+        raise ExecutionScopeError("Retry attempt ordinal is ambiguous.")
+    by_id = {item.retry_attempt_id: item for item in retries}
+    for retry in retries:
+        if retry.project_id != snapshot.project.project_id:
+            raise ExecutionScopeError("Retry attempt is not owned by this Project.")
+        try:
+            contract = execution_contract(snapshot, retry.sprint_id)
+        except ExecutionIntegrityError as exc:
+            raise ExecutionScopeError(
+                "Retry source execution contract is invalid."
+            ) from exc
+        _validate_retry(snapshot, retry, contract)
+        _validate_retry_link(retry, by_id)
+    return retries
+
+
+def _validate_retry_link(
+    retry: SprintRetryFact,
+    by_id: dict[int, SprintRetryFact],
+) -> None:
+    if retry.ordinal < 2:
+        raise ExecutionScopeError("Retry attempt ordinal is invalid.")
+    predecessor_id = retry.predecessor_retry_attempt_id
+    if retry.ordinal == 2:
+        if predecessor_id is not None:
+            raise ExecutionScopeError(
+                "Retry lineage must begin from the original attempt."
+            )
+        return
+    predecessor = None if predecessor_id is None else by_id.get(predecessor_id)
+    if (
+        predecessor is None
+        or predecessor.sprint_id != retry.sprint_id
+        or predecessor.project_id != retry.project_id
+        or predecessor.ordinal != retry.ordinal - 1
+        or predecessor.status != "completed"
+    ):
+        raise ExecutionScopeError(
+            "Retry lineage does not link the prior completed ordinal."
+        )
+
+
+def _validate_retry(
+    snapshot: WorkflowFactSnapshot,
+    retry: SprintRetryFact,
+    contract: ExecutionContract,
+) -> None:
+    if retry.project_id != snapshot.project.project_id:
+        raise ExecutionScopeError("Retry attempt is not owned by this Project.")
+    if retry.contract_fingerprint != contract.fingerprint:
+        raise ExecutionScopeError("Retry execution contract fingerprint changed.")
+    _reject_duplicate_progress(retry)
+    _validate_retry_lifecycle(retry)
+    task_ids = {item.task_id for item in contract.tasks}
+    story_ids = {item.story_id for item in contract.stories}
+    if {item[0] for item in retry.task_statuses} != task_ids or {
+        item[0] for item in retry.story_statuses
+    } != story_ids:
+        raise ExecutionScopeError("Retry progress does not exactly match its contract.")
+    _validate_retry_evidence(retry, task_ids, story_ids)
+
+
+def _validate_retry_lifecycle(retry: SprintRetryFact) -> None:
+    if retry.status not in {"planned", "active", "completed"}:
+        raise ExecutionScopeError("Retry attempt lifecycle status is invalid.")
+    if retry.status == "planned":
+        if (
+            retry.start is not None
+            or retry.started_at is not None
+            or retry.completed_at is not None
+            or retry.task_completions
+            or retry.story_completions
+            or retry.sprint_reviews
+            or retry.sprint_closures
+            or retry.post_sprint_triage
+        ):
+            raise ExecutionScopeError("Planned retry has execution evidence.")
+        return
+    start = retry.start
+    if (
+        start is None
+        or start.retry_attempt_id != retry.retry_attempt_id
+        or start.contract_fingerprint != retry.contract_fingerprint
+        or retry.started_at != start.started_at
+    ):
+        raise ExecutionScopeError("Retry start does not match its attempt lifecycle.")
+    if retry.status == "active":
+        if (
+            retry.completed_at is not None
+            or retry.sprint_reviews
+            or retry.sprint_closures
+        ):
+            raise ExecutionScopeError("Active retry has terminal lifecycle evidence.")
+        return
+    started_at = retry.started_at
+    if (
+        retry.completed_at is None
+        or started_at is None
+        or retry.completed_at < started_at
+    ):
+        raise ExecutionScopeError("Completed retry timestamps are invalid.")
+
+
+def _validate_retry_evidence(
+    retry: SprintRetryFact,
+    task_ids: set[int],
+    story_ids: set[int],
+) -> None:
+    if any(item.sprint_id != retry.sprint_id for item in retry.task_completions):
+        raise ExecutionScopeError("Retry Task evidence has the wrong source Sprint.")
+    if any(item.task_id not in task_ids for item in retry.task_completions):
+        raise ExecutionScopeError("Retry Task evidence is outside the contract.")
+    if len({item.task_id for item in retry.task_completions}) != len(
+        retry.task_completions
+    ):
+        raise ExecutionScopeError("Retry Task evidence has duplicate subjects.")
+    if any(item.sprint_id != retry.sprint_id for item in retry.story_completions):
+        raise ExecutionScopeError("Retry Story closure has the wrong source Sprint.")
+    if any(item.story_id not in story_ids for item in retry.story_completions):
+        raise ExecutionScopeError("Retry Story closure is outside the contract.")
+    if len({item.story_id for item in retry.story_completions}) != len(
+        retry.story_completions
+    ):
+        raise ExecutionScopeError("Retry Story closure has duplicate subjects.")
+    if any(item.sprint_id != retry.sprint_id for item in retry.sprint_reviews):
+        raise ExecutionScopeError("Retry review has the wrong source Sprint.")
+    if any(item.sprint_id != retry.sprint_id for item in retry.sprint_closures):
+        raise ExecutionScopeError("Retry closure has the wrong source Sprint.")
+    if any(item.sprint_id != retry.sprint_id for item in retry.post_sprint_triage):
+        raise ExecutionScopeError("Retry triage has the wrong source Sprint.")
+
+
+def _current_terminal_sprint_id(snapshot: WorkflowFactSnapshot) -> int | None:
+    approved_specs = tuple(
+        item for item in snapshot.spec_versions if item.status == "approved"
+    )
+    if not approved_specs:
+        return None
+    if len(approved_specs) != 1:
+        raise ExecutionScopeError("Current Specification lineage is ambiguous.")
+    spec = approved_specs[0]
+    artifacts = tuple(
+        item
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
+        and item.spec_version_id == spec.spec_version_id
+        and item.spec_hash == spec.spec_hash
+    )
+    if not artifacts:
+        return None
+    try:
+        stream = current_sprint_stream_artifacts(
+            snapshot,
+            artifacts,
+            spec_identity=(spec.spec_version_id, spec.spec_hash),
+        )
+        nodes = sprint_stream_nodes(stream)
+        accepted_id = select_current_accepted_artifact(
+            nodes,
+            chain_key=nodes[0].chain_key,
+        ).artifact_id
+    except PlanningLineageError as exc:
+        raise ExecutionScopeError("Current Sprint lineage is ambiguous.") from exc
+    plan = next(item for item in stream if item.artifact_id == accepted_id)
+    if not plan_has_matching_sprint_start(snapshot, plan):
+        return None
+    return plan.activated_sprint_id
+
+
+def _require_terminal_source(snapshot: WorkflowFactSnapshot, sprint_id: int) -> None:
+    scope = resolve_execution_scope(snapshot, sprint_id=sprint_id)
+    _require_terminal_attempt(snapshot, scope)
+
+
+def _require_terminal_attempt(
+    snapshot: WorkflowFactSnapshot,
+    scope: ExecutionScope,
+) -> None:
+    if (
+        scope.status != "completed"
+        or scope.started_at is None
+        or scope.completed_at is None
+        or scope.completed_at < scope.started_at
+    ):
+        raise ExecutionScopeError("Execution attempt is not terminal.")
+    if len(scope.sprint_reviews) != 1 or len(scope.sprint_closures) != 1:
+        raise ExecutionScopeError(
+            "Terminal execution has incomplete review or closure facts."
+        )
+    review = scope.sprint_reviews[0]
+    closure = scope.sprint_closures[0]
+    expected_review = sprint_review_fingerprint(
+        snapshot,
+        scope.sprint_id,
+        scope=scope,
+    )
+    expected_close = sprint_close_fingerprint(
+        snapshot,
+        scope.sprint_id,
+        expected_review,
+        scope=scope,
+    )
+    if (
+        review.review_fingerprint != expected_review
+        or closure.review_fingerprint != expected_review
+        or closure.close_fingerprint != expected_close
+    ):
+        raise ExecutionScopeError(
+            "Terminal execution review or closure fingerprint changed."
+        )
+    _require_resolved_triage(scope.post_sprint_triage)
+
+
+def _require_resolved_triage(rows: tuple[PostSprintTriageFact, ...]) -> None:
+    if not rows:
+        raise ExecutionScopeError("Terminal execution requires resolved triage.")
+    by_id = {item.triage_id: item for item in rows}
+    if len(by_id) != len(rows):
+        raise ExecutionScopeError("Terminal execution triage is ambiguous.")
+    children: dict[int, int] = {}
+    roots: list[int] = []
+    for item in rows:
+        if triage_payload_fingerprint(item.impact, item.canonical_payload) != (
+            item.payload_fingerprint
+        ):
+            raise ExecutionScopeError("Terminal execution triage fingerprint changed.")
+        parent = item.supersedes_triage_id
+        if parent is None:
+            roots.append(item.triage_id)
+        elif parent not in by_id or parent in children:
+            raise ExecutionScopeError("Terminal execution triage is ambiguous.")
+        else:
+            children[parent] = item.triage_id
+    if len(roots) != 1:
+        raise ExecutionScopeError("Terminal execution triage is ambiguous.")
+    current = roots[0]
+    visited: set[int] = set()
+    while current in children:
+        if current in visited:
+            raise ExecutionScopeError("Terminal execution triage has a cycle.")
+        visited.add(current)
+        current = children[current]
+    if len(visited | {current}) != len(rows):
+        raise ExecutionScopeError("Terminal execution triage is ambiguous.")
 
 
 def _reject_duplicate_progress(retry: SprintRetryFact) -> None:
