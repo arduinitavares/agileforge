@@ -17,6 +17,7 @@ from models.product_definition import VisionArtifact
 from models.repository import RepositoryBinding
 from models.sprint_retry import (
     SprintRetryAttempt,
+    SprintRetryStart,
     SprintRetryStoryState,
     SprintRetryTaskState,
 )
@@ -120,6 +121,50 @@ def _retry_state_rows(engine: Engine) -> dict[str, tuple[tuple[object, ...], ...
         for table_name, table_rows in rows.items()
         if table_name.startswith("sprint_retry_") or table_name == "workflow_events"
     }
+
+
+def _assert_single_retry_start_audit(
+    engine: Engine,
+    *,
+    project_id: int,
+    sprint_id: int,
+    retry_id: int,
+    request: StartSprintRetry,
+) -> None:
+    """Require one immutable start decision and its exact audit event."""
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        assert retry.status == "Active"
+        assert retry.started_at is not None
+        starts = session.exec(
+            select(SprintRetryStart).where(
+                SprintRetryStart.retry_attempt_id == retry_id
+            )
+        ).all()
+        assert len(starts) == 1
+        assert starts[0].decision_fingerprint == request.decision_fingerprint
+        assert starts[0].started_by == request.actor
+        assert starts[0].started_at == retry.started_at
+        events = session.exec(
+            select(WorkflowEvent).where(
+                WorkflowEvent.project_id == project_id,
+                WorkflowEvent.event_type == RETRY_STARTED_EVENT,
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].timestamp == retry.started_at
+        assert events[0].event_metadata == canonical_json(
+            {
+                "action": "sprint_retry_started",
+                "actor": request.actor,
+                "decision_fingerprint": request.decision_fingerprint,
+                "idempotency_key": request.idempotency_key,
+                "ordinal": FIRST_RETRY_ORDINAL,
+                "retry_attempt_id": retry_id,
+                "source_sprint_id": sprint_id,
+            }
+        )
 
 
 def _file_engine(path: Path) -> Engine:
@@ -317,27 +362,38 @@ def test_confirmed_retry_creates_planned_scope_then_requires_explicit_start(
         for item in start_position.decisions
         if item.node_id == "execution.sprint.retry.start"
     )
-    started = retry_domain.transition(
-        StartSprintRetry(
-            project_id=project_id,
-            graph_version=start_position.graph_version,
-            fact_fingerprint=start_position.fact_fingerprint,
-            decision_fingerprint=start_decision.decision_fingerprint,
-            idempotency_key="start-retry-once",
-            actor="owner@example.com",
-            instance_key=start_decision.instance_key,
-            sprint_id=sprint_id,
-            retry_attempt_id=retry_id,
-        )
+    start_request = StartSprintRetry(
+        project_id=project_id,
+        graph_version=start_position.graph_version,
+        fact_fingerprint=start_position.fact_fingerprint,
+        decision_fingerprint=start_decision.decision_fingerprint,
+        idempotency_key="start-retry-once",
+        actor="owner@example.com",
+        instance_key=start_decision.instance_key,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry_id,
     )
+    started = retry_domain.transition(start_request)
     assert started.ok is True
     assert started.output["status"] == "Active"
+    _assert_single_retry_start_audit(
+        engine,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        retry_id=retry_id,
+        request=start_request,
+    )
     with Session(engine) as session:
         events = session.exec(
             select(WorkflowEvent).where(WorkflowEvent.project_id == project_id)
         ).all()
         assert [event.event_type for event in events].count(RETRY_PLANNED_EVENT) == 1
-        assert [event.event_type for event in events].count(RETRY_STARTED_EVENT) == 1
+    before_replay = _raw_rows(engine)
+    replayed_start = retry_domain.transition(start_request)
+    assert replayed_start.ok is True
+    assert replayed_start.replayed is True
+    assert replayed_start.output == started.output
+    assert _raw_rows(engine) == before_replay
 
 
 def test_accepted_root_drift_rejects_preview_and_positioned_retry_without_writes(
@@ -680,6 +736,163 @@ def test_distinct_retry_keys_from_one_preview_create_one_attempt(
                 ).all()
             )
             == 1
+        )
+
+
+def test_retry_start_failure_after_flush_rolls_back_start_rows_and_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-service start failure restores the planned retry and all prior rows."""
+    engine = _file_engine(tmp_path / "retry-start-domain-rollback.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    retry_request = _positioned_retry_request(
+        domain,
+        engine=engine,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        idempotency_key="plan-before-start-domain-rollback",
+    )
+    planned = domain.transition(retry_request)
+    assert planned.ok is True
+    retry_id = planned.output["retry_attempt_id"]
+    assert isinstance(retry_id, int)
+
+    start_position = domain.position(project_id)
+    start_decision = next(
+        item
+        for item in start_position.decisions
+        if item.node_id == "execution.sprint.retry.start"
+        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
+    )
+    start_request = StartSprintRetry(
+        project_id=project_id,
+        graph_version=start_position.graph_version,
+        fact_fingerprint=start_position.fact_fingerprint,
+        decision_fingerprint=start_decision.decision_fingerprint,
+        idempotency_key="start-domain-rollback-after-flush",
+        actor="owner@example.com",
+        instance_key=start_decision.instance_key,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry_id,
+    )
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        planned_retry = retry.model_dump(mode="json")
+        planned_story_progress = tuple(
+            state.model_dump(mode="json")
+            for state in session.exec(
+                select(SprintRetryStoryState).where(
+                    SprintRetryStoryState.retry_attempt_id == retry_id
+                )
+            ).all()
+        )
+        planned_task_progress = tuple(
+            state.model_dump(mode="json")
+            for state in session.exec(
+                select(SprintRetryTaskState).where(
+                    SprintRetryTaskState.retry_attempt_id == retry_id
+                )
+            ).all()
+        )
+    before_start = _raw_rows(engine)
+
+    import workflow.handlers.sprint_retry as retry_handler  # noqa: PLC0415
+
+    original = retry_handler.start_sprint_retry_in_session
+    error_message = "Injected failure after retry start writes were flushed."
+
+    def fail_after_start_flush(
+        session: Session,
+        *,
+        request: StartSprintRetry,
+        snapshot: WorkflowFactSnapshot,
+        now: datetime,
+    ) -> object:
+        original(session, request=request, snapshot=snapshot, now=now)
+        retry = session.get(SprintRetryAttempt, request.retry_attempt_id)
+        assert retry is not None
+        assert retry.status == "Active"
+        assert retry.started_at is not None
+        starts = session.exec(
+            select(SprintRetryStart).where(
+                SprintRetryStart.retry_attempt_id == request.retry_attempt_id
+            )
+        ).all()
+        assert len(starts) == 1
+        assert starts[0].started_at == retry.started_at
+        started_events = session.exec(
+            select(WorkflowEvent).where(
+                WorkflowEvent.project_id == request.project_id,
+                WorkflowEvent.event_type == RETRY_STARTED_EVENT,
+            )
+        ).all()
+        assert len(started_events) == 1
+        assert started_events[0].timestamp == retry.started_at
+        raise RuntimeError(error_message)
+
+    monkeypatch.setattr(
+        retry_handler, "start_sprint_retry_in_session", fail_after_start_flush
+    )
+    with pytest.raises(RuntimeError, match="after retry start writes"):
+        domain.transition(start_request)
+
+    assert _raw_rows(engine) == before_start
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        assert retry.model_dump(mode="json") == planned_retry
+        assert (
+            tuple(
+                state.model_dump(mode="json")
+                for state in session.exec(
+                    select(SprintRetryStoryState).where(
+                        SprintRetryStoryState.retry_attempt_id == retry_id
+                    )
+                ).all()
+            )
+            == planned_story_progress
+        )
+        assert (
+            tuple(
+                state.model_dump(mode="json")
+                for state in session.exec(
+                    select(SprintRetryTaskState).where(
+                        SprintRetryTaskState.retry_attempt_id == retry_id
+                    )
+                ).all()
+            )
+            == planned_task_progress
+        )
+        assert (
+            session.exec(
+                select(SprintRetryStart).where(
+                    SprintRetryStart.retry_attempt_id == retry_id
+                )
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == RETRY_STARTED_EVENT,
+                )
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    WorkflowTransitionReceipt.idempotency_key
+                    == start_request.idempotency_key
+                )
+            ).all()
+            == []
         )
 
 
