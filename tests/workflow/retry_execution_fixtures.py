@@ -12,13 +12,13 @@ from models.core import Task
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.sprint import SprintPlannerOutput
 from tests.workflow.execution_retry_support import _close_execution_sprint
-from tests.workflow.test_planning_transitions import (
-    _apply_current_dependencies,
-    _guards,
-    _record_and_accept_roadmap,
-    _record_and_accept_story,
-    _seed_accepted_backlog,
-    _select_for_sprint,
+from tests.workflow.planning_fixtures import (
+    apply_current_dependencies,
+    planning_guards,
+    record_and_accept_roadmap,
+    record_and_accept_story,
+    seed_accepted_backlog,
+    select_for_sprint,
 )
 from workflow.clock import FixedClock
 from workflow.definitions.planning import (
@@ -30,11 +30,13 @@ from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 from workflow.requests import (
     ApplyStoryDependencies,
+    CloseSprint,
     CloseStory,
     CompleteTask,
     DecideSprintPlan,
     RecordPostSprintTriage,
     RecordSprintPlan,
+    ReviewSprint,
     StartSprint,
 )
 from workflow.requests.planning import ReviewedDependencyEdge
@@ -119,7 +121,7 @@ def _review_dependencies(
     position = domain.position(project_id)
     assert domain.transition(
         ApplyStoryDependencies(
-            **_guards(position, "planning.story_dependencies"),
+            **planning_guards(position, "planning.story_dependencies"),
             idempotency_key=idempotency_key,
             selected_story_ids=tuple(item.story_id for item in selected),
             reviewed_edges=edges,
@@ -139,7 +141,7 @@ def _plan_and_start(
         clock=FixedClock(now_value=plan.started_at),
     )
     for story_id in plan.story_ids:
-        _select_for_sprint(engine, story_id)
+        select_for_sprint(engine, story_id)
     if plan.reviewed_edges:
         _review_dependencies(
             engine,
@@ -149,7 +151,7 @@ def _plan_and_start(
             idempotency_key=f"retry-fixture-dependencies-{plan.idempotency_suffix}",
         )
     else:
-        _apply_current_dependencies(
+        apply_current_dependencies(
             engine,
             planning_domain,
             plan.project_id,
@@ -189,7 +191,7 @@ def _plan_and_start(
     position = planning_domain.position(plan.project_id)
     recorded = planning_domain.transition(
         RecordSprintPlan(
-            **_guards(position, "planning.sprint.plan"),
+            **planning_guards(position, "planning.sprint.plan"),
             idempotency_key=f"retry-fixture-plan-{plan.idempotency_suffix}",
             team_name=f"Retry fixture team {plan.idempotency_suffix}",
             spec_version_id=specification.spec_version_id,
@@ -206,7 +208,7 @@ def _plan_and_start(
     position = planning_domain.position(plan.project_id)
     accepted = planning_domain.transition(
         DecideSprintPlan(
-            **_guards(position, "planning.sprint.review"),
+            **planning_guards(position, "planning.sprint.review"),
             idempotency_key=f"retry-fixture-accept-{plan.idempotency_suffix}",
             sprint_plan_artifact_id=plan_id,
             plan_fingerprint=plan_fingerprint,
@@ -219,7 +221,7 @@ def _plan_and_start(
     position = planning_domain.position(plan.project_id)
     started = planning_domain.transition(
         StartSprint(
-            **_guards(position, "planning.sprint.start"),
+            **planning_guards(position, "planning.sprint.start"),
             idempotency_key=f"retry-fixture-start-{plan.idempotency_suffix}",
         )
     )
@@ -317,6 +319,197 @@ def _triage(
     ).ok
 
 
+def complete_retry_task(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    task_id: int,
+    suffix: str,
+) -> CompleteTask:
+    """Complete one exact attempt-bound retry Task through the graph."""
+    position = domain.position(project_id)
+    complete = next(
+        decision
+        for decision in position.decisions
+        if decision.node_id == "execution.task.complete"
+        and decision.instance_key == f"retry:{retry_id}:task:{task_id}"
+    )
+    request = CompleteTask(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=complete.decision_fingerprint,
+        idempotency_key=f"{suffix}-task",
+        actor="owner@example.com",
+        instance_key=_required_instance_key(complete.instance_key, "Task"),
+        task_id=task_id,
+        outcome_summary="Re-executed the scoped work.",
+        artifact_refs=("workflow/definitions/execution.py",),
+        acceptance_result="fully_met",
+        checklist_result={"Run focused tests": "passed"},
+    )
+    result = domain.transition(request)
+    assert result.ok is True
+    return request
+
+
+def close_retry_story(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    story_id: int,
+    suffix: str,
+) -> CloseStory:
+    """Close one exact attempt-bound retry Story through the graph."""
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.story.close"
+        and item.instance_key == f"retry:{retry_id}:story:{story_id}"
+    )
+    request = CloseStory(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=f"{suffix}-story",
+        actor="owner@example.com",
+        instance_key=_required_instance_key(decision.instance_key, "Story"),
+        story_id=story_id,
+        resolution="Completed",
+        delivered="Fresh retry Story delivery.",
+        evidence="Retry execution evidence.",
+        known_gaps="None.",
+    )
+    assert domain.transition(request).ok is True
+    return request
+
+
+def retry_review_request(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    sprint_id: int,
+    suffix: str,
+) -> ReviewSprint:
+    """Build one exact retry review request from the currently actionable binding."""
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.sprint.review"
+        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
+    )
+    review_fingerprint = next(
+        item.fingerprint
+        for item in decision.fact_references
+        if item.fact_type == "sprint_review"
+    )
+    return ReviewSprint(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=f"{suffix}-review",
+        actor="owner@example.com",
+        instance_key=_required_instance_key(decision.instance_key, "Triage"),
+        sprint_id=sprint_id,
+        review_fingerprint=review_fingerprint,
+    )
+
+
+def review_retry_sprint(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    sprint_id: int,
+    suffix: str,
+) -> ReviewSprint:
+    """Record review for one exact attempt-bound retry Sprint."""
+    request = retry_review_request(
+        domain,
+        project_id=project_id,
+        retry_id=retry_id,
+        sprint_id=sprint_id,
+        suffix=suffix,
+    )
+    assert domain.transition(request).ok is True
+    return request
+
+
+def close_retry_sprint(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    sprint_id: int,
+    suffix: str,
+) -> CloseSprint:
+    """Explicitly close one exact attempt-bound retry Sprint."""
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.sprint.close"
+        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
+    )
+    review_fingerprint = next(
+        item.fingerprint
+        for item in decision.fact_references
+        if item.fact_type == "sprint_review"
+    )
+    request = CloseSprint(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=f"{suffix}-close",
+        actor="owner@example.com",
+        instance_key=_required_instance_key(decision.instance_key, "Triage"),
+        sprint_id=sprint_id,
+        review_fingerprint=review_fingerprint,
+    )
+    assert domain.transition(request).ok is True
+    return request
+
+
+def triage_retry_sprint(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    retry_id: int,
+    sprint_id: int,
+    suffix: str,
+) -> RecordPostSprintTriage:
+    """Record terminal triage for one exact attempt-bound retry Sprint."""
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.post_sprint_triage"
+        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
+    )
+    request = RecordPostSprintTriage(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key=f"{suffix}-triage",
+        actor="owner@example.com",
+        instance_key=_required_instance_key(decision.instance_key, "Triage"),
+        sprint_id=sprint_id,
+        impact="none",
+        canonical_payload={"summary": "Fresh retry triage complete."},
+    )
+    assert domain.transition(request).ok is True
+    return request
+
+
 def seed_completed_retry_source(engine: Engine) -> CompletedRetrySource:
     """Create A completed externally, B/C completed in source, and D unselected."""
     requirements = (
@@ -325,15 +518,15 @@ def seed_completed_retry_source(engine: Engine) -> CompletedRetrySource:
         "Complete scoped Story C",
         "Preserve next Sprint candidate D",
     )
-    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    project_id = seed_accepted_backlog(engine, requirements=requirements)
     planning_domain = WorkflowDomain(
         engine=engine,
         graph=planning_graph(),
         clock=FixedClock(now_value=datetime(2026, 9, 9, tzinfo=UTC)),
     )
-    _record_and_accept_roadmap(planning_domain, project_id, requirements=requirements)
+    record_and_accept_roadmap(planning_domain, project_id, requirements=requirements)
     story_ids = tuple(
-        _record_and_accept_story(
+        record_and_accept_story(
             engine,
             planning_domain,
             project_id,
@@ -448,13 +641,13 @@ def record_pending_successor_plan(
     source: CompletedRetrySource,
 ) -> tuple[WorkflowDomain, int]:
     """Record one valid later candidate plan without accepting or starting it."""
-    _select_for_sprint(engine, source.candidate_story_id)
+    select_for_sprint(engine, source.candidate_story_id)
     domain = WorkflowDomain(
         engine=engine,
         graph=planning_graph(),
         clock=FixedClock(now_value=datetime(2026, 9, 9, 9, 20, tzinfo=UTC)),
     )
-    _apply_current_dependencies(
+    apply_current_dependencies(
         engine,
         domain,
         source.project_id,
@@ -492,7 +685,7 @@ def record_pending_successor_plan(
     position = domain.position(source.project_id)
     recorded = domain.transition(
         RecordSprintPlan(
-            **_guards(position, "planning.sprint.plan"),
+            **planning_guards(position, "planning.sprint.plan"),
             idempotency_key="retry-fixture-pending-plan",
             team_name="Retry fixture pending-plan team",
             spec_version_id=specification.spec_version_id,
@@ -509,6 +702,12 @@ def record_pending_successor_plan(
 
 __all__ = [
     "CompletedRetrySource",
+    "close_retry_sprint",
+    "close_retry_story",
+    "complete_retry_task",
     "record_pending_successor_plan",
+    "retry_review_request",
+    "review_retry_sprint",
     "seed_completed_retry_source",
+    "triage_retry_sprint",
 ]

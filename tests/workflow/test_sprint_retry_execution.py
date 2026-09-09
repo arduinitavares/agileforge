@@ -32,14 +32,20 @@ from tests.workflow.execution_retry_support import (
     _complete_execution_sprint,
     _triage_execution_sprint,
 )
+from tests.workflow.planning_fixtures import (
+    apply_current_dependencies,
+    select_for_sprint,
+)
 from tests.workflow.retry_execution_fixtures import (
     CompletedRetrySource,
+    close_retry_sprint,
+    close_retry_story,
+    complete_retry_task,
     record_pending_successor_plan,
+    retry_review_request,
+    review_retry_sprint,
     seed_completed_retry_source,
-)
-from tests.workflow.test_planning_transitions import (
-    _apply_current_dependencies,
-    _select_for_sprint,
+    triage_retry_sprint,
 )
 from workflow.clock import FixedClock
 from workflow.contracts import NodeCategory, NodeDecision
@@ -310,40 +316,6 @@ def _fresh_scope(
     )
 
 
-def _complete_retry_task(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    task_id: int,
-    suffix: str,
-) -> CompleteTask:
-    position = domain.position(project_id)
-    complete = next(
-        decision
-        for decision in position.decisions
-        if decision.node_id == "execution.task.complete"
-        and decision.instance_key == f"retry:{retry_id}:task:{task_id}"
-    )
-    request = CompleteTask(
-        project_id=project_id,
-        graph_version=position.graph_version,
-        fact_fingerprint=position.fact_fingerprint,
-        decision_fingerprint=complete.decision_fingerprint,
-        idempotency_key=f"{suffix}-task",
-        actor="owner@example.com",
-        instance_key=_required_instance_key(complete.instance_key, "Task"),
-        task_id=task_id,
-        outcome_summary="Re-executed the scoped work.",
-        artifact_refs=("workflow/definitions/execution.py",),
-        acceptance_result="fully_met",
-        checklist_result={"Run focused tests": "passed"},
-    )
-    result = domain.transition(request)
-    assert result.ok is True
-    return request
-
-
 def test_completed_original_task_rejects_before_payload_validation(
     tmp_path: Path,
 ) -> None:
@@ -382,158 +354,6 @@ def _domain_at(engine: Engine, *, minute: int) -> WorkflowDomain:
         graph=project_graph(),
         clock=FixedClock(now_value=datetime(2026, 9, 9, 9, minute, tzinfo=UTC)),
     )
-
-
-def _close_retry_story(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    story_id: int,
-    suffix: str,
-) -> CloseStory:
-    position = domain.position(project_id)
-    decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == "execution.story.close"
-        and item.instance_key == f"retry:{retry_id}:story:{story_id}"
-    )
-    request = CloseStory(
-        project_id=project_id,
-        graph_version=position.graph_version,
-        fact_fingerprint=position.fact_fingerprint,
-        decision_fingerprint=decision.decision_fingerprint,
-        idempotency_key=f"{suffix}-story",
-        actor="owner@example.com",
-        instance_key=_required_instance_key(decision.instance_key, "Story"),
-        story_id=story_id,
-        resolution="Completed",
-        delivered="Fresh retry Story delivery.",
-        evidence="Retry execution evidence.",
-        known_gaps="None.",
-    )
-    assert domain.transition(request).ok is True
-    return request
-
-
-def _retry_review_request(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    sprint_id: int,
-    suffix: str,
-) -> ReviewSprint:
-    """Build one exact retry review request from the currently actionable binding."""
-    position = domain.position(project_id)
-    decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == "execution.sprint.review"
-        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
-    )
-    review_fingerprint = next(
-        item.fingerprint
-        for item in decision.fact_references
-        if item.fact_type == "sprint_review"
-    )
-    return ReviewSprint(
-        project_id=project_id,
-        graph_version=position.graph_version,
-        fact_fingerprint=position.fact_fingerprint,
-        decision_fingerprint=decision.decision_fingerprint,
-        idempotency_key=f"{suffix}-review",
-        actor="owner@example.com",
-        instance_key=_required_instance_key(decision.instance_key, "Triage"),
-        sprint_id=sprint_id,
-        review_fingerprint=review_fingerprint,
-    )
-
-
-def _review_retry_sprint(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    sprint_id: int,
-    suffix: str,
-) -> ReviewSprint:
-    request = _retry_review_request(
-        domain,
-        project_id=project_id,
-        retry_id=retry_id,
-        sprint_id=sprint_id,
-        suffix=suffix,
-    )
-    assert domain.transition(request).ok is True
-    return request
-
-
-def _close_retry_sprint(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    sprint_id: int,
-    suffix: str,
-) -> CloseSprint:
-    position = domain.position(project_id)
-    decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == "execution.sprint.close"
-        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
-    )
-    review_fingerprint = next(
-        item.fingerprint
-        for item in decision.fact_references
-        if item.fact_type == "sprint_review"
-    )
-    request = CloseSprint(
-        project_id=project_id,
-        graph_version=position.graph_version,
-        fact_fingerprint=position.fact_fingerprint,
-        decision_fingerprint=decision.decision_fingerprint,
-        idempotency_key=f"{suffix}-close",
-        actor="owner@example.com",
-        instance_key=_required_instance_key(decision.instance_key, "Triage"),
-        sprint_id=sprint_id,
-        review_fingerprint=review_fingerprint,
-    )
-    assert domain.transition(request).ok is True
-    return request
-
-
-def _triage_retry_sprint(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    retry_id: int,
-    sprint_id: int,
-    suffix: str,
-) -> RecordPostSprintTriage:
-    position = domain.position(project_id)
-    decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == "execution.post_sprint_triage"
-        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
-    )
-    request = RecordPostSprintTriage(
-        project_id=project_id,
-        graph_version=position.graph_version,
-        fact_fingerprint=position.fact_fingerprint,
-        decision_fingerprint=decision.decision_fingerprint,
-        idempotency_key=f"{suffix}-triage",
-        actor="owner@example.com",
-        instance_key=_required_instance_key(decision.instance_key, "Triage"),
-        sprint_id=sprint_id,
-        impact="none",
-        canonical_payload={"summary": "Fresh retry triage complete."},
-    )
-    assert domain.transition(request).ok is True
-    return request
 
 
 def test_started_retry_exposes_only_attempt_bound_task_action(tmp_path: Path) -> None:
@@ -798,7 +618,7 @@ def _new_retry_matrix(tmp_path: Path) -> _RetryMatrixState:
 def _complete_first_retry_story(state: _RetryMatrixState) -> None:
     """Complete retry 2's dependency head and expose only its successor Task."""
     state.engine = _reopen_engine(state.engine)
-    state.first_task_request = _complete_retry_task(
+    state.first_task_request = complete_retry_task(
         _domain_at(state.engine, minute=11),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -825,7 +645,7 @@ def _complete_first_retry_story(state: _RetryMatrixState) -> None:
     assert blocked_second.category is NodeCategory.BLOCKED
     assert blocked_second.reason_code == "TASK_DEPENDENCY_BLOCKED"
     state.engine = _reopen_engine(state.engine)
-    _close_retry_story(
+    close_retry_story(
         _domain_at(state.engine, minute=12),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -846,7 +666,7 @@ def _complete_first_retry_story(state: _RetryMatrixState) -> None:
 def _finish_retry2_matrix(state: _RetryMatrixState) -> None:
     """Finish retry 2 and retain exact requests for stale-action rejection checks."""
     state.engine = _reopen_engine(state.engine)
-    _complete_retry_task(
+    complete_retry_task(
         _domain_at(state.engine, minute=13),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -854,7 +674,7 @@ def _finish_retry2_matrix(state: _RetryMatrixState) -> None:
         suffix="retry-matrix-2-second",
     )
     state.engine = _reopen_engine(state.engine)
-    _close_retry_story(
+    close_retry_story(
         _domain_at(state.engine, minute=14),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -863,7 +683,7 @@ def _finish_retry2_matrix(state: _RetryMatrixState) -> None:
     )
     state.engine = _reopen_engine(state.engine)
     review_domain = _domain_at(state.engine, minute=15)
-    state.retry2_review_request = _retry_review_request(
+    state.retry2_review_request = retry_review_request(
         review_domain,
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -882,7 +702,7 @@ def _finish_retry2_matrix(state: _RetryMatrixState) -> None:
     )
     assert review_domain.transition(state.retry2_review_request).ok is True
     state.engine = _reopen_engine(state.engine)
-    _close_retry_sprint(
+    close_retry_sprint(
         _domain_at(state.engine, minute=16),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -890,7 +710,7 @@ def _finish_retry2_matrix(state: _RetryMatrixState) -> None:
         suffix="retry-matrix-2",
     )
     state.engine = _reopen_engine(state.engine)
-    _triage_retry_sprint(
+    triage_retry_sprint(
         _domain_at(state.engine, minute=17),
         project_id=state.source.project_id,
         retry_id=state.retry2.retry_id,
@@ -1203,13 +1023,13 @@ def test_retry_lifecycle_unlocks_a_real_reviewed_next_plan_candidate(
     )
     SQLModel.metadata.create_all(engine)
     source = seed_completed_retry_source(engine)
-    _select_for_sprint(engine, source.candidate_story_id)
+    select_for_sprint(engine, source.candidate_story_id)
     planning_domain = WorkflowDomain(
         engine=engine,
         graph=planning_graph(),
         clock=FixedClock(now_value=datetime(2026, 9, 9, 9, 10, tzinfo=UTC)),
     )
-    _apply_current_dependencies(
+    apply_current_dependencies(
         engine,
         planning_domain,
         source.project_id,
@@ -1237,42 +1057,42 @@ def test_retry_lifecycle_unlocks_a_real_reviewed_next_plan_candidate(
     )
     _assert_retry_planning_lock(domain, source.project_id)
 
-    _complete_retry_task(
+    complete_retry_task(
         _domain_at(engine, minute=11),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
         task_id=source.first_task_id,
         suffix="retry-next-plan-2-first",
     )
-    _close_retry_story(
+    close_retry_story(
         _domain_at(engine, minute=12),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
         story_id=source.first_story_id,
         suffix="retry-next-plan-2-first",
     )
-    _complete_retry_task(
+    complete_retry_task(
         _domain_at(engine, minute=13),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
         task_id=source.second_task_id,
         suffix="retry-next-plan-2-second",
     )
-    _close_retry_story(
+    close_retry_story(
         _domain_at(engine, minute=14),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
         story_id=source.second_story_id,
         suffix="retry-next-plan-2-second",
     )
-    _review_retry_sprint(
+    review_retry_sprint(
         _domain_at(engine, minute=15),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
         sprint_id=source.source_sprint_id,
         suffix="retry-next-plan-2",
     )
-    _close_retry_sprint(
+    close_retry_sprint(
         _domain_at(engine, minute=16),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
@@ -1281,7 +1101,7 @@ def test_retry_lifecycle_unlocks_a_real_reviewed_next_plan_candidate(
     )
     _assert_retry_planning_lock(_domain_at(engine, minute=16), source.project_id)
 
-    _triage_retry_sprint(
+    triage_retry_sprint(
         _domain_at(engine, minute=17),
         project_id=source.project_id,
         retry_id=retry2.retry_id,
@@ -1877,7 +1697,7 @@ def test_completed_retry_task_exposes_attempt_bound_story_close(tmp_path: Path) 
         sprint_id=sprint_id,
         suffix="retry-story",
     )
-    _complete_retry_task(
+    complete_retry_task(
         domain,
         project_id=project_id,
         retry_id=retry_id,

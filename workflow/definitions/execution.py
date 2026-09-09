@@ -512,9 +512,6 @@ def _active_retry_task_rule(
     if not isinstance(retry_scope, _CurrentRetryScope):
         return None if retry_scope is None else retry_scope.evaluations
     scope = retry_scope.scope
-    history_result = _retry_historical_integrity_result(snapshot)
-    if history_result is not None:
-        return history_result
     stories = {item.story_id: item for item in scope.project_stories}
     if len(stories) != len(scope.project_stories):
         return (RuleEvaluation(RuleCategory.INVALID, "DUPLICATE_STORY_FACT"),)
@@ -583,6 +580,9 @@ def _retry_scope_for_status(
         return _InvalidRetryScope(
             (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
         )
+    history_result = _retry_historical_integrity_result(snapshot)
+    if history_result is not None:
+        return _InvalidRetryScope(history_result)
     return _CurrentRetryScope(scope=scope, retry_attempt_id=scope.retry_attempt_id)
 
 
@@ -685,17 +685,10 @@ def _active_retry_story_rule(
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[RuleEvaluation, ...] | None:
     """Evaluate retry-local Story closure without altering the source Story facts."""
-    if not any(item.status == "active" for item in snapshot.sprint_retries):
-        return None
-    try:
-        scope = current_execution_scope(snapshot)
-    except ExecutionScopeError:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if scope is None or scope.retry_attempt_id is None or scope.status != "active":
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    history_result = _retry_historical_integrity_result(snapshot)
-    if history_result is not None:
-        return history_result
+    retry_scope = _retry_scope_for_status(snapshot, status="active")
+    if not isinstance(retry_scope, _CurrentRetryScope):
+        return None if retry_scope is None else retry_scope.evaluations
+    scope = retry_scope.scope
     closures_by_story: dict[int, list[StoryCompletionFact]] = {}
     for closure in scope.story_completions:
         closures_by_story.setdefault(closure.story_id, []).append(closure)
@@ -1034,17 +1027,10 @@ def _active_retry_review_rule(
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[RuleEvaluation, ...] | None:
     """Offer retry review only after its own terminal evidence is complete."""
-    if not any(item.status == "active" for item in snapshot.sprint_retries):
-        return None
-    try:
-        scope = current_execution_scope(snapshot)
-    except ExecutionScopeError:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if scope is None or scope.retry_attempt_id is None or scope.status != "active":
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    history_result = _retry_historical_integrity_result(snapshot)
-    if history_result is not None:
-        return history_result
+    retry_scope = _retry_scope_for_status(snapshot, status="active")
+    if not isinstance(retry_scope, _CurrentRetryScope):
+        return None if retry_scope is None else retry_scope.evaluations
+    scope = retry_scope.scope
     expected, error = _scoped_sprint_ready(snapshot, scope)
     if error is not None or expected is None:
         return (
@@ -1256,17 +1242,10 @@ def _active_retry_close_rule(
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[RuleEvaluation, ...] | None:
     """Offer explicit close only for the reviewed active retry."""
-    if not any(item.status == "active" for item in snapshot.sprint_retries):
-        return None
-    try:
-        scope = current_execution_scope(snapshot)
-    except ExecutionScopeError:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if scope is None or scope.retry_attempt_id is None or scope.status != "active":
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    history_result = _retry_historical_integrity_result(snapshot)
-    if history_result is not None:
-        return history_result
+    retry_scope = _retry_scope_for_status(snapshot, status="active")
+    if not isinstance(retry_scope, _CurrentRetryScope):
+        return None if retry_scope is None else retry_scope.evaluations
+    scope = retry_scope.scope
     expected, error = _scoped_sprint_ready(snapshot, scope)
     if error is not None or expected is None:
         return (
