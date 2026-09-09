@@ -965,7 +965,7 @@ test('Backlog correction token survives an aborted and superseded dashboard load
     let fetchCount = 0;
     const context = loadFrontend(async (_url, options = {}) => {
         fetchCount += 1;
-        if (fetchCount <= 13) {
+        if (fetchCount <= 15) {
             return new Promise((_resolve, reject) => {
                 options.signal.addEventListener('abort', () => reject(new Error('aborted')));
             });

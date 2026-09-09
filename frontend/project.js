@@ -141,6 +141,7 @@ let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
 let activeBacklogCorrectionMutation = null;
 let activeSprintMutation = null;
+let activeSprintRetryMutation = null;
 let activeCockpitAction = null;
 let activeDeliveryUnreconciled = false;
 let sprintStartRetry = null;
@@ -160,6 +161,7 @@ let lifecycleState = {
     },
     repository: {},
     sprintStatus: { kind: 'absent' },
+    sprintHistory: {},
 };
 
 function lifecycleStageLabels() {
@@ -1492,23 +1494,135 @@ async function validateSprintStatusProjection(value, projectId) {
         || tasks.length !== taskCount
     ) return null;
 
-    const start = data.start;
+    const currentRetry = reviewObject(data.current_retry);
+    const originalStart = currentRetry ? data.original_start : data.start;
     if (sprint.status === 'planned') {
-        if (start !== null) return null;
+        if (originalStart !== null) return null;
     } else if (
-        !reviewObject(start)
-        || start.sprint_id !== sprint.sprint_id
-        || start.sprint_plan_artifact_id !== plan.sprint_plan_artifact_id
-        || start.sprint_plan_artifact_decision_id
+        !reviewObject(originalStart)
+        || originalStart.sprint_id !== sprint.sprint_id
+        || originalStart.sprint_plan_artifact_id !== plan.sprint_plan_artifact_id
+        || originalStart.sprint_plan_artifact_decision_id
             !== plan.sprint_plan_artifact_decision_id
-        || start.plan_fingerprint !== plan.plan_fingerprint
-        || start.candidate_set_fingerprint !== plan.candidate_set_fingerprint
-        || start.task_content_fingerprint !== plan.task_content_fingerprint
+        || originalStart.plan_fingerprint !== plan.plan_fingerprint
+        || originalStart.candidate_set_fingerprint !== plan.candidate_set_fingerprint
+        || originalStart.task_content_fingerprint !== plan.task_content_fingerprint
+    ) return null;
+    if (!currentRetry) {
+        return data.effective_status === undefined || data.effective_status === sprint.status
+            ? data
+            : null;
+    }
+    if (
+        sprint.status !== 'completed'
+        || plan.status !== 'completed'
+        || !positiveInteger(currentRetry.retry_attempt_id)
+        || !positiveInteger(currentRetry.ordinal)
+        || currentRetry.ordinal < 2
+        || !['planned', 'active', 'completed'].includes(currentRetry.status)
+        || !(
+            currentRetry.predecessor_retry_attempt_id === null
+            || positiveInteger(currentRetry.predecessor_retry_attempt_id)
+        )
+        || currentRetry.sprint_instance_key
+            !== `retry:${currentRetry.retry_attempt_id}:sprint:${sprint.sprint_id}`
+        || data.effective_status !== currentRetry.status
+    ) return null;
+    for (const task of tasks) {
+        if (
+            task.instance_key
+                !== `retry:${currentRetry.retry_attempt_id}:task:${task.task_id}`
+        ) return null;
+    }
+    const effectiveStart = data.start;
+    if (currentRetry.status === 'planned') {
+        if (effectiveStart !== null) return null;
+    } else if (
+        !reviewObject(effectiveStart)
+        || !positiveInteger(effectiveStart.start_id)
+        || effectiveStart.retry_attempt_id !== currentRetry.retry_attempt_id
+        || !isSha256Fingerprint(effectiveStart.contract_fingerprint)
+        || !isSha256Fingerprint(effectiveStart.decision_fingerprint)
+        || typeof effectiveStart.started_by !== 'string'
+        || !effectiveStart.started_by.trim()
+        || typeof effectiveStart.started_at !== 'string'
+        || !effectiveStart.started_at.trim()
     ) return null;
     return data;
 }
 
+function retrySprintScope(status) {
+    const sprint = reviewObject(status?.sprint);
+    const retry = reviewObject(status?.current_retry);
+    if (
+        sprint?.status !== 'completed'
+        || !positiveInteger(retry?.retry_attempt_id)
+        || !positiveInteger(retry?.ordinal)
+        || !['planned', 'active', 'completed'].includes(retry?.status)
+        || status?.effective_status !== retry.status
+        || retry.sprint_instance_key !== `retry:${retry.retry_attempt_id}:sprint:${sprint.sprint_id}`
+    ) return null;
+    return { sprint, retry };
+}
+
+function sprintRetryActionBinding(status, position, actions) {
+    const sprint = reviewObject(status?.sprint);
+    if (sprint?.status !== 'completed') return null;
+    const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
+        .filter((decision) => (
+            decision?.node_id === 'execution.sprint.retry'
+            && decision?.request_kind === 'retry_sprint'
+            && decision?.category === 'available'
+            && decision?.recommendation_kind === 'optional_reentry'
+            && decision?.reason_code === 'SPRINT_RETRY_AVAILABLE'
+            && decision?.instance_key === `sprint:${sprint.sprint_id}`
+            && isSha256Fingerprint(decision?.decision_fingerprint)
+        ));
+    if (decisions.length !== 1) return null;
+    const action = findDecisionAction(actions, decisions[0]);
+    if (
+        !action
+        || action.endpoint !== 'sprint/retry'
+        || action.transport !== 'semantic'
+    ) return null;
+    return {
+        action: captureAction(action),
+        decisionFingerprint: decisions[0].decision_fingerprint,
+        sprintId: sprint.sprint_id,
+        instanceKey: decisions[0].instance_key,
+    };
+}
+
 function sprintStartBinding(status, position, actions) {
+    const retryScope = retrySprintScope(status);
+    if (retryScope) {
+        const { sprint, retry } = retryScope;
+        if (retry.status !== 'planned' || status?.start !== null) return null;
+        const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
+            .filter((decision) => (
+                decision?.node_id === 'execution.sprint.retry.start'
+                && decision?.request_kind === 'start_sprint_retry'
+                && decision?.category === 'available'
+                && decision?.recommendation_kind === 'required'
+                && decision?.reason_code === 'SPRINT_RETRY_READY_TO_START'
+                && decision?.instance_key === retry.sprint_instance_key
+                && isSha256Fingerprint(decision?.decision_fingerprint)
+            ));
+        if (decisions.length !== 1) return null;
+        const action = findDecisionAction(actions, decisions[0]);
+        if (!action || action.endpoint !== 'sprint/start' || action.transport !== 'semantic') {
+            return null;
+        }
+        return {
+            kind: 'retry',
+            action: captureAction(action),
+            decisionFingerprint: decisions[0].decision_fingerprint,
+            sprintId: sprint.sprint_id,
+            retryAttemptId: retry.retry_attempt_id,
+            ordinal: retry.ordinal,
+            instanceKey: retry.sprint_instance_key,
+        };
+    }
     const sprint = reviewObject(status?.sprint);
     const plan = reviewObject(status?.accepted_plan);
     if (sprint?.status !== 'planned' || plan?.status !== 'planned') return null;
@@ -1547,6 +1661,7 @@ function sprintStartBinding(status, position, actions) {
         )
     ) return null;
     return {
+        kind: 'original',
         action: captureAction(action),
         decisionFingerprint: decision.decision_fingerprint,
         sprintId: sprint.sprint_id,
@@ -1573,24 +1688,23 @@ function sprintCorrectionBinding(status, position, actions) {
 }
 
 function sprintExecutionProjection(status, position, actions) {
-    if (status?.sprint?.status !== 'active') return { kind: 'absent', items: [] };
-    const taskById = new Map((Array.isArray(status?.tasks) ? status.tasks : [])
-        .map((task) => [task.task_id, task]));
+    const effectiveStatus = status?.effective_status ?? status?.sprint?.status;
+    if (effectiveStatus !== 'active') return { kind: 'absent', items: [] };
+    const taskByInstance = new Map((Array.isArray(status?.tasks) ? status.tasks : [])
+        .map((task) => [task?.instance_key ?? `task:${task?.task_id}`, task]));
     const decisions = (Array.isArray(position?.decisions) ? position.decisions : [])
         .filter((decision) => decision?.request_kind === 'complete_task');
     const items = [];
     const projectedTaskIds = new Set();
     for (const decision of decisions) {
-        const taskId = Number.parseInt(
-            String(decision?.instance_key ?? '').replace(/^task:/, ''),
-            10,
-        );
+        const task = taskByInstance.get(decision?.instance_key);
+        const taskId = task?.task_id;
+        const taskInstanceKey = task?.instance_key ?? `task:${taskId}`;
         const action = findDecisionAction(actions, decision);
-        const task = taskById.get(taskId);
         if (
             !positiveInteger(taskId)
             || projectedTaskIds.has(taskId)
-            || decision.instance_key !== `task:${taskId}`
+            || decision.instance_key !== taskInstanceKey
             || decision.category !== 'available'
             || !['NEXT_TASK_READY', 'IN_PROGRESS_TASK_REQUIRED'].includes(
                 decision.reason_code,
@@ -3172,6 +3286,23 @@ function sprintAcceptedPlanEvidenceMarkup(plan) {
     </details>`;
 }
 
+function sprintExecutionHistoryMarkup(history, sprintId) {
+    const attempts = (Array.isArray(history?.execution_attempts)
+        ? history.execution_attempts
+        : []).filter((attempt) => attempt?.sprint_id === sprintId
+        && positiveInteger(attempt?.ordinal)
+        && typeof attempt?.status === 'string');
+    if (!attempts.length) return '';
+    attempts.sort((left, right) => left.ordinal - right.ordinal);
+    return `<details class="mt-4 rounded-lg border border-slate-200 bg-white p-3" data-sprint-execution-history="true" open>
+        <summary class="cursor-pointer text-sm font-semibold text-slate-800">Original completion history</summary>
+        <ul class="mt-3 space-y-2 text-sm text-slate-700">${attempts.map((attempt) => `
+            <li class="rounded border border-slate-200 bg-slate-50 px-3 py-2" data-sprint-attempt-ordinal="${attempt.ordinal}">
+                <strong>Attempt ${attempt.ordinal}</strong> · ${escapeWorkflowText(attempt.status)}
+            </li>`).join('')}</ul>
+    </details>`;
+}
+
 function sprintStatusMarkup(sprintState, position = {}, actions = [], context = {}) {
     if (sprintState?.kind === 'absent') return '';
     if (sprintState?.kind !== 'ready') {
@@ -3180,20 +3311,30 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
     const status = sprintState.data;
     const sprint = status.sprint;
     const plan = status.accepted_plan;
-    const heading = sprint.status === 'planned'
+    const retryScope = retrySprintScope(status);
+    const effectiveStatus = status.effective_status ?? sprint.status;
+    const heading = retryScope
+        ? `Attempt ${retryScope.retry.ordinal} is ${effectiveStatus}`
+        : (sprint.status === 'planned'
         ? `Sprint #${sprint.sprint_id} is planned`
         : (sprint.status === 'active'
             ? `Sprint #${sprint.sprint_id} is active`
-            : `Sprint #${sprint.sprint_id} is complete`);
+            : `Sprint #${sprint.sprint_id} is complete`));
     const start = sprintStartBinding(status, position, actions);
     const correction = sprintCorrectionBinding(status, position, actions);
+    const retryAction = sprintRetryActionBinding(status, position, actions);
     const startBusy = activeSprintMutation !== null;
     const startMarkup = start ? `<button type="button" data-direct-action="start_sprint" ${deliveryActionBindingAttributes(start.action)}${startBusy ? ' disabled aria-disabled="true" aria-busy="true"' : ''} class="${BUTTON_PRIMARY}">
         <span class="material-symbols-outlined" aria-hidden="true">play_arrow</span>
         <span data-sprint-start-label="true">${startBusy ? 'Starting Sprint...' : 'Start Sprint'}</span>
-    </button>` : (sprint.status === 'planned'
+    </button>` : (effectiveStatus === 'planned'
         ? '<p class="text-sm text-slate-600">Start is locked until the current graph and accepted-plan evidence agree.</p>'
         : '');
+    const retryBusy = activeSprintRetryMutation !== null;
+    const retryMarkup = sprint.status === 'completed' ? `<button type="button" data-direct-action="retry_sprint" data-sprint-retry-target="${sprint.sprint_id}"${retryAction ? ` ${deliveryActionBindingAttributes(retryAction.action)}` : ''}${retryBusy ? ' disabled aria-disabled="true" aria-busy="true"' : ''} class="${BUTTON_SECONDARY}">
+        <span class="material-symbols-outlined" aria-hidden="true">restart_alt</span>
+        <span data-sprint-retry-label="true">${retryBusy ? 'Retrying Sprint...' : 'Retry Sprint'}</span>
+    </button>` : '';
     const correctionMarkup = correction ? `<details class="rounded-lg border border-slate-200 bg-white p-3" data-sprint-correction="true">
         <summary class="cursor-pointer text-sm font-semibold text-slate-700">Correct accepted plan</summary>
         <div class="mt-3">${deliveryGenerationActionMarkup(
@@ -3206,7 +3347,7 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
     </details>` : '';
 
     let executionMarkup = '';
-    if (sprint.status === 'active') {
+    if (effectiveStatus === 'active') {
         const execution = sprintExecutionProjection(status, position, actions);
         if (execution.kind === 'error') {
             executionMarkup = '<p role="alert" class="mt-4 text-sm text-red-800">Current execution action projection is inconsistent. Task controls remain locked.</p>';
@@ -3238,13 +3379,13 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
         } else {
             executionMarkup = `<div class="mt-4 space-y-2" data-sprint-execution-actions="true">
                 <p class="text-sm font-semibold text-slate-800">${execution.items.length} current execution ${execution.items.length === 1 ? 'action' : 'actions'}</p>
-                <ul class="space-y-2">${execution.items.map(({ task }) => `<li class="rounded-lg border border-sky-200 bg-sky-50 p-3"><p class="text-sm font-semibold text-sky-950">Task #${task.task_id}</p><p class="mt-1 text-sm text-slate-700">${escapeWorkflowText(task.description)}</p></li>`).join('')}</ul>
+                <ul class="space-y-2">${execution.items.map(({ task }) => `<li class="rounded-lg border border-sky-200 bg-sky-50 p-3"><p class="text-sm font-semibold text-sky-950">Task #${task.task_id}</p><p class="mt-1 text-sm text-slate-700">${escapeWorkflowText(task.description)}</p><p class="mt-1 text-xs text-slate-600">Status: ${escapeWorkflowText(task.status)}</p></li>`).join('')}</ul>
                 <p class="text-xs text-slate-500">Task completion evidence is recorded through the existing Task workflow.</p>
             </div>`;
         }
     }
-    return `<section class="rounded-lg border border-emerald-300 bg-emerald-50 p-5" data-sprint-status="${escapeWorkflowText(sprint.status)}">
-        <p class="text-xs font-semibold uppercase tracking-wide text-emerald-800">Current Sprint</p>
+    return `<section class="rounded-lg border border-emerald-300 bg-emerald-50 p-5" data-sprint-status="${escapeWorkflowText(effectiveStatus)}">
+        <p class="text-xs font-semibold uppercase tracking-wide text-emerald-800">${retryScope ? 'Current Sprint retry' : 'Current Sprint'}</p>
         <h3 class="mt-1 text-lg font-bold text-emerald-950">${escapeWorkflowText(heading)}</h3>
         <p class="mt-3 text-sm leading-6 text-slate-800"><strong>Goal:</strong> ${escapeWorkflowText(plan.goal)}</p>
         <dl class="mt-3 grid gap-2 text-sm sm:grid-cols-3">
@@ -3252,9 +3393,10 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
             <div><dt class="font-semibold text-slate-600">Scope</dt><dd>${plan.selected_stories.length} ${plan.selected_stories.length === 1 ? 'Story' : 'Stories'} · ${plan.total_points} points</dd></div>
             <div><dt class="font-semibold text-slate-600">Tasks</dt><dd>${plan.task_count}</dd></div>
         </dl>
-        <div class="mt-4 flex flex-wrap items-start gap-3">${startMarkup}</div>
+        <div class="mt-4 flex flex-wrap items-start gap-3">${startMarkup}${retryMarkup}</div>
         ${executionMarkup}
         ${sprintAcceptedPlanEvidenceMarkup(plan)}
+        ${sprintExecutionHistoryMarkup(context.sprintHistory, sprint.sprint_id)}
         ${correctionMarkup}
     </section>`;
 }
@@ -3890,6 +4032,7 @@ async function loadDashboard() {
             storyDependencies,
             sprintCandidates,
             sprintStatusResponse,
+            sprintHistory,
         ] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
@@ -3905,6 +4048,7 @@ async function loadDashboard() {
             requestJson(`${base}/story/dependencies`, options),
             requestJson(`${base}/sprint/candidates`, options),
             requestSprintStatus(`${base}/sprint/status`, options),
+            requestJson(`${base}/sprints`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         const sprintPlanReviewData = sprintPlanReview.data ?? {};
@@ -3918,7 +4062,7 @@ async function loadDashboard() {
             )
             : null;
         const sprintExecutionAdvertised = positionActions.some((action) => (
-            ['start_sprint', 'complete_task'].includes(action?.request_kind)
+            ['start_sprint', 'start_sprint_retry', 'complete_task'].includes(action?.request_kind)
         ));
         const sprintStatusAbsent = sprintStatusResponse.kind === 'absent'
             && !sprintExecutionAdvertised;
@@ -3963,6 +4107,7 @@ async function loadDashboard() {
                         message: sprintStatusResponse.message
                             ?? 'Sprint status projection is incomplete.',
                     }),
+            sprintHistory: sprintHistory.data ?? {},
         };
         const backlogFocusMutation = reconcileBacklogCorrectionMutation(
             backlogCorrectionMutationAtStart,
@@ -3987,6 +4132,12 @@ async function loadDashboard() {
         ) {
             completeSprintStartReconciliation(activeSprintMutation.token);
         }
+        if (
+            activeSprintRetryMutation?.phase === 'awaiting_authority'
+            && sprintRetryConfirmed(lifecycleState, activeSprintRetryMutation)
+        ) {
+            completeSprintRetryReconciliation(activeSprintRetryMutation.token);
+        }
         lastSuccessfulDashboardLoadSequence = sequence;
         const awaitingConfirmation = Boolean(
             (activeBacklogCorrectionMutation !== null
@@ -3995,6 +4146,9 @@ async function loadDashboard() {
             || (activeSprintMutation !== null
                 && activeSprintMutation.phase === 'awaiting_authority'
                 && !sprintStartConfirmed(lifecycleState, activeSprintMutation.binding))
+            || (activeSprintRetryMutation !== null
+                && activeSprintRetryMutation.phase === 'awaiting_authority'
+                && !sprintRetryConfirmed(lifecycleState, activeSprintRetryMutation))
             || (activeStoryMutation !== null && activeStoryMutation.phase === 'awaiting_authority')
             || (activeDependencyMutation !== null && activeDependencyMutation.phase === 'awaiting_authority')
         );
@@ -4122,6 +4276,18 @@ function captureSprintStartControlBinding(state, control) {
         : null;
 }
 
+function captureSprintRetryControlBinding(state, control) {
+    const expected = sprintRetryActionBinding(
+        state?.sprintStatus?.data,
+        state?.position,
+        state?.actions,
+    );
+    const rendered = captureDeliveryActionBinding(state, control, 'retry_sprint');
+    return expected && rendered && deliveryActionsMatch(expected.action, rendered)
+        ? expected
+        : null;
+}
+
 function currentDeliveryActionContainers(action, requestKind) {
     const candidates = Array.from(document.querySelectorAll?.(
         `[data-delivery-generation-action="${requestKind}"]`,
@@ -4143,6 +4309,36 @@ function deliveryActionsMatch(left, right) {
 function sprintStartConfirmed(state, binding) {
     const status = state?.sprintStatus;
     const data = status?.kind === 'ready' ? status.data : null;
+    if (binding?.kind === 'retry') {
+        const retry = reviewObject(data?.current_retry);
+        const start = reviewObject(data?.start);
+        const retryStartStillAdvertised = (Array.isArray(state?.actions) ? state.actions : [])
+            .some((action) => action?.request_kind === 'start_sprint_retry');
+        const retryStartDecisionStillPresent = (
+            Array.isArray(state?.position?.decisions) ? state.position.decisions : []
+        ).some((decision) => (
+            decision?.request_kind === 'start_sprint_retry'
+            && decision?.reason_code === 'SPRINT_RETRY_READY_TO_START'
+        ));
+        return Boolean(
+            data?.sprint?.sprint_id === binding.sprintId
+            && data.sprint.status === 'completed'
+            && data.effective_status === 'active'
+            && retry?.retry_attempt_id === binding.retryAttemptId
+            && retry.ordinal === binding.ordinal
+            && retry.status === 'active'
+            && retry.sprint_instance_key === binding.instanceKey
+            && start?.retry_attempt_id === binding.retryAttemptId
+            && isSha256Fingerprint(start.contract_fingerprint)
+            && start.decision_fingerprint === binding.decisionFingerprint
+            && typeof start.started_by === 'string'
+            && start.started_by.trim()
+            && typeof start.started_at === 'string'
+            && start.started_at.trim()
+            && !retryStartStillAdvertised
+            && !retryStartDecisionStillPresent
+        );
+    }
     const sprint = data?.sprint;
     const plan = data?.accepted_plan;
     const start = data?.start;
@@ -4501,10 +4697,165 @@ function openHumanDialog(config) {
         path.required = isPath;
         path.value = config.initialPath ?? '';
     }
+    const submit = document.getElementById('human-action-submit');
     setText('human-action-submit', config.submitLabel ?? 'Confirm');
+    if (submit) {
+        submit.disabled = config.submitDisabled === true;
+        if (config.submitDisabled === true) {
+            submit.setAttribute('aria-disabled', 'true');
+        } else {
+            submit.removeAttribute('aria-disabled');
+        }
+        submit.removeAttribute('aria-busy');
+    }
     setDialogError('');
     document.getElementById('human-action-dialog')?.showModal();
-    window.setTimeout(() => (isPath ? path : hideRationale ? document.getElementById('human-action-submit') : rationale)?.focus(), 0);
+    window.setTimeout(() => (isPath ? path : hideRationale ? submit : rationale)?.focus(), 0);
+}
+
+function retryPreviewForScope(value, projectId, sprintId) {
+    const preview = reviewObject(value);
+    const blockers = Array.isArray(preview?.blockers) ? preview.blockers : null;
+    if (
+        preview?.project_id !== projectId
+        || preview.sprint_id !== sprintId
+        || !positiveInteger(preview.next_ordinal)
+        || preview.next_ordinal < 2
+        || !Array.isArray(preview.story_ids)
+        || !preview.story_ids.every(positiveInteger)
+        || !Array.isArray(preview.task_ids)
+        || !preview.task_ids.every(positiveInteger)
+        || typeof preview.preserved_history !== 'string'
+        || !preview.preserved_history.trim()
+        || !isSha256Fingerprint(preview.expected_state_fingerprint)
+        || blockers === null
+        || !blockers.every((blocker) => (
+            reviewObject(blocker) !== null
+            && typeof blocker.code === 'string'
+            && blocker.code.trim()
+            && typeof blocker.reason === 'string'
+            && blocker.reason.trim()
+            && typeof blocker.subject_type === 'string'
+            && blocker.subject_type.trim()
+            && (blocker.subject_id === null || positiveInteger(blocker.subject_id))
+        ))
+    ) return null;
+    return preview;
+}
+
+function retryPreviewDescription(preview) {
+    const storyCount = preview.story_ids.length;
+    const taskCount = preview.task_ids.length;
+    const scope = `Sprint #${preview.sprint_id} will create Attempt ${preview.next_ordinal} for ${storyCount} ${storyCount === 1 ? 'Story' : 'Stories'} and ${taskCount} ${taskCount === 1 ? 'Task' : 'Tasks'}.`;
+    const preservation = ` ${preview.preserved_history}`;
+    const blockerText = preview.blockers.length === 0
+        ? ''
+        : ` Retry is unavailable: ${preview.blockers.map((blocker) => blocker.reason).join(' ')}`;
+    return `${scope}${preservation}${blockerText}`;
+}
+
+function retryPreviewTarget(state, control) {
+    const sprint = reviewObject(state?.sprintStatus?.data?.sprint);
+    const sprintId = Number.parseInt(control?.dataset?.sprintRetryTarget ?? '', 10);
+    if (
+        state?.sprintStatus?.kind !== 'ready'
+        || sprint?.status !== 'completed'
+        || !positiveInteger(sprintId)
+        || sprint.sprint_id !== sprintId
+    ) return null;
+    return { sprintId, binding: captureSprintRetryControlBinding(state, control) };
+}
+
+function retryBindingMatches(left, right) {
+    return Boolean(
+        left && right
+        && left.decisionFingerprint === right.decisionFingerprint
+        && left.sprintId === right.sprintId
+        && left.instanceKey === right.instanceKey
+        && deliveryActionsMatch(left.action, right.action)
+    );
+}
+
+function sprintRetryConfirmed(state, mutation) {
+    const data = state?.sprintStatus?.kind === 'ready'
+        ? state.sprintStatus.data
+        : null;
+    const retry = reviewObject(data?.current_retry);
+    const start = sprintStartBinding(data, state?.position, state?.actions);
+    return Boolean(
+        mutation?.retryAttemptId
+        && data?.sprint?.sprint_id === mutation.sprintId
+        && data.sprint.status === 'completed'
+        && data.effective_status === 'planned'
+        && retry?.retry_attempt_id === mutation.retryAttemptId
+        && retry.status === 'planned'
+        && retry.sprint_instance_key === `retry:${mutation.retryAttemptId}:sprint:${mutation.sprintId}`
+        && start?.kind === 'retry'
+        && start.retryAttemptId === mutation.retryAttemptId
+        && start.sprintId === mutation.sprintId
+        && start.instanceKey === retry.sprint_instance_key
+    );
+}
+
+async function openSprintRetryPreview(button) {
+    if (activeSprintRetryMutation || activeCockpitAction || activeDeliveryUnreconciled) return false;
+    const projectId = selectedProjectId;
+    const target = retryPreviewTarget(lifecycleState, button);
+    if (!target) {
+        setProjectError('This Sprint retry target changed. Reload and review the current Sprint.');
+        return false;
+    }
+    let payload;
+    try {
+        payload = await requestJson(
+            `/api/projects/${projectId}/sprint/${target.sprintId}/retry-preview`,
+        );
+    } catch (error) {
+        if (selectedProjectId === projectId) setProjectError(error.message);
+        return false;
+    }
+    if (selectedProjectId !== projectId) return false;
+    const preview = retryPreviewForScope(payload?.data, projectId, target.sprintId);
+    if (!preview) {
+        setProjectError('The retry preview did not match the selected Sprint. Reload and review it again.');
+        return false;
+    }
+    const currentTarget = retryPreviewTarget(lifecycleState, button);
+    if (!currentTarget || currentTarget.sprintId !== target.sprintId) return false;
+    const actionCurrent = target.binding === null
+        ? currentTarget.binding === null
+        : retryBindingMatches(target.binding, currentTarget.binding);
+    if (!actionCurrent) return false;
+    const canConfirm = preview.blockers.length === 0 && currentTarget.binding !== null;
+    openHumanDialog({
+        kind: 'sprint-retry',
+        button,
+        projectId,
+        sprintId: target.sprintId,
+        binding: currentTarget.binding,
+        preview,
+        title: `Retry Sprint #${target.sprintId}`,
+        description: retryPreviewDescription(preview),
+        label: 'Retry rationale',
+        required: true,
+        submitLabel: 'Retry Sprint',
+        submitDisabled: !canConfirm,
+    });
+    return true;
+}
+
+function setSprintRetryBusy(button, busy) {
+    if (!button) return;
+    button.disabled = busy;
+    if (busy) {
+        button.setAttribute('aria-disabled', 'true');
+        button.setAttribute('aria-busy', 'true');
+    } else {
+        button.removeAttribute('aria-disabled');
+        button.removeAttribute('aria-busy');
+    }
+    const label = button.querySelector?.('[data-sprint-retry-label="true"]');
+    if (label) label.textContent = busy ? 'Retrying Sprint...' : 'Retry Sprint';
 }
 
 function reviewDialogCopy(scope, decision) {
@@ -4547,12 +4898,15 @@ async function readPositionActions() {
 
 async function submitHumanAction() {
     if (!pendingHumanAction) return;
+    if (activeSprintRetryMutation) return;
     if (activeCockpitAction || activeDeliveryUnreconciled) {
         throw new Error('An action is currently executing or awaiting reload. Wait for it to complete.');
     }
     const rationale = document.getElementById('human-action-rationale')?.value.trim() ?? '';
     const path = document.getElementById('human-action-path')?.value.trim() ?? '';
     const pending = pendingHumanAction;
+
+    if (pending.submitDisabled === true) return;
 
     if (pending.required !== false && pending.field !== 'path' && !rationale) {
         throw new Error('Enter a rationale before continuing.');
@@ -4561,7 +4915,9 @@ async function submitHumanAction() {
         throw new Error('Enter a local repository path.');
     }
 
-    const isDelegatedAction = pending.kind === 'delivery-generation' || pending.kind === 'sprint-start';
+    const isDelegatedAction = pending.kind === 'delivery-generation'
+        || pending.kind === 'sprint-start'
+        || pending.kind === 'sprint-retry';
     const humanToken = isDelegatedAction ? null : crypto.randomUUID();
     if (!isDelegatedAction) {
         setCockpitActionBusy(true, pending.kind, { token: humanToken });
@@ -4622,6 +4978,9 @@ async function submitHumanAction() {
         } else if (pending.kind === 'sprint-start') {
             await runSprintStart(pending.binding, pending.button);
             return;
+        } else if (pending.kind === 'sprint-retry') {
+            await runSprintRetry(pending, rationale);
+            return;
         } else if (pending.kind === 'goal-outcome') {
             const requestKind = pending.outcome === 'fulfilled'
                 ? 'fulfill_product_goal'
@@ -4655,6 +5014,122 @@ async function submitHumanAction() {
         if (!isDelegatedAction) {
             setCockpitActionBusy(false, pending.kind, { token: humanToken });
         }
+    }
+}
+
+function retryDialogStillCurrent(pending) {
+    return selectedProjectId === pending.projectId && pendingHumanAction === pending;
+}
+
+function completeSprintRetryReconciliation(token) {
+    if (activeSprintRetryMutation?.token === token) activeSprintRetryMutation = null;
+}
+
+async function runSprintRetry(pending, rationale) {
+    if (activeSprintRetryMutation || activeCockpitAction || activeDeliveryUnreconciled) return false;
+    const currentTarget = retryPreviewTarget(lifecycleState, pending.button);
+    const preview = retryPreviewForScope(pending.preview, pending.projectId, pending.sprintId);
+    if (
+        selectedProjectId !== pending.projectId
+        || !currentTarget
+        || currentTarget.sprintId !== pending.sprintId
+        || !preview
+        || preview.blockers.length !== 0
+        || !retryBindingMatches(pending.binding, currentTarget.binding)
+    ) {
+        setProjectError('This Sprint retry changed. Reload and review the current preview.');
+        return false;
+    }
+    const token = `dashboard-${crypto.randomUUID()}`;
+    activeSprintRetryMutation = {
+        token,
+        projectId: pending.projectId,
+        sprintId: pending.sprintId,
+        binding: currentTarget.binding,
+        phase: 'submitting',
+    };
+    setCockpitActionBusy(true, 'retry_sprint', {
+        token,
+        busyLabel: 'Retrying Sprint...',
+    });
+    setSprintRetryBusy(pending.button, true);
+    const submit = document.getElementById('human-action-submit');
+    if (submit) {
+        submit.disabled = true;
+        submit.setAttribute('aria-disabled', 'true');
+        submit.setAttribute('aria-busy', 'true');
+    }
+    setProjectError('');
+    try {
+        const result = await postAction(
+            currentTarget.binding.action,
+            {
+                sprint_id: pending.sprintId,
+                confirm: true,
+                expected_state_fingerprint: preview.expected_state_fingerprint,
+                rationale,
+                idempotency_key: token,
+            },
+            {
+                expectedDecision: currentTarget.binding.decisionFingerprint,
+                expectedInstance: currentTarget.binding.instanceKey,
+            },
+        );
+        const retryAttemptId = result?.data?.output?.retry_attempt_id;
+        if (!positiveInteger(retryAttemptId)) {
+            activeDeliveryUnreconciled = true;
+            throw new Error('Sprint retry was accepted, but the response did not identify its created attempt. Controls remain locked until a successful refresh.');
+        }
+        if (activeSprintRetryMutation?.token === token) {
+            activeSprintRetryMutation = {
+                ...activeSprintRetryMutation,
+                retryAttemptId,
+                phase: 'awaiting_authority',
+            };
+        }
+        if (!retryDialogStillCurrent(pending)) {
+            completeSprintRetryReconciliation(token);
+            return false;
+        }
+        closeHumanDialog();
+        const loadSequence = dashboardLoadSequence + 1;
+        const refreshed = await loadDashboard();
+        const mutation = {
+            token,
+            projectId: pending.projectId,
+            sprintId: pending.sprintId,
+            retryAttemptId,
+        };
+        if (
+            (refreshed !== true && !isDashboardReconciled(loadSequence))
+            || !sprintRetryConfirmed(lifecycleState, mutation)
+        ) {
+            activeDeliveryUnreconciled = true;
+            throw new Error('Sprint retry was accepted, but the authoritative status did not confirm its exact created attempt. Controls remain locked until a successful refresh.');
+        }
+        completeSprintRetryReconciliation(token);
+        return true;
+    } catch (error) {
+        if (error.status === 409 && retryDialogStillCurrent(pending)) {
+            completeSprintRetryReconciliation(token);
+            setSprintRetryBusy(pending.button, false);
+            setCockpitActionBusy(false, 'retry_sprint', { token });
+            await openSprintRetryPreview(pending.button);
+            return false;
+        }
+        throw error;
+    } finally {
+        if (
+            activeSprintRetryMutation?.token === token
+            && activeSprintRetryMutation.phase !== 'awaiting_authority'
+        ) {
+            activeSprintRetryMutation = null;
+            setSprintRetryBusy(pending.button, false);
+        }
+        if (submit && retryDialogStillCurrent(pending)) {
+            submit.removeAttribute('aria-busy');
+        }
+        setCockpitActionBusy(false, 'retry_sprint', { token });
     }
 }
 
@@ -4741,9 +5216,17 @@ async function runBacklogCorrection(binding, button) {
 }
 
 function sprintStartBindingsMatch(left, right) {
+    if (!left || !right || left.kind !== right.kind) return false;
+    if (left.kind === 'retry') {
+        return left.decisionFingerprint === right.decisionFingerprint
+            && left.sprintId === right.sprintId
+            && left.retryAttemptId === right.retryAttemptId
+            && left.ordinal === right.ordinal
+            && left.instanceKey === right.instanceKey
+            && deliveryActionsMatch(left.action, right.action);
+    }
     return Boolean(
-        left && right
-        && left.decisionFingerprint === right.decisionFingerprint
+        left.decisionFingerprint === right.decisionFingerprint
         && left.sprintId === right.sprintId
         && left.sprintPlanArtifactId === right.sprintPlanArtifactId
         && left.sprintPlanArtifactDecisionId === right.sprintPlanArtifactDecisionId
@@ -4779,8 +5262,13 @@ async function runSprintStart(binding, button) {
     try {
         await postAction(
             binding.action,
-            { idempotency_key: token },
-            { expectedDecision: binding.decisionFingerprint },
+            binding.kind === 'retry'
+                ? { idempotency_key: token, instance_key: binding.instanceKey }
+                : { idempotency_key: token },
+            {
+                expectedDecision: binding.decisionFingerprint,
+                ...(binding.kind === 'retry' ? { expectedInstance: binding.instanceKey } : {}),
+            },
         );
         mutationCompleted = true;
         if (activeSprintMutation?.token === token) {
@@ -5678,13 +6166,21 @@ function installInteractions() {
                 kind: 'sprint-start',
                 binding,
                 button,
-                title: `Start Sprint #${binding.sprintId}`,
-                description: 'Confirm starting the exact accepted Sprint plan shown on this page.',
+                title: binding.kind === 'retry'
+                    ? `Start Sprint retry Attempt ${binding.ordinal}`
+                    : `Start Sprint #${binding.sprintId}`,
+                description: binding.kind === 'retry'
+                    ? `Confirm starting Attempt ${binding.ordinal} for the exact scoped Sprint retry shown on this page.`
+                    : 'Confirm starting the exact accepted Sprint plan shown on this page.',
                 submitLabel: 'Start Sprint',
                 field: 'none',
                 required: false,
                 hideRationale: true,
             });
+            return;
+        }
+        if (button.dataset.directAction === 'retry_sprint') {
+            await openSprintRetryPreview(button);
             return;
         }
         if (button.dataset.directAction) {
