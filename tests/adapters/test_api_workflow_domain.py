@@ -78,6 +78,7 @@ from services.specification_source_registration import (
 )
 from services.sprint_ownership import ResolvedSprintOwner
 from services.vision_evidence_reader import RepositoryEvidenceCapability
+from tests.adapters.sprint_retry_fixtures import durable_rows
 from tests.adapters.test_command_renderer import position_fixture
 from tests.test_create_user_story import (
     _intermediate_story_content,
@@ -2103,21 +2104,35 @@ def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
             engine=engine
         ),
     )
-    started = application.start_sprint(
-        application_module.SprintStartRequest(
-            project_id=project_id,
-            idempotency_key="selection-start-sprint",
-            actor="operator",
-            expected_decision_fingerprint=next(
-                item.decision_fingerprint
-                for item in application.position(project_id=project_id).decisions
-                if item.node_id == "planning.sprint.start"
-            ),
-        )
+    request = application_module.SprintStartRequest(
+        project_id=project_id,
+        idempotency_key="selection-start-sprint",
+        actor="operator",
+        expected_decision_fingerprint=next(
+            item.decision_fingerprint
+            for item in application.position(project_id=project_id).decisions
+            if item.node_id == "planning.sprint.start"
+        ),
     )
+    started = application.start_sprint(request)
 
     assert started.ok is True
     assert started.applied_node_id == "planning.sprint.start"
+    after_start = durable_rows(engine)
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "start_sprint",
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key,
+            )
+        ).one()
+    assert json.loads(receipt.request_json)["instance_key"] is None
+
+    replayed = application.start_sprint(request)
+
+    assert replayed == started.model_copy(update={"replayed": True})
+    assert durable_rows(engine) == after_start
 
 
 def test_sprint_start_rejects_a_replaced_browser_decision_before_transition() -> None:
@@ -3771,9 +3786,7 @@ def test_backlog_correction_request_validations() -> None:
         with pytest.raises(ValidationError):
             BacklogCorrectionRequest.model_validate({**valid, "actor": blank})
         with pytest.raises(ValidationError):
-            BacklogCorrectionRequest.model_validate(
-                {**valid, "idempotency_key": blank}
-            )
+            BacklogCorrectionRequest.model_validate({**valid, "idempotency_key": blank})
 
     with pytest.raises(ValidationError):
         BacklogCorrectionRequest.model_validate({**valid, "extra": "forbidden"})
@@ -3947,7 +3960,6 @@ def test_build_backlog_correction_negative_cases(  # noqa: PLR0915
             session.delete(stored_child)
             session.commit()
 
-
     # Negative cases for changed Spec/Goal lineage in build_backlog_correction
     with Session(engine) as session:
         real_lineage = application_module._delivery_lineage(
@@ -4060,7 +4072,6 @@ def test_build_backlog_correction_negative_cases(  # noqa: PLR0915
             == "The accepted Backlog target no longer matches durable facts."
         )
 
-
     with Session(engine) as session:
         attempts = session.exec(
             select(WorkflowNodeAttempt).where(
@@ -4069,7 +4080,6 @@ def test_build_backlog_correction_negative_cases(  # noqa: PLR0915
             )
         ).all()
         assert len(attempts) == 0
-
 
 
 def test_generic_backlog_generation_refuses_correction(engine: "Engine") -> None:
@@ -4094,6 +4104,7 @@ def test_generic_backlog_generation_refuses_correction(engine: "Engine") -> None
     assert result.ok is False
     assert result.error is not None
     assert result.error.code == WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+
 
 def test_backlog_correction_decision_shape_cases(engine: "Engine") -> None:
     """Validate decision shape constraints for initial correction and retry."""
@@ -4123,9 +4134,7 @@ def test_backlog_correction_decision_shape_cases(engine: "Engine") -> None:
     with_attempt = decision.model_copy(
         update={"fact_references": (*decision.fact_references, attempt_ref)}
     )
-    assert not application_module._backlog_correction_decision_is_valid(
-        with_attempt
-    )
+    assert not application_module._backlog_correction_decision_is_valid(with_attempt)
 
     rec_dec = decision.model_copy(
         update={
@@ -4167,7 +4176,6 @@ def test_backlog_correction_decision_shape_cases(engine: "Engine") -> None:
     assert not application_module._backlog_correction_decision_is_valid(
         with_bad_attempt
     )
-
 
 
 _AGENTIC_NODE_IDS = {
@@ -4220,6 +4228,8 @@ def _request_kind_instance_key(kind: str, index: int) -> str:
         return "story:9"
     if kind in {"review_sprint", "close_sprint", "record_post_sprint_triage"}:
         return "sprint:31"
+    if kind == "start_sprint_retry":
+        return "retry:7:sprint:31"
     return f"instance:{index}"
 
 
@@ -5208,6 +5218,66 @@ def test_position_advertises_only_supported_optional_reentry_actions(
     ]
 
 
+def test_position_advertises_retry_and_exact_retry_start_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advertise the retry and its one canonical retry-bound start action."""
+    retry = NodeDecision(
+        node_id="execution.sprint.retry",
+        child_graph_id="execution",
+        request_kind="retry_sprint",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPRINT_RETRY_AVAILABLE",
+        decision_fingerprint="retry-decision",
+        instance_key="sprint:12",
+    )
+    retry_start = NodeDecision(
+        node_id="execution.sprint.retry.start",
+        child_graph_id="execution",
+        request_kind="start_sprint_retry",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="SPRINT_RETRY_START_REQUIRED",
+        decision_fingerprint="retry-start-decision",
+        instance_key="retry:7:sprint:12",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "available_nodes": (retry.node_id, retry_start.node_id),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+            "decisions": (retry, retry_start),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "execution.sprint.retry",
+            "instance_key": "sprint:12",
+            "request_kind": "retry_sprint",
+            "endpoint": "sprint/retry",
+            "transport": "semantic",
+        },
+        {
+            "node_id": "execution.sprint.retry.start",
+            "instance_key": "retry:7:sprint:12",
+            "request_kind": "start_sprint_retry",
+            "endpoint": "sprint/start",
+            "transport": "semantic",
+        },
+    ]
+
+
 def test_position_advertises_both_specification_feedback_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6032,9 +6102,9 @@ def test_specification_source_endpoint_omits_an_empty_field_prefix(
     detail = response.json()["detail"]
     assert detail["error"]["code"] == "INVALID_SPECIFICATION_SOURCE_REQUEST"
     assert not detail["error"]["message"].startswith(":")
-    assert "Source, Context, and ADR paths must be distinct." in detail["error"][
-        "message"
-    ]
+    assert (
+        "Source, Context, and ADR paths must be distinct." in detail["error"]["message"]
+    )
     assert application.requests == []
 
 
@@ -6270,10 +6340,7 @@ def test_specification_structure_api_returns_409_conflict_on_invalid_payload(
     )
 
     assert response.status_code == 409  # noqa: PLR2004
-    assert (
-        response.json()["detail"]["error"]["code"]
-        == "INVALID_SPECIFICATION_PAYLOAD"
-    )
+    assert response.json()["detail"]["error"]["code"] == "INVALID_SPECIFICATION_PAYLOAD"
     assert response.json()["detail"]["error"]["message"] == safe_message
 
 
@@ -6398,7 +6465,6 @@ class _FakeApplication:
         if self.correct_backlog_result is not None:
             return self.correct_backlog_result
         return TransitionResult(ok=True)
-
 
     def backlog_review(self, project_id: int) -> JsonObject:
         if self.backlog_result is not None:
@@ -6645,7 +6711,6 @@ def test_backlog_correct_route_returns_409_on_workflow_fact_conflict(
     app_mock = _FakeApplication(correct_backlog_result=conflict_result)
     monkeypatch.setattr(api_module, "_application", lambda: app_mock)
 
-
     client = TestClient(api_module.app)
     response = client.post(
         "/api/projects/41/backlog/correct",
@@ -6664,7 +6729,6 @@ def test_backlog_correct_route_returns_409_on_workflow_fact_conflict(
         response.json()["detail"]["error"]["message"]
         == "The idempotency key was already used for different input."
     )
-
 
 
 @pytest.mark.parametrize(
@@ -8615,11 +8679,7 @@ def test_backlog_continuation_position_malformed_correction_variants_conflict(
     result = application.backlog_review(41)
 
     assert result["ok"] is False
-    assert (
-        _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
-    )
-
-
+    assert _object(_items(result["errors"])[0])["code"] == "WORKFLOW_FACT_CONFLICT"
 
 
 def test_backlog_continuation_position_rejects_torn_rejected_projection() -> None:

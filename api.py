@@ -49,6 +49,7 @@ from services.application import (
     SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintRetryRequest,
     SprintReviewRequest,
     SprintStartRequest,
     StoryDependenciesApplyRequest,
@@ -355,6 +356,34 @@ class StoryReadinessRepairApiRequest(MutationApiRequest):
 class SprintStartApiRequest(MutationApiRequest):
     """Transport metadata only for the accepted current Sprint plan."""
 
+    instance_key: SemanticText | None = None
+
+    @model_validator(mode="after")
+    def reject_blank_retry_start_actor(self) -> Self:
+        """Reject a blank retry-start actor before domain handling."""
+        if self.instance_key is not None and not self.actor.strip():
+            message = "Retry start requires a nonblank actor."
+            raise ValueError(message)
+        return self
+
+
+class SprintRetryApiRequest(MutationApiRequest):
+    """Literal confirmation and exact preview binding for one Sprint retry."""
+
+    sprint_id: PositiveStoryId
+    actor: SemanticText
+    confirm: Annotated[bool, Field(strict=True)]
+    expected_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rationale: SemanticText
+
+    @model_validator(mode="after")
+    def require_literal_confirmation(self) -> Self:
+        """Reject false confirmation after the strict HTTP boolean boundary."""
+        if self.confirm is not True:
+            message = "Retry Sprint requires literal confirmation true."
+            raise ValueError(message)
+        return self
+
 
 class CompleteTaskApiRequest(MutationApiRequest):
     """Strict semantic completion evidence for one selected Task."""
@@ -428,6 +457,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "decide_sprint_plan": "sprint/decide",
     "decide_story": "story/decide",
     "record_post_sprint_triage": "sprint/triage",
+    "retry_sprint": "sprint/retry",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
@@ -441,6 +471,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
     "start_sprint": "sprint/start",
+    "start_sprint_retry": "sprint/start",
 }
 
 _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
@@ -525,7 +556,8 @@ def _workflow_actions(
             or (
                 decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
                 and (
-                    decision.request_kind == "register_specification_source"
+                    decision.request_kind
+                    in {"register_specification_source", "retry_sprint"}
                     or (
                         decision.request_kind == "record_sprint_plan"
                         and decision.reason_code == "SPRINT_PLAN_CORRECTION_AVAILABLE"
@@ -1257,6 +1289,17 @@ def get_sprint_metrics(project_id: int) -> dict[str, object]:
     return _read_payload(_application().reads.sprint_metrics(project_id=project_id))
 
 
+@app.get("/api/projects/{project_id}/sprint/{sprint_id}/retry-preview")
+def get_sprint_retry_preview(project_id: int, sprint_id: int) -> dict[str, object]:
+    """Return the exact provider-free retry preview for one requested Sprint."""
+    return _read_payload(
+        _application().sprint_retry_preview(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+    )
+
+
 @app.get("/api/projects/{project_id}/sprint/status")
 def get_current_sprint(project_id: int) -> dict[str, object]:
     """Return the same selected Sprint status projection used by the CLI."""
@@ -1700,7 +1743,28 @@ def start_project_sprint(
         _application().start_sprint(
             SprintStartRequest(
                 project_id=project_id,
+                instance_key=req.instance_key,
                 expected_decision_fingerprint=expected_decision,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/retry")
+def retry_project_sprint(
+    project_id: int,
+    req: SprintRetryApiRequest,
+) -> dict[str, object]:
+    """Create one exact retry through the durable graph transition boundary."""
+    return _result_payload(
+        _application().retry_sprint(
+            SprintRetryRequest(
+                project_id=project_id,
+                sprint_id=req.sprint_id,
+                confirm=req.confirm,
+                expected_state_fingerprint=req.expected_state_fingerprint,
+                rationale=req.rationale,
                 **_metadata(req),
             )
         )

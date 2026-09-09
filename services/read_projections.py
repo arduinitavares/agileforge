@@ -96,7 +96,13 @@ from workflow.definitions.product_goal import (
     select_product_goal_interview_state,
 )
 from workflow.definitions.vision import select_vision_interview_state
+from workflow.execution_identity import execution_instance_key
 from workflow.execution_integrity import ExecutionIntegrityError, execution_contract
+from workflow.execution_scope import (
+    ExecutionScope,
+    ExecutionScopeError,
+    current_execution_scope,
+)
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import current_task_content_fingerprint
 
@@ -118,6 +124,7 @@ if TYPE_CHECKING:
         SpecificationSourceFact,
         SpecVersionFact,
         SprintFact,
+        SprintRetryFact,
         StoryFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
@@ -189,6 +196,208 @@ def _enum_value(value: object) -> JsonValue:
 def _result_data(result: JsonObject) -> JsonObject:
     data = result.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def _current_scope(
+    snapshot: WorkflowFactSnapshot,
+) -> ExecutionScope | _ExecutionScopeReadFailure | None:
+    """Resolve the sole current execution scope without guessing retry identity."""
+    try:
+        return current_execution_scope(snapshot)
+    except ExecutionScopeError:
+        return _ExecutionScopeReadFailure(
+            _error(
+                "EXECUTION_SCOPE_INCONSISTENT",
+                "Current execution scope is inconsistent.",
+                project_id=snapshot.project.project_id,
+            )
+        )
+
+
+def _retry_scope_data(
+    snapshot: WorkflowFactSnapshot,
+    scope: ExecutionScope,
+) -> JsonObject | None:
+    """Render durable retry identity and its canonical Sprint action binding."""
+    retry_attempt_id = scope.retry_attempt_id
+    if retry_attempt_id is None:
+        return None
+    retry = _retry_for_scope(snapshot, scope)
+    if retry is None:
+        return None
+    return {
+        "retry_attempt_id": retry.retry_attempt_id,
+        "ordinal": retry.ordinal,
+        "status": retry.status,
+        "predecessor_retry_attempt_id": retry.predecessor_retry_attempt_id,
+        "sprint_instance_key": execution_instance_key(
+            "sprint",
+            scope.sprint_id,
+            retry_attempt_id,
+        ),
+    }
+
+
+def _retry_for_scope(
+    snapshot: WorkflowFactSnapshot,
+    scope: ExecutionScope,
+) -> SprintRetryFact | None:
+    """Return the persisted retry fact named by a resolved retry scope."""
+    retry_attempt_id = scope.retry_attempt_id
+    if retry_attempt_id is None:
+        return None
+    return next(
+        (
+            item
+            for item in snapshot.sprint_retries
+            if item.retry_attempt_id == retry_attempt_id
+            and item.sprint_id == scope.sprint_id
+        ),
+        None,
+    )
+
+
+def _scope_task_data(task: JsonObject, scope: ExecutionScope | None) -> JsonObject:
+    """Add the exact execution binding for one task from an already chosen scope."""
+    task_id = task.get("task_id")
+    if not isinstance(task_id, int):
+        return task
+    result = dict(task)
+    result["instance_key"] = execution_instance_key(
+        "task",
+        task_id,
+        None if scope is None else scope.retry_attempt_id,
+    )
+    return result
+
+
+def _scope_story_data(story: JsonObject, scope: ExecutionScope | None) -> JsonObject:
+    """Add the exact execution binding for one story from an active scope."""
+    story_id = story.get("story_id")
+    if not isinstance(story_id, int):
+        return story
+    result = dict(story)
+    result["instance_key"] = execution_instance_key(
+        "story",
+        story_id,
+        None if scope is None else scope.retry_attempt_id,
+    )
+    return result
+
+
+def _execution_attempt_history(snapshot: WorkflowFactSnapshot) -> list[JsonValue]:
+    """Preserve original attempts and list retries with explicit action bindings."""
+    attempts: list[JsonValue] = []
+    tasks_by_sprint: dict[int, list[int]] = {}
+    for task in snapshot.tasks:
+        tasks_by_sprint.setdefault(task.sprint_id, []).append(task.task_id)
+    for sprint in sorted(snapshot.sprints, key=lambda item: item.sprint_id):
+        task_ids = sorted(tasks_by_sprint.get(sprint.sprint_id, []))
+        attempts.append(
+            {
+                "sprint_id": sprint.sprint_id,
+                "retry_attempt_id": None,
+                "ordinal": 1,
+                "status": sprint.status,
+                "predecessor_retry_attempt_id": None,
+                "sprint_instance_key": execution_instance_key(
+                    "sprint", sprint.sprint_id
+                ),
+                "task_instance_keys": [
+                    execution_instance_key("task", task_id) for task_id in task_ids
+                ],
+                "start": next(
+                    (
+                        _validated(item.model_dump(mode="json"))
+                        for item in snapshot.sprint_starts
+                        if item.sprint_id == sprint.sprint_id
+                    ),
+                    None,
+                ),
+                "task_completions": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in snapshot.task_completions
+                    if item.sprint_id == sprint.sprint_id
+                ],
+                "story_completions": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in snapshot.story_completions
+                    if item.sprint_id == sprint.sprint_id
+                ],
+                "review": next(
+                    (
+                        _validated(item.model_dump(mode="json"))
+                        for item in snapshot.sprint_reviews
+                        if item.sprint_id == sprint.sprint_id
+                    ),
+                    None,
+                ),
+                "closure": next(
+                    (
+                        _validated(item.model_dump(mode="json"))
+                        for item in snapshot.sprint_closures
+                        if item.sprint_id == sprint.sprint_id
+                    ),
+                    None,
+                ),
+                "triage": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in snapshot.post_sprint_triage
+                    if item.sprint_id == sprint.sprint_id
+                ],
+            }
+        )
+    for retry in sorted(
+        snapshot.sprint_retries,
+        key=lambda item: (item.sprint_id, item.ordinal, item.retry_attempt_id),
+    ):
+        task_ids = sorted(tasks_by_sprint.get(retry.sprint_id, []))
+        attempts.append(
+            {
+                "sprint_id": retry.sprint_id,
+                "retry_attempt_id": retry.retry_attempt_id,
+                "ordinal": retry.ordinal,
+                "status": retry.status,
+                "predecessor_retry_attempt_id": retry.predecessor_retry_attempt_id,
+                "sprint_instance_key": execution_instance_key(
+                    "sprint",
+                    retry.sprint_id,
+                    retry.retry_attempt_id,
+                ),
+                "task_instance_keys": [
+                    execution_instance_key("task", task_id, retry.retry_attempt_id)
+                    for task_id in task_ids
+                ],
+                "start": (
+                    None
+                    if retry.start is None
+                    else _validated(retry.start.model_dump(mode="json"))
+                ),
+                "task_completions": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in retry.task_completions
+                ],
+                "story_completions": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in retry.story_completions
+                ],
+                "review": (
+                    None
+                    if not retry.sprint_reviews
+                    else _validated(retry.sprint_reviews[0].model_dump(mode="json"))
+                ),
+                "closure": (
+                    None
+                    if not retry.sprint_closures
+                    else _validated(retry.sprint_closures[0].model_dump(mode="json"))
+                ),
+                "triage": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in retry.post_sprint_triage
+                ],
+            }
+        )
+    return attempts
 
 
 def _canonical_acceptance_criteria(raw: str) -> list[str]:
@@ -1516,6 +1725,13 @@ class _SpecificationReadProjection:
 @dataclass(frozen=True)
 class _SpecificationReadFailure:
     """Typed unavailable-candidate result for Specification reads."""
+
+    error: JsonObject
+
+
+@dataclass(frozen=True)
+class _ExecutionScopeReadFailure:
+    """Typed current-scope failure shared by retry-aware execution reads."""
 
     error: JsonObject
 
@@ -3087,6 +3303,7 @@ class DurableReadProjectionService:
                     _validated(item.model_dump(mode="json"))
                     for item in snapshot_or_error.sprints
                 ],
+                "execution_attempts": _execution_attempt_history(snapshot_or_error),
             }
         )
 
@@ -3110,7 +3327,7 @@ class DurableReadProjectionService:
         )
         return _success(metrics)
 
-    def sprint_status(
+    def sprint_status(  # noqa: PLR0911
         self,
         *,
         project_id: int,
@@ -3137,46 +3354,166 @@ class DurableReadProjectionService:
         )
         if accepted_plan.get("ok") is not True:
             return accepted_plan
+        current_scope = _current_scope(snapshot)
+        if isinstance(current_scope, _ExecutionScopeReadFailure):
+            return current_scope.error
+        if (
+            sprint_id is None
+            and current_scope is not None
+            and current_scope.sprint_id != selected_id
+        ):
+            sprint = self._select_sprint(snapshot.sprints, current_scope.sprint_id)
+            if sprint is None:
+                return _error(
+                    "SPRINT_NOT_FOUND",
+                    "No matching Sprint was found.",
+                    project_id=project_id,
+                    sprint_id=current_scope.sprint_id,
+                )
+            selected_id = sprint.sprint_id
+            accepted_plan = self._accepted_sprint_plan_status(
+                project_id=project_id,
+                sprint=sprint,
+                snapshot=snapshot,
+            )
+            if accepted_plan.get("ok") is not True:
+                return accepted_plan
+        scope = (
+            current_scope
+            if current_scope is not None and current_scope.sprint_id == selected_id
+            else None
+        )
+        retry = None if scope is None else _retry_scope_data(snapshot, scope)
+        if scope is not None and scope.retry_attempt_id is not None and retry is None:
+            return _error(
+                "EXECUTION_SCOPE_INCONSISTENT",
+                "Current retry scope is unavailable.",
+                project_id=project_id,
+                sprint_id=selected_id,
+            )
+        original_start = next(
+            (
+                _validated(item.model_dump(mode="json"))
+                for item in snapshot.sprint_starts
+                if item.sprint_id == selected_id
+            ),
+            None,
+        )
+        retry_fact = None if scope is None else _retry_for_scope(snapshot, scope)
+        effective_start = (
+            original_start
+            if retry_fact is None
+            else (
+                None
+                if retry_fact.start is None
+                else _validated(retry_fact.start.model_dump(mode="json"))
+            )
+        )
+        original_review = next(
+            (
+                _validated(item.model_dump(mode="json"))
+                for item in snapshot.sprint_reviews
+                if item.sprint_id == selected_id
+            ),
+            None,
+        )
+        original_closure = next(
+            (
+                _validated(item.model_dump(mode="json"))
+                for item in snapshot.sprint_closures
+                if item.sprint_id == selected_id
+            ),
+            None,
+        )
+        original_triage = [
+            _validated(item.model_dump(mode="json"))
+            for item in snapshot.post_sprint_triage
+            if item.sprint_id == selected_id
+        ]
+        effective_stories = (
+            scope.stories
+            if scope is not None
+            else tuple(
+                item for item in snapshot.stories if selected_id in item.sprint_ids
+            )
+        )
         return _success(
-            {
-                "project_id": project_id,
-                "sprint": _validated(sprint.model_dump(mode="json")),
-                "accepted_plan": _result_data(accepted_plan),
-                "start": next(
-                    (
+            _validated(
+                {
+                    "project_id": project_id,
+                    "sprint": _validated(sprint.model_dump(mode="json")),
+                    "accepted_plan": _result_data(accepted_plan),
+                    "current_retry": retry,
+                    "effective_status": sprint.status
+                    if scope is None
+                    else scope.status,
+                    "start": effective_start,
+                    "original_start": original_start,
+                    "tasks": [
+                        _scope_task_data(
+                            {
+                                **_validated(item.model_dump(mode="json")),
+                                "fact_fingerprint": canonical_hash(
+                                    item.model_dump(mode="json")
+                                ),
+                            },
+                            scope,
+                        )
+                        for item in (
+                            scope.tasks
+                            if scope is not None
+                            else tuple(
+                                item
+                                for item in snapshot.tasks
+                                if item.sprint_id == selected_id
+                            )
+                        )
+                    ],
+                    "stories": [
+                        _scope_story_data(
+                            _validated(item.model_dump(mode="json")),
+                            scope,
+                        )
+                        for item in effective_stories
+                    ],
+                    "story_completions": [
                         _validated(item.model_dump(mode="json"))
-                        for item in snapshot.sprint_starts
+                        for item in (
+                            scope.story_completions
+                            if scope is not None
+                            else snapshot.story_completions
+                        )
                         if item.sprint_id == selected_id
-                    ),
-                    None,
-                ),
-                "tasks": [
-                    {
-                        **_validated(item.model_dump(mode="json")),
-                        "fact_fingerprint": canonical_hash(
-                            item.model_dump(mode="json")
+                    ],
+                    "review": next(
+                        (
+                            _validated(item.model_dump(mode="json"))
+                            for item in (
+                                scope.sprint_reviews
+                                if scope is not None
+                                else snapshot.sprint_reviews
+                            )
+                            if item.sprint_id == selected_id
                         ),
-                    }
-                    for item in snapshot.tasks
-                    if item.sprint_id == selected_id
-                ],
-                "review": next(
-                    (
-                        _validated(item.model_dump(mode="json"))
-                        for item in snapshot.sprint_reviews
-                        if item.sprint_id == selected_id
+                        None,
                     ),
-                    None,
-                ),
-                "closure": next(
-                    (
-                        _validated(item.model_dump(mode="json"))
-                        for item in snapshot.sprint_closures
-                        if item.sprint_id == selected_id
+                    "closure": next(
+                        (
+                            _validated(item.model_dump(mode="json"))
+                            for item in (
+                                scope.sprint_closures
+                                if scope is not None
+                                else snapshot.sprint_closures
+                            )
+                            if item.sprint_id == selected_id
+                        ),
+                        None,
                     ),
-                    None,
-                ),
-            }
+                    "original_review": original_review,
+                    "original_closure": original_closure,
+                    "original_triage": original_triage,
+                }
+            )
         )
 
     def _accepted_sprint_plan_status(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -3378,6 +3715,8 @@ class DurableReadProjectionService:
                 "sprint_id": selected_id,
                 "items": items,
                 "count": len(items),
+                "current_retry": data.get("current_retry"),
+                "effective_status": data.get("effective_status"),
             }
         )
 
@@ -3393,10 +3732,14 @@ class DurableReadProjectionService:
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
         snapshot = snapshot_or_error
+        current_scope = _current_scope(snapshot)
+        if isinstance(current_scope, _ExecutionScopeReadFailure):
+            return current_scope.error
+        scoped_tasks = () if current_scope is None else current_scope.tasks
         task = next(
             (
                 item
-                for item in snapshot.tasks
+                for item in (*scoped_tasks, *snapshot.tasks)
                 if item.task_id == task_id
                 and (sprint_id is None or item.sprint_id == sprint_id)
             ),
@@ -3410,20 +3753,80 @@ class DurableReadProjectionService:
                 sprint_id=sprint_id,
                 task_id=task_id,
             )
+        scope = (
+            current_scope
+            if current_scope is not None
+            and current_scope.sprint_id == task.sprint_id
+            and any(item.task_id == task_id for item in current_scope.tasks)
+            else None
+        )
+        retry = None if scope is None else _retry_scope_data(snapshot, scope)
+        if scope is not None and scope.retry_attempt_id is not None and retry is None:
+            return _error(
+                "EXECUTION_SCOPE_INCONSISTENT",
+                "Current retry scope is unavailable.",
+                project_id=project_id,
+                sprint_id=task.sprint_id,
+                task_id=task_id,
+            )
+        original_task = next(
+            (
+                item
+                for item in snapshot.tasks
+                if item.task_id == task_id and item.sprint_id == task.sprint_id
+            ),
+            None,
+        )
+        original_completion = next(
+            (
+                item
+                for item in snapshot.task_completions
+                if item.task_id == task_id and item.sprint_id == task.sprint_id
+            ),
+            None,
+        )
         completion = next(
-            (item for item in snapshot.task_completions if item.task_id == task_id),
+            (
+                item
+                for item in (
+                    scope.task_completions
+                    if scope is not None
+                    else snapshot.task_completions
+                )
+                if item.task_id == task_id
+            ),
             None,
         )
         return _success(
-            {
-                "project_id": project_id,
-                "task": _validated(task.model_dump(mode="json")),
-                "completion": (
-                    _validated(completion.model_dump(mode="json"))
-                    if completion is not None
-                    else None
-                ),
-            }
+            _validated(
+                {
+                    "project_id": project_id,
+                    "task": _scope_task_data(
+                        _validated(task.model_dump(mode="json")),
+                        scope,
+                    ),
+                    "completion": (
+                        _validated(completion.model_dump(mode="json"))
+                        if completion is not None
+                        else None
+                    ),
+                    "current_retry": retry,
+                    "effective_status": task.status if scope is None else scope.status,
+                    "original_task": (
+                        None
+                        if original_task is None
+                        else _scope_task_data(
+                            _validated(original_task.model_dump(mode="json")),
+                            None,
+                        )
+                    ),
+                    "original_completion": (
+                        None
+                        if original_completion is None
+                        else _validated(original_completion.model_dump(mode="json"))
+                    ),
+                }
+            )
         )
 
     def sprint_task_history(
@@ -3475,6 +3878,10 @@ class DurableReadProjectionService:
                 "completion": _result_data(detail).get("completion"),
                 "items": items,
                 "count": len(items),
+                "current_retry": _result_data(detail).get("current_retry"),
+                "effective_status": _result_data(detail).get("effective_status"),
+                "original_task": _result_data(detail).get("original_task"),
+                "original_completion": _result_data(detail).get("original_completion"),
             }
         )
 
@@ -3494,9 +3901,21 @@ class DurableReadProjectionService:
         snapshot_or_error = self._snapshot(project_id)
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
+        current_scope = _current_scope(snapshot_or_error)
+        if isinstance(current_scope, _ExecutionScopeReadFailure):
+            return current_scope.error
+        scope = (
+            current_scope
+            if current_scope is not None and current_scope.sprint_id == selected_id
+            else None
+        )
         triage: list[JsonValue] = [
             _validated(item.model_dump(mode="json"))
-            for item in snapshot_or_error.post_sprint_triage
+            for item in (
+                scope.post_sprint_triage
+                if scope is not None
+                else snapshot_or_error.post_sprint_triage
+            )
             if item.sprint_id == selected_id
         ]
         return _success(
@@ -3506,6 +3925,12 @@ class DurableReadProjectionService:
                 "review": data.get("review"),
                 "closure": data.get("closure"),
                 "triage": triage,
+                "current_retry": data.get("current_retry"),
+                "effective_status": data.get("effective_status"),
+                "original_start": data.get("original_start"),
+                "original_review": data.get("original_review"),
+                "original_closure": data.get("original_closure"),
+                "original_triage": data.get("original_triage"),
             }
         )
 

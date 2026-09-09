@@ -119,6 +119,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "generate_vision_bootstrap": ("agileforge", "vision", "bootstrap"),
     "record_backlog_draft": ("agileforge", "backlog", "generate"),
     "record_post_sprint_triage": ("agileforge", "sprint", "triage"),
+    "retry_sprint": ("agileforge", "sprint", "retry"),
     "record_product_goal_interview_turn": ("agileforge", "goal", "respond"),
     "record_roadmap_draft": ("agileforge", "roadmap", "generate"),
     "register_specification_source": (
@@ -133,6 +134,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("agileforge", "story", "readiness", "repair"),
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_sprint": ("agileforge", "sprint", "start"),
+    "start_sprint_retry": ("agileforge", "sprint", "start"),
     "structure_specification": ("agileforge", "specification", "structure"),
 }
 
@@ -220,6 +222,15 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "--file",
         "<file>",
     ),
+    "retry_sprint": (
+        "--sprint-id",
+        "<sprint-id>",
+        "--confirm",
+        "--expected-state-fingerprint",
+        "<expected-state-fingerprint>",
+        "--rationale",
+        "<rationale>",
+    ),
     "record_product_goal_interview_turn": ("--text", "<text>"),
     "record_roadmap_draft": (),
     "register_specification_source": (
@@ -237,6 +248,7 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("--repair", "<repair>"),
     "review_sprint": (),
     "start_sprint": (),
+    "start_sprint_retry": (),
     "structure_specification": (),
 }
 
@@ -253,6 +265,7 @@ _INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {
     "close_story",
     "record_post_sprint_triage",
     "review_sprint",
+    "start_sprint_retry",
 }
 
 
@@ -264,15 +277,11 @@ def _render_semantic_command(
         position: WorkflowPosition,
         decision: NodeDecision,
     ) -> tuple[str, ...]:
-        if (
-            request_kind == "record_backlog_draft"
-            and decision.reason_code
-            in {
-                "BACKLOG_CORRECTION_AVAILABLE",
-                "BACKLOG_CORRECTION_FAILED",
-                "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
-            }
-        ):
+        if request_kind == "record_backlog_draft" and decision.reason_code in {
+            "BACKLOG_CORRECTION_AVAILABLE",
+            "BACKLOG_CORRECTION_FAILED",
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+        }:
             backlog_references = tuple(
                 item for item in decision.fact_references if item.fact_type == "backlog"
             )
@@ -412,7 +421,8 @@ def render_workflow_next(
             or (
                 decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
                 and (
-                    decision.request_kind == "register_specification_source"
+                    decision.request_kind
+                    in {"register_specification_source", "retry_sprint"}
                     or (
                         decision.request_kind == "record_story_draft"
                         and decision.reason_code == "STORY_CORRECTION_AVAILABLE"

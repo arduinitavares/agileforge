@@ -13,6 +13,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    Self,
     TypedDict,
     Unpack,
     assert_never,
@@ -112,6 +113,7 @@ from services.sprint_ownership import (
     SprintOwnerResolutionError,
     resolve_sprint_owner,
 )
+from services.sprint_retry import build_sprint_retry_preview
 from services.sprint_selection import (
     SprintSelectionError,
     require_exact_candidate_story_ids,
@@ -196,8 +198,10 @@ from workflow.requests import (
     RecordPostSprintTriage,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetrySprint,
     ReviewSprint,
     StartSprint,
+    StartSprintRetry,
 )
 from workflow.requests.planning import ReviewedDependencyEdge, StoryReadinessUpdate
 
@@ -2045,12 +2049,21 @@ def _story_eligibility_item(
 class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
+    instance_key: SemanticText | None = Field(default=None, exclude=True, repr=False)
     expected_decision_fingerprint: str | None = Field(
         default=None,
         min_length=1,
         exclude=True,
         repr=False,
     )
+
+    @model_validator(mode="after")
+    def reject_blank_retry_start_actor(self) -> Self:
+        """Require an accountable actor only for the retry-bound start path."""
+        if self.instance_key is not None and not self.actor.strip():
+            message = "Retry start requires a nonblank actor."
+            raise ValueError(message)
+        return self
 
 
 class _ExecutionMutationRequest(FrozenModel):
@@ -2060,6 +2073,43 @@ class _ExecutionMutationRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class SprintRetryRequest(_ExecutionMutationRequest):
+    """Semantic confirmation for one exact completed Sprint retry preview."""
+
+    sprint_id: int = Field(gt=0)
+    actor: SemanticText
+    confirm: Annotated[bool, Field(strict=True)]
+    expected_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rationale: SemanticText
+
+    @model_validator(mode="after")
+    def require_literal_confirmation(self) -> Self:
+        """Reject every public confirmation representation except literal true."""
+        if self.confirm is not True:
+            message = "Retry Sprint requires literal confirmation true."
+            raise ValueError(message)
+        return self
+
+
+def _sprint_retry_preview_error(
+    code: str,
+    message: str,
+    *,
+    project_id: int,
+    sprint_id: int | None = None,
+) -> JsonObject:
+    """Build one ordinary typed read error for an unavailable retry preview."""
+    data: JsonObject = {"project_id": project_id}
+    if sprint_id is not None:
+        data["sprint_id"] = sprint_id
+    return {
+        "ok": False,
+        "data": data,
+        "errors": [{"code": code, "message": message}],
+        "warnings": [],
+    }
 
 
 class CompleteTaskRequest(_ExecutionMutationRequest):
@@ -3744,6 +3794,8 @@ class AgileForgeApplication:
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""
+        if request.instance_key is not None:
+            return self._start_retry_sprint(request)
         selection = self._planning_action_selection
         if selection is None:
             return _transition_not_available(None, "planning.sprint.start")
@@ -3773,6 +3825,144 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+            )
+        )
+
+    def _start_retry_sprint(self, request: SprintStartRequest) -> TransitionResult:
+        """Start the exact retry attempt named by the supplied execution binding."""
+        instance_key = request.instance_key
+        identity = _retry_sprint_start_identity(instance_key)
+        if identity is None or instance_key is None:
+            return _transition_not_available(None, "execution.sprint.retry.start")
+        replay = self._replay_retry_start(request)
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="start_sprint_retry",
+            node_id="execution.sprint.retry.start",
+            instance_key=instance_key,
+        )
+        if decision is None:
+            return _transition_not_available(
+                position,
+                "execution.sprint.retry.start",
+            )
+        if (
+            request.expected_decision_fingerprint is not None
+            and request.expected_decision_fingerprint != decision.decision_fingerprint
+        ):
+            return _stale_sprint_start_action(position)
+        return self.transition(
+            StartSprintRetry(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=identity.entity_id,
+                retry_attempt_id=cast("int", identity.retry_attempt_id),
+            )
+        )
+
+    def sprint_retry_preview(self, *, project_id: int, sprint_id: int) -> JsonObject:
+        """Return an exact provider-free retry preview without a transition."""
+        with Session(self._engine()) as session:
+            if session.get(Project, project_id) is None:
+                return _sprint_retry_preview_error(
+                    "PROJECT_NOT_FOUND",
+                    "Project was not found.",
+                    project_id=project_id,
+                )
+            try:
+                snapshot = WorkflowFactRepository(session).load(project_id)
+            except WorkflowFactLoadError as error:
+                return _sprint_retry_preview_error(
+                    "PROJECT_FACTS_UNAVAILABLE",
+                    str(error),
+                    project_id=project_id,
+                )
+            if not any(item.sprint_id == sprint_id for item in snapshot.sprints):
+                return _sprint_retry_preview_error(
+                    "SPRINT_NOT_FOUND",
+                    "The requested Sprint was not found.",
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                )
+            preview = build_sprint_retry_preview(
+                session,
+                snapshot=snapshot,
+                sprint_id=sprint_id,
+            )
+        return _JSON_OBJECT.validate_python(
+            {
+                "ok": True,
+                "data": {
+                    "project_id": preview.project_id,
+                    "sprint_id": preview.sprint_id,
+                    "predecessor_retry_attempt_id": (
+                        preview.predecessor_retry_attempt_id
+                    ),
+                    "next_ordinal": preview.next_ordinal,
+                    "story_ids": list(preview.story_ids),
+                    "task_ids": list(preview.task_ids),
+                    "preserved_history": preview.preserved_history,
+                    "repository_provenance": preview.repository_provenance,
+                    "blockers": [
+                        {
+                            "code": blocker.code,
+                            "reason": blocker.reason,
+                            "subject_type": blocker.subject_type,
+                            "subject_id": blocker.subject_id,
+                        }
+                        for blocker in preview.blockers
+                    ],
+                    "expected_state_fingerprint": preview.expected_state_fingerprint,
+                },
+                "warnings": [],
+            }
+        )
+
+    def retry_sprint(self, request: SprintRetryRequest) -> TransitionResult:
+        """Create one exact retry through the graph's durable receipt transaction."""
+        replay = self._replay_execution_action(
+            request_kind="retry_sprint",
+            request=request,
+            operator_input={
+                "sprint_id": request.sprint_id,
+                "confirm": request.confirm,
+                "expected_state_fingerprint": request.expected_state_fingerprint,
+                "rationale": request.rationale,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "execution.sprint.retry",
+            instance_key=f"sprint:{request.sprint_id}",
+        )
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "execution.sprint.retry")
+        return self.transition(
+            RetrySprint(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=request.sprint_id,
+                confirm=request.confirm,
+                rationale=request.rationale,
+                expected_state_fingerprint=request.expected_state_fingerprint,
             )
         )
 
@@ -4054,6 +4244,25 @@ class AgileForgeApplication:
                 actor=request.actor,
                 correlation_id=request.correlation_id,
                 operator_input=operator_input,
+            )
+        )
+
+    def _replay_retry_start(
+        self,
+        request: SprintStartRequest,
+    ) -> TransitionResult | None:
+        """Replay a retry-bound start through its execution receipt namespace."""
+        selection = self._execution_action_selection
+        if selection is None or request.instance_key is None:
+            return None
+        return selection.replay_transition(
+            TransitionReplayQuery(
+                request_kind="start_sprint_retry",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={"instance_key": request.instance_key},
             )
         )
 
@@ -5768,6 +5977,19 @@ def _instance_identity(decision: NodeDecision, prefix: str) -> int | None:
     return identity.entity_id if identity.kind == prefix else None
 
 
+def _retry_sprint_start_identity(instance_key: str | None) -> ExecutionIdentity | None:
+    """Return only a canonical retry-bound Sprint identity for a start request."""
+    if instance_key is None:
+        return None
+    try:
+        identity = parse_execution_instance_key(instance_key)
+    except (TypeError, ValueError):
+        return None
+    if identity.kind != "sprint" or identity.retry_attempt_id is None:
+        return None
+    return identity
+
+
 def _sprint_close_fingerprints(
     snapshot: WorkflowFactSnapshot,
     sprint_id: int | None,
@@ -6008,6 +6230,8 @@ _SINGLE_REFERENCE_EXECUTION_ACTIONS = {
 
 def execution_action_decision_is_transportable(decision: NodeDecision) -> bool:
     """Return whether one execution decision has an exact public selector target."""
+    if decision.request_kind == "start_sprint_retry":
+        return _retry_start_decision_is_transportable(decision)
     simple_contract = _SINGLE_REFERENCE_EXECUTION_ACTIONS.get(decision.request_kind)
     if simple_contract is not None:
         return _single_reference_execution_action_is_transportable(
@@ -6020,6 +6244,17 @@ def execution_action_decision_is_transportable(decision: NodeDecision) -> bool:
     if decision.request_kind == "record_post_sprint_triage":
         return _post_sprint_triage_decision_is_transportable(decision)
     return True
+
+
+def _retry_start_decision_is_transportable(decision: NodeDecision) -> bool:
+    """Require the exact retry attempt identity carried by a retry-start action."""
+    if decision.instance_key is None:
+        return False
+    try:
+        identity = parse_execution_instance_key(decision.instance_key)
+    except (TypeError, ValueError):
+        return False
+    return identity.kind == "sprint" and identity.retry_attempt_id is not None
 
 
 def _single_reference_execution_action_is_transportable(
@@ -6644,6 +6879,7 @@ __all__ = [
     "SprintPlanReviewRequest",
     "SprintPlanningInputService",
     "SprintPlanningRequest",
+    "SprintRetryRequest",
     "SprintReviewRequest",
     "SprintStartRequest",
     "StoryCorrectionRequest",

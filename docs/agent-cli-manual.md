@@ -186,7 +186,7 @@ The current fixed request kinds map to these prefixes:
 | Backlog | `backlog generate`, `backlog decide` |
 | Roadmap | `roadmap generate`, `roadmap decide` |
 | Story | `story generate`, `story decide`, `story dependencies apply`, `story readiness repair`, `story close` |
-| Sprint | `sprint generate`, `sprint decide`, `sprint start`, `sprint task complete`, `sprint review`, `sprint close`, `sprint triage` |
+| Sprint | `sprint generate`, `sprint decide`, `sprint retry-preview`, `sprint retry`, `sprint start`, `sprint task complete`, `sprint review`, `sprint close`, `sprint triage` |
 
 Registration does not imply availability. `workflow next` determines what can
 run for the current facts.
@@ -204,6 +204,67 @@ Reads never advance the workflow:
 ```
 
 A read result is evidence, not permission to mutate.
+
+## Sprint Retry
+
+Run Sprint retry work from the executor-prepared branch or worktree and its
+profile. Retry does not choose or change a branch, manage a worktree, rebind a
+repository, or require the original attempt's branch. Start with the live
+position and next actions; retry is available only when `workflow next`
+advertises it for the latest eligible completed Sprint. Do not substitute an
+older Sprint ID or infer a retry binding from a previous attempt.
+
+Preview the exact source Sprint before requesting a retry. The preview is a
+read: it lists the retained Sprint scope and blockers, then returns the
+`expected_state_fingerprint` to confirm.
+
+```sh
+./agileforge-dev cli --profile local -- sprint retry-preview \
+  --project-id 41 \
+  --sprint-id 12
+```
+
+If the preview has no blockers, explicitly confirm the exact observed state.
+Use a rationale that records the fresh evidence requiring another attempt.
+
+```sh
+./agileforge-dev cli --profile local -- sprint retry \
+  --project-id 41 \
+  --sprint-id 12 \
+  --confirm \
+  --expected-state-fingerprint 'sha256:...' \
+  --rationale "New validation evidence requires the Sprint to be repeated." \
+  --actor operator \
+  --idempotency-key sprint-12-retry-1
+```
+
+The request is rejected when confirmation is absent or false, the Sprint is
+unknown or not the current eligible source, or its fingerprint is stale. Read a
+new preview and `workflow next` after such a failure; use the advertised action
+and a new idempotency key for a changed request.
+
+Creating a retry only prepares its new attempt. Read `workflow next` again and
+use the provided retry-bound start identity exactly. `--instance-key` is required
+for this advertised retry start and has the form
+`retry:<attempt-id>:sprint:<source-sprint-id>`. An unbound original `sprint
+start` keeps its existing selectorless behavior.
+
+```sh
+./agileforge-dev cli --profile local -- sprint start \
+  --project-id 41 \
+  --instance-key retry:7:sprint:12 \
+  --idempotency-key sprint-12-retry-1-start \
+  --actor operator
+```
+
+The retry uses the original accepted requirements but requires fresh execution
+evidence. Sprint status, tasks, task detail and history, review, and Sprint
+history show the current retry progress and its exact bindings. Original starts,
+task and Story completion evidence, review, closure, triage, and timeline facts
+remain available as source-attempt history. Canonical Story and Task packets
+remain the accepted requirement and source-execution snapshots; use workflow
+position/next and the scoped Sprint and Task reads for current retry progress
+and action identities.
 
 ## Agentic Nodes
 

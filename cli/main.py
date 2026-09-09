@@ -39,6 +39,7 @@ from services.application import (
     SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintRetryRequest,
     SprintReviewRequest,
     SprintStartRequest,
     StoryDependenciesApplyRequest,
@@ -278,6 +279,12 @@ class _Application(Protocol):
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
 
+    def sprint_retry_preview(
+        self, *, project_id: int, sprint_id: int
+    ) -> JsonObject: ...
+
+    def retry_sprint(self, request: SprintRetryRequest) -> TransitionResult: ...
+
     def complete_task(self, request: CompleteTaskRequest) -> TransitionResult: ...
 
     def close_story(self, request: CloseStoryRequest) -> TransitionResult: ...
@@ -438,6 +445,10 @@ def _install_sprint_reads(
         if action in {"status", "tasks"}:
             read.add_argument("--sprint-id", type=int)
         read.set_defaults(command_handler=handler)
+    retry_preview = sprint_sub.add_parser("retry-preview")
+    retry_preview.add_argument("--project-id", type=int, required=True)
+    retry_preview.add_argument("--sprint-id", type=int, required=True)
+    retry_preview.set_defaults(command_handler=_sprint_retry_preview)
     task = sprint_sub.add_parser("task")
     task_sub = task.add_subparsers(dest="task_action", required=True)
     parsers[("sprint", "task")] = task
@@ -592,7 +603,13 @@ def _install_planning_action_mutations(
         mutation.add_argument("--expected-state-fingerprint", required=True)
         mutation.add_argument("--rationale")
         mutation.set_defaults(selection_intent=intent)
-    _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
+    retry = _semantic_leaf(branches[("sprint",)], "retry", _sprint_retry)
+    retry.add_argument("--sprint-id", type=int, required=True)
+    retry.add_argument("--confirm", action="store_true", required=True)
+    retry.add_argument("--expected-state-fingerprint", required=True)
+    retry.add_argument("--rationale", required=True)
+    start = _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
+    start.add_argument("--instance-key")
 
 
 def _install_execution_action_mutations(
@@ -961,6 +978,18 @@ def _sprint_status(args: argparse.Namespace, application: _Application) -> int:
     )
 
 
+def _sprint_retry_preview(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.sprint_retry_preview(
+            project_id=args.project_id,
+            sprint_id=args.sprint_id,
+        )
+    )
+
+
 def _sprint_tasks(args: argparse.Namespace, application: _Application) -> int:
     return _emit_read(
         application.reads.sprint_tasks(
@@ -1241,9 +1270,7 @@ def _backlog_correct(args: argparse.Namespace, application: _Application) -> int
         application.correct_backlog(
             BacklogCorrectionRequest(
                 project_id=args.project_id,
-                expected_decision_fingerprint=(
-                    args.expected_decision_fingerprint
-                ),
+                expected_decision_fingerprint=(args.expected_decision_fingerprint),
                 accepted_backlog_artifact_id=args.accepted_backlog_artifact_id,
                 accepted_backlog_artifact_fingerprint=(
                     args.accepted_backlog_artifact_fingerprint
@@ -1271,9 +1298,7 @@ def _story_correct(args: argparse.Namespace, application: _Application) -> int:
             StorySetCorrectionRequest(
                 project_id=args.project_id,
                 instance_key=args.instance_key,
-                expected_decision_fingerprint=(
-                    args.expected_decision_fingerprint
-                ),
+                expected_decision_fingerprint=(args.expected_decision_fingerprint),
                 accepted_story_artifact_id=args.accepted_story_artifact_id,
                 accepted_story_artifact_fingerprint=(
                     args.accepted_story_artifact_fingerprint
@@ -1440,9 +1465,7 @@ _INVEST_DIMENSION_NAMES: tuple[str, ...] = (
 
 def _is_substantive_story_text(value: object) -> bool:
     return bool(
-        isinstance(value, str)
-        and value.strip()
-        and not is_story_sentinel_text(value)
+        isinstance(value, str) and value.strip() and not is_story_sentinel_text(value)
     )
 
 
@@ -1496,8 +1519,7 @@ def _is_story_item_acceptable(item: object) -> bool:
         and isinstance(acceptance_criteria, list)
         and bool(acceptance_criteria)
         and all(
-            _is_substantive_story_text(criterion)
-            for criterion in acceptance_criteria
+            _is_substantive_story_text(criterion) for criterion in acceptance_criteria
         )
     )
 
@@ -1626,8 +1648,7 @@ def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
             rationale = cast("str", dim_dict["rationale"]).strip()
             evidence = cast("str", dim_dict["evidence"]).strip()
             lines.append(
-                f"{sub_indent}- {name} [{result}]: "
-                f"{rationale} (Evidence: {evidence})"
+                f"{sub_indent}- {name} [{result}]: {rationale} (Evidence: {evidence})"
             )
         elif isinstance(dim_raw, dict):
             dim_dict = cast("dict[str, object]", dim_raw)
@@ -1735,9 +1756,7 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
         )
     if story.get("dependency_candidates") is not None:
         lines.extend(
-            _dependency_candidate_lines(
-                story["dependency_candidates"], indent=indent
-            )
+            _dependency_candidate_lines(story["dependency_candidates"], indent=indent)
         )
     if story.get("reason_for_selection") is not None:
         lines.append(
@@ -2114,6 +2133,24 @@ def _sprint_start(args: argparse.Namespace, application: _Application) -> int:
         application.start_sprint(
             SprintStartRequest(
                 project_id=args.project_id,
+                instance_key=args.instance_key,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_retry(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.retry_sprint(
+            SprintRetryRequest(
+                project_id=args.project_id,
+                sprint_id=args.sprint_id,
+                confirm=args.confirm,
+                expected_state_fingerprint=args.expected_state_fingerprint,
+                rationale=args.rationale,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
