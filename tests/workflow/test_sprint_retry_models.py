@@ -33,7 +33,7 @@ from workflow.execution_integrity import (
     triage_payload_fingerprint,
 )
 from workflow.execution_scope import resolve_execution_scope
-from workflow.facts import SprintRetryFact, TaskCompletionFact
+from workflow.facts import SprintRetryFact, SprintRetryStartFact, TaskCompletionFact
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -499,9 +499,23 @@ def test_workflow_loader_rejects_tampered_retry_task_and_story_fingerprints(
             status="Completed",
         )
         attempt.contract_fingerprint = contract.fingerprint
+        attempt.started_at = NOW
+        attempt.completed_at = NOW
         session.add(attempt)
         session.flush()
         assert attempt.retry_attempt_id is not None
+        retry_start = SprintRetryStart(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            retry_attempt_id=attempt.retry_attempt_id,
+            contract_fingerprint=contract.fingerprint,
+            decision_fingerprint="sha256:retry-start",
+            started_by="owner@example.com",
+            started_at=NOW,
+        )
+        session.add(retry_start)
+        session.flush()
+        assert retry_start.sprint_retry_start_id is not None
         session.add_all(
             (
                 SprintRetryStoryState(
@@ -534,8 +548,18 @@ def test_workflow_loader_rejects_tampered_retry_task_and_story_fingerprints(
             creation_receipt_key=attempt.creation_receipt_key,
             created_at=attempt.created_at,
             status="completed",
+            started_at=attempt.started_at,
+            completed_at=attempt.completed_at,
             story_statuses=((story_id, "Done"),),
             task_statuses=((task_id, "Done"),),
+            start=SprintRetryStartFact(
+                start_id=retry_start.sprint_retry_start_id,
+                retry_attempt_id=attempt.retry_attempt_id,
+                contract_fingerprint=contract.fingerprint,
+                decision_fingerprint=retry_start.decision_fingerprint,
+                started_by=retry_start.started_by,
+                started_at=retry_start.started_at,
+            ),
         )
         retry_snapshot = base.model_copy(update={"sprint_retries": (provisional,)})
         scope = resolve_execution_scope(

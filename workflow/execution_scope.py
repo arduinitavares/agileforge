@@ -190,38 +190,44 @@ def current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | 
     live_count = len(live_originals) + len(live_retries)
     if live_count > 1:
         raise ExecutionScopeError("multiple live original or retry attempts exist.")
+    _require_finalized_predecessors(snapshot, retries)
     if live_retries:
         retry = live_retries[0]
-        _require_terminal_source(snapshot, retry.sprint_id)
-        return resolve_execution_scope(
+        scope = resolve_execution_scope(
             snapshot,
             sprint_id=retry.sprint_id,
             retry_attempt_id=retry.retry_attempt_id,
         )
+        if scope.status == "active":
+            _require_current_active_attempt(snapshot, scope)
+        return scope
     if live_originals:
         sprint = live_originals[0]
         if sprint.status == "planned":
             return None
-        return resolve_execution_scope(snapshot, sprint_id=sprint.sprint_id)
+        scope = resolve_execution_scope(snapshot, sprint_id=sprint.sprint_id)
+        _require_current_active_attempt(snapshot, scope)
+        return scope
 
     sprint_id = _current_terminal_sprint_id(snapshot)
     if sprint_id is None:
         return None
-    _require_terminal_source(snapshot, sprint_id)
     terminal_retries = tuple(
         item
         for item in retries
         if item.sprint_id == sprint_id and item.status == "completed"
     )
     if not terminal_retries:
-        return resolve_execution_scope(snapshot, sprint_id=sprint_id)
+        scope = resolve_execution_scope(snapshot, sprint_id=sprint_id)
+        _require_current_closed_attempt(snapshot, scope)
+        return scope
     retry = max(terminal_retries, key=lambda item: item.ordinal)
     scope = resolve_execution_scope(
         snapshot,
         sprint_id=sprint_id,
         retry_attempt_id=retry.retry_attempt_id,
     )
-    _require_terminal_attempt(snapshot, scope)
+    _require_current_closed_attempt(snapshot, scope)
     return scope
 
 
@@ -293,6 +299,29 @@ def _validate_retry_link(
         )
 
 
+def _require_finalized_predecessors(
+    snapshot: WorkflowFactSnapshot,
+    retries: tuple[SprintRetryFact, ...],
+) -> None:
+    """Require a full terminal lifecycle before a successor can be current."""
+    for retry in retries:
+        if retry.ordinal == 2:
+            predecessor_scope = resolve_execution_scope(
+                snapshot,
+                sprint_id=retry.sprint_id,
+            )
+        else:
+            predecessor_id = retry.predecessor_retry_attempt_id
+            if predecessor_id is None:
+                raise ExecutionScopeError("Retry lineage has no predecessor.")
+            predecessor_scope = resolve_execution_scope(
+                snapshot,
+                sprint_id=retry.sprint_id,
+                retry_attempt_id=predecessor_id,
+            )
+        _require_finalized_attempt(snapshot, predecessor_scope)
+
+
 def _validate_retry(
     snapshot: WorkflowFactSnapshot,
     retry: SprintRetryFact,
@@ -340,8 +369,9 @@ def _validate_retry_lifecycle(retry: SprintRetryFact) -> None:
     if retry.status == "active":
         if (
             retry.completed_at is not None
-            or retry.sprint_reviews
+            or len(retry.sprint_reviews) > 1
             or retry.sprint_closures
+            or retry.post_sprint_triage
         ):
             raise ExecutionScopeError("Active retry has terminal lifecycle evidence.")
         return
@@ -420,15 +450,36 @@ def _current_terminal_sprint_id(snapshot: WorkflowFactSnapshot) -> int | None:
     return plan.activated_sprint_id
 
 
-def _require_terminal_source(snapshot: WorkflowFactSnapshot, sprint_id: int) -> None:
-    scope = resolve_execution_scope(snapshot, sprint_id=sprint_id)
-    _require_terminal_attempt(snapshot, scope)
-
-
-def _require_terminal_attempt(
+def _require_current_active_attempt(
     snapshot: WorkflowFactSnapshot,
     scope: ExecutionScope,
 ) -> None:
+    """Validate the optional single review allowed before an explicit close."""
+    if scope.status != "active":
+        raise ExecutionScopeError("Execution attempt is not active.")
+    if scope.completed_at is not None:
+        raise ExecutionScopeError("Active execution has a completed timestamp.")
+    if scope.sprint_closures or scope.post_sprint_triage:
+        raise ExecutionScopeError("Active execution has terminal lifecycle evidence.")
+    if len(scope.sprint_reviews) > 1:
+        raise ExecutionScopeError("Active execution has duplicate review facts.")
+    if not scope.sprint_reviews:
+        return
+    review = scope.sprint_reviews[0]
+    expected_review = sprint_review_fingerprint(
+        snapshot,
+        scope.sprint_id,
+        scope=scope,
+    )
+    if review.review_fingerprint != expected_review:
+        raise ExecutionScopeError("Active execution review fingerprint changed.")
+
+
+def _require_current_closed_attempt(
+    snapshot: WorkflowFactSnapshot,
+    scope: ExecutionScope,
+) -> None:
+    """Validate a closed current attempt, allowing triage to be the next action."""
     if (
         scope.status != "completed"
         or scope.started_at is None
@@ -461,6 +512,16 @@ def _require_terminal_attempt(
         raise ExecutionScopeError(
             "Terminal execution review or closure fingerprint changed."
         )
+    if scope.post_sprint_triage:
+        _require_resolved_triage(scope.post_sprint_triage)
+
+
+def _require_finalized_attempt(
+    snapshot: WorkflowFactSnapshot,
+    scope: ExecutionScope,
+) -> None:
+    """Require a closed predecessor's complete triage chain before succession."""
+    _require_current_closed_attempt(snapshot, scope)
     _require_resolved_triage(scope.post_sprint_triage)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
@@ -18,6 +19,7 @@ from tests.workflow.test_execution_transitions import (
 )
 from workflow.execution_identity import (
     ExecutionIdentity,
+    ExecutionKind,
     execution_instance_key,
     parse_execution_instance_key,
 )
@@ -36,6 +38,7 @@ from workflow.facts import (
     SprintRetryFact,
     SprintRetryStartFact,
     SprintReviewFact,
+    WorkflowFactSnapshot,
 )
 from workflow.sprint_lineage import (
     current_sprint_stream_artifacts,
@@ -68,6 +71,153 @@ def _retry_fact(  # noqa: PLR0913
         story_statuses=story_statuses,
         task_statuses=task_statuses,
     )
+
+
+def _started_retry(  # noqa: PLR0913
+    snapshot: WorkflowFactSnapshot,
+    *,
+    retry_attempt_id: int,
+    project_id: int,
+    sprint_id: int,
+    story_id: int,
+    task_id: int,
+    ordinal: int = 2,
+    predecessor_retry_attempt_id: int | None = None,
+) -> SprintRetryFact:
+    """Build one retry with the immutable start required for active lifecycle."""
+    contract = execution_contract(snapshot, sprint_id)
+    started_at = datetime(2026, 9, 9, 12, tzinfo=UTC)
+    return _retry_fact(
+        retry_attempt_id=retry_attempt_id,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        contract_fingerprint=contract.fingerprint,
+        story_statuses=((story_id, "Done"),),
+        task_statuses=((task_id, "Done"),),
+    ).model_copy(
+        update={
+            "ordinal": ordinal,
+            "predecessor_retry_attempt_id": predecessor_retry_attempt_id,
+            "status": "active",
+            "started_at": started_at,
+            "start": SprintRetryStartFact(
+                start_id=700 + retry_attempt_id,
+                retry_attempt_id=retry_attempt_id,
+                contract_fingerprint=contract.fingerprint,
+                decision_fingerprint=f"sha256:retry-start-{retry_attempt_id}",
+                started_by="owner@example.com",
+                started_at=started_at,
+            ),
+            "task_completions": tuple(
+                item
+                for item in snapshot.task_completions
+                if item.sprint_id == sprint_id
+            ),
+            "story_completions": tuple(
+                item
+                for item in snapshot.story_completions
+                if item.sprint_id == sprint_id
+            ),
+        }
+    )
+
+
+def _closed_retry(
+    snapshot: WorkflowFactSnapshot,
+    retry: SprintRetryFact,
+    *,
+    include_triage: bool,
+) -> SprintRetryFact:
+    """Bind review and close facts to one retry without using future graph code."""
+    retry_snapshot = snapshot.model_copy(update={"sprint_retries": (retry,)})
+    scope = resolve_execution_scope(
+        retry_snapshot,
+        sprint_id=retry.sprint_id,
+        retry_attempt_id=retry.retry_attempt_id,
+    )
+    review_fingerprint = sprint_review_fingerprint(
+        retry_snapshot,
+        retry.sprint_id,
+        scope=scope,
+    )
+    close_fingerprint = sprint_close_fingerprint(
+        retry_snapshot,
+        retry.sprint_id,
+        review_fingerprint,
+        scope=scope,
+    )
+    assert retry.started_at is not None
+    return retry.model_copy(
+        update={
+            "status": "completed",
+            "completed_at": retry.started_at + timedelta(minutes=1),
+            "sprint_reviews": (
+                SprintReviewFact(
+                    review_id=800 + retry.retry_attempt_id,
+                    sprint_id=retry.sprint_id,
+                    review_fingerprint=review_fingerprint,
+                ),
+            ),
+            "sprint_closures": (
+                SprintClosureFact(
+                    closure_id=900 + retry.retry_attempt_id,
+                    sprint_id=retry.sprint_id,
+                    review_fingerprint=review_fingerprint,
+                    close_fingerprint=close_fingerprint,
+                ),
+            ),
+            "post_sprint_triage": (
+                tuple(
+                    item
+                    for item in snapshot.post_sprint_triage
+                    if item.sprint_id == retry.sprint_id
+                )
+                if include_triage
+                else ()
+            ),
+        }
+    )
+
+
+def _reviewed_retry(
+    snapshot: WorkflowFactSnapshot,
+    retry: SprintRetryFact,
+) -> SprintRetryFact:
+    """Add the one canonical review allowed before explicit Sprint close."""
+    retry_snapshot = snapshot.model_copy(update={"sprint_retries": (retry,)})
+    scope = resolve_execution_scope(
+        retry_snapshot,
+        sprint_id=retry.sprint_id,
+        retry_attempt_id=retry.retry_attempt_id,
+    )
+    return retry.model_copy(
+        update={
+            "sprint_reviews": (
+                SprintReviewFact(
+                    review_id=800 + retry.retry_attempt_id,
+                    sprint_id=retry.sprint_id,
+                    review_fingerprint=sprint_review_fingerprint(
+                        retry_snapshot,
+                        retry.sprint_id,
+                        scope=scope,
+                    ),
+                ),
+            ),
+        }
+    )
+
+
+def _completed_triaged_snapshot() -> tuple[WorkflowFactSnapshot, int, int, int, int]:
+    """Load a real original terminal execution as the immutable retry source."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    domain, project_id, sprint_id, story_id, task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    return snapshot, project_id, sprint_id, story_id, task_id
 
 
 def test_retry_scope_has_an_attempt_bound_effective_contract() -> None:
@@ -162,12 +312,12 @@ def test_retry_scope_keeps_an_accepted_external_prerequisite_terminal() -> None:
 
 
 @pytest.mark.parametrize("kind", ["task", "story", "sprint"])
-def test_scoped_instance_roundtrip(kind: str) -> None:
+def test_scoped_instance_roundtrip(kind: ExecutionKind) -> None:
     """Retry keys retain an exact subject without changing original key bytes."""
     assert execution_instance_key(kind, 7) == f"{kind}:7"
     key = execution_instance_key(kind, 7, 2)
     assert key == f"retry:2:{kind}:7"
-    assert parse_execution_instance_key(key) == ExecutionIdentity(kind, 7, 2)  # type: ignore[arg-type]
+    assert parse_execution_instance_key(key) == ExecutionIdentity(kind, 7, 2)
 
 
 @pytest.mark.parametrize(
@@ -203,7 +353,7 @@ def test_execution_identity_constructor_rejects_nonpositive_or_boolean_ids(
 ) -> None:
     """Constructor validation prevents noncanonical bindings before serialization."""
     with pytest.raises(ValueError, match=r"positive|invalid"):
-        ExecutionIdentity(kind, entity_id, retry_attempt_id)  # type: ignore[arg-type]
+        ExecutionIdentity(cast("ExecutionKind", kind), entity_id, retry_attempt_id)
 
 
 def test_current_scope_selects_the_one_active_original_execution() -> None:
@@ -290,6 +440,232 @@ def test_current_scope_selects_the_valid_planned_retry_after_triaged_source() ->
     assert scope is not None
     assert scope.retry_attempt_id == retry.retry_attempt_id
     assert scope.status == "planned"
+
+
+def test_current_scope_allows_one_valid_review_on_an_active_retry() -> None:
+    """Review is a valid current state until the separate close transition runs."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry = _started_retry(
+        snapshot,
+        retry_attempt_id=17,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    reviewed = _reviewed_retry(snapshot, retry)
+
+    scope = current_execution_scope(
+        snapshot.model_copy(update={"sprint_retries": (reviewed,)})
+    )
+
+    assert scope is not None
+    assert scope.retry_attempt_id == reviewed.retry_attempt_id
+    assert scope.status == "active"
+    assert scope.sprint_reviews == reviewed.sprint_reviews
+
+
+def test_current_scope_allows_a_validly_closed_original_or_retry_before_triage(
+) -> None:
+    """Close and triage are separate current states for original and retry work."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _domain, project_id, _sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    with Session(engine) as session:
+        untriaged_original = WorkflowFactRepository(session).load(project_id)
+
+    original_scope = current_execution_scope(untriaged_original)
+
+    retry_snapshot, retry_project_id, retry_sprint_id, retry_story_id, retry_task_id = (
+        _completed_triaged_snapshot()
+    )
+    retry = _started_retry(
+        retry_snapshot,
+        retry_attempt_id=17,
+        project_id=retry_project_id,
+        sprint_id=retry_sprint_id,
+        story_id=retry_story_id,
+        task_id=retry_task_id,
+    )
+    closed_retry = _closed_retry(
+        retry_snapshot,
+        retry,
+        include_triage=False,
+    )
+    retry_scope = current_execution_scope(
+        retry_snapshot.model_copy(update={"sprint_retries": (closed_retry,)})
+    )
+
+    assert original_scope is not None
+    assert original_scope.retry_attempt_id is None
+    assert original_scope.status == "completed"
+    assert retry_scope is not None
+    assert retry_scope.retry_attempt_id == closed_retry.retry_attempt_id
+    assert retry_scope.status == "completed"
+
+
+@pytest.mark.parametrize("predecessor_state", ["completed_only", "untriaged"])
+def test_current_scope_rejects_unfinalized_retry_predecessor(
+    predecessor_state: str,
+) -> None:
+    """A planned successor requires review, close, and resolved triage from retry 2."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry_two = _started_retry(
+        snapshot,
+        retry_attempt_id=17,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    if predecessor_state == "completed_only":
+        assert retry_two.started_at is not None
+        retry_two = retry_two.model_copy(
+            update={
+                "status": "completed",
+                "completed_at": retry_two.started_at + timedelta(minutes=1),
+            }
+        )
+    else:
+        retry_two = _closed_retry(snapshot, retry_two, include_triage=False)
+    retry_three = _retry_fact(
+        retry_attempt_id=18,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        contract_fingerprint=execution_contract(snapshot, sprint_id).fingerprint,
+        story_statuses=((story_id, "To Do"),),
+        task_statuses=((task_id, "To Do"),),
+    ).model_copy(
+        update={
+            "ordinal": 3,
+            "predecessor_retry_attempt_id": retry_two.retry_attempt_id,
+        }
+    )
+
+    with pytest.raises(ExecutionScopeError, match=r"triage|incomplete"):
+        current_execution_scope(
+            snapshot.model_copy(update={"sprint_retries": (retry_two, retry_three)})
+        )
+
+
+def test_current_scope_selects_retry_three_after_finalized_retry_two() -> None:
+    """A full review/close/triage chain permits the next planned retry."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry_two = _closed_retry(
+        snapshot,
+        _started_retry(
+            snapshot,
+            retry_attempt_id=17,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            task_id=task_id,
+        ),
+        include_triage=True,
+    )
+    retry_three = _retry_fact(
+        retry_attempt_id=18,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        contract_fingerprint=execution_contract(snapshot, sprint_id).fingerprint,
+        story_statuses=((story_id, "To Do"),),
+        task_statuses=((task_id, "To Do"),),
+    ).model_copy(
+        update={
+            "ordinal": 3,
+            "predecessor_retry_attempt_id": retry_two.retry_attempt_id,
+        }
+    )
+
+    scope = current_execution_scope(
+        snapshot.model_copy(update={"sprint_retries": (retry_two, retry_three)})
+    )
+
+    assert scope is not None
+    assert scope.retry_attempt_id == retry_three.retry_attempt_id
+    assert scope.status == "planned"
+
+
+@pytest.mark.parametrize("invalid_evidence", ["duplicate_review", "close", "triage"])
+def test_current_scope_rejects_active_retry_close_or_triage(
+    invalid_evidence: str,
+) -> None:
+    """An active retry can have only its single validated review evidence."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry = _started_retry(
+        snapshot,
+        retry_attempt_id=17,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    reviewed = _reviewed_retry(snapshot, retry)
+    closed = _closed_retry(snapshot, retry, include_triage=True)
+    invalid = retry.model_copy(
+        update={
+            "sprint_reviews": (
+                (*reviewed.sprint_reviews, reviewed.sprint_reviews[0])
+                if invalid_evidence == "duplicate_review"
+                else ()
+            ),
+            "sprint_closures": (
+                closed.sprint_closures if invalid_evidence == "close" else ()
+            ),
+            "post_sprint_triage": (
+                closed.post_sprint_triage if invalid_evidence == "triage" else ()
+            ),
+        }
+    )
+
+    with pytest.raises(ExecutionScopeError, match="Active retry"):
+        current_execution_scope(
+            snapshot.model_copy(update={"sprint_retries": (invalid,)})
+        )
+
+
+def test_current_scope_rejects_changed_present_review_or_triage() -> None:
+    """Present lifecycle evidence must remain canonical even when optional now."""
+    snapshot, project_id, sprint_id, story_id, task_id = _completed_triaged_snapshot()
+    retry = _started_retry(
+        snapshot,
+        retry_attempt_id=17,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    reviewed = _reviewed_retry(snapshot, retry).model_copy(
+        update={
+            "sprint_reviews": (
+                SprintReviewFact(
+                    review_id=817,
+                    sprint_id=sprint_id,
+                    review_fingerprint="sha256:changed-review",
+                ),
+            ),
+        }
+    )
+    closed = _closed_retry(snapshot, retry, include_triage=True).model_copy(
+        update={
+            "post_sprint_triage": (
+                snapshot.post_sprint_triage[0].model_copy(
+                    update={"payload_fingerprint": "sha256:changed-triage"}
+                ),
+            ),
+        }
+    )
+
+    with pytest.raises(ExecutionScopeError, match="fingerprint changed"):
+        current_execution_scope(
+            snapshot.model_copy(update={"sprint_retries": (reviewed,)})
+        )
+    with pytest.raises(ExecutionScopeError, match="triage fingerprint changed"):
+        current_execution_scope(
+            snapshot.model_copy(update={"sprint_retries": (closed,)})
+        )
 
 
 def test_current_scope_rejects_unlinked_retry_ordinal() -> None:
