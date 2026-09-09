@@ -667,6 +667,134 @@ test('a preview that arrives after Project selection changes cannot revive the s
     assert.equal(harness.dialog.open, false);
 });
 
+test('a late retry preview cannot replace a newer human dialog or rationale', async () => {
+    let resolvePreview;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((resolve) => { resolvePreview = resolve; }),
+    });
+
+    const opening = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    vm.runInContext(`
+        openHumanDialog({
+            kind: 'goal-outcome',
+            title: 'Newer human decision',
+            description: 'Keep this newer dialog and its rationale.',
+            required: true,
+        });
+    `, harness.context);
+    harness.elements['human-action-rationale'].value = 'Keep this rationale.';
+    resolvePreview(response({ data: retryPreview() }));
+    await opening;
+
+    assert.equal(harness.dialog.open, true);
+    assert.equal(harness.elements['human-action-title'].textContent, 'Newer human decision');
+    assert.equal(harness.elements['human-action-rationale'].value, 'Keep this rationale.');
+    assert.equal(harness.retryPosts().length, 0);
+});
+
+test('an older retry preview cannot reopen a dismissed newer preview', async () => {
+    let resolveFirst;
+    let resolveSecond;
+    let requestCount = 0;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((resolve) => {
+            requestCount += 1;
+            if (requestCount === 1) resolveFirst = resolve;
+            else resolveSecond = resolve;
+        }),
+    });
+
+    const first = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    resolveSecond(response({ data: retryPreview() }));
+    await second;
+    assert.equal(harness.dialog.open, true);
+
+    harness.dialog.close();
+    resolveFirst(response({ data: retryPreview() }));
+    await first;
+
+    assert.equal(harness.dialog.open, false);
+    assert.equal(harness.retryPosts().length, 0);
+});
+
+test('a late retry preview error cannot overwrite a newer dialog error', async () => {
+    let rejectPreview;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((_resolve, reject) => { rejectPreview = reject; }),
+    });
+
+    const opening = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    vm.runInContext(`
+        openHumanDialog({
+            kind: 'goal-outcome',
+            title: 'Newer human decision',
+            description: 'Keep this newer dialog open.',
+            required: false,
+            hideRationale: true,
+        });
+        setProjectError('Keep this newer error.');
+    `, harness.context);
+    rejectPreview(new Error('Late retry preview failed.'));
+    assert.equal(await opening, false);
+
+    assert.equal(harness.dialog.open, true);
+    assert.equal(harness.elements['human-action-title'].textContent, 'Newer human decision');
+    assert.equal(harness.elements['project-error'].textContent, 'Keep this newer error.');
+    assert.equal(harness.retryPosts().length, 0);
+});
+
+test('a retry preview that resolves during a newer mutation cannot open a dialog', async () => {
+    let resolvePreview;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((resolve) => { resolvePreview = resolve; }),
+    });
+
+    const opening = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    vm.runInContext(`
+        activeCockpitAction = {
+            token: 'newer-action',
+            requestKind: 'complete_task',
+            busyLabel: 'Completing Task...',
+        };
+    `, harness.context);
+    resolvePreview(response({ data: retryPreview() }));
+    assert.equal(await opening, false);
+
+    assert.equal(harness.dialog.open, false);
+    assert.equal(harness.retryPosts().length, 0);
+});
+
+test('a native dialog close invalidates a pending retry preview', async () => {
+    let resolvePreview;
+    const harness = retryHarness({
+        previewResponse: () => new Promise((resolve) => { resolvePreview = resolve; }),
+    });
+
+    vm.runInContext(`
+        openHumanDialog({
+            kind: 'goal-outcome',
+            title: 'Dismissed human decision',
+            description: 'Native close must invalidate the pending preview.',
+            required: false,
+            hideRationale: true,
+        });
+    `, harness.context);
+    const opening = harness.context.openSprintRetryPreview(harness.retryButton);
+    await new Promise((resolve) => setImmediate(resolve));
+    harness.dialog.close();
+    resolvePreview(response({ data: retryPreview() }));
+    assert.equal(await opening, false);
+
+    assert.equal(harness.dialog.open, false);
+    assert.equal(harness.retryPosts().length, 0);
+});
+
 test('a wrong-owner retry preview cannot open confirmation or submit', async () => {
     const harness = retryHarness({
         previewResponse: async () => response({ data: retryPreview({ project_id: 8 }) }),

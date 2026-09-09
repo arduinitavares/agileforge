@@ -21,7 +21,7 @@ from workflow.sprint_retry_eligibility import (
     SprintRetryBlocker,
     SprintRetryEligibility,
     evaluate_sprint_retry_eligibility,
-    retry_start_contract_is_current,
+    retry_start_authority_is_current,
     sprint_retry_eligibility_payload,
 )
 
@@ -326,11 +326,15 @@ def _require_live_start_guard(
     snapshot: WorkflowFactSnapshot,
     retry: SprintRetryAttempt,
 ) -> None:
-    """Use the same current-source contract proof as retry eligibility."""
-    if not retry_start_contract_is_current(
+    """Require the exact planned retry to own the current execution scope."""
+    if not retry_start_authority_is_current(
         snapshot,
         sprint_id=retry.sprint_id,
+        retry_attempt_id=retry.retry_attempt_id,
         retry_contract_fingerprint=retry.contract_fingerprint,
     ):
-        message = "Retry start selected requirements or dependencies changed."
+        message = (
+            "Retry start selected requirements or dependencies changed or current "
+            "lifecycle authority is invalid."
+        )
         raise ValueError(message)

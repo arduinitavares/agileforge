@@ -115,6 +115,32 @@ def retry_start_contract_is_current(
     return current_contract.fingerprint == retry_contract_fingerprint
 
 
+def retry_start_authority_is_current(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    sprint_id: int,
+    retry_attempt_id: int | None,
+    retry_contract_fingerprint: str,
+) -> bool:
+    """Prove that one exact planned retry still owns the current scope."""
+    if retry_attempt_id is None or not retry_start_contract_is_current(
+        snapshot,
+        sprint_id=sprint_id,
+        retry_contract_fingerprint=retry_contract_fingerprint,
+    ):
+        return False
+    try:
+        scope = current_execution_scope(snapshot)
+    except ExecutionScopeError:
+        return False
+    return (
+        scope is not None
+        and scope.sprint_id == sprint_id
+        and scope.retry_attempt_id == retry_attempt_id
+        and scope.status == "planned"
+    )
+
+
 def evaluate_sprint_retry_eligibility(  # noqa: C901, PLR0912, PLR0915
     snapshot: WorkflowFactSnapshot, *, sprint_id: int
 ) -> SprintRetryEligibility:

@@ -142,6 +142,7 @@ let activeSpecificationMutation = null;
 let activeBacklogCorrectionMutation = null;
 let activeSprintMutation = null;
 let activeSprintRetryMutation = null;
+let activeSprintRetryPreview = null;
 let activeCockpitAction = null;
 let activeDeliveryUnreconciled = false;
 let sprintStartRetry = null;
@@ -4318,6 +4319,7 @@ function setDialogError(message) {
 }
 
 function closeHumanDialog() {
+    invalidateSprintRetryPreview();
     document.getElementById('human-action-dialog')?.close();
     pendingHumanAction = null;
     setDialogError('');
@@ -4778,6 +4780,7 @@ function planningReviewBinding(selected, scope, decision) {
 }
 
 function openHumanDialog(config) {
+    if (config.previewOwner !== activeSprintRetryPreview) invalidateSprintRetryPreview();
     pendingHumanAction = config;
     setText('human-action-kicker', config.kicker ?? 'Human decision');
     setText('human-action-title', config.title);
@@ -4937,6 +4940,27 @@ function sprintRetryConfirmed(state, mutation) {
     );
 }
 
+function invalidateSprintRetryPreview(owner = null) {
+    if (owner === null || activeSprintRetryPreview === owner) {
+        activeSprintRetryPreview = null;
+    }
+}
+
+function retryPreviewOwnerIsCurrent(owner, button) {
+    if (
+        activeSprintRetryPreview !== owner
+        || selectedProjectId !== owner.projectId
+        || activeSprintRetryMutation
+        || activeCockpitAction
+        || activeDeliveryUnreconciled
+    ) return false;
+    const currentTarget = retryPreviewTarget(lifecycleState, button);
+    if (!currentTarget || currentTarget.sprintId !== owner.sprintId) return false;
+    return owner.binding === null
+        ? currentTarget.binding === null
+        : retryBindingMatches(owner.binding, currentTarget.binding);
+}
+
 async function openSprintRetryPreview(button) {
     if (activeSprintRetryMutation || activeCockpitAction || activeDeliveryUnreconciled) return false;
     const projectId = selectedProjectId;
@@ -4945,29 +4969,51 @@ async function openSprintRetryPreview(button) {
         setProjectError('This Sprint retry target changed. Reload and review the current Sprint.');
         return false;
     }
+    const owner = {
+        projectId,
+        sprintId: target.sprintId,
+        binding: target.binding,
+    };
+    activeSprintRetryPreview = owner;
     let payload;
     try {
         payload = await requestJson(
             `/api/projects/${projectId}/sprint/${target.sprintId}/retry-preview`,
         );
     } catch (error) {
-        if (selectedProjectId === projectId) setProjectError(error.message);
+        if (!retryPreviewOwnerIsCurrent(owner, button)) {
+            invalidateSprintRetryPreview(owner);
+            return false;
+        }
+        invalidateSprintRetryPreview(owner);
+        setProjectError(error.message);
         return false;
     }
-    if (selectedProjectId !== projectId) return false;
+    if (!retryPreviewOwnerIsCurrent(owner, button)) {
+        invalidateSprintRetryPreview(owner);
+        return false;
+    }
     const preview = retryPreviewForScope(payload?.data, projectId, target.sprintId);
     if (!preview) {
+        invalidateSprintRetryPreview(owner);
         setProjectError('The retry preview did not match the selected Sprint. Reload and review it again.');
         return false;
     }
     const currentTarget = retryPreviewTarget(lifecycleState, button);
-    if (!currentTarget || currentTarget.sprintId !== target.sprintId) return false;
+    if (!currentTarget || currentTarget.sprintId !== target.sprintId) {
+        invalidateSprintRetryPreview(owner);
+        return false;
+    }
     const actionCurrent = target.binding === null
         ? currentTarget.binding === null
         : retryBindingMatches(target.binding, currentTarget.binding);
-    if (!actionCurrent) return false;
+    if (!actionCurrent) {
+        invalidateSprintRetryPreview(owner);
+        return false;
+    }
     const canConfirm = preview.blockers.length === 0 && currentTarget.binding !== null;
     openHumanDialog({
+        previewOwner: owner,
         kind: 'sprint-retry',
         button,
         projectId,
@@ -6582,6 +6628,7 @@ function installInteractions() {
     document.getElementById('human-action-cancel')?.addEventListener('click', closeHumanDialog);
     document.getElementById('human-action-close')?.addEventListener('click', closeHumanDialog);
     document.getElementById('human-action-dialog')?.addEventListener('close', () => {
+        invalidateSprintRetryPreview();
         pendingHumanAction = null;
         setDialogError('');
     });

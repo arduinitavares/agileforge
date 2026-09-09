@@ -61,6 +61,7 @@ from tests.workflow.execution_retry_support import (
     _triage_execution_sprint,
 )
 from workflow.clock import FixedClock
+from workflow.contracts import TransitionResult
 from workflow.definitions.planning import (
     dependency_review_lifecycle_locked,
     planning_graph,
@@ -546,6 +547,99 @@ def test_accepted_root_drift_rejects_positioned_retry_start_without_writes(
             == []
         )
         assert retry.status == "Planned"
+
+
+def test_retry_start_rejects_missing_predecessor_triage_in_graph_and_service(
+    tmp_path: Path,
+) -> None:
+    """A planned retry cannot start after its source triage is removed."""
+    engine = _file_engine(tmp_path / "retry-start-missing-triage.sqlite")
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    retry_request = _positioned_retry_request(
+        domain,
+        engine=engine,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        idempotency_key="plan-before-source-triage-removal",
+    )
+    planned = domain.transition(retry_request)
+    assert planned.ok is True
+    retry_id = planned.output["retry_attempt_id"]
+    assert isinstance(retry_id, int)
+
+    with Session(engine) as session:
+        triage = session.exec(
+            select(PostSprintTriage).where(PostSprintTriage.sprint_id == sprint_id)
+        ).one()
+        session.delete(triage)
+        session.commit()
+
+    fresh_domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=datetime(2026, 9, 9, tzinfo=UTC)),
+    )
+    fresh_position = fresh_domain.position(project_id)
+    assert "execution.sprint.retry.start" in fresh_position.blocked_nodes
+    fresh_decision = next(
+        item
+        for item in fresh_position.decisions
+        if item.node_id == "execution.sprint.retry.start"
+        and item.instance_key == f"retry:{retry_id}:sprint:{sprint_id}"
+    )
+    assert fresh_decision.category.value != "available"
+    start_request = StartSprintRetry(
+        project_id=project_id,
+        graph_version=fresh_position.graph_version,
+        fact_fingerprint=fresh_position.fact_fingerprint,
+        decision_fingerprint=fresh_decision.decision_fingerprint,
+        idempotency_key="fresh-start-after-source-triage-removal",
+        actor="owner@example.com",
+        instance_key=fresh_decision.instance_key,
+        sprint_id=sprint_id,
+        retry_attempt_id=retry_id,
+    )
+    before_start = _raw_rows(engine)
+    retry_before = _retry_state_rows(engine)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        with pytest.raises(ValueError, match="current lifecycle authority is invalid"):
+            start_sprint_retry_in_session(
+                session,
+                request=start_request,
+                snapshot=snapshot,
+                now=datetime(2026, 9, 9, tzinfo=UTC),
+            )
+        session.rollback()
+
+    result = fresh_domain.transition(start_request)
+    assert result.ok is False
+    _assert_preexisting_rows_unchanged(before_start, _raw_rows(engine))
+    assert _retry_state_rows(engine) == retry_before
+    with Session(engine) as session:
+        retry = session.get(SprintRetryAttempt, retry_id)
+        assert retry is not None
+        assert retry.status == "Planned"
+        starts = session.exec(
+            select(SprintRetryStart).where(
+                SprintRetryStart.retry_attempt_id == retry_id
+            )
+        ).all()
+        assert starts == []
+        receipts = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.idempotency_key
+                == start_request.idempotency_key
+            )
+        ).all()
+        assert all(
+            receipt.result_json is None
+            or not TransitionResult.model_validate_json(receipt.result_json).ok
+            for receipt in receipts
+        )
 
 
 def test_fresh_retry_start_position_blocks_stored_contract_mismatch(
