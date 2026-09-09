@@ -829,7 +829,7 @@ def _models_db_schema_guard_binding_is_exact(
         ),
         None,
     )
-    if guard is None or ensure is guard:
+    if guard is None or ensure is guard or guard.decorator_list:
         return False
     bindings = [
         node
@@ -2197,6 +2197,8 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             ):
                 _assert_current_business_schema(connection)
             connection.commit()"""
+    schema_guard_definition = "def _assert_current_business_schema("
+    assert source.count(schema_guard_definition) == 1
     mutations: tuple[tuple[str, str | None, str], ...] = (
         (
             "ddl-before-rejection",
@@ -2271,6 +2273,11 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             "        except BaseException:\n"
             "            connection.rollback()\n"
             "            return",
+        ),
+        (
+            "decorated-module-schema-guard",
+            schema_guard_definition,
+            "@lambda _guard: (lambda _target: None)\n" + schema_guard_definition,
         ),
         (
             "extra-module-guard-call",
