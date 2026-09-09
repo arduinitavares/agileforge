@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from services.planning_lineage import (
+    PlanningLineageCode,
     PlanningLineageError,
     select_current_accepted_artifact,
 )
@@ -458,11 +459,16 @@ def _current_terminal_sprint_id(snapshot: WorkflowFactSnapshot) -> int | None:
             spec_identity=(spec.spec_version_id, spec.spec_hash),
         )
         nodes = sprint_stream_nodes(stream)
+    except PlanningLineageError as exc:
+        raise ExecutionScopeError("Current Sprint lineage is ambiguous.") from exc
+    try:
         accepted_id = select_current_accepted_artifact(
             nodes,
             chain_key=nodes[0].chain_key,
         ).artifact_id
     except PlanningLineageError as exc:
+        if exc.code is PlanningLineageCode.ACCEPTED_LEAF_MISSING:
+            return None
         raise ExecutionScopeError("Current Sprint lineage is ambiguous.") from exc
     plan = next(item for item in stream if item.artifact_id == accepted_id)
     if not plan_has_matching_sprint_start(snapshot, plan):

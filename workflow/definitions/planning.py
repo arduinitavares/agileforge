@@ -884,14 +884,18 @@ def _dependency_review_evaluation(  # noqa: PLR0911
                 RuleCategory.INVALID,
                 "STORY_DEPENDENCY_REVIEW_STALE",
             )
-        incomplete = tuple(
+        selected_prerequisite_blockers = {
+            f"PREREQUISITE_STORY_{story_id}_INCOMPLETE" for story_id in selected_ids
+        }
+        external_incomplete = tuple(
             blocker
             for story in stories
             for blocker in story.readiness_blockers
             if blocker.startswith("PREREQUISITE_STORY_")
             and blocker.endswith("_INCOMPLETE")
+            and blocker not in selected_prerequisite_blockers
         )
-        if incomplete:
+        if external_incomplete:
             return RuleEvaluation(
                 RuleCategory.BLOCKED,
                 "STORY_DEPENDENCY_EXTERNAL_INCOMPLETE",
@@ -903,7 +907,7 @@ def _dependency_review_evaluation(  # noqa: PLR0911
                             "prerequisite."
                         ),
                     )
-                    for code in incomplete
+                    for code in external_incomplete
                 ),
             )
         return RuleEvaluation(

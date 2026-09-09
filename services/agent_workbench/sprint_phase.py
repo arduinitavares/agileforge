@@ -11,6 +11,11 @@ from sqlmodel import Session, col, select
 from models.core import ProjectTeam, Sprint, SprintStory, Task, Team
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import TaskExecutionLog, WorkflowEvent
+from models.sprint_retry import (
+    SprintRetryAttempt,
+    SprintRetryClosure,
+    SprintRetryReview,
+)
 from models.workflow import (
     SprintClosure,
     SprintPlanArtifact,
@@ -60,7 +65,12 @@ from workflow.execution_integrity import (
     sprint_review_fingerprint,
     sprint_start_audit_metadata,
 )
-from workflow.execution_scope import retry_blocks_planning
+from workflow.execution_scope import (
+    ExecutionScope,
+    ExecutionScopeError,
+    resolve_execution_scope,
+    retry_blocks_planning,
+)
 from workflow.fingerprints import canonical_json
 from workflow.planning_integrity import (
     current_task_content_fingerprint,
@@ -70,7 +80,23 @@ from workflow.planning_integrity import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from workflow.facts import StoryFact
+    from workflow.facts import StoryFact, WorkflowFactSnapshot
+
+_REVIEW_TERMINAL_REQUIRED = "Sprint review requires every attached Story terminal."
+_REVIEW_FINGERPRINT_STALE = "Sprint review fingerprint is stale."
+_ACTIVE_SPRINT_REQUIRED = "Sprint close requires the exact active Project Sprint."
+_CLOSE_REVIEW_STALE = "Sprint close review fingerprint is stale or missing."
+_FACTS_CHANGED_AFTER_REVIEW = "Sprint facts changed after review."
+_CLOSE_FINGERPRINT_STALE = "Sprint close fingerprint is stale."
+_RETRY_REVIEW_SCOPE_REQUIRED = (
+    "Retry review persistence requires validated retry scope."
+)
+_ORIGINAL_CLOSE_SCOPE_REQUIRED = (
+    "Original Sprint closure requires validated Sprint scope."
+)
+_RETRY_CLOSE_SCOPE_REQUIRED = (
+    "Retry closure persistence requires validated retry scope."
+)
 
 
 class SprintPlanStreamCollisionError(ValueError):
@@ -1041,6 +1067,7 @@ class SprintReviewInput:
     review_fingerprint: str
     reviewed_by: str
     reviewed_at: datetime
+    retry_attempt_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1053,46 +1080,126 @@ class SprintCloseInput:
     close_fingerprint: str
     closed_by: str
     closed_at: datetime
+    retry_attempt_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _ValidatedSprintReview:
+    """Scoped terminal review facts selected before original or retry persistence."""
+
+    scope: ExecutionScope
+    retry: SprintRetryAttempt | None
+
+
+@dataclass(frozen=True)
+class _ValidatedSprintClosure:
+    """Scoped reviewed-close facts selected before original or retry persistence."""
+
+    scope: ExecutionScope
+    close_fingerprint: str
+    sprint: Sprint | None
+    retry: SprintRetryAttempt | None
+
+
+def _retry_review_error() -> ValueError:
+    return ValueError("Sprint review requires an active Sprint retry.")
+
+
+def _validate_sprint_review(
+    session: Session,
+    command: SprintReviewInput,
+) -> _ValidatedSprintReview:
+    """Validate terminal scoped facts before choosing the review evidence table."""
+    retry: SprintRetryAttempt | None = None
+    if command.retry_attempt_id is not None:
+        retry = session.get(SprintRetryAttempt, command.retry_attempt_id)
+        if (
+            retry is None
+            or retry.project_id != command.project_id
+            or retry.sprint_id != command.sprint_id
+            or retry.status != "Active"
+        ):
+            raise _retry_review_error()
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    if command.retry_attempt_id is None:
+        sprint = next(
+            (item for item in snapshot.sprints if item.sprint_id == command.sprint_id),
+            None,
+        )
+        attached = tuple(
+            item for item in snapshot.stories if command.sprint_id in item.sprint_ids
+        )
+        closure_ids = {
+            item.story_id
+            for item in snapshot.story_completions
+            if item.sprint_id == command.sprint_id
+        }
+        if (
+            sprint is None
+            or sprint.status != "active"
+            or not attached
+            or any(item.status not in {"Done", "Accepted"} for item in attached)
+            or closure_ids != {item.story_id for item in attached}
+        ):
+            raise ValueError(_REVIEW_TERMINAL_REQUIRED)
+    try:
+        scope = resolve_execution_scope(
+            snapshot,
+            sprint_id=command.sprint_id,
+            retry_attempt_id=command.retry_attempt_id,
+        )
+    except ExecutionScopeError as error:
+        raise ValueError(str(error)) from error
+    if command.retry_attempt_id is not None and (
+        not scope.stories
+        or any(item.status not in {"Done", "Accepted"} for item in scope.stories)
+        or {item.story_id for item in scope.story_completions}
+        != {item.story_id for item in scope.stories}
+    ):
+        raise ValueError(_REVIEW_TERMINAL_REQUIRED)
+    expected = sprint_review_fingerprint(
+        snapshot,
+        command.sprint_id,
+        scope=scope,
+    )
+    if command.review_fingerprint != expected:
+        raise ValueError(_REVIEW_FINGERPRINT_STALE)
+    existing = (
+        session.exec(
+            select(SprintRetryReview).where(
+                SprintRetryReview.retry_attempt_id == command.retry_attempt_id
+            )
+        ).one_or_none()
+        if command.retry_attempt_id is not None
+        else session.exec(
+            select(SprintReview).where(SprintReview.sprint_id == command.sprint_id)
+        ).first()
+    )
+    if existing is not None:
+        message = (
+            "Sprint retry review is immutable."
+            if command.retry_attempt_id is not None
+            else "Sprint review is immutable."
+        )
+        raise ValueError(message)
+    return _ValidatedSprintReview(scope=scope, retry=retry)
 
 
 def review_sprint_in_session(
     session: Session, command: SprintReviewInput
-) -> SprintReview:
+) -> SprintReview | SprintRetryReview:
     """Persist one exact Sprint review in the caller's transaction."""
-    snapshot = WorkflowFactRepository(session).load(command.project_id)
-    sprint = next(
-        (item for item in snapshot.sprints if item.sprint_id == command.sprint_id),
-        None,
-    )
-    attached = tuple(
-        item for item in snapshot.stories if command.sprint_id in item.sprint_ids
-    )
-    closure_ids = {
-        item.story_id
-        for item in snapshot.story_completions
-        if item.sprint_id == command.sprint_id
-    }
-    if (
-        sprint is None
-        or sprint.status != "active"
-        or not attached
-        or any(item.status not in {"Done", "Accepted"} for item in attached)
-        or closure_ids != {item.story_id for item in attached}
-    ):
-        message = "Sprint review requires every attached Story terminal."
-        raise ValueError(message)
-    expected = sprint_review_fingerprint(snapshot, command.sprint_id)
-    if command.review_fingerprint != expected:
-        message = "Sprint review fingerprint is stale."
-        raise ValueError(message)
-    if (
-        session.exec(
-            select(SprintReview).where(SprintReview.sprint_id == command.sprint_id)
-        ).first()
-        is not None
-    ):
-        message = "Sprint review is immutable."
-        raise ValueError(message)
+    validated = _validate_sprint_review(session, command)
+    if command.retry_attempt_id is not None:
+        return _persist_retry_sprint_review(session, command, validated)
+    return _persist_original_sprint_review(session, command)
+
+
+def _persist_original_sprint_review(
+    session: Session,
+    command: SprintReviewInput,
+) -> SprintReview:
+    """Persist an original review after shared scoped validation."""
     row = SprintReview(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
@@ -1105,18 +1212,86 @@ def review_sprint_in_session(
     return row
 
 
-def close_sprint_in_session(
-    session: Session, command: SprintCloseInput
-) -> SprintClosure:
-    """Close one reviewed Sprint in the caller's transaction."""
+def _persist_retry_sprint_review(
+    session: Session,
+    command: SprintReviewInput,
+    validated: _ValidatedSprintReview,
+) -> SprintRetryReview:
+    """Persist retry-local review after shared scoped validation."""
+    if command.retry_attempt_id is None or validated.retry is None:
+        raise RuntimeError(_RETRY_REVIEW_SCOPE_REQUIRED)
+    row = SprintRetryReview(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        retry_attempt_id=command.retry_attempt_id,
+        review_fingerprint=command.review_fingerprint,
+        reviewed_by=command.reviewed_by,
+        reviewed_at=command.reviewed_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _retry_close_error() -> ValueError:
+    return ValueError("Sprint close requires the exact active Project Sprint retry.")
+
+
+def _validate_sprint_closure(
+    session: Session,
+    command: SprintCloseInput,
+) -> _ValidatedSprintClosure:
+    """Validate one reviewed execution scope before choosing its close rows."""
+    sprint, retry = _validate_sprint_close_target(session, command)
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    try:
+        scope = resolve_execution_scope(
+            snapshot,
+            sprint_id=command.sprint_id,
+            retry_attempt_id=command.retry_attempt_id,
+        )
+    except ExecutionScopeError as error:
+        raise ValueError(str(error)) from error
+    _validate_close_review(snapshot, command, scope)
+    expected_close = sprint_close_fingerprint(
+        snapshot,
+        command.sprint_id,
+        command.review_fingerprint,
+        scope=scope,
+    )
+    if command.close_fingerprint != expected_close:
+        raise ValueError(_CLOSE_FINGERPRINT_STALE)
+    _ensure_sprint_closure_absent(session, command)
+    return _ValidatedSprintClosure(
+        scope=scope,
+        close_fingerprint=expected_close,
+        sprint=sprint,
+        retry=retry,
+    )
+
+
+def _validate_sprint_close_target(
+    session: Session,
+    command: SprintCloseInput,
+) -> tuple[Sprint | None, SprintRetryAttempt | None]:
+    """Load the exact active original Sprint or retry that can close."""
+    if command.retry_attempt_id is not None:
+        retry = session.get(SprintRetryAttempt, command.retry_attempt_id)
+        if (
+            retry is None
+            or retry.project_id != command.project_id
+            or retry.sprint_id != command.sprint_id
+            or retry.status != "Active"
+        ):
+            raise _retry_close_error()
+        return None, retry
     sprint = session.get(Sprint, command.sprint_id)
     if (
         sprint is None
         or sprint.project_id != command.project_id
         or sprint.status is not SprintStatus.ACTIVE
     ):
-        message = "Sprint close requires the exact active Project Sprint."
-        raise ValueError(message)
+        raise ValueError(_ACTIVE_SPRINT_REQUIRED)
     review = session.exec(
         select(SprintReview).where(
             SprintReview.project_id == command.project_id,
@@ -1124,35 +1299,74 @@ def close_sprint_in_session(
         )
     ).one_or_none()
     if review is None or review.review_fingerprint != command.review_fingerprint:
-        message = "Sprint close review fingerprint is stale or missing."
-        raise ValueError(message)
-    snapshot = WorkflowFactRepository(session).load(command.project_id)
-    if (
-        sprint_review_fingerprint(snapshot, command.sprint_id)
-        != command.review_fingerprint
-    ):
-        message = "Sprint facts changed after review."
-        raise ValueError(message)
-    expected_close = sprint_close_fingerprint(
+        raise ValueError(_CLOSE_REVIEW_STALE)
+    return sprint, None
+
+
+def _validate_close_review(
+    snapshot: WorkflowFactSnapshot,
+    command: SprintCloseInput,
+    scope: ExecutionScope,
+) -> None:
+    """Verify the supplied review still binds the exact effective scope."""
+    if command.retry_attempt_id is not None:
+        reviews = scope.sprint_reviews
+        if (
+            len(reviews) != 1
+            or reviews[0].review_fingerprint != command.review_fingerprint
+        ):
+            raise ValueError(_CLOSE_REVIEW_STALE)
+        if any(item.status not in {"Done", "Accepted"} for item in scope.stories):
+            raise ValueError(_FACTS_CHANGED_AFTER_REVIEW)
+    expected_review = sprint_review_fingerprint(
         snapshot,
         command.sprint_id,
-        command.review_fingerprint,
+        scope=scope,
     )
-    if command.close_fingerprint != expected_close:
-        message = "Sprint close fingerprint is stale."
-        raise ValueError(message)
-    if (
-        session.exec(
+    if expected_review != command.review_fingerprint:
+        raise ValueError(_FACTS_CHANGED_AFTER_REVIEW)
+
+
+def _ensure_sprint_closure_absent(session: Session, command: SprintCloseInput) -> None:
+    """Reject a second append to either original or retry closure stream."""
+    if command.retry_attempt_id is not None:
+        existing = session.exec(
+            select(SprintRetryClosure).where(
+                SprintRetryClosure.retry_attempt_id == command.retry_attempt_id
+            )
+        ).one_or_none()
+        message = "Sprint retry closure is immutable."
+    else:
+        existing = session.exec(
             select(SprintClosure).where(SprintClosure.sprint_id == command.sprint_id)
         ).first()
-        is not None
-    ):
         message = "Sprint closure is immutable."
+    if existing is not None:
         raise ValueError(message)
-    sprint.status = SprintStatus.COMPLETED
-    sprint.completed_at = command.closed_at
-    sprint.updated_at = command.closed_at
-    sprint.close_snapshot_json = None
+
+
+def close_sprint_in_session(
+    session: Session, command: SprintCloseInput
+) -> SprintClosure | SprintRetryClosure:
+    """Close one reviewed Sprint in the caller's transaction."""
+    validated = _validate_sprint_closure(session, command)
+    if command.retry_attempt_id is not None:
+        return _persist_retry_sprint_closure(session, command, validated)
+    return _persist_original_sprint_closure(session, command, validated)
+
+
+def _persist_original_sprint_closure(
+    session: Session,
+    command: SprintCloseInput,
+    validated: _ValidatedSprintClosure,
+) -> SprintClosure:
+    """Close the original projection after shared scoped validation."""
+    if validated.sprint is None:
+        raise RuntimeError(_ORIGINAL_CLOSE_SCOPE_REQUIRED)
+    validated.sprint.status = SprintStatus.COMPLETED
+    validated.sprint.completed_at = command.closed_at
+    validated.sprint.updated_at = command.closed_at
+    validated.sprint.close_snapshot_json = None
     closure = SprintClosure(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
@@ -1161,7 +1375,7 @@ def close_sprint_in_session(
         closed_by=command.closed_by,
         closed_at=command.closed_at,
     )
-    session.add(sprint)
+    session.add(validated.sprint)
     session.add(closure)
     session.add(
         WorkflowEvent(
@@ -1179,6 +1393,31 @@ def close_sprint_in_session(
             duration_seconds=0.0,
         )
     )
+    session.flush()
+    return closure
+
+
+def _persist_retry_sprint_closure(
+    session: Session,
+    command: SprintCloseInput,
+    validated: _ValidatedSprintClosure,
+) -> SprintRetryClosure:
+    """Close the retry attempt without mutating original Sprint rows."""
+    if command.retry_attempt_id is None or validated.retry is None:
+        raise RuntimeError(_RETRY_CLOSE_SCOPE_REQUIRED)
+    validated.retry.status = "Completed"
+    validated.retry.completed_at = command.closed_at
+    closure = SprintRetryClosure(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        retry_attempt_id=command.retry_attempt_id,
+        review_fingerprint=command.review_fingerprint,
+        close_fingerprint=command.close_fingerprint,
+        closed_by=command.closed_by,
+        closed_at=command.closed_at,
+    )
+    session.add(validated.retry)
+    session.add(closure)
     session.flush()
     return closure
 

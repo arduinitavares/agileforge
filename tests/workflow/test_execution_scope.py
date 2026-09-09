@@ -17,6 +17,11 @@ from tests.workflow.execution_retry_support import (
     _complete_execution_sprint,
     _triage_execution_sprint,
 )
+from tests.workflow.retry_execution_fixtures import (
+    CompletedRetrySource,
+    record_pending_successor_plan,
+    seed_completed_retry_source,
+)
 from workflow.execution_identity import (
     ExecutionIdentity,
     ExecutionKind,
@@ -787,6 +792,71 @@ def test_retry_scope_hashes_are_attempt_bound_without_mutating_history() -> None
     assert retry_close != original_close
     assert complete_scope.sprint_reviews[0].review_fingerprint == retry_review
     assert snapshot.model_dump(mode="json") == before
+
+
+def _snapshot_with_pending_successor_plan() -> tuple[
+    WorkflowFactSnapshot, CompletedRetrySource
+]:
+    """Build the normal pending-plan route after a proven terminal delivery."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    source = seed_completed_retry_source(engine)
+    record_pending_successor_plan(engine, source)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(source.project_id)
+    return snapshot, source
+
+
+def test_current_scope_returns_none_for_a_valid_newer_pending_plan() -> None:
+    """An unaccepted newer plan owns the next cycle without erasing source history."""
+    snapshot, source = _snapshot_with_pending_successor_plan()
+
+    assert current_execution_scope(snapshot) is None
+    source_scope = resolve_execution_scope(
+        snapshot,
+        sprint_id=source.source_sprint_id,
+    )
+    assert source_scope.retry_attempt_id is None
+    assert source_scope.status == "completed"
+
+
+def test_current_scope_rejects_malformed_unaccepted_successor_streams() -> None:
+    """Only a validated missing accepted leaf may yield no current scope."""
+    snapshot, _source = _snapshot_with_pending_successor_plan()
+    pending = next(
+        item
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan" and item.status == "pending_review"
+    )
+    bad_version = pending.model_copy(update={"version_number": 2})
+    malformed_version = snapshot.model_copy(
+        update={
+            "planning_artifacts": tuple(
+                bad_version if item.artifact_id == pending.artifact_id else item
+                for item in snapshot.planning_artifacts
+            )
+        }
+    )
+    with pytest.raises(ExecutionScopeError, match="Current Sprint lineage"):
+        current_execution_scope(malformed_version)
+
+    duplicate_pending_stream = pending.model_copy(
+        update={
+            "artifact_id": max(item.artifact_id for item in snapshot.planning_artifacts)
+            + 1,
+            "sprint_plan_stream_id": "SPS-extra-pending-stream",
+        }
+    )
+    multiple_pending = snapshot.model_copy(
+        update={
+            "planning_artifacts": (
+                *snapshot.planning_artifacts,
+                duplicate_pending_stream,
+            )
+        }
+    )
+    with pytest.raises(ExecutionScopeError, match="Current Sprint lineage"):
+        current_execution_scope(multiple_pending)
 
 
 def test_shared_sprint_lineage_selector_keeps_the_current_started_stream() -> None:
