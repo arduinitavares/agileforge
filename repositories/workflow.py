@@ -53,6 +53,7 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
+from repositories.sprint_retry import load_sprint_retry_facts
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     specification_structuring_fact_fingerprint,
@@ -519,6 +520,9 @@ class WorkflowFactRepository:
             sprint_reviews=sprint_reviews,
             sprint_closures=sprint_closures,
             post_sprint_triage=self._post_sprint_triage(project_id, sprints),
+            sprint_retries=load_sprint_retry_facts(
+                self._session, project_id=project_id
+            ),
             node_attempts=node_attempts,
         )
 

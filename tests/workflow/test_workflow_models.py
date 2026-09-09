@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import Text
 from sqlmodel import SQLModel
 
+from models.sprint_retry import SprintRetryAttempt, SprintRetryTaskEvidence
 from models.workflow import (
     SprintClosure,
     SprintStart,
@@ -12,8 +15,41 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from workflow.contracts import GRAPH_VERSION
+from workflow.facts import ProjectFact, WorkflowFactSnapshot
+from workflow.fingerprints import canonical_hash, fact_fingerprint
 
 EXPECTED_FIELDS: dict[type[SQLModel], set[str]] = {
+    SprintRetryAttempt: {
+        "retry_attempt_id",
+        "project_id",
+        "sprint_id",
+        "ordinal",
+        "predecessor_retry_attempt_id",
+        "contract_fingerprint",
+        "created_by",
+        "rationale",
+        "creation_fingerprint",
+        "creation_receipt_key",
+        "created_at",
+        "status",
+        "started_at",
+        "completed_at",
+    },
+    SprintRetryTaskEvidence: {
+        "sprint_retry_task_evidence_id",
+        "project_id",
+        "sprint_id",
+        "retry_attempt_id",
+        "task_id",
+        "outcome_summary",
+        "artifact_refs_json",
+        "acceptance_result",
+        "checklist_result_json",
+        "evidence_fingerprint",
+        "completed_by",
+        "completed_at",
+    },
     SprintStart: {
         "sprint_start_id",
         "project_id",
@@ -86,6 +122,8 @@ EXPECTED_FIELDS: dict[type[SQLModel], set[str]] = {
 }
 
 EXPECTED_TABLE_NAMES: dict[type[SQLModel], str] = {
+    SprintRetryAttempt: "sprint_retry_attempts",
+    SprintRetryTaskEvidence: "sprint_retry_task_evidence",
     SprintClosure: "sprint_closures",
     SprintStart: "sprint_starts",
     WorkflowNodeAttemptOutcome: "workflow_node_attempt_outcomes",
@@ -94,6 +132,12 @@ EXPECTED_TABLE_NAMES: dict[type[SQLModel], str] = {
 }
 
 TEXT_FIELDS: dict[type[SQLModel], set[str]] = {
+    SprintRetryAttempt: {"rationale"},
+    SprintRetryTaskEvidence: {
+        "outcome_summary",
+        "artifact_refs_json",
+        "checklist_result_json",
+    },
     SprintStart: {"selected_story_ids_json"},
     WorkflowNodeAttempt: {"normalized_input_json", "execution_settings_json"},
     WorkflowNodeAttemptOutcome: {"output_json", "failure_message"},
@@ -123,3 +167,21 @@ def test_payload_and_error_fields_use_text_columns() -> None:
         table = SQLModel.metadata.tables[EXPECTED_TABLE_NAMES[model]]
         for field_name in field_names:
             assert isinstance(table.c[field_name].type, Text)
+
+
+def test_retry_fact_default_does_not_change_legacy_snapshot_hash() -> None:
+    """Hashing an old snapshot must not gain an empty retry field."""
+    snapshot = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=7,
+            name="Synthetic retry hash",
+            created_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    )
+    legacy_payload = snapshot.model_dump(mode="json")
+    legacy_payload.pop("sprint_retries", None)
+
+    assert snapshot.sprint_retries == ()
+    assert fact_fingerprint(snapshot) == canonical_hash(
+        {"graph_version": GRAPH_VERSION, "facts": legacy_payload}
+    )

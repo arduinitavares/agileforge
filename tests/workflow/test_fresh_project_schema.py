@@ -170,6 +170,17 @@ def test_fresh_schema_uses_project_names(engine: Engine) -> None:
     table_names = set(inspector.get_table_names())
 
     assert "projects" in table_names
+    assert {
+        "sprint_retry_attempts",
+        "sprint_retry_story_states",
+        "sprint_retry_task_states",
+        "sprint_retry_starts",
+        "sprint_retry_task_evidence",
+        "sprint_retry_story_closures",
+        "sprint_retry_reviews",
+        "sprint_retry_closures",
+        "sprint_retry_triage",
+    } <= table_names
     assert "products" not in table_names
     assert "sessions" not in table_names
 

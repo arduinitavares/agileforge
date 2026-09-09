@@ -135,6 +135,8 @@ def _snapshot_fingerprint(
     include_node_attempts: bool,
 ) -> str:
     facts = snapshot.model_dump(mode="json")
+    if not snapshot.sprint_retries:
+        facts.pop("sprint_retries")
     if not include_node_attempts:
         facts.pop("node_attempts")
     for name, collection in facts.items():

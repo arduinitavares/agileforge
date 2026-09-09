@@ -17,7 +17,7 @@ from sqlalchemy import (
     event,
     inspect,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlmodel import SQLModel, create_engine
 
 from models import (
@@ -26,6 +26,7 @@ from models import (
     product_definition,
     repository,
     specs,
+    sprint_retry,
     workflow,
 )
 from utils.runtime_config import get_business_db_target, get_database_echo
@@ -42,6 +43,7 @@ _CURRENT_MODEL_MODULES: tuple[ModuleType, ...] = (
     events,
     product_definition,
     repository,
+    sprint_retry,
     workflow,
 )
 
@@ -1657,6 +1659,281 @@ CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
     },
 )
 
+PRE_RETRY_BUSINESS_SCHEMA_MANIFEST = CURRENT_BUSINESS_SCHEMA_MANIFEST
+
+_RETRY_TABLE_NAMES = frozenset(
+    {
+        "sprint_retry_attempts",
+        "sprint_retry_story_states",
+        "sprint_retry_task_states",
+        "sprint_retry_starts",
+        "sprint_retry_task_evidence",
+        "sprint_retry_story_closures",
+        "sprint_retry_reviews",
+        "sprint_retry_closures",
+        "sprint_retry_triage",
+    }
+)
+
+_RETRY_TABLE_STRUCTURES = {
+    "sprint_retry_attempts": _structure(
+        columns=(
+            ("retry_attempt_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("ordinal", False),
+            ("predecessor_retry_attempt_id", True),
+            ("contract_fingerprint", False),
+            ("created_by", False),
+            ("rationale", False),
+            ("creation_fingerprint", False),
+            ("creation_receipt_key", False),
+            ("created_at", False),
+            ("status", False),
+            ("started_at", True),
+            ("completed_at", True),
+        ),
+        uniques=(
+            (("project_id", "retry_attempt_id"), None),
+            (("project_id", "sprint_id", "retry_attempt_id"), None),
+            (("project_id", "sprint_id", "ordinal"), None),
+            (("project_id", "sprint_id", "predecessor_retry_attempt_id"), None),
+            (("project_id", "sprint_id"), "predecessor_retry_attempt_id is null"),
+            (("project_id",), "status in ('planned', 'active')"),
+        ),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (
+                ("project_id", "sprint_id", "predecessor_retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+        checks=("ordinal >= 2", "status in ('planned', 'active', 'completed')"),
+    ),
+    "sprint_retry_story_states": _structure(
+        columns=(
+            ("sprint_retry_story_state_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("story_id", False),
+            ("status", False),
+        ),
+        uniques=(
+            (("retry_attempt_id", "story_id"), None),
+            (("project_id", "sprint_id", "retry_attempt_id", "story_id"), None),
+        ),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (("story_id",), "user_stories", ("story_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_task_states": _structure(
+        columns=(
+            ("sprint_retry_task_state_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("task_id", False),
+            ("status", False),
+        ),
+        uniques=(
+            (("retry_attempt_id", "task_id"), None),
+            (("project_id", "sprint_id", "retry_attempt_id", "task_id"), None),
+        ),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (("task_id",), "tasks", ("task_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_starts": _structure(
+        columns=(
+            ("sprint_retry_start_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("contract_fingerprint", False),
+            ("decision_fingerprint", False),
+            ("started_by", False),
+            ("started_at", False),
+        ),
+        uniques=((("retry_attempt_id",), None),),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_task_evidence": _structure(
+        columns=(
+            ("sprint_retry_task_evidence_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("task_id", False),
+            ("outcome_summary", False),
+            ("artifact_refs_json", False),
+            ("acceptance_result", False),
+            ("checklist_result_json", False),
+            ("evidence_fingerprint", False),
+            ("completed_by", False),
+            ("completed_at", False),
+        ),
+        uniques=((("retry_attempt_id", "task_id"), None),),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (("task_id",), "tasks", ("task_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id", "task_id"),
+                "sprint_retry_task_states",
+                ("project_id", "sprint_id", "retry_attempt_id", "task_id"),
+            ),
+        ),
+        checks=("acceptance_result in ('partially_met', 'fully_met')",),
+    ),
+    "sprint_retry_story_closures": _structure(
+        columns=(
+            ("sprint_retry_story_closure_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("story_id", False),
+            ("completion_fingerprint", False),
+            ("resolution", False),
+            ("delivered", False),
+            ("evidence", False),
+            ("known_gaps", False),
+            ("closed_by", False),
+            ("closed_at", False),
+        ),
+        uniques=((("retry_attempt_id", "story_id"), None),),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (("story_id",), "user_stories", ("story_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id", "story_id"),
+                "sprint_retry_story_states",
+                ("project_id", "sprint_id", "retry_attempt_id", "story_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_reviews": _structure(
+        columns=(
+            ("sprint_retry_review_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("review_fingerprint", False),
+            ("reviewed_by", False),
+            ("reviewed_at", False),
+        ),
+        uniques=((("retry_attempt_id",), None),),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_closures": _structure(
+        columns=(
+            ("sprint_retry_closure_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("review_fingerprint", False),
+            ("close_fingerprint", False),
+            ("closed_by", False),
+            ("closed_at", False),
+        ),
+        uniques=((("retry_attempt_id",), None),),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+        ),
+    ),
+    "sprint_retry_triage": _structure(
+        columns=(
+            ("sprint_retry_triage_id", False),
+            ("project_id", False),
+            ("sprint_id", False),
+            ("retry_attempt_id", False),
+            ("impact", False),
+            ("canonical_payload_json", False),
+            ("payload_fingerprint", False),
+            ("supersedes_sprint_retry_triage_id", True),
+            ("recorded_by", False),
+            ("recorded_at", False),
+        ),
+        uniques=(
+            (("retry_attempt_id", "sprint_retry_triage_id"), None),
+            (("retry_attempt_id", "supersedes_sprint_retry_triage_id"), None),
+            (("retry_attempt_id",), "supersedes_sprint_retry_triage_id is null"),
+        ),
+        foreign_keys=(
+            (("project_id",), "projects", ("project_id",)),
+            (("sprint_id",), "sprints", ("sprint_id",)),
+            (
+                ("project_id", "sprint_id", "retry_attempt_id"),
+                "sprint_retry_attempts",
+                ("project_id", "sprint_id", "retry_attempt_id"),
+            ),
+            (
+                ("retry_attempt_id", "supersedes_sprint_retry_triage_id"),
+                "sprint_retry_triage",
+                ("retry_attempt_id", "sprint_retry_triage_id"),
+            ),
+        ),
+        checks=("impact in ('none', 'backlog', 'specification')",),
+    ),
+}
+
+CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
+    table_names=PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.table_names | _RETRY_TABLE_NAMES,
+    structures={
+        **PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.structures,
+        **_RETRY_TABLE_STRUCTURES,
+    },
+)
+
 _RETIRED_TABLES = frozenset(
     {
         "discovery_artifacts",
@@ -1745,7 +2022,7 @@ def _sqlmodel_business_schema_manifest() -> BusinessSchemaManifest:
 
 
 def _inspected_table_structure(
-    target_engine: Engine, table_name: str
+    target_engine: Engine | Connection, table_name: str
 ) -> TableStructure:
     inspector = inspect(target_engine)
     uniques: set[tuple[tuple[str, ...], str | None]] = {
@@ -1784,7 +2061,9 @@ def _inspected_table_structure(
     )
 
 
-def _inspect_business_schema_manifest(target_engine: Engine) -> BusinessSchemaManifest:
+def _inspect_business_schema_manifest(
+    target_engine: Engine | Connection,
+) -> BusinessSchemaManifest:
     """Inspect an existing database using the same normalized manifest shape."""
     table_names = frozenset(inspect(target_engine).get_table_names())
     return BusinessSchemaManifest(
@@ -1797,7 +2076,9 @@ def _inspect_business_schema_manifest(target_engine: Engine) -> BusinessSchemaMa
     )
 
 
-def _retired_schema_references(target_engine: Engine) -> tuple[str, ...]:
+def _retired_schema_references(
+    target_engine: Engine | Connection,
+) -> tuple[str, ...]:
     """Find retired names in tables, columns, and structural SQL expressions."""
     inspector = inspect(target_engine)
     table_names = frozenset(inspector.get_table_names())
@@ -1821,7 +2102,7 @@ def _retired_schema_references(target_engine: Engine) -> tuple[str, ...]:
     return tuple(incompatible)
 
 
-def _assert_current_business_schema(target_engine: Engine) -> None:
+def _assert_current_business_schema(target_engine: Engine | Connection) -> None:
     """Allow only an empty database or the exact reviewed fresh schema."""
     if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         message = (
@@ -1922,7 +2203,35 @@ def create_db_and_tables() -> None:
 
 
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
-    """Create all current business tables from SQLModel metadata."""
+    """Create or atomically upgrade only the exact pre-retry business schema."""
     target_engine = engine_override or engine
-    _assert_current_business_schema(target_engine)
-    SQLModel.metadata.create_all(target_engine)
+    if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        _assert_current_business_schema(target_engine)
+
+    with target_engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            observed = _inspect_business_schema_manifest(connection)
+            if not observed.table_names:
+                SQLModel.metadata.create_all(connection)
+            elif observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
+                pass
+            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
+                SQLModel.metadata.create_all(
+                    connection,
+                    tables=[
+                        SQLModel.metadata.tables[table_name]
+                        for table_name in sorted(_RETRY_TABLE_NAMES)
+                    ],
+                )
+            else:
+                _assert_current_business_schema(connection)
+            if (
+                _inspect_business_schema_manifest(connection)
+                != CURRENT_BUSINESS_SCHEMA_MANIFEST
+            ):
+                _assert_current_business_schema(connection)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
