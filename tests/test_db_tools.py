@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
 
@@ -314,8 +315,10 @@ def test_failed_schema_setup_closes_the_owned_connection(
         connections[0].execute("SELECT 1")
 
 
-def test_engine_lifecycles_do_not_accumulate_global_connection_listeners() -> None:
-    """Fresh unrelated connections receive the same PRAGMAs after fixture use."""
+def test_engine_lifecycles_do_not_accumulate_global_connection_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixture connections neither duplicate nor accumulate global PRAGMAs."""
     statements: list[str] = []
 
     def trace_connection() -> sqlite3.Connection:
@@ -331,9 +334,15 @@ def test_engine_lifecycles_do_not_accumulate_global_connection_listeners() -> No
         assert before >= 1
         probe.dispose()
         statements.clear()
+        monkeypatch.setattr(
+            "tests.conftest.create_engine",
+            partial(create_engine, creator=trace_connection),
+        )
         for _ in range(3):
             with fresh_test_engine("sqlite:///:memory:"):
                 pass
+            assert statements.count("PRAGMA foreign_keys=ON") == before
+            statements.clear()
         with probe.connect():
             pass
         assert statements.count("PRAGMA foreign_keys=ON") == before

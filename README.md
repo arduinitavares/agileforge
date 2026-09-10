@@ -140,6 +140,17 @@ credential values.
 
 Use the checkout's locked Python 3.13.15 environment and the same `pyrepo-check`
 controller pinned in `.github/workflows/ci.yml`. Run from that checkout's root.
+
+Install the controller separately; `uv sync --frozen` does not install it:
+
+```sh
+uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@8651b8b377bb96f8cf9705a5bb76e6380a308007"
+uv tool update-shell
+```
+
+Restart the terminal if the executable directory was added to `PATH`. Confirm
+`pyrepo-check --help` works before running the commands below.
+
 `pyrepo-check` provisions and invokes the repository Python through uv; the full
 gate remains `./agileforge-dev check` (`sh ./agileforge-dev check` in PowerShell).
 Quality checks do not require an initialized operator profile. Before runtime
@@ -201,8 +212,8 @@ Each requested engine still creates a new in-memory SQLite database and the
 complete current schema.
 No rows, engines or mutable schema snapshots are shared between tests.
 
-The fixture's connection listener belongs to its engine. It no longer adds a
-listener to the global `Engine` class for every test. Cleanup disposes the owned
+The fixture reuses the existing foreign-key connection listener in `models.db`.
+It adds no duplicate engine-local or global listeners. Cleanup disposes the owned
 in-memory pool in `finally`, including after setup failure, instead of issuing
 DROP statements and disabling foreign keys. File-backed persistence, migration,
 rollback and process-ownership tests keep their existing real resources.
@@ -221,11 +232,12 @@ setup, call and teardown duration through the repository's `--durations=0
 Sum by phase and module to see cumulative costs; the runner's separate top-ten
 summary alone cannot establish where the suite spends all its time.
 
-On Linux, for example:
+Write logs outside the checkout so their creation does not make acceptance-mode
+smoke tests reject the checkout as dirty. On Linux, for example:
 
 ```sh
-/usr/bin/time -p ./agileforge-dev check > canonical-unique-run.log 2>&1
-/usr/bin/time -p pyrepo-check --python 3.13.15 pytest tests/workflow/test_graph_properties.py > focused-unique-run.log 2>&1
+/usr/bin/time -p ./agileforge-dev check > ../canonical-unique-run.log 2>&1
+/usr/bin/time -p pyrepo-check --python 3.13.15 pytest tests/workflow/test_graph_properties.py > ../focused-unique-run.log 2>&1
 ```
 
 Keep the exit code, commit and diff, platform and filesystem, CPU/memory,

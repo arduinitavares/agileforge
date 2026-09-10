@@ -7,12 +7,10 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
-from sqlite3 import Connection
 from threading import RLock
 from typing import cast
 
 import pytest
-from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
@@ -121,15 +119,6 @@ def fresh_test_engine(database_url: str) -> Iterator[Engine]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-
-    @event.listens_for(_engine, "connect")
-    def set_sqlite_pragma(
-        dbapi_connection: Connection,
-        _connection_record: object,
-    ) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
 
     try:
         SQLModel.metadata.create_all(_engine)
