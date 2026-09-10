@@ -37,6 +37,7 @@ from services.agent_workbench.sprint_phase import (
     record_sprint_plan_in_session,
     start_sprint_in_session,
 )
+from services.contracts.sprint import SprintPlannerOutput
 from services.sprint_retry import (
     build_sprint_retry_preview,
     retry_sprint_in_session,
@@ -50,6 +51,7 @@ from services.story_dependencies import (
 from tests.vision_lineage_fixtures import seed_accepted_vision_revision
 from tests.workflow.execution_fixtures import (
     record_following_execution_sprint_plan,
+    seed_started_execution,
     seed_started_execution_with_transitive_dependency,
     seed_started_execution_with_unselected_story,
     start_following_execution_sprint,
@@ -61,7 +63,7 @@ from tests.workflow.execution_retry_support import (
     _triage_execution_sprint,
 )
 from workflow.clock import FixedClock
-from workflow.contracts import TransitionResult
+from workflow.contracts import TransitionResult, WorkflowErrorCode
 from workflow.definitions.planning import (
     dependency_review_lifecycle_locked,
     planning_graph,
@@ -74,14 +76,19 @@ from workflow.fingerprints import (
     canonical_json,
     fact_fingerprint,
 )
-from workflow.requests import RecordPostSprintTriage, RetrySprint, StartSprintRetry
+from workflow.requests import (
+    RecordPostSprintTriage,
+    RecordSprintPlan,
+    RetrySprint,
+    StartNodeAttempt,
+    StartSprintRetry,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
 
-    from services.contracts.sprint import SprintPlannerOutput
     from workflow.facts import WorkflowFactSnapshot
 
 
@@ -2180,6 +2187,202 @@ def test_retry_generation_guards_only_block_relevant_unresolved_work(
         assert codes == set()
     else:
         assert expected_code in codes
+
+
+def test_old_business_sprint_plan_attempt_becomes_obsolete(
+    tmp_path: Path,
+) -> None:
+    """A late old-business plan result cannot mutate completed Sprint history."""
+    engine = _file_engine(tmp_path / "retry-old-business-plan-attempt.sqlite")
+    project_id, sprint_id, story_id, task_id = seed_started_execution(engine)
+    continuation_at = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    continuation_domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=continuation_at),
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        position = continuation_domain.position(project_id)
+        decision = next(
+            item
+            for item in position.decisions
+            if item.node_id == "planning.sprint.plan"
+        )
+        story = next(item for item in snapshot.stories if item.story_id == story_id)
+        specification = next(
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan" and item.status == "accepted"
+        )
+        assert specification.spec_version_id is not None
+        assert specification.spec_hash is not None
+        start_request = StartNodeAttempt(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key="old-business-plan-attempt",
+            actor="owner@example.com",
+            target_node_id="planning.sprint.plan",
+            target_instance_key=None,
+            normalized_input={"request": "pre-completion Sprint plan"},
+            model_id="fixture-model",
+            execution_settings={},
+            lease_seconds=3_600,
+        )
+        started_at = continuation_at - timedelta(seconds=1)
+        lease_expires_at = continuation_at + timedelta(days=1)
+        attempt = WorkflowNodeAttempt(
+            project_id=project_id,
+            node_id=start_request.target_node_id,
+            instance_key=start_request.target_instance_key,
+            graph_version=start_request.graph_version,
+            fact_fingerprint=start_request.fact_fingerprint,
+            business_fact_fingerprint=business_fact_fingerprint(snapshot),
+            decision_fingerprint=start_request.decision_fingerprint,
+            normalized_input_json=canonical_json(start_request.normalized_input),
+            input_fingerprint=canonical_hash(start_request.normalized_input),
+            model_id=start_request.model_id,
+            execution_settings_json=canonical_json(start_request.execution_settings),
+            idempotency_key=start_request.idempotency_key,
+            actor=start_request.actor,
+            started_at=started_at,
+            lease_expires_at=lease_expires_at,
+            attempt_fingerprint="old-business-plan-attempt",
+        )
+        session.add(attempt)
+        session.flush()
+        assert attempt.workflow_node_attempt_id is not None
+        attempt_business_fingerprint = attempt.business_fact_fingerprint
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind=start_request.kind,
+                idempotency_key=start_request.idempotency_key,
+                request_fingerprint=canonical_hash(
+                    start_request.model_dump(mode="json")
+                ),
+                request_json=canonical_json(start_request.model_dump(mode="json")),
+                result_json=canonical_json(
+                    TransitionResult(
+                        ok=True,
+                        applied_node_id="planning.sprint.plan",
+                        output={
+                            "attempt_id": attempt.workflow_node_attempt_id,
+                            "attempt_fingerprint": attempt.attempt_fingerprint,
+                            "lease_expires_at": lease_expires_at.isoformat(),
+                        },
+                    ).model_dump(mode="json")
+                ),
+                started_at=started_at,
+                completed_at=started_at,
+            )
+        )
+        continuation = RecordSprintPlan(
+            project_id=project_id,
+            graph_version=start_request.graph_version,
+            fact_fingerprint=start_request.fact_fingerprint,
+            decision_fingerprint=start_request.decision_fingerprint,
+            idempotency_key="old-business-late-plan-result",
+            actor=start_request.actor,
+            instance_key=None,
+            attempt_id=attempt.workflow_node_attempt_id,
+            attempt_fingerprint=attempt.attempt_fingerprint,
+            team_name="Late pre-completion planning team",
+            spec_version_id=specification.spec_version_id,
+            spec_hash=specification.spec_hash,
+            planner_output=SprintPlannerOutput.model_validate(
+                {
+                    "sprint_goal": "Late pre-completion plan output.",
+                    "selected_stories": [
+                        {
+                            "story_id": story.story_id,
+                            "story_item_id": story.source_story_item_id,
+                            "tasks": [
+                                {
+                                    "description": "A late plan must not persist.",
+                                    "relevant_spec_item_ids": list(story.spec_item_ids),
+                                    "task_kind": "implementation",
+                                    "artifact_targets": ["retry test"],
+                                    "workstream_tags": ["workflow"],
+                                    "checklist_items": ["Do not write an artifact"],
+                                }
+                            ],
+                            "reason_for_selection": "The original Sprint selected it.",
+                        }
+                    ],
+                }
+            ),
+        )
+        session.commit()
+
+    execution_domain = _domain(engine)
+    _close_execution_sprint(
+        execution_domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    _triage_execution_sprint(
+        execution_domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+    )
+    with Session(engine) as session:
+        source = session.get(Sprint, sprint_id)
+        assert source is not None
+        assert source.completed_at is not None
+        source_completed_at = (
+            source.completed_at.replace(tzinfo=UTC)
+            if source.completed_at.tzinfo is None
+            else source.completed_at.astimezone(UTC)
+        )
+        assert started_at < source_completed_at <= continuation_at
+        assert continuation_at < lease_expires_at
+        current = WorkflowFactRepository(session).load(project_id)
+        assert business_fact_fingerprint(current) != attempt_business_fingerprint
+        preview = build_sprint_retry_preview(
+            session,
+            snapshot=current,
+            sprint_id=sprint_id,
+        )
+        assert preview.blockers == ()
+    before_business_rows = {
+        table_name: rows
+        for table_name, rows in _raw_rows(engine).items()
+        if table_name
+        not in {
+            "workflow_node_attempts",
+            "workflow_node_attempt_outcomes",
+            "workflow_transition_receipts",
+        }
+    }
+
+    result = continuation_domain.transition(continuation)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    after_business_rows = {
+        table_name: rows
+        for table_name, rows in _raw_rows(engine).items()
+        if table_name
+        not in {
+            "workflow_node_attempts",
+            "workflow_node_attempt_outcomes",
+            "workflow_transition_receipts",
+        }
+    }
+    assert after_business_rows == before_business_rows
+    with Session(engine) as session:
+        outcome = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                WorkflowNodeAttemptOutcome.workflow_node_attempt_id
+                == continuation.attempt_id
+            )
+        ).one()
+        assert outcome.status == "obsolete"
 
 
 @pytest.mark.parametrize(

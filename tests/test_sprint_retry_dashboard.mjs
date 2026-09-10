@@ -647,6 +647,110 @@ test('retry preview details escape malicious blocker fields', async () => {
     assert.doesNotMatch(markup, /<script>|<img /);
 });
 
+test('retry preview renders each persisted repository provenance state before confirmation', async () => {
+    const boundFingerprint = fingerprint('b');
+    const cases = [
+        {
+            name: 'bound repository values',
+            provenance: {
+                state: 'bound',
+                repository_binding_id: 17,
+                worktree_path: 'C:/worktrees/<img src=x onerror=alert(1)>/issue-260',
+                branch_name: 'feature/<script>alert(1)</script>',
+                head_sha: 'a'.repeat(40),
+                fingerprint: boundFingerprint,
+            },
+            visible: [
+                'Repository provenance',
+                'Binding ID',
+                '#17',
+                'Worktree path',
+                'C:/worktrees/&lt;img src=x onerror=alert(1)&gt;/issue-260',
+                'Branch',
+                'feature/&lt;script&gt;alert(1)&lt;/script&gt;',
+                'HEAD',
+                'a'.repeat(40),
+                'Binding fingerprint',
+                boundFingerprint,
+            ],
+        },
+        {
+            name: 'detached bound repository',
+            provenance: {
+                state: 'bound',
+                repository_binding_id: 18,
+                worktree_path: 'C:/worktrees/detached',
+                branch_name: null,
+                head_sha: 'b'.repeat(40),
+                fingerprint: fingerprint('c'),
+            },
+            visible: ['Repository provenance', 'Binding ID', '#18', 'Detached HEAD (no branch)'],
+        },
+        {
+            name: 'unbound repository',
+            provenance: null,
+            visible: ['Repository provenance', 'No repository is currently bound to this Project.'],
+        },
+        {
+            name: 'invalid repository binding',
+            provenance: { state: 'invalid', repository_binding_id: 19 },
+            visible: ['Repository provenance', 'Repository binding #19 is unavailable.'],
+        },
+    ];
+
+    for (const { name, provenance, visible } of cases) {
+        const harness = retryHarness({
+            previews: [retryPreview({ repository_provenance: provenance })],
+        });
+
+        await harness.open();
+
+        const markup = harness.elements['human-action-retry-details'].innerHTML;
+        assert.match(markup, /aria-label="Repository provenance"/, name);
+        for (const expected of visible) assert.ok(markup.includes(expected), `${name}: ${expected}`);
+        assert.doesNotMatch(markup, /<script>|<img /, name);
+        assert.equal(harness.dialog.open, true, name);
+        assert.equal(harness.retryPosts().length, 0, name);
+    }
+});
+
+test('malformed retry provenance rejects the preview before any retry POST', async () => {
+    const validBound = {
+        state: 'bound',
+        repository_binding_id: 20,
+        worktree_path: 'C:/worktrees/issue-260',
+        branch_name: 'feature/issue-260',
+        head_sha: 'c'.repeat(40),
+        fingerprint: fingerprint('d'),
+    };
+    const malformed = [
+        undefined,
+        {},
+        { state: 'unknown', repository_binding_id: 20 },
+        { state: 'invalid', repository_binding_id: 0 },
+        { ...validBound, repository_binding_id: 0 },
+        { ...validBound, worktree_path: '' },
+        { ...validBound, branch_name: '' },
+        { ...validBound, head_sha: '' },
+        { ...validBound, fingerprint: 'sha256:not-a-fingerprint' },
+    ];
+
+    for (const provenance of malformed) {
+        const harness = retryHarness({
+            previews: [retryPreview({ repository_provenance: provenance })],
+        });
+
+        await harness.open();
+
+        assert.equal(harness.dialog.open, false);
+        assert.match(
+            harness.elements['project-error'].textContent,
+            /retry preview did not match the selected Sprint/i,
+        );
+        assert.equal(harness.retryPosts().length, 0);
+    }
+});
+
 test('a preview that arrives after Project selection changes cannot revive the stale retry dialog', async () => {
     let resolvePreview;
     const harness = retryHarness({

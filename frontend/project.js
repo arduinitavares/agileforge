@@ -4832,6 +4832,7 @@ function openHumanDialog(config) {
 function retryPreviewForScope(value, projectId, sprintId) {
     const preview = reviewObject(value);
     const blockers = Array.isArray(preview?.blockers) ? preview.blockers : null;
+    const provenance = retryPreviewProvenance(preview?.repository_provenance);
     if (
         preview?.project_id !== projectId
         || preview.sprint_id !== sprintId
@@ -4844,6 +4845,7 @@ function retryPreviewForScope(value, projectId, sprintId) {
         || typeof preview.preserved_history !== 'string'
         || !preview.preserved_history.trim()
         || !isSha256Fingerprint(preview.expected_state_fingerprint)
+        || provenance === null
         || blockers === null
         || !blockers.every((blocker) => (
             reviewObject(blocker) !== null
@@ -4856,7 +4858,38 @@ function retryPreviewForScope(value, projectId, sprintId) {
             && (blocker.subject_id === null || positiveInteger(blocker.subject_id))
         ))
     ) return null;
-    return preview;
+    return { ...preview, repositoryProvenance: provenance };
+}
+
+function retryPreviewProvenance(value) {
+    if (value === null) return { state: 'unbound' };
+    const provenance = reviewObject(value);
+    if (provenance?.state === 'invalid' && positiveInteger(provenance.repository_binding_id)) {
+        return {
+            state: 'invalid',
+            repositoryBindingId: provenance.repository_binding_id,
+        };
+    }
+    if (
+        provenance?.state !== 'bound'
+        || !positiveInteger(provenance.repository_binding_id)
+        || typeof provenance.worktree_path !== 'string'
+        || !provenance.worktree_path.trim()
+        || !(provenance.branch_name === null || (
+            typeof provenance.branch_name === 'string' && provenance.branch_name.trim()
+        ))
+        || typeof provenance.head_sha !== 'string'
+        || !provenance.head_sha.trim()
+        || !isSha256Fingerprint(provenance.fingerprint)
+    ) return null;
+    return {
+        state: 'bound',
+        repositoryBindingId: provenance.repository_binding_id,
+        worktreePath: provenance.worktree_path,
+        branchName: provenance.branch_name,
+        headSha: provenance.head_sha,
+        fingerprint: provenance.fingerprint,
+    };
 }
 
 function retryPreviewDescription(preview) {
@@ -4877,9 +4910,43 @@ function retryPreviewDialogMarkup(preview) {
             <span class="text-slate-600">(${escapeWorkflowText(subject)})</span>
         </li>`;
     }).join('');
+    const provenance = retryPreviewProvenanceMarkup(preview.repositoryProvenance);
     return `<ul class="space-y-1" aria-label="Retry scope">${scopeItems.map((item) => (
         `<li>${escapeWorkflowText(item)}</li>`
-    )).join('')}</ul>${blockers ? `<ul class="space-y-2" aria-label="Retry blockers">${blockers}</ul>` : ''}`;
+    )).join('')}</ul>${provenance}${blockers ? `<ul class="space-y-2" aria-label="Retry blockers">${blockers}</ul>` : ''}`;
+}
+
+function retryPreviewProvenanceMarkup(provenance) {
+    if (provenance.state === 'unbound') {
+        return `<section class="mt-3" aria-label="Repository provenance">
+            <h3 class="font-medium text-slate-900">Repository provenance</h3>
+            <p class="text-slate-600">No repository is currently bound to this Project.</p>
+        </section>`;
+    }
+    if (provenance.state === 'invalid') {
+        return `<section class="mt-3" aria-label="Repository provenance">
+            <h3 class="font-medium text-slate-900">Repository provenance</h3>
+            <p class="text-slate-600">Repository binding #${escapeWorkflowText(String(provenance.repositoryBindingId))} is unavailable.</p>
+        </section>`;
+    }
+    const branch = provenance.branchName === null
+        ? 'Detached HEAD (no branch)'
+        : provenance.branchName;
+    return `<section class="mt-3" aria-label="Repository provenance">
+        <h3 class="font-medium text-slate-900">Repository provenance</h3>
+        <dl class="mt-1 grid gap-x-3 gap-y-1 text-sm sm:grid-cols-[max-content_minmax(0,1fr)]">
+            <dt class="font-medium text-slate-700">Binding ID</dt>
+            <dd class="break-all">#${escapeWorkflowText(String(provenance.repositoryBindingId))}</dd>
+            <dt class="font-medium text-slate-700">Worktree path</dt>
+            <dd class="break-all">${escapeWorkflowText(provenance.worktreePath)}</dd>
+            <dt class="font-medium text-slate-700">Branch</dt>
+            <dd class="break-all">${escapeWorkflowText(branch)}</dd>
+            <dt class="font-medium text-slate-700">HEAD</dt>
+            <dd class="break-all">${escapeWorkflowText(provenance.headSha)}</dd>
+            <dt class="font-medium text-slate-700">Binding fingerprint</dt>
+            <dd class="break-all">${escapeWorkflowText(provenance.fingerprint)}</dd>
+        </dl>
+    </section>`;
 }
 
 function retryPreviewTarget(state, control) {

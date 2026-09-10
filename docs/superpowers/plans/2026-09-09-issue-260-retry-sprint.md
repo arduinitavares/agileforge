@@ -439,4 +439,70 @@ The next full gate was interrupted after it exposed a new stale-start reason nam
 
 ## Plan self-review
 
+### Task 8: Address PR 264 provenance feedback and CI timeouts
+
+Approved follow-up, 2026-09-10: finish PR 264 before beginning issue 265. Base is
+`d98c16b55fcbfb5cf01aa5152da9f8e8e240629f`. The completed broad review and earlier
+fixes remain accepted; this task receives a fresh review of its bounded delta.
+ROOT owns all checks through the existing capture helper and every phase release.
+The implementer owns only the files explicitly released below, with no subagents,
+GitHub writes, operator runtime changes, cleanup, or unrequested production edits.
+
+**Files:** `frontend/project.js`, `tests/test_sprint_retry_dashboard.mjs`,
+`tests/workflow/test_sprint_retry_transitions.py`, `.github/workflows/ci.yml`, and
+`tests/test_ci_contract.py`, plus the existing retry browser case in
+`tests/e2e/test_single_project_lifecycle_ui.py`. ROOT owns this plan and the existing
+SDD ledger.
+
+**Requirements and decisions:**
+
+- Show the retry preview's descriptive persisted repository provenance before
+  confirmation: binding ID, worktree path, branch, HEAD and binding fingerprint.
+  Use accessible labels, wrapping for long values, and the existing escaping
+  helper for every interpolated string. Keep scope, blockers and dialog ownership.
+- Validate the API's actual variants: `null` means unbound; `state: invalid` has a
+  positive binding ID; `state: bound` has a positive binding ID, nonempty worktree
+  path and HEAD strings, a null or nonempty branch, and a SHA-256 binding
+  fingerprint. A null branch is valid detached HEAD; label it explicitly. Render clear
+  unbound/invalid explanations. These recognized variants remain descriptive;
+  add no branch restriction, Git operation, server blocker or binding mutation.
+  Missing, unknown or malformed provenance rejects the preview through the
+  existing invalid-preview path. Do not invent tighter Git syntax constraints.
+- Exercise bound/unbound/invalid display and malformed response rejection through
+  the actual dashboard harness, including escaping and no automatic POST. Preserve
+  explicit confirmation and its existing server-bound fingerprint.
+- Strengthen the existing issue-260 browser lifecycle case with representative
+  bound provenance and visible-value assertions before its existing screenshot
+  and confirmation. Preserve the request counts and rest of that lifecycle.
+- Characterize an old-business, pre-completion Sprint-plan attempt with no terminal
+  outcome: it must not block retry; its later continuation must return
+  `ATTEMPT_OBSOLETE` and create no planning artifact or changes to existing business
+  rows. Use existing synthetic lifecycle fixtures and real domain continuation,
+  with matching durable request/attempt identity and an unexpired lease so the
+  business mismatch is the relevant guard. Test accepted current behavior; do not
+  change generation eligibility or manufacture a failing production bug. Point out
+  any limitations of the fixture or additional mismatch guards in the report.
+- Set only the Linux full gate's job timeout to **90 minutes** and the Windows
+  full gate's to **180 minutes**. Update their existing CI contract coverage.
+  Preserve all test selection, security cases, runner versions and canonical
+  commands. These are validation budgets, not a performance improvement for #265.
+  GitHub run 34427482972 stopped at 45/90 minutes; local final pytest completed in
+  101m46s. Keep sufficient room for the entire gate and hosted-runner variation.
+
+- [x] Phase 1: add tests only, freeze files, and report exact selectors to ROOT.
+  ROOT captures genuine failing UI/CI contracts and the passing or failing
+  characterization separately. Explain each assertion's protected behavior.
+- [x] Phase 2: after ROOT releases production, implement only the dialog and CI
+  changes; freeze files for ROOT's checks. No checks or commits by the implementer.
+- [x] Phase 3: ROOT verifies all Node suites, owning Python characterization and
+  existing late-output/relevance tests, CI contracts, focused browser coverage,
+  scoped Ruff/format/Ty and whitespace. Correct genuine failures within this task.
+  CI will run the unchanged full canonical gate on both hosted platforms after
+  push; do not duplicate the approximately 102-minute local gate for this delta.
+- [ ] Phase 4: ROOT inspects the actual diff, commits the reviewed candidates,
+  obtains fresh independent spec/quality review, and addresses scoped findings.
+  Push the accepted follow-up, verify hosted CI on that exact commit, and merge
+  only after successful checks and review as authorized by the user's proceed.
+  Preserve all worktree evidence; do not run an operator Sprint retry or #265 work.
+
 Coverage: storage/history/schema (1), binding/dependencies/hash compatibility (2), eligibility/atomicity/start (3), full lifecycle/replay/repeat retry (4), CLI/API/read parity (5), dashboard/reload (6), two-Sprint acceptance/no external mutation/quality and delivery (7). Interfaces are additive and source requirements remain original. Original serialized transition payloads and empty-retry snapshot fingerprints remain unchanged. Steps carry concrete tests, implementation algorithms, verification commands, and commits; exact existing adapter/test paths are resolved in the task report before edits where repository organization supplies their names.

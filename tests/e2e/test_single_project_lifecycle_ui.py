@@ -1753,7 +1753,17 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
             "story_ids": [101],
             "task_ids": [71],
             "preserved_history": "Original completion evidence remains immutable.",
-            "repository_provenance": None,
+            "repository_provenance": {
+                "state": "bound",
+                "repository_binding_id": 17,
+                "worktree_path": (
+                    "C:/worktrees/issue-260-retry-sprint/"
+                    "with-a-deliberately-long-segment-for-dialog-wrapping"
+                ),
+                "branch_name": "feature/issue-260-retry-sprint",
+                "head_sha": "a" * 40,
+                "fingerprint": _fingerprint("b"),
+            },
             "blockers": self.retry_preview_blockers,
             "expected_state_fingerprint": _fingerprint("f"),
         }
@@ -3967,6 +3977,15 @@ def _capture_issue_260_retry_preview(
     expect(dialog).to_contain_text("Sprint #31")
     expect(dialog).to_contain_text("Story #101")
     expect(dialog).to_contain_text("Task #71")
+    expect(dialog).to_contain_text("Repository provenance")
+    expect(dialog).to_contain_text("Binding ID")
+    expect(dialog).to_contain_text("#17")
+    expect(dialog).to_contain_text(
+        "C:/worktrees/issue-260-retry-sprint/with-a-deliberately-long-segment-for-dialog-wrapping"
+    )
+    expect(dialog).to_contain_text("feature/issue-260-retry-sprint")
+    expect(dialog).to_contain_text("a" * 40)
+    expect(dialog).to_contain_text(_fingerprint("b"))
     preview_screenshot = tmp_path / "issue-260-retry-preview.png"
     dialog.screenshot(path=str(preview_screenshot))
     assert preview_screenshot.is_file()

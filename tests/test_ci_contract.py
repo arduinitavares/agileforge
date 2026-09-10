@@ -18,7 +18,8 @@ PYREPO_CHECK_SOURCE = (
 )
 CANONICAL_PYTHON = "3.13.15"
 CI_UV_VERSION = "0.12.8"
-WINDOWS_FULL_GATE_TIMEOUT_MINUTES: int = 90
+LINUX_FULL_GATE_TIMEOUT_MINUTES: int = 90
+WINDOWS_FULL_GATE_TIMEOUT_MINUTES: int = 180
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -455,6 +456,16 @@ def test_windows_full_gate_executes_canonical_check(
     )
     assert "$gateExit = $LASTEXITCODE" in gate_run
     assert "exit $gateExit" in gate_run
+
+
+def test_linux_full_gate_has_room_for_the_canonical_validation_budget(
+    workflow: dict[str, object],
+) -> None:
+    """Reserve the proven full-gate budget without changing its command."""
+    job = _job(workflow, "python-313")
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == LINUX_FULL_GATE_TIMEOUT_MINUTES
 
 
 def test_windows_jobs_upload_exact_narrow_artifacts(
