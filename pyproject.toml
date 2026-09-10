@@ -71,7 +71,7 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-m 'not integration' --disable-socket --allow-unix-socket"
+addopts = "-m 'not integration' --disable-socket --allow-unix-socket --durations=0 --durations-min=0"
 testpaths = ["tests"]
 markers = [
     "integration: marks environment-dependent acceptance or external-provider tests",

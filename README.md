@@ -142,11 +142,15 @@ Use only the current checkout's `./agileforge-dev` in branches and linked
 worktrees. Record `info --json` before mutations.
 
 ```sh
-uv run --frozen pytest -q
-uv run --frozen ruff check .
-uv run --frozen ty check
-uv run --frozen ruff format --check .
+pyrepo-check --python 3.13.15 pytest tests/workflow/test_graph_properties.py
+pyrepo-check --python 3.13.15 ruff annotations ty bandit workflow/fingerprints.py
+./agileforge-dev check
 ```
+
+Use the owning test file or node for everyday edits; the graph file above is an
+example, not coverage for every change. Run the full launcher gate before final
+review. See [Python validation and timing](docs/testing/python-performance.md)
+for coverage boundaries, measured budgets and reproducible timing commands.
 
 See [CONTEXT.md](CONTEXT.md) for domain language,
 [docs/agent-cli-manual.md](docs/agent-cli-manual.md) for the command contract,
