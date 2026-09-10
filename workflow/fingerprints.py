@@ -30,6 +30,11 @@ def _datetime_to_utc_z(value: datetime) -> str:
 
 def normalize_for_hash(value: object) -> object:
     """Normalize objects into deterministic JSON-compatible values."""
+    # JSON leaves dominate repeated snapshot normalization. Exact types keep
+    # subclasses on the existing datetime/Mapping/Sequence dispatch path.
+    kind = type(value)
+    if kind is str or kind is int or value is None or kind is float or kind is bool:
+        return value
     if isinstance(value, datetime):
         return _datetime_to_utc_z(value)
     if isinstance(value, date):

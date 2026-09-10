@@ -138,15 +138,149 @@ credential values.
 
 ## Development
 
-Use only the current checkout's `./agileforge-dev` in branches and linked
-worktrees. Record `info --json` before mutations.
+Use the checkout's locked Python 3.13.15 environment and the same `pyrepo-check`
+controller pinned in `.github/workflows/ci.yml`. Run from that checkout's root.
+
+Install the controller separately; `uv sync --frozen` does not install it:
 
 ```sh
-uv run --frozen pytest -q
-uv run --frozen ruff check .
-uv run --frozen ty check
-uv run --frozen ruff format --check .
+uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@8651b8b377bb96f8cf9705a5bb76e6380a308007"
+uv tool update-shell
 ```
+
+Restart the terminal if the executable directory was added to `PATH`. Confirm
+`pyrepo-check --help` works before running the commands below.
+
+`pyrepo-check` provisions and invokes the repository Python through uv; the full
+gate remains `./agileforge-dev check` (`sh ./agileforge-dev check` in PowerShell).
+Quality checks do not require an initialized operator profile. Before runtime
+mutations, inspect the selected existing profile with
+`./agileforge-dev info --profile <name> --json`.
+
+### Everyday feedback
+
+Select the owning tests, then expand to their callers when a contract changes:
+
+```sh
+# Pure graph decisions, fingerprints, ordering and guard properties.
+pyrepo-check --python 3.13.15 pytest tests/workflow/test_graph_properties.py
+
+# Database fixture ownership and canonical fingerprint compatibility.
+pyrepo-check --python 3.13.15 pytest tests/test_db_tools.py tests/test_agent_workbench_fingerprints.py tests/workflow/test_fingerprints.py
+
+# One persisted retry lifecycle, including reloads and stale actions.
+pyrepo-check --python 3.13.15 pytest tests/workflow/test_sprint_retry_execution.py::test_multistory_retries_preserve_history_reload_and_reject_stale_actions
+
+# File-oriented checks for the changed Python files.
+pyrepo-check --python 3.13.15 ruff annotations ty bandit workflow/fingerprints.py tests/conftest.py
+```
+
+These are focused selections. The pure graph file does not exercise database
+transactions, API adapters, browser behavior, packaged installation or process
+ownership. A changed fixture, shared hash, persistence contract or runtime
+launcher needs its regression tests and the full gate. Focused coverage reports
+are guidance, not a full-suite coverage result.
+
+### Full validation
+
+```sh
+./agileforge-dev check
+```
+
+This still runs lock validation, the canonical Python quality checks and pytest,
+the registered Node suites, whitespace validation and isolated distribution
+verification in the existing order. Default pytest selection still excludes
+`integration` and blocks external sockets. No timeout, platform marker or
+required check is relaxed by the performance changes.
+
+The real launcher smoke checks require a clean checkout. Commit the candidate
+locally before this gate; uncommitted changes cause acceptance-mode
+initialization to fail. Run it before requesting final review or merging, after
+changes to shared test fixtures or workflow authority, and when focused results
+leave affected callers uncertain. Follow the separate operator acceptance
+checklist when real provider or product acceptance is needed; this gate does not
+perform those workflows.
+
+### Isolation and the optimization boundary
+
+The autouse database guard is installed for every test. Its getters request the
+function-scoped `engine` fixture on demand; an explicit `engine` or `session`
+argument also constructs it normally. All requests in that test resolve to the
+same fixture. A per-test lock also serializes concurrent first requests from
+background or TestClient threads. Pure tests no longer build an unused schema.
+Each requested engine still creates a new in-memory SQLite database and the
+complete current schema.
+No rows, engines or mutable schema snapshots are shared between tests.
+
+The fixture reuses the existing foreign-key connection listener in `models.db`.
+It adds no duplicate engine-local or global listeners. Cleanup disposes the owned
+in-memory pool in `finally`, including after setup failure, instead of issuing
+DROP statements and disabling foreign keys. File-backed persistence, migration,
+rollback and process-ownership tests keep their existing real resources.
+
+Canonical normalization returns exact built-in JSON scalar values before
+checking the more expensive datetime and container protocols. Subclasses keep
+the previous dispatch path. Key-collision rejection, datetime conversion,
+canonical bytes and SHA-256 inputs are unchanged. There is no cache of mutable
+workflow facts or validation outcomes and no parallel pytest execution.
+
+### Reproducing measurements
+
+Retain the complete output in a new file for each run. Pytest reports every
+setup, call and teardown duration through the repository's `--durations=0
+--durations-min=0` configuration. This adds reporting without changing selection.
+Sum by phase and module to see cumulative costs; the runner's separate top-ten
+summary alone cannot establish where the suite spends all its time.
+
+Write logs outside the checkout so their creation does not make acceptance-mode
+smoke tests reject the checkout as dirty. On Linux, for example:
+
+```sh
+/usr/bin/time -p ./agileforge-dev check > ../canonical-unique-run.log 2>&1
+/usr/bin/time -p pyrepo-check --python 3.13.15 pytest tests/workflow/test_graph_properties.py > ../focused-unique-run.log 2>&1
+```
+
+Keep the exit code, commit and diff, platform and filesystem, CPU/memory,
+Python/dependency/controller versions, exact command and selected node IDs.
+Record whether dependencies and browser binaries are already installed. Run
+one benchmark workload at a time, with fresh Python processes and fresh test
+databases; compare warm dependency caches separately from environment setup.
+Measure pytest time and total command wall time separately. The full gate also
+performs checks and package verification outside pytest.
+
+### Measured feedback and budgets
+
+Issue #265 measurements used serial runs on a Core Ultra 7 165H host, Windows 11
+and Ubuntu 22.04 under WSL2 on ext4, with Python 3.13.15 and warm dependencies.
+The baseline source was `6d434f4d`; each pair uses the same selected test nodes.
+Linux used the CI-pinned controller `8651b8b`; the Windows pair used `a417a5f`
+on both sides. Compare results within each environment, not across platforms.
+
+| Selection | Environment | Before wall time | Final wall time | Fixed target |
+| --- | --- | ---: | ---: | ---: |
+| 45 pure graph tests | Linux | 5.90s | 3.78s | <=5.31s |
+| Graph plus one retry lifecycle, 46 tests | Linux | 56.35s | 40.45-40.76s | <=50.71s |
+| Same 46 tests | Windows | 67.34s | 51.28-52.23s | <=60.60s |
+| Same 46 tests with `--coverage` | Linux | 81.54s | 73.82-78.01s | <=73.39s, missed |
+
+The pure graph fixture phases fell from 3.44s to 1.26s, meeting their target of
+at least a 50% reduction. Earlier pure-command repeats took 3.76s and 8.23s;
+both spent 1.46s in pytest, so the slower command missed its wall budget outside
+pytest. All trials are retained. The covered selection also missed its target;
+these results do not establish that every issue acceptance criterion is met.
+
+The Linux baseline spent 4574.96s in pytest and 5032.40s in the command before
+two launcher smoke failures stopped later stages. The uncommitted timing config
+violated the clean-checkout requirement; both tests passed after a local commit.
+That incomplete command is not a comparable full-gate baseline. The investigation
+targets were <=4117.46s for the matching pytest stage and <=4529.16s for the full
+command. The final canonical result belongs in the retained validation report.
+Budgets are measurement targets, not test timeouts or universal CI guarantees.
+
+The historical Windows runs of 5,547.66 and 6,106.09 pytest seconds used different
+revisions and are not a controlled before/after comparison. Linux development
+and CI measurements must remain separate from them. Container and platform
+cutover work belongs to issue #263.
 
 See [CONTEXT.md](CONTEXT.md) for domain language,
 [docs/agent-cli-manual.md](docs/agent-cli-manual.md) for the command contract,

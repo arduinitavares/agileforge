@@ -5,12 +5,12 @@ import os
 import socket
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
-from sqlite3 import Connection
+from threading import RLock
+from typing import cast
 
 import pytest
-from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
@@ -59,6 +59,7 @@ def _permit_windows_testclient_socketpair(
     if sys.platform == "win32":
         monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
+
 _TEST_MODEL_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "models.test.yaml"
 )
@@ -105,58 +106,51 @@ def test_db_url() -> str:
 @pytest.fixture
 def engine(test_db_url: str) -> Iterator[Engine]:  # pylint: disable=redefined-outer-name
     """Create a fresh in-memory database for each test."""
+    with fresh_test_engine(test_db_url) as test_engine:
+        yield test_engine
 
-    # Enable foreign key support for SQLite
-    @event.listens_for(Engine, "connect")
-    def set_sqlite_pragma(
-        dbapi_connection: Connection,
-        _connection_record: object,
-    ) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
 
-    # Use _engine to avoid redefining the 'engine' fixture name
-    # Use StaticPool to ensure in-memory DB persists across connections in the same test
+@contextmanager
+def fresh_test_engine(database_url: str) -> Iterator[Engine]:
+    """Own one in-memory database, including cleanup after failed setup."""
     _engine = create_engine(
-        test_db_url,
+        database_url,
         echo=False,
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
 
-    # Import here to avoid circular imports.
-    # We disable unused-import as these models are needed to populate
-    # SQLModel.metadata before create_all() is called.
-
-    # Create all tables
-    SQLModel.metadata.create_all(_engine)
-
-    yield _engine
-
-    # Cleanup
-    # SQLite cannot topologically drop the intentionally cyclic immutable
-    # Specification candidate/registry lineage while FK checks are enabled.
-    # Disable enforcement only for schema teardown; every test runs with it on.
-    with _engine.connect() as connection:
-        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
-    SQLModel.metadata.drop_all(_engine)
+    try:
+        SQLModel.metadata.create_all(_engine)
+        yield _engine
+    finally:
+        # Closing the owned in-memory pool discards its schema and rows without
+        # issuing DROP statements or disabling foreign key enforcement.
+        _engine.dispose()
 
 
 @pytest.fixture(autouse=True)
 def patch_get_engine_globally(
-    engine: Engine,
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Automatically patch get_engine() in all modules to return the test engine.
 
     This ensures tests never accidentally hit the production database.
-    The autouse=True means this runs for every test automatically.
+    Install the guard for every test, constructing its function-scoped database
+    only when it explicitly requests engine/session or calls get_engine().
     """
+    engine_lock = RLock()
+
+    def get_test_engine() -> Engine:
+        # Pytest does not synchronize two first-time dynamic fixture requests.
+        with engine_lock:
+            return cast("Engine", request.getfixturevalue("engine"))
+
     # Patch the agile_sqlmodel module's get_engine function
-    monkeypatch.setattr(agile_sqlmodel, "get_engine", lambda: engine)
-    monkeypatch.setattr(model_db, "get_engine", lambda: engine)
+    monkeypatch.setattr(agile_sqlmodel, "get_engine", get_test_engine)
+    monkeypatch.setattr(model_db, "get_engine", get_test_engine)
 
     # Also patch in all modules that import get_engine
     # These need explicit patching because they import at module load time
@@ -172,7 +166,7 @@ def patch_get_engine_globally(
         try:
             module = importlib.import_module(module_path)
             if hasattr(module, "get_engine"):
-                monkeypatch.setattr(module, "get_engine", lambda: engine)
+                monkeypatch.setattr(module, "get_engine", get_test_engine)
         except ImportError:
             pass  # Module not imported in this test, skip
 
