@@ -182,10 +182,13 @@ verification in the existing order. Default pytest selection still excludes
 `integration` and blocks external sockets. No timeout, platform marker or
 required check is relaxed by the performance changes.
 
-The real launcher smoke checks require a clean checkout. Commit the candidate locally before this gate; uncommitted changes cause acceptance-mode initialization to fail. Run it before requesting final review or merging, after changes to shared test
-fixtures or workflow authority, and when focused results leave affected callers
-uncertain. Follow the separate operator acceptance checklist when real provider
-or product acceptance is needed; this gate does not perform those workflows.
+The real launcher smoke checks require a clean checkout. Commit the candidate
+locally before this gate; uncommitted changes cause acceptance-mode
+initialization to fail. Run it before requesting final review or merging, after
+changes to shared test fixtures or workflow authority, and when focused results
+leave affected callers uncertain. Follow the separate operator acceptance
+checklist when real provider or product acceptance is needed; this gate does not
+perform those workflows.
 
 ### Isolation and the optimization boundary
 
@@ -194,8 +197,8 @@ function-scoped `engine` fixture on demand; an explicit `engine` or `session`
 argument also constructs it normally. All requests in that test resolve to the
 same fixture. A per-test lock also serializes concurrent first requests from
 background or TestClient threads. Pure tests no longer build an unused schema.
-Each requested engine
-still creates a new in-memory SQLite database and the complete current schema.
+Each requested engine still creates a new in-memory SQLite database and the
+complete current schema.
 No rows, engines or mutable schema snapshots are shared between tests.
 
 The fixture's connection listener belongs to its engine. It no longer adds a
@@ -233,9 +236,35 @@ databases; compare warm dependency caches separately from environment setup.
 Measure pytest time and total command wall time separately. The full gate also
 performs checks and package verification outside pytest.
 
-Timing budgets and the before/after measurements for issue #265 are recorded in
-the retained validation report. They are investigation thresholds for the
-measured environment, not test timeouts or a universal CI service-level promise.
+### Measured feedback and budgets
+
+Issue #265 measurements used serial runs on a Core Ultra 7 165H host, Windows 11
+and Ubuntu 22.04 under WSL2 on ext4, with Python 3.13.15 and warm dependencies.
+The baseline source was `6d434f4d`; each pair uses the same selected test nodes.
+Linux used the CI-pinned controller `8651b8b`; the Windows pair used `a417a5f`
+on both sides. Compare results within each environment, not across platforms.
+
+| Selection | Environment | Before wall time | Final wall time | Fixed target |
+| --- | --- | ---: | ---: | ---: |
+| 45 pure graph tests | Linux | 5.90s | 3.78s | <=5.31s |
+| Graph plus one retry lifecycle, 46 tests | Linux | 56.35s | 40.45-40.76s | <=50.71s |
+| Same 46 tests | Windows | 67.34s | 51.28-52.23s | <=60.60s |
+| Same 46 tests with `--coverage` | Linux | 81.54s | 73.82-78.01s | <=73.39s, missed |
+
+The pure graph fixture phases fell from 3.44s to 1.26s, meeting their target of
+at least a 50% reduction. Earlier pure-command repeats took 3.76s and 8.23s;
+both spent 1.46s in pytest, so the slower command missed its wall budget outside
+pytest. All trials are retained. The covered selection also missed its target;
+these results do not establish that every issue acceptance criterion is met.
+
+The Linux baseline spent 4574.96s in pytest and 5032.40s in the command before
+two launcher smoke failures stopped later stages. The uncommitted timing config
+violated the clean-checkout requirement; both tests passed after a local commit.
+That incomplete command is not a comparable full-gate baseline. The investigation
+targets were <=4117.46s for the matching pytest stage and <=4529.16s for the full
+command. The final canonical result belongs in the retained validation report.
+Budgets are measurement targets, not test timeouts or universal CI guarantees.
+
 The historical Windows runs of 5,547.66 and 6,106.09 pytest seconds used different
 revisions and are not a controlled before/after comparison. Linux development
 and CI measurements must remain separate from them. Container and platform
