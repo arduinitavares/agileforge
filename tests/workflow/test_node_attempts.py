@@ -25,6 +25,7 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from repositories.workflow import WorkflowFactRepository
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
@@ -905,6 +906,11 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
 
     assert completed.ok is True
     with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        assert any(
+            guard.node_id == "backlog.generate" and guard.integrity == "canonical"
+            for guard in snapshot.provider_generation_guards
+        )
         assert session.exec(select(BacklogArtifact)).one() is not None
         outcome = _backlog_outcomes(session)[0]
         assert outcome.status == "success"
@@ -1265,9 +1271,7 @@ def test_backlog_correction_replay_exact_and_conflicts(engine: Engine) -> None:
             idempotency_key=stored.idempotency_key,
             actor=stored.actor,
             correlation_id=stored.correlation_id,
-            semantic_input={
-                "backlog_correction": {"guidance": "Only guidance."}
-            },
+            semantic_input={"backlog_correction": {"guidance": "Only guidance."}},
         ),
         # Non-dict nested value
         NodeAttemptReplayQuery(
@@ -1336,7 +1340,9 @@ def test_backlog_correction_replay_exact_and_conflicts(engine: Engine) -> None:
             WorkflowTransitionReceipt(
                 request_kind="start_node_attempt",
                 idempotency_key=generic_stored.idempotency_key,
-                request_fingerprint=canonical_hash(generic_stored.model_dump(mode="json")),
+                request_fingerprint=canonical_hash(
+                    generic_stored.model_dump(mode="json")
+                ),
                 request_json=canonical_json(generic_stored.model_dump(mode="json")),
                 result_json=canonical_json(persisted.model_dump(mode="json")),
                 started_at=EVALUATED_AT,

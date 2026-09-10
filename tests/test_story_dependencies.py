@@ -12,6 +12,7 @@ from api import StoryDependenciesApplyApiRequest
 from models.core import UserStory, UserStoryDependency
 from models.enums import StoryStatus
 from models.events import WorkflowEvent
+from models.sprint_retry import SprintRetryAttempt
 from models.workflow import (
     BacklogArtifact,
     StoryDependencyReview,
@@ -54,6 +55,10 @@ from tests.test_create_user_story import (
     _seed_story_parent,
 )
 from tests.test_story_validation_service import _validate
+from tests.workflow.execution_retry_support import (
+    _complete_execution_sprint,
+    _triage_execution_sprint,
+)
 from tests.workflow.test_planning_transitions import (
     EVALUATED_AT,
     _domain,
@@ -63,7 +68,10 @@ from tests.workflow.test_planning_transitions import (
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import story_dependency_source_fingerprint
-from workflow.execution_integrity import selected_story_dependency_snapshot
+from workflow.execution_integrity import (
+    execution_contract,
+    selected_story_dependency_snapshot,
+)
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
@@ -97,10 +105,7 @@ def test_dependency_api_accepts_external_prerequisite_for_selected_dependent() -
 
     assert request.selected_story_ids == [_SELECTED_STORY_ID]
     assert request.selected_scope_fingerprint == "sha256:" + ("a" * 64)
-    assert (
-        request.reviewed_edges[0].prerequisite_story_id
-        == _EXTERNAL_PREREQUISITE_ID
-    )
+    assert request.reviewed_edges[0].prerequisite_story_id == _EXTERNAL_PREREQUISITE_ID
 
 
 def _invest_assessment() -> StoryInvestAssessment:
@@ -841,8 +846,7 @@ def test_selection_change_invalidates_review_until_exact_scope_is_confirmed(
     selected = tuple(
         story
         for story in changed.stories
-        if story.sprint_selection_state == "selected"
-        and story.structurally_eligible
+        if story.sprint_selection_state == "selected" and story.structurally_eligible
     )
     assert tuple(story.story_id for story in selected) == tuple(
         sorted((first_id, second_id))
@@ -999,8 +1003,7 @@ def test_dependency_apply_rejects_changed_observed_scope_without_mutation(
         reviews_before = session.exec(select(StoryDependencyReview)).all()
         receipts_before = session.exec(
             select(WorkflowTransitionReceipt).where(
-                WorkflowTransitionReceipt.request_kind
-                == "apply_story_dependencies"
+                WorkflowTransitionReceipt.request_kind == "apply_story_dependencies"
             )
         ).all()
 
@@ -1028,9 +1031,72 @@ def test_dependency_apply_rejects_changed_observed_scope_without_mutation(
             row_before
         )
         assert session.exec(select(StoryDependencyReview)).all() == reviews_before
-        assert session.exec(
-            select(WorkflowTransitionReceipt).where(
-                WorkflowTransitionReceipt.request_kind
-                == "apply_story_dependencies"
+        assert (
+            session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    WorkflowTransitionReceipt.request_kind == "apply_story_dependencies"
+                )
+            ).all()
+            == receipts_before
+        )
+
+
+def test_direct_dependency_review_is_locked_by_a_planned_retry(
+    engine: Engine,
+) -> None:
+    """The direct dependency service cannot mutate while retry delivery is live."""
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        reviews_before = session.exec(
+            select(StoryDependencyReview).where(
+                StoryDependencyReview.project_id == project_id
             )
-        ).all() == receipts_before
+        ).all()
+        session.add(
+            SprintRetryAttempt(
+                project_id=project_id,
+                sprint_id=sprint_id,
+                ordinal=2,
+                predecessor_retry_attempt_id=None,
+                contract_fingerprint=execution_contract(
+                    snapshot, sprint_id
+                ).fingerprint,
+                created_by="dependency-reviewer",
+                rationale="Keep dependency edits locked during retry delivery.",
+                creation_fingerprint="sha256:planned-retry-lock",
+                creation_receipt_key="planned-retry-lock",
+                created_at=REVIEWED_AT,
+                status="Planned",
+            )
+        )
+        session.commit()
+
+        with pytest.raises(StoryDependencyGraphError) as raised:
+            _apply_dependency_review(
+                session,
+                project_id=project_id,
+                selected_story_ids=(),
+                reviewed_edges=(),
+            )
+
+        assert {issue.code for issue in raised.value.issues} == {
+            "STORY_DEPENDENCY_LIFECYCLE_LOCKED"
+        }
+        assert (
+            session.exec(
+                select(StoryDependencyReview).where(
+                    StoryDependencyReview.project_id == project_id
+                )
+            ).all()
+            == reviews_before
+        )
+        retry = session.exec(
+            select(SprintRetryAttempt).where(
+                SprintRetryAttempt.project_id == project_id
+            )
+        ).one()
+        assert retry.status == "Planned"

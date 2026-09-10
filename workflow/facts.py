@@ -463,10 +463,13 @@ class StoryFact(FrozenModel):
     sprint_selection_state_fingerprint: str
     sprint_selection_event_id: int | None = None
     sprint_selection_event_fingerprint: str | None = None
-    selected_scope_fingerprint: Annotated[
-        str,
-        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
-    ] | None = None
+    selected_scope_fingerprint: (
+        Annotated[
+            str,
+            Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+        ]
+        | None
+    ) = None
     dependency_safe: bool = False
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
@@ -557,6 +560,56 @@ class PostSprintTriageFact(FrozenModel):
     supersedes_triage_id: int | None = None
 
 
+class SprintRetryStartFact(FrozenModel):
+    """Immutable retry-local start decision."""
+
+    start_id: int
+    retry_attempt_id: int
+    contract_fingerprint: str
+    decision_fingerprint: str
+    started_by: str
+    started_at: _DATETIME
+
+    @field_validator("started_at", mode="after")
+    @classmethod
+    def normalize_started_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Normalize retry starts persisted by SQLite to UTC."""
+        return _normalize_utc(value)
+
+
+class SprintRetryFact(FrozenModel):
+    """Complete immutable evidence history for one isolated retry attempt."""
+
+    retry_attempt_id: int
+    project_id: int
+    sprint_id: int
+    ordinal: int
+    predecessor_retry_attempt_id: int | None
+    contract_fingerprint: str
+    created_by: str
+    rationale: str
+    creation_fingerprint: str
+    creation_receipt_key: str
+    created_at: _DATETIME
+    status: Literal["planned", "active", "completed"]
+    started_at: _DATETIME | None = None
+    completed_at: _DATETIME | None = None
+    story_statuses: tuple[tuple[int, str], ...] = ()
+    task_statuses: tuple[tuple[int, str], ...] = ()
+    start: SprintRetryStartFact | None = None
+    task_completions: tuple[TaskCompletionFact, ...] = ()
+    story_completions: tuple[StoryCompletionFact, ...] = ()
+    sprint_reviews: tuple[SprintReviewFact, ...] = ()
+    sprint_closures: tuple[SprintClosureFact, ...] = ()
+    post_sprint_triage: tuple[PostSprintTriageFact, ...] = ()
+
+    @field_validator("created_at", "started_at", "completed_at", mode="after")
+    @classmethod
+    def normalize_retry_timezones(cls, value: _DATETIME | None) -> _DATETIME | None:
+        """Normalize retry lifecycle timestamps persisted by SQLite to UTC."""
+        return _normalize_utc(value) if value is not None else None
+
+
 class NodeAttemptFact(FrozenModel):
     """Durable execution attempt tied to an evaluated node decision."""
 
@@ -579,6 +632,43 @@ class NodeAttemptFact(FrozenModel):
     def normalize_lease_timezone(cls, value: _DATETIME) -> _DATETIME:
         """Normalize the lease expiry timestamp to UTC."""
         return _normalize_utc(value)
+
+
+class SprintPlanGenerationGuardFact(FrozenModel):
+    """Retry-only provenance classification for one Sprint plan generation."""
+
+    attempt_id: int
+    started_at: _DATETIME
+    outcome: Literal["success", "failure", "obsolete"] | None
+    outcome_recorded_at: _DATETIME | None = None
+    generated_plan_artifact_id: int | None = None
+    generated_plan_fingerprint: str | None = None
+    integrity: Literal["linked", "unlinked", "malformed"]
+    failure_code: str | None = None
+
+
+class ProviderGenerationGuardFact(FrozenModel):
+    """Retry-only identity and terminal proof for non-Sprint provider work."""
+
+    attempt_id: int
+    node_id: str
+    instance_key: str | None
+    business_fact_fingerprint: str
+    input_fingerprint: str
+    started_at: _DATETIME
+    outcome: Literal["success", "failure", "obsolete"] | None
+    outcome_recorded_at: _DATETIME | None = None
+    integrity: Literal["canonical", "malformed", "none"]
+
+
+class IncompleteTransitionFact(FrozenModel):
+    """Retry-only projection of one pending transition receipt."""
+
+    receipt_id: int | None
+    request_kind: str | None
+    request_fingerprint: str | None
+    started_at: _DATETIME | None
+    integrity: Literal["linked", "malformed", "unassignable"]
 
 
 class WorkflowFactSnapshot(FrozenModel):
@@ -613,4 +703,8 @@ class WorkflowFactSnapshot(FrozenModel):
     sprint_reviews: tuple[SprintReviewFact, ...] = ()
     sprint_closures: tuple[SprintClosureFact, ...] = ()
     post_sprint_triage: tuple[PostSprintTriageFact, ...] = ()
+    sprint_retries: tuple[SprintRetryFact, ...] = ()
     node_attempts: tuple[NodeAttemptFact, ...] = ()
+    sprint_plan_generation_guards: tuple[SprintPlanGenerationGuardFact, ...] = ()
+    provider_generation_guards: tuple[ProviderGenerationGuardFact, ...] = ()
+    incomplete_transitions: tuple[IncompleteTransitionFact, ...] = ()

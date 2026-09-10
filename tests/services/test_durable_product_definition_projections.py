@@ -852,9 +852,7 @@ def test_story_dependencies_inspect_returns_only_active_replacement_rows(
     assert projected_story_ids == set(range(5, 16))
     assert len(stories) == CORRECTED_ACTIVE_STORY_COUNT
     assert all(
-        story["is_superseded"] is False
-        for story in stories
-        if isinstance(story, dict)
+        story["is_superseded"] is False for story in stories if isinstance(story, dict)
     )
     assert {
         story["selected_scope_fingerprint"]
@@ -910,9 +908,7 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
                     [reviewed_edge.model_dump(mode="json")]
                 ),
                 source_fingerprint=source_fingerprint,
-                dependency_fingerprint=dependency_review_fingerprint(
-                    (reviewed_edge,)
-                ),
+                dependency_fingerprint=dependency_review_fingerprint((reviewed_edge,)),
                 reviewed_by="issue-228-boundary-reviewer",
                 reviewed_at=NOW,
             )
@@ -932,9 +928,7 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
     assert isinstance(reviews, list)
 
     assert historical_story_id not in {
-        story["story_id"]
-        for story in stories
-        if isinstance(story, dict)
+        story["story_id"] for story in stories if isinstance(story, dict)
     }
     assert [
         (edge["dependent_story_id"], edge["prerequisite_story_id"])
@@ -942,9 +936,7 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
         if isinstance(edge, dict)
     ] == [(active_story_id, historical_story_id)]
     assert [
-        review["selected_story_ids"]
-        for review in reviews
-        if isinstance(review, dict)
+        review["selected_story_ids"] for review in reviews if isinstance(review, dict)
     ] == [[active_story_id]]
 
 
@@ -982,10 +974,7 @@ def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(
     assert "validation_status" not in shown
     assert "validation_failures" not in shown
     assert shown["structurally_eligible"] == fact.structurally_eligible
-    assert (
-        shown["structural_eligibility_status"]
-        == fact.structural_eligibility_status
-    )
+    assert shown["structural_eligibility_status"] == fact.structural_eligibility_status
     assert shown["structural_failures"] == list(fact.validation_failures)
     assert shown["sprint_selection_state"] == fact.sprint_selection_state
     assert (
@@ -4887,10 +4876,10 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     """Render pinned ordered Sprint evidence without operational draft rows."""
     from models.core import Sprint, Task, Team, UserStory  # noqa: PLC0415
     from models.workflow import StoryArtifact  # noqa: PLC0415
+    from tests.workflow.planning_fixtures import _invest_assessment  # noqa: PLC0415
     from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
         _domain,
         _guards,
-        _invest_assessment,
         _record_and_accept_roadmap,
         _record_and_accept_story,
         _record_sprint_plan_draft,

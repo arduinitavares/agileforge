@@ -101,7 +101,7 @@ const failed = { ok: false, status: 500, text: async () => JSON.stringify({ mess
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
 function completeDashboardGets(requests, actions, fail = false) {
-    assert.equal(requests.length, 14);
+    assert.equal(requests.length, 15);
     for (const request of requests) {
         if (fail && request.url === '/api/projects/7') {
             request.reject(new Error('Controlled recovery GET failure.'));
@@ -386,7 +386,7 @@ test('accepted interview and failed refresh leave local controls disabled', asyn
     assert.equal(submit.disabled, true);
     assert.equal(textarea.disabled, true);
     await h.submit(form);
-    assert.equal(h.requests.length, postIndex + 15);
+    assert.equal(h.requests.length, postIndex + 16);
 });
 
 test('initialized Vision action cannot be dispatched again after failed reload', async () => {
@@ -426,7 +426,7 @@ test('failed delivery POST and failed recovery GET leave cockpit Locked', async 
     assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Locked');
     assert.equal(h.elements['cockpit-primary-action-label'].textContent, 'Action Unavailable');
     h.context.handlePrimaryCockpitAction({ request_kind: action.request_kind });
-    assert.equal(h.requests.length, postIndex + 15);
+    assert.equal(h.requests.length, postIndex + 16);
 });
 
 test('pre-POST refresh cannot reconcile the mutation', async () => {
@@ -481,7 +481,7 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
         },
     };
     function finishGets(requests, marker) {
-        assert.equal(requests.length, 14);
+        assert.equal(requests.length, 15);
         for (const request of requests) {
             if (request.url.endsWith('/sprint/status')) {
                 request.resolve({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'SPRINT_NOT_FOUND' }) });
@@ -502,7 +502,7 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
     assert.equal(h.state('dashboardLoadSequence'), 1);
 
     const newerRefresh = h.context.loadDashboard();
-    finishGets(h.requests.slice(15), 'newer successful projection');
+    finishGets(h.requests.slice(16), 'newer successful projection');
     assert.equal(await newerRefresh, true);
     assert.equal(h.state('dashboardLoadSequence'), 2);
     assert.equal(h.state('lifecycleState.project.name'), 'newer successful projection');
@@ -540,7 +540,7 @@ test('repeated successful GETs with unconfirmed projection keep cockpit locked u
     // Run a manual loadDashboard(): all GET requests succeed (HTTP 200),
     // but the backlog projection does NOT confirm the correction (qualifyingBacklogState is false).
     const refresh1 = h.context.loadDashboard();
-    completeDashboardGets(h.requests.slice(14), [action]);
+    completeDashboardGets(h.requests.slice(15), [action]);
     assert.equal(await refresh1, true);
 
     // Assert: repeated successful GETs must NOT clear activeDeliveryUnreconciled
@@ -552,7 +552,7 @@ test('repeated successful GETs with unconfirmed projection keep cockpit locked u
     // Clearing the mutation simulates successful authority confirmation.
     h.state('activeBacklogCorrectionMutation = null;');
     const refresh2 = h.context.loadDashboard();
-    completeDashboardGets(h.requests.slice(28), [action]);
+    completeDashboardGets(h.requests.slice(30), [action]);
     assert.equal(await refresh2, true);
 
     // Assert: confirming projection unlocks the controls and cockpit
@@ -619,7 +619,7 @@ test('backend reload errors remain visible in Story selection and Dependency rev
 
     // The reload fails with an authoritative backend error message
     const reloadRequests = h.requests.slice(postIndex + 1);
-    assert.equal(reloadRequests.length, 14);
+    assert.equal(reloadRequests.length, 15);
     for (const request of reloadRequests) {
         if (request.url.endsWith('/story/dependencies')) {
             request.reject(new Error('Story authority projection conflicted.'));

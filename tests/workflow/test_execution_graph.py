@@ -614,8 +614,10 @@ def _combine_execution_history(
 
 
 def test_execution_graph_has_exact_fixed_nodes() -> None:
-    """Expose exactly the five approved fixed execution node IDs."""
+    """Expose exactly the two retry and five established execution node IDs."""
     assert [node.node_id for node in execution_graph().root.nodes] == [
+        "execution.sprint.retry",
+        "execution.sprint.retry.start",
         "execution.task.complete",
         "execution.story.close",
         "execution.sprint.review",

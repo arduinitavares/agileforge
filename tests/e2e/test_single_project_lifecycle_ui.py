@@ -58,6 +58,10 @@ _EXPECTED_RETRIED_DEPENDENCY_REQUESTS = 2
 _CORRECTED_SUPERSEDED_STORY_COUNT = 4
 _CORRECTED_ACTIVE_STORY_COUNT = 11
 _CORRECTED_REPLACEMENT_FIRST_STORY_ID = 12
+_ISSUE_260_SPRINT_ID = 31
+_ISSUE_260_PREVIEW_CANCEL_COUNT = 2
+_ISSUE_260_PREVIEW_STALE_REFRESH_COUNT = 4
+_ISSUE_260_RETRY_REQUEST_COUNT = 2
 _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
@@ -474,6 +478,10 @@ class FakeLifecycle:
             "/story/pending": self._story_pending_projection,
             "/story/dependencies": self._story_dependencies_projection,
             "/sprint/candidates": self._sprint_candidates_projection,
+            "/sprints": lambda: {
+                "project_id": _PROJECT_ID,
+                "execution_attempts": [],
+            },
             "/vision/status": self._vision_projection,
         }
         reader = readers.get(suffix)
@@ -1687,6 +1695,441 @@ class SprintContinuityLifecycle(FakeLifecycle):
             "actions": [],
             "_actions": actions,
         }
+
+
+@dataclass
+class Issue260RetryLifecycle(SprintContinuityLifecycle):
+    """Synthetic completed Sprint with one optional retry attempt."""
+
+    retry_state: str = "none"
+    retry_preview_blockers: list[JsonValue] = field(default_factory=list)
+    retry_stale_once: bool = False
+    retry_preview_requests: int = 0
+    retry_requests: list[JsonObject] = field(default_factory=list)
+    retry_task_completed: bool = False
+    retry_task_completion_requests: list[JsonObject] = field(default_factory=list)
+    retry_story_closed: bool = False
+    retry_story_close_requests: list[JsonObject] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Seed the immutable source Sprint without a pending next-plan review."""
+        super().__post_init__()
+        assert self.project is not None
+        self.project["name"] = "Issue 260 Sprint retry"
+        self.sprint_plan_candidate = None
+        self.sprint_plan_accepted = True
+
+    @staticmethod
+    def _retry_fingerprint() -> str:
+        return _fingerprint("d")
+
+    @staticmethod
+    def _retry_task_fingerprint() -> str:
+        return _fingerprint("e")
+
+    def _dispatch(self, route: Route) -> tuple[int, JsonObject]:
+        """Expose the reviewed retry read and confirmed mutation routes."""
+        request = route.request
+        path = urlsplit(request.url).path
+        prefix = f"/api/projects/{_PROJECT_ID}"
+        if path == f"{prefix}/sprint/31/retry-preview":
+            assert request.method == "GET"
+            return _HTTP_OK, self._success(self._retry_preview())
+        if path == f"{prefix}/sprint/retry":
+            assert request.method == "POST"
+            return self._retry_project_sprint(
+                self._request_body(route),
+                dict(request.headers),
+            )
+        return super()._dispatch(route)
+
+    def _retry_preview(self) -> JsonObject:
+        self.retry_preview_requests += 1
+        preview: JsonObject = {
+            "project_id": _PROJECT_ID,
+            "sprint_id": 31,
+            "predecessor_retry_attempt_id": None,
+            "next_ordinal": 2,
+            "story_ids": [101],
+            "task_ids": [71],
+            "preserved_history": "Original completion evidence remains immutable.",
+            "repository_provenance": {
+                "state": "bound",
+                "repository_binding_id": 17,
+                "worktree_path": (
+                    "C:/worktrees/issue-260-retry-sprint/"
+                    "with-a-deliberately-long-segment-for-dialog-wrapping"
+                ),
+                "branch_name": "feature/issue-260-retry-sprint",
+                "head_sha": "a" * 40,
+                "fingerprint": _fingerprint("b"),
+            },
+            "blockers": self.retry_preview_blockers,
+            "expected_state_fingerprint": _fingerprint("f"),
+        }
+        return preview
+
+    def _retry_project_sprint(
+        self,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        self._assert_fields(
+            body,
+            {
+                "confirm",
+                "expected_state_fingerprint",
+                "rationale",
+                "sprint_id",
+            },
+        )
+        assert body["confirm"] is True
+        assert body["sprint_id"] == _ISSUE_260_SPRINT_ID
+        assert body["expected_state_fingerprint"] == _fingerprint("f")
+        assert isinstance(body["rationale"], str)
+        assert body["rationale"].strip()
+        assert headers.get("x-agileforge-expected-decision") == _fingerprint("b")
+        assert headers.get("x-agileforge-expected-instance") == "sprint:31"
+        self.retry_requests.append(dict(body))
+        if self.retry_stale_once:
+            self.retry_stale_once = False
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "errors": [
+                        {
+                            "code": "WORKFLOW_FACT_CONFLICT",
+                            "message": "The retry preview is stale.",
+                        }
+                    ]
+                }
+            }
+        self.retry_state = "planned"
+        return _HTTP_OK, self._success(
+            {"output": {"retry_attempt_id": 101, "status": "Planned"}}
+        )
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        _status, envelope = super()._sprint_status_response()
+        data = cast("JsonObject", envelope["data"])
+        data["sprint"] = {
+            "sprint_id": 31,
+            "status": "completed",
+            "completed_at": "2026-09-09T09:00:00Z",
+        }
+        accepted_plan = cast("JsonObject", data["accepted_plan"])
+        accepted_plan["status"] = "completed"
+        original_start: JsonObject = {
+            "start_id": 61,
+            "sprint_id": 31,
+            "sprint_plan_artifact_id": 41,
+            "sprint_plan_artifact_decision_id": 51,
+            "plan_fingerprint": self._plan_fingerprint(),
+            "candidate_set_fingerprint": self._candidate_fingerprint(),
+            "task_content_fingerprint": self._task_fingerprint(),
+        }
+        data["start"] = dict(original_start)
+        data["original_start"] = dict(original_start)
+        data["original_review"] = None
+        data["original_closure"] = None
+        data["original_triage"] = []
+        tasks = cast("list[JsonObject]", data["tasks"])
+        task = tasks[0]
+        task["instance_key"] = "task:71"
+        task["status"] = "Done"
+        data["stories"] = [
+            {
+                "story_id": 101,
+                "status": "Done",
+                "sprint_ids": [31],
+                "source_story_item_id": "US-0101",
+                "instance_key": "story:101",
+            }
+        ]
+        data["current_retry"] = None
+        data["effective_status"] = "completed"
+        if self.retry_state == "none":
+            return _HTTP_OK, self._success(data)
+
+        retry_key = "retry:101:sprint:31"
+        data["current_retry"] = {
+            "retry_attempt_id": 101,
+            "ordinal": 2,
+            "status": self.retry_state,
+            "predecessor_retry_attempt_id": None,
+            "sprint_instance_key": retry_key,
+        }
+        data["effective_status"] = self.retry_state
+        task["instance_key"] = "retry:101:task:71"
+        task["status"] = (
+            "Done"
+            if self.retry_state == "completed" or self.retry_task_completed
+            else "To Do"
+        )
+        task["fact_fingerprint"] = self._retry_task_fingerprint()
+        data["stories"] = [
+            {
+                "story_id": 101,
+                "status": (
+                    "Done"
+                    if self.retry_state == "completed" or self.retry_story_closed
+                    else "To Do"
+                ),
+                "sprint_ids": [31],
+                "source_story_item_id": "US-0101",
+                "instance_key": "retry:101:story:101",
+            }
+        ]
+        if self.retry_state == "planned":
+            data["start"] = None
+        else:
+            data["start"] = {
+                "start_id": 102,
+                "retry_attempt_id": 101,
+                "contract_fingerprint": _fingerprint("a"),
+                "decision_fingerprint": self._retry_fingerprint(),
+                "started_by": "dashboard-ui",
+                "started_at": "2026-09-09T12:00:00Z",
+            }
+        return _HTTP_OK, self._success(data)
+
+    def _position_projection(self) -> JsonObject:
+        if self.retry_state == "planned":
+            decision: JsonValue = {
+                "node_id": "execution.sprint.retry.start",
+                "child_graph_id": "execution",
+                "request_kind": "start_sprint_retry",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": "retry:101:sprint:31",
+                "reason_code": "SPRINT_RETRY_READY_TO_START",
+                "decision_fingerprint": self._retry_fingerprint(),
+                "fact_references": [
+                    {
+                        "fact_type": "sprint_retry",
+                        "fact_id": "101",
+                        "fingerprint": _fingerprint("a"),
+                    }
+                ],
+            }
+            action: JsonValue = {
+                "node_id": "execution.sprint.retry.start",
+                "instance_key": "retry:101:sprint:31",
+                "request_kind": "start_sprint_retry",
+                "endpoint": "sprint/start",
+                "transport": "semantic",
+            }
+        elif self.retry_state == "active" and not self.retry_task_completed:
+            decision = {
+                "node_id": "execution.task.complete",
+                "child_graph_id": "execution",
+                "request_kind": "complete_task",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": "retry:101:task:71",
+                "reason_code": "NEXT_TASK_READY",
+                "decision_fingerprint": _fingerprint("c"),
+                "fact_references": [
+                    {
+                        "fact_type": "task",
+                        "fact_id": "71",
+                        "fingerprint": self._retry_task_fingerprint(),
+                    }
+                ],
+            }
+            action = {
+                "node_id": "execution.task.complete",
+                "instance_key": "retry:101:task:71",
+                "request_kind": "complete_task",
+                "endpoint": "sprint/task/complete",
+                "transport": "semantic",
+            }
+        elif self.retry_state == "active" and not self.retry_story_closed:
+            decision = {
+                "node_id": "execution.story.close",
+                "child_graph_id": "execution",
+                "request_kind": "close_story",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": "retry:101:story:101",
+                "reason_code": "NEXT_STORY_READY",
+                "decision_fingerprint": _fingerprint("f"),
+                "fact_references": [
+                    {
+                        "fact_type": "story",
+                        "fact_id": "101",
+                        "fingerprint": _fingerprint("f"),
+                    }
+                ],
+            }
+            action = {
+                "node_id": "execution.story.close",
+                "instance_key": "retry:101:story:101",
+                "request_kind": "close_story",
+                "endpoint": "story/close",
+                "transport": "semantic",
+            }
+        elif self.retry_state == "active":
+            return {
+                "graph_version": "agileforge.workflow.hidden",
+                "fact_fingerprint": _fingerprint("a"),
+                "decisions": [],
+                "terminal": False,
+                "actions": [],
+                "_actions": [],
+            }
+        else:
+            decision = {
+                "node_id": "execution.sprint.retry",
+                "child_graph_id": "execution",
+                "request_kind": "retry_sprint",
+                "category": "available",
+                "recommendation_kind": "optional_reentry",
+                "instance_key": "sprint:31",
+                "reason_code": "SPRINT_RETRY_AVAILABLE",
+                "decision_fingerprint": _fingerprint("b"),
+                "fact_references": [
+                    {
+                        "fact_type": "sprint_retry_target",
+                        "fact_id": "31",
+                        "fingerprint": _fingerprint("f"),
+                    }
+                ],
+            }
+            action = {
+                "node_id": "execution.sprint.retry",
+                "instance_key": "sprint:31",
+                "request_kind": "retry_sprint",
+                "endpoint": "sprint/retry",
+                "transport": "semantic",
+            }
+        decisions: list[JsonValue] = [cast("JsonValue", decision)]
+        actions: list[JsonValue] = [cast("JsonValue", action)]
+        return {
+            "graph_version": "agileforge.workflow.hidden",
+            "fact_fingerprint": _fingerprint("a"),
+            "decisions": decisions,
+            "terminal": False,
+            "actions": [],
+            "_actions": actions,
+        }
+
+    def _read(self, suffix: str) -> JsonObject:
+        if suffix != "/sprints":
+            return super()._read(suffix)
+        attempts: list[JsonValue] = [
+            {
+                "sprint_id": 31,
+                "retry_attempt_id": None,
+                "ordinal": 1,
+                "status": "completed",
+                "predecessor_retry_attempt_id": None,
+                "sprint_instance_key": "sprint:31",
+                "task_instance_keys": ["task:71"],
+                "start": {
+                    "start_id": 61,
+                    "sprint_id": 31,
+                    "sprint_plan_artifact_id": 41,
+                    "sprint_plan_artifact_decision_id": 51,
+                    "plan_fingerprint": self._plan_fingerprint(),
+                    "candidate_set_fingerprint": self._candidate_fingerprint(),
+                    "task_content_fingerprint": self._task_fingerprint(),
+                },
+                "task_completions": [{"task_id": 71, "status": "Done"}],
+                "story_completions": [{"story_id": 101, "status": "Done"}],
+                "review": {"review_id": 81, "status": "completed"},
+                "closure": {"closure_id": 91, "status": "completed"},
+                "triage": [],
+            }
+        ]
+        if self.retry_state != "none":
+            attempts.append(
+                {
+                    "sprint_id": 31,
+                    "retry_attempt_id": 101,
+                    "ordinal": 2,
+                    "status": self.retry_state,
+                    "predecessor_retry_attempt_id": None,
+                    "sprint_instance_key": "retry:101:sprint:31",
+                    "task_instance_keys": ["retry:101:task:71"],
+                    "start": (
+                        None
+                        if self.retry_state == "planned"
+                        else {
+                            "start_id": 102,
+                            "retry_attempt_id": 101,
+                            "contract_fingerprint": _fingerprint("a"),
+                            "decision_fingerprint": self._retry_fingerprint(),
+                            "started_by": "dashboard-ui",
+                            "started_at": "2026-09-09T12:00:00Z",
+                        }
+                    ),
+                    "task_completions": (
+                        [{"task_id": 71, "status": "Done"}]
+                        if self.retry_task_completed or self.retry_state == "completed"
+                        else []
+                    ),
+                    "story_completions": (
+                        [{"story_id": 101, "status": "Done"}]
+                        if self.retry_story_closed or self.retry_state == "completed"
+                        else []
+                    ),
+                    "review": None,
+                    "closure": None,
+                    "triage": [],
+                }
+            )
+        return {"project_id": _PROJECT_ID, "execution_attempts": attempts}
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        if suffix == "/sprint/task/complete":
+            self._assert_fields(
+                body,
+                {
+                    "acceptance_result",
+                    "actor",
+                    "artifact_refs",
+                    "checklist_result",
+                    "idempotency_key",
+                    "instance_key",
+                    "outcome_summary",
+                },
+            )
+            assert body["instance_key"] == "retry:101:task:71"
+            self.retry_task_completion_requests.append(dict(body))
+            self.retry_task_completed = True
+            return _HTTP_OK, self._mutation_result()
+        if suffix == "/story/close":
+            self._assert_fields(
+                body,
+                {
+                    "actor",
+                    "delivered",
+                    "evidence",
+                    "idempotency_key",
+                    "instance_key",
+                    "known_gaps",
+                    "resolution",
+                },
+            )
+            assert body["instance_key"] == "retry:101:story:101"
+            self.retry_story_close_requests.append(dict(body))
+            self.retry_story_closed = True
+            return _HTTP_OK, self._mutation_result()
+        assert suffix == "/sprint/start", f"Unexpected mutation: {suffix}"
+        self._assert_fields(body, {"instance_key"})
+        assert body["instance_key"] == "retry:101:sprint:31"
+        assert (
+            headers.get("x-agileforge-expected-decision") == self._retry_fingerprint()
+        )
+        assert headers.get("x-agileforge-expected-instance") == "retry:101:sprint:31"
+        self.start_requests.append(dict(body))
+        self.retry_state = "active"
+        return _HTTP_OK, self._mutation_result()
 
 
 @dataclass
@@ -3475,6 +3918,253 @@ def test_issue_227_accepted_sprint_survives_reload_and_starts_exactly_once(
     context.close()
 
 
+def _issue_260_retry_controls(page: Page) -> tuple[Locator, Locator]:
+    completed = page.locator('[data-sprint-status="completed"]')
+    retry = page.locator('[data-direct-action="retry_sprint"]')
+    expect(completed).to_contain_text("Sprint #31 is complete")
+    expect(completed.locator('[data-sprint-execution-history="true"]')).to_contain_text(
+        "Attempt 1"
+    )
+    expect(retry).to_be_enabled()
+    return retry, page.locator("#human-action-dialog")
+
+
+def _assert_issue_260_blocked_preview(
+    fake: Issue260RetryLifecycle,
+    retry: Locator,
+    dialog: Locator,
+) -> None:
+    fake.retry_preview_blockers = [
+        {
+            "code": 'x" data-injected="true',
+            "reason": "A retry attempt is already active.",
+            "subject_type": "retry_attempt",
+            "subject_id": 101,
+        },
+        {
+            "code": "RETRY_PROVENANCE_MISSING",
+            "reason": "No prior retry provenance was recorded.",
+            "subject_type": "repository_provenance",
+            "subject_id": None,
+        },
+    ]
+    retry.click()
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("already active")
+    expect(dialog).to_contain_text('x" data-injected="true')
+    expect(dialog.locator('[data-injected="true"]')).to_have_count(0)
+    expect(dialog).to_contain_text("retry_attempt #101")
+    expect(dialog).to_contain_text("RETRY_PROVENANCE_MISSING")
+    expect(dialog).to_contain_text("repository_provenance, no subject ID")
+    expect(
+        dialog.get_by_role("button", name="Retry Sprint", exact=True)
+    ).to_be_disabled()
+    assert fake.retry_requests == []
+    assert fake.retry_preview_requests == 1
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    expect(dialog).not_to_be_visible()
+
+
+def _capture_issue_260_retry_preview(
+    fake: Issue260RetryLifecycle,
+    retry: Locator,
+    dialog: Locator,
+    tmp_path: Path,
+) -> None:
+    fake.retry_preview_blockers = []
+    retry.click()
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Sprint #31")
+    expect(dialog).to_contain_text("Story #101")
+    expect(dialog).to_contain_text("Task #71")
+    expect(dialog).to_contain_text("Repository provenance")
+    expect(dialog).to_contain_text("Binding ID")
+    expect(dialog).to_contain_text("#17")
+    expect(dialog).to_contain_text(
+        "C:/worktrees/issue-260-retry-sprint/with-a-deliberately-long-segment-for-dialog-wrapping"
+    )
+    expect(dialog).to_contain_text("feature/issue-260-retry-sprint")
+    expect(dialog).to_contain_text("a" * 40)
+    expect(dialog).to_contain_text(_fingerprint("b"))
+    preview_screenshot = tmp_path / "issue-260-retry-preview.png"
+    dialog.screenshot(path=str(preview_screenshot))
+    assert preview_screenshot.is_file()
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    assert fake.retry_requests == []
+    assert fake.retry_preview_requests == _ISSUE_260_PREVIEW_CANCEL_COUNT
+
+
+def _refresh_issue_260_stale_retry_preview(
+    fake: Issue260RetryLifecycle,
+    retry: Locator,
+    dialog: Locator,
+) -> None:
+    fake.retry_stale_once = True
+    retry.click()
+    dialog.get_by_label("Retry rationale", exact=True).fill(
+        "Re-execute the approved work."
+    )
+    dialog.get_by_role("button", name="Retry Sprint", exact=True).click()
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Sprint #31")
+    expect(dialog.get_by_label("Retry rationale", exact=True)).to_have_value("")
+    assert fake.retry_preview_requests == _ISSUE_260_PREVIEW_STALE_REFRESH_COUNT
+    assert len(fake.retry_requests) == 1
+    assert fake.retry_state == "none"
+
+
+def _confirm_issue_260_retry(
+    fake: Issue260RetryLifecycle,
+    page: Page,
+    dialog: Locator,
+) -> Locator:
+    dialog.get_by_label("Retry rationale", exact=True).fill(
+        "Re-execute the approved work."
+    )
+    dialog.get_by_role("button", name="Retry Sprint", exact=True).click()
+    planned = page.locator('[data-sprint-status="planned"]')
+    expect(planned).to_contain_text("Attempt 2")
+    expect(planned).to_contain_text("Start Sprint")
+    assert len(fake.retry_requests) == _ISSUE_260_RETRY_REQUEST_COUNT
+    retry_request = fake.retry_requests[-1]
+    assert retry_request["sprint_id"] == _ISSUE_260_SPRINT_ID
+    assert retry_request["confirm"] is True
+    assert retry_request["expected_state_fingerprint"] == _fingerprint("f")
+    assert retry_request["rationale"] == "Re-execute the approved work."
+    assert retry_request["actor"] == "dashboard-ui"
+    assert "target_branch" not in retry_request
+    return page.locator('[data-direct-action="start_sprint"]')
+
+
+def _start_issue_260_retry(
+    fake: Issue260RetryLifecycle,
+    start: Locator,
+    dialog: Locator,
+    page: Page,
+    tmp_path: Path,
+) -> None:
+    start.click()
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Attempt 2")
+    dialog.get_by_role("button", name="Start Sprint", exact=True).click()
+    active = page.locator('[data-sprint-status="active"]')
+    progress = active.locator('[data-sprint-retry-progress="true"]')
+    expect(active).to_contain_text("Attempt 2")
+    expect(progress.locator('[data-sprint-retry-task-id="71"]')).to_contain_text(
+        "Status: To Do"
+    )
+    expect(progress.locator('[data-sprint-retry-story-id="101"]')).to_contain_text(
+        "Status: To Do"
+    )
+    expect(active.locator('[data-sprint-execution-history="true"]')).to_contain_text(
+        "Attempt 1"
+    )
+    active_screenshot = tmp_path / "issue-260-retry-active-history.png"
+    active.screenshot(path=str(active_screenshot))
+    assert active_screenshot.is_file()
+    assert len(fake.start_requests) == 1
+    assert fake.start_requests[0]["instance_key"] == "retry:101:sprint:31"
+    assert "sprint_id" not in fake.start_requests[0]
+
+
+def _assert_issue_260_retry_survives_reload(
+    fake: Issue260RetryLifecycle,
+    page: Page,
+) -> None:
+    completion_status = page.evaluate(
+        """async () => (await fetch('/api/projects/1/sprint/task/complete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                instance_key: 'retry:101:task:71',
+                outcome_summary: 'Completed the retry-scoped Task.',
+                artifact_refs: ['artifact://retry/101/task/71'],
+                acceptance_result: 'fully_met',
+                checklist_result: {verification: 'passed'},
+                actor: 'dashboard-ui',
+                idempotency_key: 'dashboard-issue-260-browser-task-complete',
+            }),
+        })).status"""
+    )
+    assert completion_status == _HTTP_OK
+    assert len(fake.retry_task_completion_requests) == 1
+    assert fake.retry_task_completion_requests[0]["instance_key"] == "retry:101:task:71"
+    page.reload(wait_until="networkidle")
+    reloaded = page.locator('[data-sprint-status="active"]')
+    progress = reloaded.locator('[data-sprint-retry-progress="true"]')
+    expect(reloaded).to_contain_text("Attempt 2")
+    expect(progress.locator('[data-sprint-retry-task-id="71"]')).to_contain_text(
+        "Status: Done"
+    )
+    expect(progress.locator('[data-sprint-retry-story-id="101"]')).to_contain_text(
+        "Status: To Do"
+    )
+    expect(reloaded.locator('[data-sprint-execution-history="true"]')).to_contain_text(
+        "Attempt 1"
+    )
+    story_close_status = page.evaluate(
+        """async () => (await fetch('/api/projects/1/story/close', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                instance_key: 'retry:101:story:101',
+                resolution: 'Completed',
+                delivered: 'The retry-scoped Story is now complete.',
+                evidence: 'artifact://retry/101/story/101',
+                known_gaps: 'None.',
+                actor: 'dashboard-ui',
+                idempotency_key: 'dashboard-issue-260-browser-story-close',
+            }),
+        })).status"""
+    )
+    assert story_close_status == _HTTP_OK
+    assert len(fake.retry_story_close_requests) == 1
+    assert fake.retry_story_close_requests[0]["instance_key"] == "retry:101:story:101"
+    page.reload(wait_until="networkidle")
+    reloaded_after_story_close = page.locator('[data-sprint-status="active"]')
+    progress_after_story_close = reloaded_after_story_close.locator(
+        '[data-sprint-retry-progress="true"]'
+    )
+    expect(
+        progress_after_story_close.locator('[data-sprint-retry-task-id="71"]')
+    ).to_contain_text("Status: Done")
+    expect(
+        progress_after_story_close.locator('[data-sprint-retry-story-id="101"]')
+    ).to_contain_text("Status: Done")
+    fake.retry_state = "completed"
+    page.reload(wait_until="networkidle")
+    completed_retry = page.locator('[data-sprint-status="completed"]')
+    expect(completed_retry).to_contain_text("Attempt 2 is completed")
+    expect(
+        completed_retry.locator('[data-sprint-execution-history="true"]')
+    ).to_contain_text("Attempt 1")
+    expect(
+        completed_retry.locator('[data-sprint-execution-history="true"]')
+    ).to_contain_text("Attempt 2")
+
+
+def test_issue_260_retry_sprint_requires_preview_confirmation_and_preserves_history(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Retry only the previewed completed Sprint and keep its original evidence."""
+    fake = Issue260RetryLifecycle(repositories={})
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        retry, dialog = _issue_260_retry_controls(page)
+        assert fake.retry_requests == []
+        assert fake.retry_preview_requests == 0
+        _assert_issue_260_blocked_preview(fake, retry, dialog)
+        _capture_issue_260_retry_preview(fake, retry, dialog, tmp_path)
+        _refresh_issue_260_stale_retry_preview(fake, retry, dialog)
+        start = _confirm_issue_260_retry(fake, page, dialog)
+        _start_issue_260_retry(fake, start, dialog, page, tmp_path)
+        _assert_issue_260_retry_survives_reload(fake, page)
+        assert fake.api_errors == []
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize("decision", ["accepted", "feedback", "rejected"])
 def test_issue_259_pending_next_plan_survives_reload_and_confirms_decision(
     dashboard_harness: DashboardHarness,
@@ -3510,8 +4200,7 @@ def test_issue_259_pending_next_plan_survives_reload_and_confirms_decision(
         assert len(fake.review_requests) == 1
         assert fake.review_requests[0]["decision"] == decision
         assert (
-            fake.review_requests[0]["rationale"]
-            == "Reviewed the distinct next plan."
+            fake.review_requests[0]["rationale"] == "Reviewed the distinct next plan."
         )
         assert fake.api_errors == []
         assert fake.start_requests == []

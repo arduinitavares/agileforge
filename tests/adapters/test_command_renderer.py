@@ -30,9 +30,11 @@ _PLACEHOLDERS = {
     "<rationale>": "reviewed",
     "<reason>": "changed",
     "<source-path>": "specification.md",
+    "<sprint-id>": "7",
     "<story-id>": "7",
     "<dependency>": "7:8:Story 7 requires Story 8.",
     "<selected-scope-fingerprint>": f"sha256:{'a' * 64}",
+    "<expected-state-fingerprint>": f"sha256:{'a' * 64}",
     "<repair>": "7:3:101",
     "<outcome-summary>": "Implemented semantic execution.",
     "<artifact-ref>": "services/application.py",
@@ -915,10 +917,7 @@ def test_story_correction_renders_exact_artifact_bound_command() -> None:
     tokens = shlex.split(commands[0]["command"])
     assert tokens[:3] == ["agileforge", "story", "correct"]
     parsed = build_parser().parse_args(
-        [
-            _PLACEHOLDERS.get(argument, argument)
-            for argument in tokens[1:]
-        ]
+        [_PLACEHOLDERS.get(argument, argument) for argument in tokens[1:]]
     )
     assert parsed.instance_key == "backlog_item:PBI-000001"
     assert parsed.expected_decision_fingerprint == decision_fingerprint
@@ -1184,10 +1183,7 @@ def test_backlog_correction_renders_exact_artifact_bound_command() -> None:
     tokens = shlex.split(commands[0]["command"])
     assert tokens[:3] == ["agileforge", "backlog", "correct"]
     parsed = build_parser().parse_args(
-        [
-            _PLACEHOLDERS.get(argument, argument)
-            for argument in tokens[1:]
-        ]
+        [_PLACEHOLDERS.get(argument, argument) for argument in tokens[1:]]
     )
     assert parsed.expected_decision_fingerprint == decision_fingerprint
     assert parsed.accepted_backlog_artifact_id == artifact_id
@@ -1257,10 +1253,7 @@ def test_backlog_correction_recovery_renders_exact_command(
     tokens = shlex.split(commands[0]["command"])
     assert tokens[:3] == ["agileforge", "backlog", "correct"]
     parsed = build_parser().parse_args(
-        [
-            _PLACEHOLDERS.get(argument, argument)
-            for argument in tokens[1:]
-        ]
+        [_PLACEHOLDERS.get(argument, argument) for argument in tokens[1:]]
     )
     assert parsed.expected_decision_fingerprint == decision_fingerprint
     assert parsed.accepted_backlog_artifact_id == artifact_id
@@ -1268,9 +1261,7 @@ def test_backlog_correction_recovery_renders_exact_command(
 
 
 def _ref(fact_type: str, fact_id: str, fingerprint: str) -> FactReference:
-    return FactReference(
-        fact_type=fact_type, fact_id=fact_id, fingerprint=fingerprint
-    )
+    return FactReference(fact_type=fact_type, fact_id=fact_id, fingerprint=fingerprint)
 
 
 @pytest.mark.parametrize(

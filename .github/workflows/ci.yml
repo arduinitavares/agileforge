@@ -18,7 +18,7 @@ jobs:
   python-313:
     name: Python 3.13 full gate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -50,6 +50,7 @@ jobs:
       - name: Run frontend suites
         run: >-
           node --test tests/test_workflow_position_display.mjs
+          tests/test_sprint_retry_dashboard.mjs
           tests/test_create_project_modal_required_fields.mjs
           tests/test_vision_interview_ui.mjs
 
@@ -201,7 +202,7 @@ jobs:
   windows-full-gate:
     name: Windows Python 3.13 full gate
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2

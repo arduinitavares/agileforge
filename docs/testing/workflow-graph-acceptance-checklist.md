@@ -225,6 +225,65 @@ uv run --frozen ruff format --check .
 git diff --check
 ```
 
+### Automated Sprint Retry Regression Scope
+
+The focused automated Sprint retry acceptance regression is separate from this
+operator-owned checklist and does not change `acceptance_status: not_run`.
+
+```sh
+uv run --locked --exact --python 3.13.15 pytest \
+  tests/workflow/test_sprint_retry_acceptance.py \
+  tests/workflow/test_sprint_retry_execution.py \
+  tests/workflow/test_sprint_retry_transitions.py -q
+```
+
+Verified 2026-09-09 in the isolated Issue 260 worktree: `73 passed` in
+`682.31s`, with four existing `BaseAgentConfig` deprecation warnings. This is
+automated regression evidence only; external operator acceptance remains
+`not_run`.
+
+Its one-artifact journey records and accepts three distinct Story envelopes,
+completes and triages two sequential Sprints, retries exactly the second Sprint,
+and completes the fresh retry through the normal Task, Story, review, close, and
+triage actions. It preserves the original primary-key history subset and an
+unselected third Story while allowing new retry audit rows. The fixture assigns
+the first Sprint a larger numeric ID than the second while keeping completion
+time ordered, so target eligibility cannot be inferred from the largest ID.
+
+The regression also checks an actual profile API against a synthetic tracked
+current-source checkout: it upgrades an exact frozen pre-retry database at that
+profile's owned path, disposes and reopens it, loads the unchanged profile
+manifest, and verifies the current schema plus retained original row. This does
+not assert automatic upgrade of an old-source profile or a CLI migration path.
+
+During the exercised retry actions, the regression preserves representative
+bound-tree and `.git` bytes and guards the named ADK runner, application,
+repository-binding, GitPython, and `Path` cleanup entry points. Those are
+bounded runtime checks for the exercised lifecycle; they do not claim to
+intercept every possible operating-system mutation.
+
+The corrected projection and request checks also passed: `4 passed` in `6.17s`
+with five existing warnings. The focused schema, parser, CI, graph and checklist
+contract checks passed: `250 passed` in `81.66s`, with four existing
+`BaseAgentConfig` warnings. Changed Python files were then checked with the
+pinned Ruff formatter: `66 files already formatted`, native exit 0. The global
+`ruff format --check .` separately reports 42 files that would be reformatted;
+each is unchanged from the Issue 260 starting commit, uses the same locked Ruff
+0.15.8 and configuration, and remains pre-existing formatting debt rather than
+an external acceptance result.
+
+The complete `sh ./agileforge-dev check` then returned native exit 0 on a frozen
+checkout: lock validation, Python quality, registered Node tests, whitespace,
+and distribution verification all passed. Pytest reported `3267 passed`,
+`33 skipped`, `1 deselected`, and `119 warnings` in `5547.66s`; the registered
+Node stage reported `164 passed` with no failures or skips. The wheel and source
+distribution were verified. All 689 tracked file hashes, the index, and HEAD
+matched before and after the run. Coverage was reported as partial guidance
+(`83.57%`), with the 80% minimum not applied; this is not a coverage-gate result.
+The separate complete Node run passed all 194 tests. Existing platform skips,
+dependency warnings, and the 42 unchanged formatting-debt files remain explicit
+limitations; external operator acceptance remains `not_run`.
+
 ## Stop Conditions
 
 Stop and report without repair when:

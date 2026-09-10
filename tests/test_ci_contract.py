@@ -18,7 +18,8 @@ PYREPO_CHECK_SOURCE = (
 )
 CANONICAL_PYTHON = "3.13.15"
 CI_UV_VERSION = "0.12.8"
-WINDOWS_FULL_GATE_TIMEOUT_MINUTES: int = 90
+LINUX_FULL_GATE_TIMEOUT_MINUTES: int = 90
+WINDOWS_FULL_GATE_TIMEOUT_MINUTES: int = 180
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -248,6 +249,7 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
     assert "scripts/verify_distribution.py" not in python_313
     assert (
         "node --test tests/test_workflow_position_display.mjs "
+        "tests/test_sprint_retry_dashboard.mjs "
         "tests/test_create_project_modal_required_fields.mjs "
         "tests/test_vision_interview_ui.mjs"
     ) in " ".join(frontend.split())
@@ -358,8 +360,7 @@ def test_windows_job_runs_only_provider_free_evidence_contracts(
     assert "$cases[0].SelectSingleNode('failure')" in guard
     assert "$cases[0].SelectSingleNode('error')" in guard
     assert (
-        "test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets["
-        in guard
+        "test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets[" in guard
     )
     assert "$paramCases.Count -ne 4" in guard
     assert "$case.SelectSingleNode('skipped')" in guard
@@ -424,34 +425,26 @@ def test_windows_full_gate_executes_canonical_check(
     assert _mapping(setup_node["with"])["node-version"] == "24"
 
     controller = next(
-        step
-        for step in steps
-        if step.get("name") == "Install pyrepo-check controller"
+        step for step in steps if step.get("name") == "Install pyrepo-check controller"
     )
     assert controller.get("shell") == "pwsh"
     controller_run = str(controller.get("run", ""))
-    assert (
-        f'uv tool install --python 3.13.15 "{PYREPO_CHECK_SOURCE}"'
-        in controller_run
-    )
+    assert f'uv tool install --python 3.13.15 "{PYREPO_CHECK_SOURCE}"' in controller_run
     assert "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in controller_run
     assert (
         "uv tool dir --bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append"
         in controller_run
     )
 
-    commands = [
-        run for step in steps if isinstance((run := step.get("run")), str)
-    ]
+    commands = [run for step in steps if isinstance((run := step.get("run")), str)]
     gate_step = next(
         step for step in steps if step.get("name") == "Run canonical full gate"
     )
     assert steps.index(controller) < steps.index(gate_step)
     assert commands.index("uv lock --check") < commands.index(str(gate_step.get("run")))
-    assert (
-        commands.index("uv run --locked python -m playwright install chromium")
-        < commands.index(str(gate_step.get("run")))
-    )
+    assert commands.index(
+        "uv run --locked python -m playwright install chromium"
+    ) < commands.index(str(gate_step.get("run")))
 
     assert gate_step.get("shell") == "pwsh"
     gate_env = _mapping(gate_step.get("env", {}))
@@ -463,6 +456,16 @@ def test_windows_full_gate_executes_canonical_check(
     )
     assert "$gateExit = $LASTEXITCODE" in gate_run
     assert "exit $gateExit" in gate_run
+
+
+def test_linux_full_gate_has_room_for_the_canonical_validation_budget(
+    workflow: dict[str, object],
+) -> None:
+    """Reserve the proven full-gate budget without changing its command."""
+    job = _job(workflow, "python-313")
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == LINUX_FULL_GATE_TIMEOUT_MINUTES
 
 
 def test_windows_jobs_upload_exact_narrow_artifacts(

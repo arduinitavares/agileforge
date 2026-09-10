@@ -41,6 +41,7 @@ from workflow.requests.project import (
     RecordRepositoryBinding,
     RepositoryBindingInput,
 )
+from workflow.requests.sprint_retry import RetrySprint, StartSprintRetry
 from workflow.requests.vision import (
     BeginVisionRevision,
     DecideVisionReview,
@@ -73,6 +74,8 @@ type TransitionRequest = (
     | RecordSprintPlan
     | DecideSprintPlan
     | StartSprint
+    | RetrySprint
+    | StartSprintRetry
     | CompleteTask
     | CloseStory
     | ReviewSprint
@@ -115,9 +118,11 @@ __all__ = [
     "RegisterSpecificationSource",
     "RepairStoryReadiness",
     "RepositoryBindingInput",
+    "RetrySprint",
     "RevalidateNodeAttempt",
     "ReviewSprint",
     "StartNodeAttempt",
     "StartSprint",
+    "StartSprintRetry",
     "TransitionRequest",
 ]

@@ -15,8 +15,10 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
+from workflow.definitions.execution import EXECUTION_NODES
 from workflow.facts import (
     BacklogItemFact,
+    IncompleteTransitionFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
@@ -26,6 +28,7 @@ from workflow.facts import (
     ProductGoalInterviewTurnFact,
     ProductGoalOutcomeFact,
     ProjectFact,
+    ProviderGenerationGuardFact,
     ReviewDecisionFact,
     SpecificationCandidateFact,
     SpecificationDecisionFact,
@@ -33,6 +36,8 @@ from workflow.facts import (
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
+    SprintPlanGenerationGuardFact,
+    SprintRetryFact,
     SprintReviewFact,
     SprintStartFact,
     StoryCompletionFact,
@@ -48,7 +53,7 @@ from workflow.facts import (
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
 )
-from workflow.fingerprints import fact_fingerprint
+from workflow.fingerprints import business_fact_fingerprint, fact_fingerprint
 from workflow.graph import (
     ChildGraphSpec,
     NodeSpec,
@@ -59,6 +64,24 @@ from workflow.graph import (
 
 CLOCK: FixedClock = FixedClock(datetime(2026, 8, 2, 12, tzinfo=UTC))
 EVALUATED_AT: datetime = CLOCK.now()
+
+SPRINT_RETRY_VARIANT: tuple[SprintRetryFact, ...] = (
+    SprintRetryFact(
+        retry_attempt_id=64,
+        project_id=23,
+        sprint_id=12,
+        ordinal=2,
+        predecessor_retry_attempt_id=None,
+        contract_fingerprint="sha256:retry-contract",
+        created_by="reviewer",
+        rationale="Retry with fresh evidence.",
+        creation_fingerprint="sha256:retry-creation",
+        creation_receipt_key="properties-retry-64",
+        created_at=EVALUATED_AT,
+        status="completed",
+        completed_at=EVALUATED_AT,
+    ),
+)
 
 AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
     (
@@ -548,6 +571,74 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
             ),
         ),
     ),
+    ("sprint_retries", SPRINT_RETRY_VARIANT),
+)
+
+DERIVED_RETRY_GUARD_VARIANTS: tuple[tuple[str, object, object, str], ...] = (
+    (
+        "sprint_plan_generation_guards",
+        SprintPlanGenerationGuardFact(
+            attempt_id=61,
+            started_at=EVALUATED_AT,
+            outcome="failure",
+            outcome_recorded_at=EVALUATED_AT,
+            integrity="malformed",
+            failure_code="first",
+        ),
+        SprintPlanGenerationGuardFact(
+            attempt_id=61,
+            started_at=EVALUATED_AT,
+            outcome="failure",
+            outcome_recorded_at=EVALUATED_AT,
+            integrity="malformed",
+            failure_code="second",
+        ),
+        "sprint_plan_generation_guard",
+    ),
+    (
+        "provider_generation_guards",
+        ProviderGenerationGuardFact(
+            attempt_id=62,
+            node_id="properties.provider",
+            instance_key=None,
+            business_fact_fingerprint="sha256:business",
+            input_fingerprint="sha256:first",
+            started_at=EVALUATED_AT,
+            outcome="failure",
+            outcome_recorded_at=EVALUATED_AT,
+            integrity="malformed",
+        ),
+        ProviderGenerationGuardFact(
+            attempt_id=62,
+            node_id="properties.provider",
+            instance_key=None,
+            business_fact_fingerprint="sha256:business",
+            input_fingerprint="sha256:second",
+            started_at=EVALUATED_AT,
+            outcome="failure",
+            outcome_recorded_at=EVALUATED_AT,
+            integrity="malformed",
+        ),
+        "provider_generation_guard",
+    ),
+    (
+        "incomplete_transitions",
+        IncompleteTransitionFact(
+            receipt_id=63,
+            request_kind="retry_sprint",
+            request_fingerprint="sha256:first",
+            started_at=EVALUATED_AT,
+            integrity="linked",
+        ),
+        IncompleteTransitionFact(
+            receipt_id=63,
+            request_kind="retry_sprint",
+            request_fingerprint="sha256:second",
+            started_at=EVALUATED_AT,
+            integrity="linked",
+        ),
+        "incomplete_transition",
+    ),
 )
 
 
@@ -782,9 +873,11 @@ def test_time_insensitive_decision_fingerprint_ignores_evaluation_time() -> None
 
 def test_snapshot_variants_cover_every_authoritative_field() -> None:
     """Keep the sensitivity matrix aligned with the complete snapshot contract."""
-    assert {name for name, _value in AUTHORITATIVE_SNAPSHOT_VARIANTS} == set(
-        WorkflowFactSnapshot.model_fields
-    )
+    sensitive = {name for name, _value in AUTHORITATIVE_SNAPSHOT_VARIANTS}
+    stable = {item[0] for item in DERIVED_RETRY_GUARD_VARIANTS}
+
+    assert sensitive.isdisjoint(stable)
+    assert sensitive | stable == set(WorkflowFactSnapshot.model_fields)
 
 
 @pytest.mark.parametrize(
@@ -815,9 +908,121 @@ def test_authoritative_snapshot_fields_change_fact_and_decision_fingerprints(
     variant_position = graph.evaluate(variant, EVALUATED_AT)
 
     assert fact_fingerprint(variant) != fact_fingerprint(baseline), field_name
+    if field_name == "sprint_retries":
+        assert business_fact_fingerprint(variant) != business_fact_fingerprint(baseline)
     assert variant_position.fact_fingerprint != baseline_position.fact_fingerprint
     assert variant_position.decisions[0].decision_fingerprint != (
         baseline_position.decisions[0].decision_fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "baseline_guard", "variant_guard"),
+    tuple(item[:3] for item in DERIVED_RETRY_GUARD_VARIANTS),
+    ids=tuple(item[0] for item in DERIVED_RETRY_GUARD_VARIANTS),
+)
+def test_derived_retry_guards_keep_ordinary_fingerprints_stable(
+    field_name: str,
+    baseline_guard: object,
+    variant_guard: object,
+) -> None:
+    """Keep retry-only guard metadata out of ordinary graph continuations."""
+    empty = _snapshot()
+    baseline = empty.model_copy(update={field_name: (baseline_guard,)})
+    variant = empty.model_copy(update={field_name: (variant_guard,)})
+    graph = _graph(
+        _node(
+            "properties.fingerprint",
+            (RuleEvaluation(category=RuleCategory.AVAILABLE, reason_code="READY"),),
+        )
+    )
+
+    empty_position = graph.evaluate(empty, EVALUATED_AT)
+    baseline_position = graph.evaluate(baseline, EVALUATED_AT)
+    variant_position = graph.evaluate(variant, EVALUATED_AT)
+
+    assert (
+        fact_fingerprint(empty)
+        == fact_fingerprint(baseline)
+        == fact_fingerprint(variant)
+    )
+    assert (
+        business_fact_fingerprint(empty)
+        == business_fact_fingerprint(baseline)
+        == business_fact_fingerprint(variant)
+    )
+    assert (
+        empty_position.fact_fingerprint
+        == baseline_position.fact_fingerprint
+        == variant_position.fact_fingerprint
+    )
+    assert (
+        empty_position.decisions[0].decision_fingerprint
+        == baseline_position.decisions[0].decision_fingerprint
+        == variant_position.decisions[0].decision_fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "baseline_guard", "variant_guard", "guard_fact_type"),
+    DERIVED_RETRY_GUARD_VARIANTS,
+    ids=tuple(item[0] for item in DERIVED_RETRY_GUARD_VARIANTS),
+)
+def test_derived_retry_guard_metadata_changes_retry_decision_references(
+    field_name: str,
+    baseline_guard: object,
+    variant_guard: object,
+    guard_fact_type: str,
+) -> None:
+    """Bind retry decisions to metadata omitted from ordinary fact hashes."""
+    candidate = SprintFact(
+        sprint_id=65,
+        status="completed",
+        completed_at=EVALUATED_AT,
+    )
+    baseline = _snapshot().model_copy(
+        update={"sprints": (candidate,), field_name: (baseline_guard,)}
+    )
+    variant = baseline.model_copy(update={field_name: (variant_guard,)})
+    retry_node = next(
+        item for item in EXECUTION_NODES if item.node_id == "execution.sprint.retry"
+    )
+    retry_graph = WorkflowGraph(
+        graph_version=GRAPH_VERSION,
+        root=ChildGraphSpec(child_graph_id="execution", nodes=(retry_node,)),
+    )
+
+    baseline_position = retry_graph.evaluate(baseline, EVALUATED_AT)
+    variant_position = retry_graph.evaluate(variant, EVALUATED_AT)
+    baseline_decision = baseline_position.decisions[0]
+    variant_decision = variant_position.decisions[0]
+    baseline_reference = next(
+        item
+        for item in baseline_decision.fact_references
+        if item.fact_type == guard_fact_type
+    )
+    variant_reference = next(
+        item
+        for item in variant_decision.fact_references
+        if item.fact_type == guard_fact_type
+    )
+
+    assert fact_fingerprint(variant) == fact_fingerprint(baseline)
+    assert business_fact_fingerprint(variant) == business_fact_fingerprint(baseline)
+    assert (
+        variant_decision.node_id,
+        variant_decision.instance_key,
+        variant_decision.category,
+        variant_decision.reason_code,
+    ) == (
+        baseline_decision.node_id,
+        baseline_decision.instance_key,
+        baseline_decision.category,
+        baseline_decision.reason_code,
+    )
+    assert variant_reference.fingerprint != baseline_reference.fingerprint
+    assert (
+        variant_decision.decision_fingerprint != baseline_decision.decision_fingerprint
     )
 
 

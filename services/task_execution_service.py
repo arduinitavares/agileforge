@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import TaskAcceptanceResult, TaskStatus
 from models.events import TaskExecutionLog
+from models.sprint_retry import (
+    SprintRetryTaskEvidence,
+    SprintRetryTaskState,
+)
 from models.workflow import TaskCompletionEvidence
 from repositories.workflow import WorkflowFactRepository
 from utils.api_schemas import TaskExecutionLogEntry
@@ -31,7 +35,21 @@ from workflow.execution_integrity import (
     TaskEvidencePayload,
     task_evidence_fingerprint,
 )
+from workflow.execution_scope import (
+    ExecutionScope,
+    ExecutionScopeError,
+    resolve_execution_scope,
+)
 from workflow.fingerprints import canonical_json
+
+_OUTCOME_REQUIRED = "Task completion requires an outcome summary."
+_ARTIFACT_REFS_REQUIRED = "Task completion requires artifact references."
+_ORIGINAL_EVIDENCE_IMMUTABLE = "Task completion evidence is immutable."
+_DEPENDENCY_BLOCKED = "Task dependency facts do not permit completion."
+_RETRY_EVIDENCE_IMMUTABLE = "Retry task completion evidence is immutable."
+_RETRY_TASK_SCOPE_REQUIRED = (
+    "Retry completion persistence requires validated retry scope."
+)
 
 
 class TaskExecutionServiceError(Exception):
@@ -77,6 +95,7 @@ class TaskCompletionInput:
     checklist_result: JsonObject
     completed_by: str
     completed_at: datetime
+    retry_attempt_id: int | None = None
 
 
 class _TaskLike(Protocol):
@@ -336,11 +355,29 @@ def _completion_metadata(
     return metadata
 
 
-def complete_task_in_session(
+@dataclass(frozen=True)
+class _ValidatedTaskCompletion:
+    """Semantic completion facts resolved before original or retry persistence."""
+
+    task: Task
+    scope: ExecutionScope
+    normalized_outcome: str
+    normalized_refs: tuple[str, ...]
+    evidence_fingerprint: str
+    retry_state: SprintRetryTaskState | None
+
+
+def _task_open_message(command: TaskCompletionInput) -> str:
+    if command.retry_attempt_id is None:
+        return "Task is not open in the active Sprint."
+    return "Task is not open in the active Sprint retry."
+
+
+def _validate_task_completion(
     session: Session,
     command: TaskCompletionInput,
-) -> TaskCompletionEvidence:
-    """Complete one exact Sprint Task inside the caller's transaction."""
+) -> _ValidatedTaskCompletion:
+    """Validate one attempt-scoped completion before choosing its persistence row."""
     sprint = session.get(Sprint, command.sprint_id)
     task = session.get(Task, command.task_id)
     if sprint is None or sprint.project_id != command.project_id:
@@ -356,45 +393,33 @@ def complete_task_in_session(
     ).one_or_none()
     if story is None or story.project_id != command.project_id or membership is None:
         raise TaskExecutionServiceError.task_not_in_sprint()
-    if sprint.status.value != "Active" or task.status in {
-        TaskStatus.DONE,
-        TaskStatus.CANCELLED,
-    }:
-        message = "Task is not open in the active Sprint."
-        raise TaskExecutionServiceError(message, status_code=409)
+    retry_state = _validate_attempt_open(session, command, sprint, task)
     metadata = _completion_metadata(task, command.checklist_result)
     normalized_outcome = command.outcome_summary.strip()
     if not normalized_outcome:
-        message = "Task completion requires an outcome summary."
-        raise TaskExecutionServiceError(message, status_code=409)
+        raise TaskExecutionServiceError(_OUTCOME_REQUIRED, status_code=409)
     normalized_refs = tuple(
         sorted({item.strip() for item in command.artifact_refs if item.strip()})
     )
     if metadata.artifact_targets and not normalized_refs:
-        message = "Task completion requires artifact references."
-        raise TaskExecutionServiceError(message, status_code=409)
-    existing = session.exec(
-        select(TaskCompletionEvidence).where(
-            col(TaskCompletionEvidence.task_id) == command.task_id,
-            col(TaskCompletionEvidence.sprint_id) == command.sprint_id,
-        )
-    ).one_or_none()
-    if existing is not None:
-        message = "Task completion evidence is immutable."
-        raise TaskExecutionServiceError(message, status_code=409)
+        raise TaskExecutionServiceError(_ARTIFACT_REFS_REQUIRED, status_code=409)
     snapshot = WorkflowFactRepository(session).load(command.project_id)
+    try:
+        scope = resolve_execution_scope(
+            snapshot,
+            sprint_id=command.sprint_id,
+            retry_attempt_id=command.retry_attempt_id,
+        )
+    except ExecutionScopeError as error:
+        raise TaskExecutionServiceError(str(error), status_code=409) from error
+    if scope.status.lower() != "active":
+        raise TaskExecutionServiceError(_task_open_message(command), status_code=409)
     current_task = next(
-        (
-            item
-            for item in snapshot.tasks
-            if item.sprint_id == command.sprint_id
-            and item.task_id == command.task_id
-        ),
+        (item for item in scope.tasks if item.task_id == command.task_id),
         None,
     )
     if current_task is None or not current_task.dependencies_satisfied:
-        message = "Task dependency facts do not permit completion."
-        raise TaskExecutionServiceError(message, status_code=409)
+        raise TaskExecutionServiceError(_DEPENDENCY_BLOCKED, status_code=409)
     task_fact = current_task.model_copy(update={"status": TaskStatus.DONE.value})
     try:
         evidence_fingerprint = task_evidence_fingerprint(
@@ -406,25 +431,96 @@ def complete_task_in_session(
                 acceptance_result=command.acceptance_result,
                 checklist_result=command.checklist_result,
             ),
+            scope=scope,
         )
     except ExecutionIntegrityError as error:
         raise TaskExecutionServiceError(str(error), status_code=409) from error
-    old_status = task.status
-    task.status = TaskStatus.DONE
-    task.updated_at = command.completed_at
+    return _ValidatedTaskCompletion(
+        task=task,
+        scope=scope,
+        normalized_outcome=normalized_outcome,
+        normalized_refs=normalized_refs,
+        evidence_fingerprint=evidence_fingerprint,
+        retry_state=retry_state,
+    )
+
+
+def _validate_attempt_open(
+    session: Session,
+    command: TaskCompletionInput,
+    sprint: Sprint,
+    task: Task,
+) -> SprintRetryTaskState | None:
+    """Validate the mutable execution rows for the selected attempt."""
+    if command.retry_attempt_id is not None:
+        return _open_retry_task_state(session, command)
+    if sprint.status.value != "Active" or task.status in {
+        TaskStatus.DONE,
+        TaskStatus.CANCELLED,
+    }:
+        raise TaskExecutionServiceError(_task_open_message(command), status_code=409)
+    existing = session.exec(
+        select(TaskCompletionEvidence).where(
+            col(TaskCompletionEvidence.task_id) == command.task_id,
+            col(TaskCompletionEvidence.sprint_id) == command.sprint_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        raise TaskExecutionServiceError(_ORIGINAL_EVIDENCE_IMMUTABLE, status_code=409)
+    return None
+
+
+def _open_retry_task_state(
+    session: Session,
+    command: TaskCompletionInput,
+) -> SprintRetryTaskState:
+    """Load the one mutable retry state required by a retry completion."""
+    if command.retry_attempt_id is None:
+        raise RuntimeError(_RETRY_TASK_SCOPE_REQUIRED)
+    retry_state = session.exec(
+        select(SprintRetryTaskState).where(
+            col(SprintRetryTaskState.retry_attempt_id) == command.retry_attempt_id,
+            col(SprintRetryTaskState.task_id) == command.task_id,
+        )
+    ).one_or_none()
+    if retry_state is None or retry_state.status in {"Done", "Cancelled"}:
+        raise TaskExecutionServiceError(_task_open_message(command), status_code=409)
+    return retry_state
+
+
+def complete_task_in_session(
+    session: Session,
+    command: TaskCompletionInput,
+) -> TaskCompletionEvidence | SprintRetryTaskEvidence:
+    """Complete one exact Sprint Task inside the caller's transaction."""
+    validated = _validate_task_completion(session, command)
+    if command.retry_attempt_id is not None:
+        return _persist_retry_task_completion(session, command, validated)
+    return _persist_original_task_completion(session, command, validated)
+
+
+def _persist_original_task_completion(
+    session: Session,
+    command: TaskCompletionInput,
+    validated: _ValidatedTaskCompletion,
+) -> TaskCompletionEvidence:
+    """Append original execution evidence after attempt-scoped validation."""
+    old_status = validated.task.status
+    validated.task.status = TaskStatus.DONE
+    validated.task.updated_at = command.completed_at
     evidence = TaskCompletionEvidence(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
         task_id=command.task_id,
-        outcome_summary=normalized_outcome,
-        artifact_refs_json=canonical_json(list(normalized_refs)),
+        outcome_summary=validated.normalized_outcome,
+        artifact_refs_json=canonical_json(list(validated.normalized_refs)),
         acceptance_result=command.acceptance_result,
         checklist_result_json=canonical_json(command.checklist_result),
-        evidence_fingerprint=evidence_fingerprint,
+        evidence_fingerprint=validated.evidence_fingerprint,
         completed_by=command.completed_by,
         completed_at=command.completed_at,
     )
-    session.add(task)
+    session.add(validated.task)
     session.add(evidence)
     session.add(
         TaskExecutionLog(
@@ -432,13 +528,49 @@ def complete_task_in_session(
             sprint_id=command.sprint_id,
             old_status=old_status,
             new_status=TaskStatus.DONE,
-            outcome_summary=normalized_outcome,
-            artifact_refs_json=canonical_json(list(normalized_refs)),
+            outcome_summary=validated.normalized_outcome,
+            artifact_refs_json=canonical_json(list(validated.normalized_refs)),
             acceptance_result=TaskAcceptanceResult(command.acceptance_result),
             notes=canonical_json(command.checklist_result),
             changed_by=command.completed_by,
             changed_at=command.completed_at,
         )
     )
+    session.flush()
+    return evidence
+
+
+def _persist_retry_task_completion(
+    session: Session,
+    command: TaskCompletionInput,
+    validated: _ValidatedTaskCompletion,
+) -> SprintRetryTaskEvidence:
+    """Append retry evidence without changing the original execution rows."""
+    if command.retry_attempt_id is None or validated.retry_state is None:
+        raise RuntimeError(_RETRY_TASK_SCOPE_REQUIRED)
+    existing = session.exec(
+        select(SprintRetryTaskEvidence).where(
+            col(SprintRetryTaskEvidence.retry_attempt_id) == command.retry_attempt_id,
+            col(SprintRetryTaskEvidence.task_id) == command.task_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        raise TaskExecutionServiceError(_RETRY_EVIDENCE_IMMUTABLE, status_code=409)
+    validated.retry_state.status = TaskStatus.DONE.value
+    evidence = SprintRetryTaskEvidence(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        retry_attempt_id=command.retry_attempt_id,
+        task_id=command.task_id,
+        outcome_summary=validated.normalized_outcome,
+        artifact_refs_json=canonical_json(list(validated.normalized_refs)),
+        acceptance_result=command.acceptance_result,
+        checklist_result_json=canonical_json(command.checklist_result),
+        evidence_fingerprint=validated.evidence_fingerprint,
+        completed_by=command.completed_by,
+        completed_at=command.completed_at,
+    )
+    session.add(validated.retry_state)
+    session.add(evidence)
     session.flush()
     return evidence

@@ -8,10 +8,12 @@ from sqlmodel import Session, col, select
 from models.core import UserStory, UserStoryDependency
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
+from models.sprint_retry import SprintRetryAttempt
 from models.workflow import StoryDependencyReview
 from services.agent_workbench.story_phase import (
     load_story_correction_target_in_session,
 )
+from workflow.execution_scope import retry_blocks_planning
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
@@ -83,13 +85,9 @@ def selected_scope_fingerprint(
                         item.validation_evidence_fingerprint
                     ),
                     "selection_state": "selected",
-                    "selection_state_fingerprint": (
-                        item.selection_state_fingerprint
-                    ),
+                    "selection_state_fingerprint": (item.selection_state_fingerprint),
                     "selection_event_id": item.selection_event_id,
-                    "selection_event_fingerprint": (
-                        item.selection_event_fingerprint
-                    ),
+                    "selection_event_fingerprint": (item.selection_event_fingerprint),
                 }
                 for item in ordered
             ],
@@ -156,13 +154,50 @@ class ApplyStoryDependenciesInput:
     reviewed_at: datetime
 
 
-def apply_story_dependencies_in_session(  # noqa: C901, PLR0915
+def _retry_blocks_dependency_mutation(session: Session, *, project_id: int) -> bool:
+    """Check retry ownership without importing the fact repository at module load."""
+    statuses = tuple(
+        session.exec(
+            select(SprintRetryAttempt.status).where(
+                SprintRetryAttempt.project_id == project_id
+            )
+        ).all()
+    )
+    if not statuses:
+        return False
+    if any(status in {"Planned", "Active"} for status in statuses):
+        return True
+    from repositories.workflow import (  # noqa: PLC0415
+        WorkflowFactLoadError,
+        WorkflowFactRepository,
+    )
+
+    try:
+        return retry_blocks_planning(WorkflowFactRepository(session).load(project_id))
+    except WorkflowFactLoadError:
+        return True
+
+
+def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
     session: Session,
     *,
     inputs: ApplyStoryDependenciesInput,
 ) -> StoryDependencyReview:
     """Apply an exact acyclic reviewed edge set in the caller transaction."""
     project_id = inputs.project_id
+    if _retry_blocks_dependency_mutation(session, project_id=project_id):
+        message = (
+            "Dependency review is locked until current Sprint retry triage finishes."
+        )
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_LIFECYCLE_LOCKED",
+                    message=message,
+                    story_ids=list(inputs.selected_story_ids),
+                )
+            ]
+        )
     selected_story_ids = inputs.selected_story_ids
     reviewed_edges = canonical_dependency_edges(inputs.reviewed_edges)
     reviewed_at = inputs.reviewed_at
@@ -178,9 +213,7 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0915
                 )
             ]
         )
-    endpoint_ids = selected | {
-        edge.prerequisite_story_id for edge in reviewed_edges
-    }
+    endpoint_ids = selected | {edge.prerequisite_story_id for edge in reviewed_edges}
     stories = session.exec(
         select(UserStory).where(col(UserStory.story_id).in_(endpoint_ids))
     ).all()

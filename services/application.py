@@ -13,6 +13,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    Self,
     TypedDict,
     Unpack,
     assert_never,
@@ -112,6 +113,7 @@ from services.sprint_ownership import (
     SprintOwnerResolutionError,
     resolve_sprint_owner,
 )
+from services.sprint_retry import build_sprint_retry_preview
 from services.sprint_selection import (
     SprintSelectionError,
     require_exact_candidate_story_ids,
@@ -158,11 +160,20 @@ from workflow.definitions.planning import (
     selected_scope_stories,
     story_dependency_source_fingerprint,
 )
+from workflow.execution_identity import (
+    ExecutionIdentity,
+    parse_execution_instance_key,
+)
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     sprint_close_fingerprint,
     sprint_review_fingerprint,
     story_completion_eligibility_fingerprint,
+)
+from workflow.execution_scope import (
+    ExecutionScope,
+    ExecutionScopeError,
+    resolve_execution_scope,
 )
 from workflow.fingerprints import (
     canonical_hash,
@@ -187,8 +198,10 @@ from workflow.requests import (
     RecordPostSprintTriage,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetrySprint,
     ReviewSprint,
     StartSprint,
+    StartSprintRetry,
 )
 from workflow.requests.planning import ReviewedDependencyEdge, StoryReadinessUpdate
 
@@ -202,6 +215,7 @@ if TYPE_CHECKING:
     from utils.spec_schemas import ValidationEvidence
     from workflow.facts import (
         PostSprintTriageFact,
+        SprintFact,
         StoryDependencyFact,
         StoryFact,
         WorkflowFactSnapshot,
@@ -629,12 +643,73 @@ class ExecutionActionSelectionService:
         decision: NodeDecision,
     ) -> tuple[int, int] | None:
         """Resolve one selected open Task and its active Sprint."""
+        selected = self._selected_execution(project_id, decision, expected_kind="task")
+        if selected is None:
+            return None
+        snapshot, identity, retry_scope = selected
+        task_id = identity.entity_id
+        if retry_scope is not None:
+            return self._retry_task_completion_target(
+                retry_scope, decision, task_id=task_id
+            )
+        return self._original_task_completion_target(
+            snapshot, decision, task_id=task_id
+        )
+
+    def _selected_execution(
+        self,
+        project_id: int,
+        decision: NodeDecision,
+        *,
+        expected_kind: str,
+    ) -> tuple[WorkflowFactSnapshot, ExecutionIdentity, ExecutionScope | None] | None:
+        """Load a transportable decision bound to its original or retry scope."""
         if not execution_action_decision_is_transportable(decision):
             return None
         snapshot = self._snapshot(project_id)
-        task_id = _instance_identity(decision, "task")
+        selected = self._selection_scope(snapshot, decision)
+        if selected is None or snapshot is None:
+            return None
+        identity, retry_scope = selected
+        if identity.kind != expected_kind:
+            return None
+        return snapshot, identity, retry_scope
+
+    def _retry_task_completion_target(
+        self,
+        retry_scope: ExecutionScope,
+        decision: NodeDecision,
+        *,
+        task_id: int | None,
+    ) -> tuple[int, int] | None:
+        """Validate a task decision against one exact active retry scope."""
+        tasks = tuple(
+            item
+            for item in retry_scope.tasks
+            if item.task_id == task_id and item.status not in {"Done", "Cancelled"}
+        )
+        reference = _integer_fact_reference(decision, "task")
+        if (
+            task_id is None
+            or len(tasks) != 1
+            or reference is None
+            or reference[0] != task_id
+            or reference[1].fingerprint
+            != canonical_hash(tasks[0].model_dump(mode="json"))
+        ):
+            return None
+        return task_id, retry_scope.sprint_id
+
+    def _original_task_completion_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        decision: NodeDecision,
+        *,
+        task_id: int | None,
+    ) -> tuple[int, int] | None:
+        """Validate a task decision against the current original Sprint scope."""
         active_sprint_id = _single_sprint_id(snapshot, status="active")
-        if snapshot is None or task_id is None or active_sprint_id is None:
+        if task_id is None or active_sprint_id is None:
             return None
         tasks = tuple(
             item
@@ -661,12 +736,62 @@ class ExecutionActionSelectionService:
         decision: NodeDecision,
     ) -> tuple[int, int, str] | None:
         """Resolve one selected Story and its current completion fingerprint."""
-        if not execution_action_decision_is_transportable(decision):
+        selected = self._selected_execution(project_id, decision, expected_kind="story")
+        if selected is None:
             return None
-        snapshot = self._snapshot(project_id)
-        story_id = _instance_identity(decision, "story")
+        snapshot, identity, retry_scope = selected
+        story_id = identity.entity_id
+        if retry_scope is not None:
+            return self._retry_story_close_target(
+                snapshot, retry_scope, decision, story_id=story_id
+            )
+        return self._original_story_close_target(snapshot, decision, story_id=story_id)
+
+    def _retry_story_close_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        retry_scope: ExecutionScope,
+        decision: NodeDecision,
+        *,
+        story_id: int | None,
+    ) -> tuple[int, int, str] | None:
+        """Validate a Story close decision against one exact retry scope."""
+        if story_id is None:
+            return None
+        story = next(
+            (item for item in retry_scope.stories if item.story_id == story_id),
+            None,
+        )
+        reference = _integer_fact_reference(decision, "story_completion")
+        try:
+            fingerprint = story_completion_eligibility_fingerprint(
+                snapshot,
+                sprint_id=retry_scope.sprint_id,
+                story_id=story_id,
+                scope=retry_scope,
+            )
+        except ExecutionIntegrityError:
+            return None
+        if (
+            story is None
+            or story.status in {"Done", "Accepted"}
+            or reference is None
+            or reference[0] != story_id
+            or reference[1].fingerprint != fingerprint
+        ):
+            return None
+        return story_id, retry_scope.sprint_id, fingerprint
+
+    def _original_story_close_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        decision: NodeDecision,
+        *,
+        story_id: int | None,
+    ) -> tuple[int, int, str] | None:
+        """Validate a Story close decision against the active original Sprint."""
         active_sprint_id = _single_sprint_id(snapshot, status="active")
-        if snapshot is None or story_id is None or active_sprint_id is None:
+        if story_id is None or active_sprint_id is None:
             return None
         stories = tuple(
             item
@@ -700,14 +825,64 @@ class ExecutionActionSelectionService:
         decision: NodeDecision,
     ) -> tuple[int, str] | None:
         """Resolve the active Sprint and terminal-review fingerprint."""
-        if not execution_action_decision_is_transportable(decision):
+        selected = self._selected_execution(
+            project_id, decision, expected_kind="sprint"
+        )
+        if selected is None:
             return None
-        snapshot = self._snapshot(project_id)
-        sprint_id = _instance_identity(decision, "sprint")
+        snapshot, identity, retry_scope = selected
+        sprint_id = identity.entity_id
+        if retry_scope is not None:
+            return self._retry_sprint_review_target(
+                snapshot, retry_scope, decision, sprint_id=sprint_id
+            )
+        return self._original_sprint_review_target(
+            snapshot, decision, sprint_id=sprint_id
+        )
+
+    def _retry_sprint_review_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        retry_scope: ExecutionScope,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str] | None:
+        """Validate a Sprint review decision against one active retry scope."""
+        if (
+            sprint_id is None
+            or sprint_id != retry_scope.sprint_id
+            or retry_scope.sprint_reviews
+        ):
+            return None
+        try:
+            fingerprint = sprint_review_fingerprint(
+                snapshot,
+                sprint_id,
+                scope=retry_scope,
+            )
+        except ExecutionIntegrityError:
+            return None
+        reference = _integer_fact_reference(decision, "sprint_review")
+        if (
+            reference is None
+            or reference[0] != sprint_id
+            or reference[1].fingerprint != fingerprint
+        ):
+            return None
+        return sprint_id, fingerprint
+
+    def _original_sprint_review_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str] | None:
+        """Validate a Sprint review decision against the active original Sprint."""
         active_sprint_id = _single_sprint_id(snapshot, status="active")
         if (
-            snapshot is None
-            or sprint_id is None
+            sprint_id is None
             or sprint_id != active_sprint_id
             or any(item.sprint_id == sprint_id for item in snapshot.sprint_reviews)
         ):
@@ -732,12 +907,71 @@ class ExecutionActionSelectionService:
         decision: NodeDecision,
     ) -> tuple[int, str, str] | None:
         """Resolve active Sprint review and close fingerprints."""
-        if not execution_action_decision_is_transportable(decision):
+        selected = self._selected_execution(
+            project_id, decision, expected_kind="sprint"
+        )
+        if selected is None:
             return None
-        snapshot = self._snapshot(project_id)
-        sprint_id = _instance_identity(decision, "sprint")
+        snapshot, identity, retry_scope = selected
+        if retry_scope is not None:
+            return self._retry_sprint_close_target(
+                snapshot, retry_scope, decision, sprint_id=identity.entity_id
+            )
+        return self._original_sprint_close_target(
+            snapshot, decision, sprint_id=identity.entity_id
+        )
+
+    def _retry_sprint_close_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        retry_scope: ExecutionScope,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str, str] | None:
+        """Validate a Sprint close decision against its active retry scope."""
+        reviews = retry_scope.sprint_reviews
+        if (
+            sprint_id is None
+            or sprint_id != retry_scope.sprint_id
+            or retry_scope.status != "active"
+            or len(reviews) != 1
+            or retry_scope.sprint_closures
+        ):
+            return None
+        fingerprints = _sprint_close_fingerprints(
+            snapshot, sprint_id, scope=retry_scope
+        )
+        if fingerprints is None:
+            return None
+        review_fingerprint, close_fingerprint = fingerprints
+        sprint = next(
+            (item for item in snapshot.sprints if item.sprint_id == sprint_id), None
+        )
+        if (
+            sprint is None
+            or reviews[0].review_fingerprint != review_fingerprint
+            or not _matches_sprint_close_references(
+                decision,
+                sprint_id=sprint_id,
+                sprint=sprint,
+                review_fingerprint=review_fingerprint,
+                close_fingerprint=close_fingerprint,
+            )
+        ):
+            return None
+        return sprint_id, review_fingerprint, close_fingerprint
+
+    def _original_sprint_close_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str, str] | None:
+        """Validate a Sprint close decision against the active original Sprint."""
         active_sprint_id = _single_sprint_id(snapshot, status="active")
-        if snapshot is None or sprint_id is None or sprint_id != active_sprint_id:
+        if sprint_id is None or sprint_id != active_sprint_id:
             return None
         reviews = tuple(
             item for item in snapshot.sprint_reviews if item.sprint_id == sprint_id
@@ -746,31 +980,20 @@ class ExecutionActionSelectionService:
             item.sprint_id == sprint_id for item in snapshot.sprint_closures
         ):
             return None
-        try:
-            review_fingerprint = sprint_review_fingerprint(snapshot, sprint_id)
-            close_fingerprint = sprint_close_fingerprint(
-                snapshot,
-                sprint_id,
-                review_fingerprint,
-            )
-        except ExecutionIntegrityError:
+        fingerprints = _sprint_close_fingerprints(snapshot, sprint_id)
+        if fingerprints is None:
             return None
-        sprint_reference = _integer_fact_reference(decision, "sprint")
-        review_reference = _integer_fact_reference(decision, "sprint_review")
-        close_reference = _integer_fact_reference(decision, "sprint_close")
+        review_fingerprint, close_fingerprint = fingerprints
         sprint = next(item for item in snapshot.sprints if item.sprint_id == sprint_id)
         if (
             reviews[0].review_fingerprint != review_fingerprint
-            or sprint_reference is None
-            or sprint_reference[0] != sprint_id
-            or sprint_reference[1].fingerprint
-            != canonical_hash(sprint.model_dump(mode="json"))
-            or review_reference is None
-            or review_reference[0] != sprint_id
-            or review_reference[1].fingerprint != review_fingerprint
-            or close_reference is None
-            or close_reference[0] != sprint_id
-            or close_reference[1].fingerprint != close_fingerprint
+            or not _matches_sprint_close_references(
+                decision,
+                sprint_id=sprint_id,
+                sprint=sprint,
+                review_fingerprint=review_fingerprint,
+                close_fingerprint=close_fingerprint,
+            )
         ):
             return None
         return sprint_id, review_fingerprint, close_fingerprint
@@ -782,11 +1005,73 @@ class ExecutionActionSelectionService:
         decision: NodeDecision,
     ) -> tuple[int, str] | None:
         """Resolve one completed Sprint and its exact closure identity."""
-        if not execution_action_decision_is_transportable(decision):
+        selected = self._selected_execution(
+            project_id, decision, expected_kind="sprint"
+        )
+        if selected is None:
             return None
-        snapshot = self._snapshot(project_id)
-        sprint_id = _instance_identity(decision, "sprint")
-        if snapshot is None or sprint_id is None:
+        snapshot, identity, retry_scope = selected
+        if retry_scope is not None:
+            return self._retry_triage_target(
+                snapshot, retry_scope, decision, sprint_id=identity.entity_id
+            )
+        return self._original_triage_target(
+            snapshot, decision, sprint_id=identity.entity_id
+        )
+
+    def _retry_triage_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        retry_scope: ExecutionScope,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str] | None:
+        """Validate a triage decision against its completed retry scope."""
+        reviews = retry_scope.sprint_reviews
+        closures = retry_scope.sprint_closures
+        if (
+            sprint_id is None
+            or sprint_id != retry_scope.sprint_id
+            or retry_scope.status != "completed"
+            or len(reviews) != 1
+            or len(closures) != 1
+        ):
+            return None
+        fingerprints = _sprint_close_fingerprints(
+            snapshot, sprint_id, scope=retry_scope
+        )
+        if fingerprints is None:
+            return None
+        review_fingerprint, close_fingerprint = fingerprints
+        triage_valid, current_triage = _current_post_sprint_triage(
+            retry_scope.post_sprint_triage
+        )
+        closure = closures[0]
+        if (
+            reviews[0].review_fingerprint != review_fingerprint
+            or closure.review_fingerprint != review_fingerprint
+            or closure.close_fingerprint != close_fingerprint
+            or not _matches_triage_references(
+                decision,
+                sprint_id=sprint_id,
+                close_fingerprint=close_fingerprint,
+                triage_valid=triage_valid,
+                current_triage=current_triage,
+            )
+        ):
+            return None
+        return sprint_id, close_fingerprint
+
+    def _original_triage_target(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        decision: NodeDecision,
+        *,
+        sprint_id: int | None,
+    ) -> tuple[int, str] | None:
+        """Validate a triage decision against a completed original Sprint."""
+        if sprint_id is None:
             return None
         completed = tuple(
             item
@@ -801,17 +1086,10 @@ class ExecutionActionSelectionService:
         )
         if len(completed) != 1 or len(reviews) != 1 or len(closures) != 1:
             return None
-        try:
-            review_fingerprint = sprint_review_fingerprint(snapshot, sprint_id)
-            close_fingerprint = sprint_close_fingerprint(
-                snapshot,
-                sprint_id,
-                review_fingerprint,
-            )
-        except ExecutionIntegrityError:
+        fingerprints = _sprint_close_fingerprints(snapshot, sprint_id)
+        if fingerprints is None:
             return None
-        reference = _integer_fact_reference(decision, "sprint_closure")
-        triage_reference = _integer_fact_reference(decision, "post_sprint_triage")
+        review_fingerprint, close_fingerprint = fingerprints
         triage_rows = tuple(
             item for item in snapshot.post_sprint_triage if item.sprint_id == sprint_id
         )
@@ -821,19 +1099,12 @@ class ExecutionActionSelectionService:
             reviews[0].review_fingerprint != review_fingerprint
             or closure.review_fingerprint != review_fingerprint
             or closure.close_fingerprint != close_fingerprint
-            or reference is None
-            or reference[0] != sprint_id
-            or reference[1].fingerprint != close_fingerprint
-            or not triage_valid
-            or (current_triage is None and triage_reference is not None)
-            or (
-                current_triage is not None
-                and (
-                    triage_reference is None
-                    or triage_reference[0] != current_triage.triage_id
-                    or triage_reference[1].fingerprint
-                    != current_triage.payload_fingerprint
-                )
+            or not _matches_triage_references(
+                decision,
+                sprint_id=sprint_id,
+                close_fingerprint=close_fingerprint,
+                triage_valid=triage_valid,
+                current_triage=current_triage,
             )
         ):
             return None
@@ -845,6 +1116,51 @@ class ExecutionActionSelectionService:
                 return WorkflowFactRepository(session).load(project_id)
         except WorkflowFactLoadError:
             return None
+
+    @staticmethod
+    def _selection_scope(
+        snapshot: WorkflowFactSnapshot | None,
+        decision: NodeDecision,
+    ) -> tuple[ExecutionIdentity, ExecutionScope | None] | None:
+        """Resolve original work or one exact retry scope without fallback."""
+        if decision.instance_key is None:
+            return None
+        try:
+            identity = parse_execution_instance_key(decision.instance_key)
+        except (TypeError, ValueError):
+            return None
+        if identity.retry_attempt_id is None:
+            return identity, None
+        return ExecutionActionSelectionService._retry_selection_scope(
+            snapshot, identity
+        )
+
+    @staticmethod
+    def _retry_selection_scope(
+        snapshot: WorkflowFactSnapshot | None,
+        identity: ExecutionIdentity,
+    ) -> tuple[ExecutionIdentity, ExecutionScope] | None:
+        """Resolve the one retry scope named by a parsed retry decision key."""
+        if identity.retry_attempt_id is None:
+            return None
+        if snapshot is None:
+            return None
+        retries = tuple(
+            item
+            for item in snapshot.sprint_retries
+            if item.retry_attempt_id == identity.retry_attempt_id
+        )
+        if len(retries) != 1:
+            return None
+        try:
+            scope = resolve_execution_scope(
+                snapshot,
+                sprint_id=retries[0].sprint_id,
+                retry_attempt_id=identity.retry_attempt_id,
+            )
+        except ExecutionScopeError:
+            return None
+        return identity, scope
 
 
 @dataclass(frozen=True)
@@ -869,22 +1185,17 @@ def _validate_backlog_correction_target(
     if (
         target is None
         or target.project_id != project_id
-        or target.content_fingerprint
-        != request.accepted_backlog_artifact_fingerprint
+        or target.content_fingerprint != request.accepted_backlog_artifact_fingerprint
         or canonical_stored_json_hash(target.canonical_content_json)
         != target.content_fingerprint
-        or target.spec_version_id
-        != lineage.accepted_specification.spec_version_id
+        or target.spec_version_id != lineage.accepted_specification.spec_version_id
         or target.spec_hash != lineage.accepted_specification.spec_hash
-        or target.product_goal_artifact_id
-        != lineage.goal.product_goal_artifact_id
+        or target.product_goal_artifact_id != lineage.goal.product_goal_artifact_id
         or target.product_goal_fingerprint != lineage.goal.content_fingerprint
     ):
         return WorkflowError(
             code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
-            message=(
-                "The accepted Backlog target no longer matches durable facts."
-            ),
+            message=("The accepted Backlog target no longer matches durable facts."),
         )
     review = session.exec(
         select(BacklogArtifactDecision).where(
@@ -1110,7 +1421,6 @@ class DeliveryActionInputService:
             return _accepted_specification_input_error(error)
         except (ValidationError, ValueError):
             return None
-
 
 
 @dataclass(frozen=True)
@@ -1473,14 +1783,11 @@ class BacklogCorrectionRequest(FrozenModel):
     project_id: int
     expected_decision_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
-    accepted_backlog_artifact_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    accepted_backlog_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     guidance: SemanticText = Field(max_length=MAX_BACKLOG_CORRECTION_GUIDANCE_CHARS)
     idempotency_key: SemanticText
     actor: SemanticText
     correlation_id: str | None = None
-
 
 
 class StorySetCorrectionRequest(FrozenModel):
@@ -1742,12 +2049,21 @@ def _story_eligibility_item(
 class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
+    instance_key: SemanticText | None = Field(default=None, exclude=True, repr=False)
     expected_decision_fingerprint: str | None = Field(
         default=None,
         min_length=1,
         exclude=True,
         repr=False,
     )
+
+    @model_validator(mode="after")
+    def reject_blank_retry_start_actor(self) -> Self:
+        """Require an accountable actor only for the retry-bound start path."""
+        if self.instance_key is not None and not self.actor.strip():
+            message = "Retry start requires a nonblank actor."
+            raise ValueError(message)
+        return self
 
 
 class _ExecutionMutationRequest(FrozenModel):
@@ -1757,6 +2073,43 @@ class _ExecutionMutationRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class SprintRetryRequest(_ExecutionMutationRequest):
+    """Semantic confirmation for one exact completed Sprint retry preview."""
+
+    sprint_id: int = Field(gt=0)
+    actor: SemanticText
+    confirm: Annotated[bool, Field(strict=True)]
+    expected_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rationale: SemanticText
+
+    @model_validator(mode="after")
+    def require_literal_confirmation(self) -> Self:
+        """Reject every public confirmation representation except literal true."""
+        if self.confirm is not True:
+            message = "Retry Sprint requires literal confirmation true."
+            raise ValueError(message)
+        return self
+
+
+def _sprint_retry_preview_error(
+    code: str,
+    message: str,
+    *,
+    project_id: int,
+    sprint_id: int | None = None,
+) -> JsonObject:
+    """Build one ordinary typed read error for an unavailable retry preview."""
+    data: JsonObject = {"project_id": project_id}
+    if sprint_id is not None:
+        data["sprint_id"] = sprint_id
+    return {
+        "ok": False,
+        "data": data,
+        "errors": [{"code": code, "message": message}],
+        "warnings": [],
+    }
 
 
 class CompleteTaskRequest(_ExecutionMutationRequest):
@@ -2602,9 +2955,7 @@ class AgileForgeApplication:
             request=request,
         )
         if isinstance(input_payload, WorkflowError):
-            return TransitionResult(
-                ok=False, position=position, error=input_payload
-            )
+            return TransitionResult(ok=False, position=position, error=input_payload)
         if input_payload is None:
             return _transition_not_available(position, node_id)
         return self.run_agentic_action(
@@ -3443,6 +3794,8 @@ class AgileForgeApplication:
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""
+        if request.instance_key is not None:
+            return self._start_retry_sprint(request)
         selection = self._planning_action_selection
         if selection is None:
             return _transition_not_available(None, "planning.sprint.start")
@@ -3472,6 +3825,144 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+            )
+        )
+
+    def _start_retry_sprint(self, request: SprintStartRequest) -> TransitionResult:
+        """Start the exact retry attempt named by the supplied execution binding."""
+        instance_key = request.instance_key
+        identity = _retry_sprint_start_identity(instance_key)
+        if identity is None or instance_key is None:
+            return _transition_not_available(None, "execution.sprint.retry.start")
+        replay = self._replay_retry_start(request)
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="start_sprint_retry",
+            node_id="execution.sprint.retry.start",
+            instance_key=instance_key,
+        )
+        if decision is None:
+            return _transition_not_available(
+                position,
+                "execution.sprint.retry.start",
+            )
+        if (
+            request.expected_decision_fingerprint is not None
+            and request.expected_decision_fingerprint != decision.decision_fingerprint
+        ):
+            return _stale_sprint_start_action(position)
+        return self.transition(
+            StartSprintRetry(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=identity.entity_id,
+                retry_attempt_id=cast("int", identity.retry_attempt_id),
+            )
+        )
+
+    def sprint_retry_preview(self, *, project_id: int, sprint_id: int) -> JsonObject:
+        """Return an exact provider-free retry preview without a transition."""
+        with Session(self._engine()) as session:
+            if session.get(Project, project_id) is None:
+                return _sprint_retry_preview_error(
+                    "PROJECT_NOT_FOUND",
+                    "Project was not found.",
+                    project_id=project_id,
+                )
+            try:
+                snapshot = WorkflowFactRepository(session).load(project_id)
+            except WorkflowFactLoadError as error:
+                return _sprint_retry_preview_error(
+                    "PROJECT_FACTS_UNAVAILABLE",
+                    str(error),
+                    project_id=project_id,
+                )
+            if not any(item.sprint_id == sprint_id for item in snapshot.sprints):
+                return _sprint_retry_preview_error(
+                    "SPRINT_NOT_FOUND",
+                    "The requested Sprint was not found.",
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                )
+            preview = build_sprint_retry_preview(
+                session,
+                snapshot=snapshot,
+                sprint_id=sprint_id,
+            )
+        return _JSON_OBJECT.validate_python(
+            {
+                "ok": True,
+                "data": {
+                    "project_id": preview.project_id,
+                    "sprint_id": preview.sprint_id,
+                    "predecessor_retry_attempt_id": (
+                        preview.predecessor_retry_attempt_id
+                    ),
+                    "next_ordinal": preview.next_ordinal,
+                    "story_ids": list(preview.story_ids),
+                    "task_ids": list(preview.task_ids),
+                    "preserved_history": preview.preserved_history,
+                    "repository_provenance": preview.repository_provenance,
+                    "blockers": [
+                        {
+                            "code": blocker.code,
+                            "reason": blocker.reason,
+                            "subject_type": blocker.subject_type,
+                            "subject_id": blocker.subject_id,
+                        }
+                        for blocker in preview.blockers
+                    ],
+                    "expected_state_fingerprint": preview.expected_state_fingerprint,
+                },
+                "warnings": [],
+            }
+        )
+
+    def retry_sprint(self, request: SprintRetryRequest) -> TransitionResult:
+        """Create one exact retry through the graph's durable receipt transaction."""
+        replay = self._replay_execution_action(
+            request_kind="retry_sprint",
+            request=request,
+            operator_input={
+                "sprint_id": request.sprint_id,
+                "confirm": request.confirm,
+                "expected_state_fingerprint": request.expected_state_fingerprint,
+                "rationale": request.rationale,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "execution.sprint.retry",
+            instance_key=f"sprint:{request.sprint_id}",
+        )
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "execution.sprint.retry")
+        return self.transition(
+            RetrySprint(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=request.sprint_id,
+                confirm=request.confirm,
+                rationale=request.rationale,
+                expected_state_fingerprint=request.expected_state_fingerprint,
             )
         )
 
@@ -3756,6 +4247,25 @@ class AgileForgeApplication:
             )
         )
 
+    def _replay_retry_start(
+        self,
+        request: SprintStartRequest,
+    ) -> TransitionResult | None:
+        """Replay a retry-bound start through its execution receipt namespace."""
+        selection = self._execution_action_selection
+        if selection is None or request.instance_key is None:
+            return None
+        return selection.replay_transition(
+            TransitionReplayQuery(
+                request_kind="start_sprint_retry",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={"instance_key": request.instance_key},
+            )
+        )
+
     def _replay_planning_action(
         self,
         *,
@@ -3845,15 +4355,11 @@ class AgileForgeApplication:
             and decision.reason_code == "STORY_CORRECTION_AVAILABLE"
         ):
             return _transition_not_available(position, node_id)
-        if (
-            node_id == "backlog.generate"
-            and decision.reason_code
-            in {
-                "BACKLOG_CORRECTION_AVAILABLE",
-                "BACKLOG_CORRECTION_FAILED",
-                "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
-            }
-        ):
+        if node_id == "backlog.generate" and decision.reason_code in {
+            "BACKLOG_CORRECTION_AVAILABLE",
+            "BACKLOG_CORRECTION_FAILED",
+            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+        }:
             return _transition_not_available(position, node_id)
 
         input_payload = input_service.build(
@@ -5460,16 +5966,107 @@ def _unique_execution_decision(
 
 
 def _instance_identity(decision: NodeDecision, prefix: str) -> int | None:
-    """Parse one exact positive numeric semantic instance selector."""
+    """Return one canonical original or retry-scoped execution subject identity."""
     instance_key = decision.instance_key
-    expected_prefix = f"{prefix}:"
-    if instance_key is None or not instance_key.startswith(expected_prefix):
+    if instance_key is None:
         return None
     try:
-        identity = int(instance_key.removeprefix(expected_prefix))
-    except ValueError:
+        identity = parse_execution_instance_key(instance_key)
+    except (TypeError, ValueError):
         return None
-    return identity if identity > 0 else None
+    return identity.entity_id if identity.kind == prefix else None
+
+
+def _retry_sprint_start_identity(instance_key: str | None) -> ExecutionIdentity | None:
+    """Return only a canonical retry-bound Sprint identity for a start request."""
+    if instance_key is None:
+        return None
+    try:
+        identity = parse_execution_instance_key(instance_key)
+    except (TypeError, ValueError):
+        return None
+    if identity.kind != "sprint" or identity.retry_attempt_id is None:
+        return None
+    return identity
+
+
+def _sprint_close_fingerprints(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int | None,
+    *,
+    scope: ExecutionScope | None = None,
+) -> tuple[str, str] | None:
+    """Calculate close fingerprints while converting integrity failures to no target."""
+    if sprint_id is None:
+        return None
+    try:
+        review_fingerprint = sprint_review_fingerprint(
+            snapshot,
+            sprint_id,
+            scope=scope,
+        )
+        close_fingerprint = sprint_close_fingerprint(
+            snapshot,
+            sprint_id,
+            review_fingerprint,
+            scope=scope,
+        )
+    except ExecutionIntegrityError:
+        return None
+    return review_fingerprint, close_fingerprint
+
+
+def _matches_sprint_close_references(
+    decision: NodeDecision,
+    *,
+    sprint_id: int,
+    sprint: SprintFact,
+    review_fingerprint: str,
+    close_fingerprint: str,
+) -> bool:
+    """Check every close-decision fact reference against the selected Sprint."""
+    sprint_reference = _integer_fact_reference(decision, "sprint")
+    review_reference = _integer_fact_reference(decision, "sprint_review")
+    close_reference = _integer_fact_reference(decision, "sprint_close")
+    return (
+        sprint_reference is not None
+        and sprint_reference[0] == sprint_id
+        and sprint_reference[1].fingerprint
+        == canonical_hash(sprint.model_dump(mode="json"))
+        and review_reference is not None
+        and review_reference[0] == sprint_id
+        and review_reference[1].fingerprint == review_fingerprint
+        and close_reference is not None
+        and close_reference[0] == sprint_id
+        and close_reference[1].fingerprint == close_fingerprint
+    )
+
+
+def _matches_triage_references(
+    decision: NodeDecision,
+    *,
+    sprint_id: int,
+    close_fingerprint: str,
+    triage_valid: bool,
+    current_triage: PostSprintTriageFact | None,
+) -> bool:
+    """Check the closure and optional latest-triage references for one scope."""
+    reference = _integer_fact_reference(decision, "sprint_closure")
+    triage_reference = _integer_fact_reference(decision, "post_sprint_triage")
+    if (
+        reference is None
+        or reference[0] != sprint_id
+        or reference[1].fingerprint != close_fingerprint
+        or not triage_valid
+    ):
+        return False
+    if current_triage is None:
+        return triage_reference is None
+    return (
+        triage_reference is not None
+        and triage_reference[0] == current_triage.triage_id
+        and triage_reference[1].fingerprint == current_triage.payload_fingerprint
+    )
 
 
 def _single_sprint_id(
@@ -5583,11 +6180,9 @@ def _backlog_correction_decision_is_valid(decision: NodeDecision) -> bool:
         attempt_ref = _positive_integer_reference(decision, "node_attempt")
         return (
             attempt_ref is not None
-            and len(decision.fact_references)
-            == _BACKLOG_CORRECTION_RECOVERY_REF_COUNT
+            and len(decision.fact_references) == _BACKLOG_CORRECTION_RECOVERY_REF_COUNT
         )
     return False
-
 
 
 def planning_action_decision_is_transportable(
@@ -5595,15 +6190,11 @@ def planning_action_decision_is_transportable(
     decision: NodeDecision,
 ) -> bool:
     """Return whether one planning decision has the references its route needs."""
-    if (
-        decision.request_kind == "record_backlog_draft"
-        and decision.reason_code
-        in {
-            "BACKLOG_CORRECTION_AVAILABLE",
-            "BACKLOG_CORRECTION_FAILED",
-            "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
-        }
-    ):
+    if decision.request_kind == "record_backlog_draft" and decision.reason_code in {
+        "BACKLOG_CORRECTION_AVAILABLE",
+        "BACKLOG_CORRECTION_FAILED",
+        "BACKLOG_CORRECTION_RECOVERY_REQUIRED",
+    }:
         return _backlog_correction_decision_is_valid(decision)
     if (
         decision.request_kind == "record_story_draft"
@@ -5639,6 +6230,8 @@ _SINGLE_REFERENCE_EXECUTION_ACTIONS = {
 
 def execution_action_decision_is_transportable(decision: NodeDecision) -> bool:
     """Return whether one execution decision has an exact public selector target."""
+    if decision.request_kind == "start_sprint_retry":
+        return _retry_start_decision_is_transportable(decision)
     simple_contract = _SINGLE_REFERENCE_EXECUTION_ACTIONS.get(decision.request_kind)
     if simple_contract is not None:
         return _single_reference_execution_action_is_transportable(
@@ -5651,6 +6244,17 @@ def execution_action_decision_is_transportable(decision: NodeDecision) -> bool:
     if decision.request_kind == "record_post_sprint_triage":
         return _post_sprint_triage_decision_is_transportable(decision)
     return True
+
+
+def _retry_start_decision_is_transportable(decision: NodeDecision) -> bool:
+    """Require the exact retry attempt identity carried by a retry-start action."""
+    if decision.instance_key is None:
+        return False
+    try:
+        identity = parse_execution_instance_key(decision.instance_key)
+    except (TypeError, ValueError):
+        return False
+    return identity.kind == "sprint" and identity.retry_attempt_id is not None
 
 
 def _single_reference_execution_action_is_transportable(
@@ -5866,8 +6470,7 @@ def _backlog_correction_review_decision_is_valid(decision: NodeDecision) -> bool
     counts = Counter(reference.fact_type for reference in decision.fact_references)
     if (
         any(
-            reference.fact_type not in allowed
-            for reference in decision.fact_references
+            reference.fact_type not in allowed for reference in decision.fact_references
         )
         or any(counts[fact_type] != 1 for fact_type in required)
         or counts["node_attempt"] != int(expected[2])
@@ -6276,6 +6879,7 @@ __all__ = [
     "SprintPlanReviewRequest",
     "SprintPlanningInputService",
     "SprintPlanningRequest",
+    "SprintRetryRequest",
     "SprintReviewRequest",
     "SprintStartRequest",
     "StoryCorrectionRequest",

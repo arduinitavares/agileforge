@@ -135,8 +135,14 @@ def _snapshot_fingerprint(
     include_node_attempts: bool,
 ) -> str:
     facts = snapshot.model_dump(mode="json")
+    if not snapshot.sprint_retries:
+        facts.pop("sprint_retries")
     if not include_node_attempts:
         facts.pop("node_attempts")
+    # These are retry-specific derived guard projections, never legacy facts.
+    facts.pop("sprint_plan_generation_guards")
+    facts.pop("provider_generation_guards")
+    facts.pop("incomplete_transitions")
     for name, collection in facts.items():
         if name != "project" and isinstance(collection, tuple | list):
             facts[name] = sorted(collection, key=canonical_json)

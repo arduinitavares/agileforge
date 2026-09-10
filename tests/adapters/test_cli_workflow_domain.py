@@ -319,9 +319,7 @@ def test_specification_structure_cli_returns_nonzero_on_invalid_payload(
             message=safe_message,
         ),
     )
-    application = _SpecificationPreparationApplication(
-        structure_result=failure_result
-    )
+    application = _SpecificationPreparationApplication(structure_result=failure_result)
 
     exit_code = cli_main.main(
         [
@@ -1395,6 +1393,71 @@ def test_workflow_next_reads_position_once() -> None:
         "planning.roadmap.review",
         "planning.story.review",
         "planning.sprint.review",
+    ]
+
+
+def test_workflow_next_advertises_retry_and_exact_retry_start_binding() -> None:
+    """Expose optional retry and its distinct retry-bound start command exactly."""
+    retry = NodeDecision(
+        node_id="execution.sprint.retry",
+        child_graph_id="execution",
+        request_kind="retry_sprint",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPRINT_RETRY_AVAILABLE",
+        decision_fingerprint="retry-decision",
+        instance_key="sprint:12",
+    )
+    retry_start = NodeDecision(
+        node_id="execution.sprint.retry.start",
+        child_graph_id="execution",
+        request_kind="start_sprint_retry",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="SPRINT_RETRY_START_REQUIRED",
+        decision_fingerprint="retry-start-decision",
+        instance_key="retry:7:sprint:12",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "available_nodes": (retry.node_id, retry_start.node_id),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+            "decisions": (retry, retry_start),
+        }
+    )
+
+    payload = workflow_next(application=_FakeApplication(position), project_id=41)
+
+    assert payload["commands"] == [
+        {
+            "node_id": "execution.sprint.retry",
+            "instance_key": "sprint:12",
+            "child_graph_id": "execution",
+            "request_kind": "retry_sprint",
+            "recommendation_kind": "optional_reentry",
+            "reason_code": "SPRINT_RETRY_AVAILABLE",
+            "command": (
+                "agileforge sprint retry --project-id 41 --sprint-id '<sprint-id>' "
+                "--confirm --expected-state-fingerprint '<expected-state-fingerprint>' "
+                "--rationale '<rationale>' --idempotency-key '<idempotency-key>' "
+                "--actor '<actor>'"
+            ),
+        },
+        {
+            "node_id": "execution.sprint.retry.start",
+            "instance_key": "retry:7:sprint:12",
+            "child_graph_id": "execution",
+            "request_kind": "start_sprint_retry",
+            "recommendation_kind": "required",
+            "reason_code": "SPRINT_RETRY_START_REQUIRED",
+            "command": (
+                "agileforge sprint start --project-id 41 "
+                "--instance-key retry:7:sprint:12 --idempotency-key "
+                "'<idempotency-key>' --actor '<actor>'"
+            ),
+        },
     ]
 
 

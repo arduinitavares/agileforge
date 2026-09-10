@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from models.enums import TaskStatus
-from workflow.fingerprints import canonical_hash
+from workflow.contracts import JsonObject, JsonValue
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
     active_dependency_review_edges,
     dependency_review_fingerprint,
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from typing import NoReturn
 
     from workflow.contracts import JsonObject
+    from workflow.execution_scope import ExecutionScope
     from workflow.facts import (
         PlanningArtifactFact,
         ReviewDecisionFact,
@@ -35,6 +37,10 @@ if TYPE_CHECKING:
 
 class ExecutionIntegrityError(ValueError):
     """Normalized execution facts cannot prove one coherent contract."""
+
+
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+_STRING_LIST = TypeAdapter(list[str])
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,36 @@ class StoryClosurePayload:
     delivered: str
     evidence: str
     known_gaps: str
+
+
+def canonical_task_evidence_payload(
+    *,
+    outcome_summary: str,
+    artifact_refs_json: str,
+    acceptance_result: str,
+    checklist_result_json: str,
+) -> TaskEvidencePayload:
+    """Decode and require the one durable canonical Task-evidence payload."""
+    try:
+        artifact_refs = tuple(_STRING_LIST.validate_json(artifact_refs_json))
+        checklist_result = _JSON_OBJECT.validate_json(checklist_result_json)
+    except ValidationError as exc:
+        _fail("Task completion evidence JSON is invalid.", cause=exc)
+    if (
+        artifact_refs != tuple(sorted(set(artifact_refs)))
+        or canonical_json(list(artifact_refs)) != artifact_refs_json
+        or canonical_json(checklist_result) != checklist_result_json
+        or acceptance_result not in {"partially_met", "fully_met"}
+    ):
+        _fail("Task completion evidence is not canonical.")
+    return TaskEvidencePayload(
+        outcome_summary=outcome_summary,
+        artifact_refs=artifact_refs,
+        acceptance_result=cast(
+            "Literal['partially_met', 'fully_met']", acceptance_result
+        ),
+        checklist_result=checklist_result,
+    )
 
 
 @dataclass(frozen=True)
@@ -189,9 +225,8 @@ def canonical_dependency_rows_snapshot(
     endpoints = tuple(
         (item.dependent_story_id, item.prerequisite_story_id) for item in canonical
     )
-    if (
-        any(identity <= 0 for identity in identities)
-        or len(identities) != len(set(identities))
+    if any(identity <= 0 for identity in identities) or len(identities) != len(
+        set(identities)
     ):
         _fail("Sprint dependency row snapshot has invalid or duplicate identities.")
     if len(endpoints) != len(set(endpoints)) or any(
@@ -262,8 +297,7 @@ def selected_story_dependency_snapshot(
     historical_rows = canonical_dependency_rows_snapshot(
         tuple(
             {
-                item.dependency_id: item
-                for item in (*persisted_rows, *dependencies)
+                item.dependency_id: item for item in (*persisted_rows, *dependencies)
             }.values()
         ),
         project_story_ids=frozenset(stories_by_id),
@@ -327,9 +361,7 @@ def current_dependency_review(
     source_fingerprints = {item.selected_scope_fingerprint for item in stories}
     if None in source_fingerprints or len(source_fingerprints) != 1:
         _fail("Current selected Story scope fingerprint is missing or conflicting.")
-    source_fingerprint = next(
-        item for item in source_fingerprints if item is not None
-    )
+    source_fingerprint = next(item for item in source_fingerprints if item is not None)
     selected_id_set = set(selected_story_ids)
     try:
         edges = active_dependency_review_edges(
@@ -607,11 +639,18 @@ def task_evidence_fingerprint(
     task: TaskFact,
     *,
     evidence: TaskEvidencePayload,
+    scope: ExecutionScope | None = None,
 ) -> str:
     """Bind completion evidence to the complete normalized execution contract."""
-    contract = execution_contract(snapshot, task.sprint_id)
+    resolved = scope
+    contract = (
+        resolved.contract
+        if resolved is not None
+        else execution_contract(snapshot, task.sprint_id)
+    )
+    effective_tasks = resolved.tasks if resolved is not None else contract.tasks
     current = next(
-        (item for item in contract.tasks if item.task_id == task.task_id),
+        (item for item in effective_tasks if item.task_id == task.task_id),
         None,
     )
     if (
@@ -641,19 +680,32 @@ def story_completion_eligibility_fingerprint(
     *,
     sprint_id: int,
     story_id: int,
+    scope: ExecutionScope | None = None,
 ) -> str:
     """Bind Story close eligibility to accepted content, Tasks, and dependencies."""
-    contract = execution_contract(snapshot, sprint_id)
-    story = next((item for item in contract.stories if item.story_id == story_id), None)
+    resolved = scope
+    contract = (
+        resolved.contract
+        if resolved is not None
+        else execution_contract(snapshot, sprint_id)
+    )
+    effective_stories = resolved.stories if resolved is not None else contract.stories
+    effective_tasks = resolved.tasks if resolved is not None else contract.tasks
+    completions_source = (
+        resolved.task_completions if resolved is not None else snapshot.task_completions
+    )
+    story = next(
+        (item for item in effective_stories if item.story_id == story_id), None
+    )
     if story is None or sprint_id not in story.sprint_ids:
         _fail("Story closure does not target an attached contract Story.")
-    tasks = tuple(item for item in contract.tasks if item.story_id == story_id)
+    tasks = tuple(item for item in effective_tasks if item.story_id == story_id)
     task_ids = {item.task_id for item in tasks}
     completions = tuple(
         sorted(
             (
                 item
-                for item in snapshot.task_completions
+                for item in completions_source
                 if item.sprint_id == sprint_id and item.task_id in task_ids
             ),
             key=lambda item: item.task_id,
@@ -675,6 +727,7 @@ def story_completion_fingerprint(
     sprint_id: int,
     story_id: int,
     closure: StoryClosurePayload,
+    scope: ExecutionScope | None = None,
 ) -> str:
     """Bind one persisted Story closure to eligibility and exact close evidence."""
     return canonical_hash(
@@ -683,6 +736,7 @@ def story_completion_fingerprint(
                 snapshot,
                 sprint_id=sprint_id,
                 story_id=story_id,
+                scope=scope,
             ),
             "resolution": closure.resolution,
             "delivered": closure.delivered,
@@ -695,37 +749,46 @@ def story_completion_fingerprint(
 def sprint_review_fingerprint(
     snapshot: WorkflowFactSnapshot,
     sprint_id: int,
+    *,
+    scope: ExecutionScope | None = None,
 ) -> str:
     """Bind Sprint review to current terminal Story, Task, and closure facts."""
-    contract = execution_contract(snapshot, sprint_id)
+    resolved = scope
+    contract = (
+        resolved.contract
+        if resolved is not None
+        else execution_contract(snapshot, sprint_id)
+    )
+    stories = resolved.stories if resolved is not None else contract.stories
+    tasks = resolved.tasks if resolved is not None else contract.tasks
+    task_completions = (
+        resolved.task_completions if resolved is not None else snapshot.task_completions
+    )
+    story_completions = (
+        resolved.story_completions
+        if resolved is not None
+        else snapshot.story_completions
+    )
     return canonical_hash(
         {
             "execution_contract_fingerprint": contract.fingerprint,
             "sprint_id": sprint_id,
             "stories": [
                 _accepted_story_payload(item)
-                for item in sorted(contract.stories, key=lambda item: item.story_id)
+                for item in sorted(stories, key=lambda item: item.story_id)
             ],
-            "tasks": [item.model_dump(mode="json") for item in contract.tasks],
+            "tasks": [item.model_dump(mode="json") for item in tasks],
             "task_completions": [
                 item.model_dump(mode="json")
                 for item in sorted(
-                    (
-                        item
-                        for item in snapshot.task_completions
-                        if item.sprint_id == sprint_id
-                    ),
+                    (item for item in task_completions if item.sprint_id == sprint_id),
                     key=lambda item: item.task_id,
                 )
             ],
             "story_completions": [
                 item.model_dump(mode="json")
                 for item in sorted(
-                    (
-                        item
-                        for item in snapshot.story_completions
-                        if item.sprint_id == sprint_id
-                    ),
+                    (item for item in story_completions if item.sprint_id == sprint_id),
                     key=lambda item: item.story_id,
                 )
             ],
@@ -737,16 +800,25 @@ def sprint_close_fingerprint(
     snapshot: WorkflowFactSnapshot,
     sprint_id: int,
     review_fingerprint: str,
+    *,
+    scope: ExecutionScope | None = None,
 ) -> str:
     """Bind Sprint closure to its current review and exact terminal Story set."""
-    contract = execution_contract(snapshot, sprint_id)
+    resolved = scope
+    contract = (
+        resolved.contract
+        if resolved is not None
+        else execution_contract(snapshot, sprint_id)
+    )
+    story_completions = (
+        resolved.story_completions
+        if resolved is not None
+        else snapshot.story_completions
+    )
+    stories = resolved.stories if resolved is not None else contract.stories
     closures = tuple(
         sorted(
-            (
-                item
-                for item in snapshot.story_completions
-                if item.sprint_id == sprint_id
-            ),
+            (item for item in story_completions if item.sprint_id == sprint_id),
             key=lambda item: item.story_id,
         )
     )
@@ -755,9 +827,7 @@ def sprint_close_fingerprint(
             "execution_contract_fingerprint": contract.fingerprint,
             "sprint_id": sprint_id,
             "review_fingerprint": review_fingerprint,
-            "terminal_stories": [
-                _accepted_story_payload(item) for item in contract.stories
-            ],
+            "terminal_stories": [_accepted_story_payload(item) for item in stories],
             "story_completions": [
                 {
                     "completion_id": item.completion_id,

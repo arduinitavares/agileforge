@@ -42,6 +42,7 @@ CHECK_STAGES: tuple[CheckStage, ...] = (
             "node",
             "--test",
             "tests/test_workflow_position_display.mjs",
+            "tests/test_sprint_retry_dashboard.mjs",
             "tests/test_create_project_modal_required_fields.mjs",
             "tests/test_vision_interview_ui.mjs",
         ),

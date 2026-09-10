@@ -196,7 +196,14 @@ convention = "pep257"
 exclude_dirs = [".venv", "notebooks"]
 
 [tool.bandit.assert_used]
-skips = ["*_test.py", "*test_*.py"]
+# Test-only workflow fixture assertions are not production assertions.
+skips = [
+    "*_test.py",
+    "*test_*.py",
+    "*tests/workflow/execution_retry_support.py",
+    "*tests/workflow/planning_fixtures.py",
+    "*tests/workflow/retry_execution_fixtures.py",
+]
 
 [tool.ty.environment]
 python-version = "3.13"

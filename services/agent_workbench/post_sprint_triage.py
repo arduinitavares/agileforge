@@ -11,12 +11,24 @@ from sqlmodel import Session, col, select
 from models.core import Sprint
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
+from models.sprint_retry import (
+    SprintRetryAttempt,
+    SprintRetryClosure,
+    SprintRetryTriage,
+)
 from models.workflow import PostSprintTriage, SprintClosure
+from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.fingerprints import canonical_hash
 from workflow.execution_integrity import triage_payload_fingerprint
+from workflow.execution_scope import (
+    ExecutionScope,
+    ExecutionScopeError,
+    resolve_execution_scope,
+)
 from workflow.fingerprints import canonical_json
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from workflow.contracts import JsonObject
@@ -56,6 +68,13 @@ TRIAGE_STORED_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 TRIAGE_IMPACT_FIELDS_INVALID: Final[str] = "TRIAGE_IMPACT_FIELDS_INVALID"
 TRIAGE_REQUIRED_FIELD_MISSING: Final[str] = "TRIAGE_REQUIRED_FIELD_MISSING"
 TRIAGE_FIELD_INVALID: Final[str] = "TRIAGE_FIELD_INVALID"
+_COMPLETED_SPRINT_REQUIRED = (
+    "Post-sprint triage requires the exact completed Project Sprint."
+)
+_SPRINT_CLOSURE_REQUIRED = "Post-sprint triage requires an explicit Sprint closure."
+_RETRY_CLOSURE_REQUIRED = (
+    "Post-sprint triage requires an explicit Sprint retry closure."
+)
 
 
 @dataclass(frozen=True)
@@ -190,62 +209,166 @@ class PostSprintTriageInput:
     canonical_payload: JsonObject
     recorded_by: str
     recorded_at: datetime
+    retry_attempt_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _ValidatedPostSprintTriage:
+    """Current append-only triage lineage resolved before persistence selection."""
+
+    scope: ExecutionScope
+    retry: SprintRetryAttempt | None
+    current_id: int | None
+    payload_fingerprint: str
+
+
+def _retry_triage_error() -> ValueError:
+    return ValueError("Post-sprint triage requires the exact completed Sprint retry.")
+
+
+def _sole_current_triage_row[T](
+    rows: Sequence[T],
+    *,
+    row_id: typing.Callable[[T], int | None],
+    superseded_id: typing.Callable[[T], int | None],
+    conflict_message: str,
+) -> T | None:
+    """Return the sole current lineage leaf or reject conflicting triage rows."""
+    superseded = {
+        superseded_id(item) for item in rows if superseded_id(item) is not None
+    }
+    current_rows = tuple(item for item in rows if row_id(item) not in superseded)
+    if len(current_rows) > 1:
+        raise ValueError(conflict_message)
+    return current_rows[0] if current_rows else None
+
+
+def _validate_post_sprint_triage(
+    session: Session,
+    command: PostSprintTriageInput,
+) -> _ValidatedPostSprintTriage:
+    """Validate the exact completed scope before choosing its triage table."""
+    retry: SprintRetryAttempt | None = None
+    if command.retry_attempt_id is None:
+        sprint = session.get(Sprint, command.sprint_id)
+        if (
+            sprint is None
+            or sprint.project_id != command.project_id
+            or sprint.status is not SprintStatus.COMPLETED
+        ):
+            raise ValueError(_COMPLETED_SPRINT_REQUIRED)
+        closure = session.exec(
+            select(SprintClosure).where(
+                col(SprintClosure.project_id) == command.project_id,
+                col(SprintClosure.sprint_id) == command.sprint_id,
+            )
+        ).one_or_none()
+        if closure is None:
+            raise ValueError(_SPRINT_CLOSURE_REQUIRED)
+    else:
+        retry = session.get(SprintRetryAttempt, command.retry_attempt_id)
+        if (
+            retry is None
+            or retry.project_id != command.project_id
+            or retry.sprint_id != command.sprint_id
+            or retry.status != "Completed"
+        ):
+            raise _retry_triage_error()
+        closure = session.exec(
+            select(SprintRetryClosure).where(
+                col(SprintRetryClosure.retry_attempt_id) == command.retry_attempt_id
+            )
+        ).one_or_none()
+        if closure is None:
+            raise ValueError(_RETRY_CLOSURE_REQUIRED)
+
+    payload_fingerprint = triage_payload_fingerprint(
+        command.impact,
+        command.canonical_payload,
+    )
+    if command.retry_attempt_id is None:
+        rows = session.exec(
+            select(PostSprintTriage)
+            .where(
+                col(PostSprintTriage.project_id) == command.project_id,
+                col(PostSprintTriage.sprint_id) == command.sprint_id,
+            )
+            .order_by(col(PostSprintTriage.triage_id))
+        ).all()
+        current = _sole_current_triage_row(
+            rows,
+            row_id=lambda row: row.triage_id,
+            superseded_id=lambda row: row.supersedes_triage_id,
+            conflict_message="Post-sprint triage facts conflict.",
+        )
+        current_id = None if current is None else current.triage_id
+    else:
+        rows = session.exec(
+            select(SprintRetryTriage)
+            .where(
+                col(SprintRetryTriage.retry_attempt_id) == command.retry_attempt_id,
+            )
+            .order_by(col(SprintRetryTriage.sprint_retry_triage_id))
+        ).all()
+        current = _sole_current_triage_row(
+            rows,
+            row_id=lambda row: row.sprint_retry_triage_id,
+            superseded_id=lambda row: row.supersedes_sprint_retry_triage_id,
+            conflict_message="Sprint retry triage facts conflict.",
+        )
+        current_id = None if current is None else current.sprint_retry_triage_id
+    if current is not None and current.payload_fingerprint == payload_fingerprint:
+        message = (
+            "Duplicate Sprint retry triage is not a correction."
+            if command.retry_attempt_id is not None
+            else "Duplicate post-sprint triage is not a correction."
+        )
+        raise ValueError(message)
+
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    try:
+        scope = resolve_execution_scope(
+            snapshot,
+            sprint_id=command.sprint_id,
+            retry_attempt_id=command.retry_attempt_id,
+        )
+    except ExecutionScopeError as error:
+        raise ValueError(str(error)) from error
+    if command.retry_attempt_id is not None and len(scope.sprint_closures) != 1:
+        message = "Post-sprint triage requires an exact Sprint retry closure."
+        raise ValueError(message)
+    return _ValidatedPostSprintTriage(
+        scope=scope,
+        retry=retry,
+        current_id=current_id,
+        payload_fingerprint=payload_fingerprint,
+    )
 
 
 def record_post_sprint_triage_in_session(
     session: Session,
     command: PostSprintTriageInput,
-) -> PostSprintTriage:
+) -> PostSprintTriage | SprintRetryTriage:
     """Append exact triage or a correction in the caller's transaction."""
-    sprint = session.get(Sprint, command.sprint_id)
-    if (
-        sprint is None
-        or sprint.project_id != command.project_id
-        or sprint.status is not SprintStatus.COMPLETED
-    ):
-        message = "Post-sprint triage requires the exact completed Project Sprint."
-        raise ValueError(message)
-    closure = session.exec(
-        select(SprintClosure).where(
-            col(SprintClosure.project_id) == command.project_id,
-            col(SprintClosure.sprint_id) == command.sprint_id,
-        )
-    ).one_or_none()
-    if closure is None:
-        message = "Post-sprint triage requires an explicit Sprint closure."
-        raise ValueError(message)
-    rows = session.exec(
-        select(PostSprintTriage)
-        .where(
-            col(PostSprintTriage.project_id) == command.project_id,
-            col(PostSprintTriage.sprint_id) == command.sprint_id,
-        )
-        .order_by(col(PostSprintTriage.triage_id))
-    ).all()
-    superseded = {
-        item.supersedes_triage_id
-        for item in rows
-        if item.supersedes_triage_id is not None
-    }
-    current_rows = tuple(item for item in rows if item.triage_id not in superseded)
-    if len(current_rows) > 1:
-        message = "Post-sprint triage facts conflict."
-        raise ValueError(message)
-    current = current_rows[0] if current_rows else None
-    payload_fingerprint = triage_payload_fingerprint(
-        command.impact,
-        command.canonical_payload,
-    )
-    if current is not None and current.payload_fingerprint == payload_fingerprint:
-        message = "Duplicate post-sprint triage is not a correction."
-        raise ValueError(message)
+    validated = _validate_post_sprint_triage(session, command)
+    if command.retry_attempt_id is not None:
+        return _persist_retry_triage(session, command, validated)
+    return _persist_original_triage(session, command, validated)
+
+
+def _persist_original_triage(
+    session: Session,
+    command: PostSprintTriageInput,
+    validated: _ValidatedPostSprintTriage,
+) -> PostSprintTriage:
+    """Append original triage lineage after scoped validation."""
     row = PostSprintTriage(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
         impact=command.impact,
         canonical_payload_json=canonical_json(command.canonical_payload),
-        payload_fingerprint=payload_fingerprint,
-        supersedes_triage_id=current.triage_id if current is not None else None,
+        payload_fingerprint=validated.payload_fingerprint,
+        supersedes_triage_id=validated.current_id,
         recorded_by=command.recorded_by,
         recorded_at=command.recorded_at,
     )
@@ -260,8 +383,54 @@ def record_post_sprint_triage_in_session(
                 {
                     "action": "post_sprint_triage_recorded",
                     "impact": command.impact,
-                    "payload_fingerprint": payload_fingerprint,
+                    "payload_fingerprint": validated.payload_fingerprint,
                     "supersedes_triage_id": row.supersedes_triage_id,
+                }
+            ),
+            duration_seconds=0.0,
+        )
+    )
+    session.flush()
+    return row
+
+
+def _persist_retry_triage(
+    session: Session,
+    command: PostSprintTriageInput,
+    validated: _ValidatedPostSprintTriage,
+) -> SprintRetryTriage:
+    """Append retry-local triage without changing original triage lineage."""
+    retry_attempt_id = command.retry_attempt_id
+    if retry_attempt_id is None or validated.retry is None:
+        message = "Validated retry triage must include retry identity."
+        raise RuntimeError(message)
+    row = SprintRetryTriage(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        retry_attempt_id=retry_attempt_id,
+        impact=command.impact,
+        canonical_payload_json=canonical_json(command.canonical_payload),
+        payload_fingerprint=validated.payload_fingerprint,
+        supersedes_sprint_retry_triage_id=validated.current_id,
+        recorded_by=command.recorded_by,
+        recorded_at=command.recorded_at,
+    )
+    session.add(row)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED,
+            timestamp=command.recorded_at,
+            project_id=command.project_id,
+            sprint_id=command.sprint_id,
+            event_metadata=canonical_json(
+                {
+                    "action": "sprint_retry_triage_recorded",
+                    "impact": command.impact,
+                    "payload_fingerprint": validated.payload_fingerprint,
+                    "retry_attempt_id": retry_attempt_id,
+                    "supersedes_sprint_retry_triage_id": (
+                        row.supersedes_sprint_retry_triage_id
+                    ),
                 }
             ),
             duration_seconds=0.0,

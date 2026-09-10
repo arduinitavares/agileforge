@@ -197,9 +197,7 @@ def _story(
         story_points=points,
         rank=rank,
         structurally_eligible=accepted,
-        structural_eligibility_status=(
-            "eligible" if accepted else "ineligible"
-        ),
+        structural_eligibility_status=("eligible" if accepted else "ineligible"),
         sprint_selection_state="selected" if candidate else "unselected",
         sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
         selected_scope_fingerprint=(
@@ -393,8 +391,7 @@ def _snapshot(
     selected_scope = tuple(
         item
         for item in stories
-        if item.structurally_eligible
-        and item.sprint_selection_state == "selected"
+        if item.structurally_eligible and item.sprint_selection_state == "selected"
     )
     current_dependency_reviews = (
         (
@@ -1069,6 +1066,102 @@ def test_selected_dependency_proposal_keeps_review_actionable() -> None:
     )
     assert sprint.category is NodeCategory.BLOCKED
     assert sprint.reason_code == "STORY_DEPENDENCIES_UNREVIEWED"
+
+
+def test_reviewed_selected_prerequisite_is_not_external_incomplete() -> None:
+    """Keep a reviewed selected cohort's ordering blocker out of external checks."""
+    external = _story(1, "req-a", candidate=False).model_copy(update={"status": "Done"})
+    prerequisite = _story(2, "req-b")
+    dependent = _story(3, "req-c").model_copy(
+        update={"readiness_blockers": ("PREREQUISITE_STORY_2_INCOMPLETE",)}
+    )
+    dependencies = (
+        StoryDependencyFact(
+            dependency_id=1,
+            dependent_story_id=2,
+            prerequisite_story_id=1,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="Second Story follows completed external work.",
+        ),
+        StoryDependencyFact(
+            dependency_id=2,
+            dependent_story_id=3,
+            prerequisite_story_id=2,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="Third Story follows the selected prerequisite.",
+        ),
+    )
+    selected = (prerequisite, dependent)
+    review = StoryDependencyReviewFact(
+        review_id=901,
+        selected_story_ids=(2, 3),
+        reviewed_edges=active_dependency_review_edges(dependencies),
+        source_fingerprint=story_dependency_source_fingerprint(selected),
+        dependency_fingerprint=dependency_review_fingerprint(
+            active_dependency_review_edges(dependencies)
+        ),
+    )
+    internal_snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b", "req-c"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+            _story_artifact(3, "req-c"),
+        ),
+        stories=(external, *selected),
+        dependencies=dependencies,
+        dependency_reviews=(review,),
+    )
+
+    internal = _position(internal_snapshot)
+
+    assert dependent.readiness_blockers == ("PREREQUISITE_STORY_2_INCOMPLETE",)
+    internal_nodes = tuple(
+        item
+        for item in internal.decisions
+        if item.node_id == "planning.story_dependencies"
+    )
+    assert internal_nodes == ()
+    planning = _node(internal_snapshot, "planning.sprint.plan")
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "SPRINT_PLANNING_REQUIRED"
+
+    external_unfinished = external.model_copy(update={"status": "To Do"})
+    external_blocked = prerequisite.model_copy(
+        update={"readiness_blockers": ("PREREQUISITE_STORY_1_INCOMPLETE",)}
+    )
+    external_review = review.model_copy(
+        update={
+            "source_fingerprint": story_dependency_source_fingerprint(
+                (external_blocked, dependent)
+            )
+        }
+    )
+    external_snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b", "req-c"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+            _story_artifact(3, "req-c"),
+        ),
+        stories=(external_unfinished, external_blocked, dependent),
+        dependencies=dependencies,
+        dependency_reviews=(external_review,),
+    )
+
+    blocked = _node(external_snapshot, "planning.story_dependencies")
+
+    assert blocked.category is NodeCategory.BLOCKED
+    assert blocked.reason_code == "STORY_DEPENDENCY_EXTERNAL_INCOMPLETE"
+    assert [item.code for item in blocked.blockers] == [
+        "PREREQUISITE_STORY_1_INCOMPLETE"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2139,8 +2232,7 @@ def test_all_planning_nodes_pause_during_unresolved_correction_attempt(
     )
     snapshot = base.model_copy(update={"node_attempts": (attempt,)})
     expected_msg = (
-        "New planning waits until the accepted Backlog correction chain "
-        "is resolved."
+        "New planning waits until the accepted Backlog correction chain is resolved."
     )
     for node_id in ALL_PLANNING_NODE_IDS:
         decision = _node(snapshot, node_id)
@@ -2192,8 +2284,7 @@ def test_all_planning_nodes_pause_during_unresolved_backlog_child(
         }
     )
     expected_msg = (
-        "New planning waits until the accepted Backlog correction chain "
-        "is resolved."
+        "New planning waits until the accepted Backlog correction chain is resolved."
     )
     for node_id in ALL_PLANNING_NODE_IDS:
         decision = _node(snapshot, node_id)
@@ -2209,8 +2300,7 @@ def test_planning_nodes_not_blocked_before_correction_or_after_acceptance() -> N
     base = _snapshot()
     position = _position(base)
     assert not any(
-        d.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS"
-        for d in position.decisions
+        d.reason_code == "BACKLOG_CORRECTION_IN_PROGRESS" for d in position.decisions
     )
 
     # Accepted successor replaces parent

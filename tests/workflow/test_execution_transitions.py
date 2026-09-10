@@ -40,14 +40,20 @@ from tests.workflow.execution_fixtures import (
     seed_started_execution_with_transitive_dependency,
     seed_started_execution_with_unselected_story,
 )
+from tests.workflow.execution_retry_support import (
+    _close_execution_sprint,
+    _complete_execution_sprint,
+    _complete_task,
+    _decision,
+    _domain,
+    _guards,
+    _triage_execution_sprint,
+)
 from tests.workflow.test_planning_transitions import (
     _domain as _planning_domain,
 )
 from tests.workflow.test_planning_transitions import _select_for_sprint
-from workflow.clock import FixedClock
-from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
-from workflow.definitions.execution import execution_graph
-from workflow.domain import WorkflowDomain
+from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.execution_integrity import (
     execution_contract,
     sprint_close_fingerprint,
@@ -70,8 +76,10 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from workflow.domain import WorkflowDomain
+
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 33
+EXPECTED_REQUEST_VARIANT_COUNT = 35
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,
@@ -91,14 +99,6 @@ class _PositionGuards(TypedDict):
 
 class _RequestBase(_PositionGuards):
     idempotency_key: str
-
-
-def _domain(engine: Engine) -> WorkflowDomain:
-    return WorkflowDomain(
-        engine=engine,
-        graph=execution_graph(),
-        clock=FixedClock(now_value=EVALUATED_AT),
-    )
 
 
 def _file_engine(path: Path) -> Engine:
@@ -123,173 +123,6 @@ def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
         session.delete(start)
         session.commit()
     return project_id, sprint_id, story_id, task_id
-
-
-def _decision(
-    domain: WorkflowDomain,
-    project_id: int,
-    node_id: str,
-    instance_key: str | None = None,
-) -> NodeDecision:
-    return next(
-        item
-        for item in domain.position(project_id).decisions
-        if item.node_id == node_id and item.instance_key == instance_key
-    )
-
-
-def _guards(
-    domain: WorkflowDomain,
-    project_id: int,
-    node_id: str,
-    instance_key: str | None = None,
-) -> _PositionGuards:
-    position = domain.position(project_id)
-    decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == node_id and item.instance_key == instance_key
-    )
-    return {
-        "project_id": project_id,
-        "graph_version": position.graph_version,
-        "fact_fingerprint": position.fact_fingerprint,
-        "decision_fingerprint": decision.decision_fingerprint,
-        "actor": "operator@example.com",
-    }
-
-
-def _complete_task(
-    domain: WorkflowDomain,
-    project_id: int,
-    task_id: int,
-    *,
-    idempotency_key: str = "complete-task",
-) -> CompleteTask:
-    return CompleteTask(
-        **_guards(domain, project_id, "execution.task.complete", f"task:{task_id}"),
-        instance_key=f"task:{task_id}",
-        idempotency_key=idempotency_key,
-        task_id=task_id,
-        outcome_summary="Implemented execution graph.",
-        artifact_refs=("workflow/definitions/execution.py",),
-        acceptance_result="fully_met",
-        checklist_result={"Run focused tests": "passed"},
-    )
-
-
-def _complete_execution_sprint(
-    engine: Engine,
-) -> tuple[WorkflowDomain, int, int, int, int, str]:
-    project_id, sprint_id, story_id, task_id = _seed_active_task(engine)
-    domain = _domain(engine)
-    review_fingerprint = _close_execution_sprint(
-        domain,
-        project_id=project_id,
-        sprint_id=sprint_id,
-        story_id=story_id,
-        task_id=task_id,
-    )
-    return domain, project_id, sprint_id, story_id, task_id, review_fingerprint
-
-
-def _triage_execution_sprint(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    sprint_id: int,
-) -> None:
-    triaged = domain.transition(
-        RecordPostSprintTriage(
-            **_guards(
-                domain,
-                project_id,
-                "execution.post_sprint_triage",
-                f"sprint:{sprint_id}",
-            ),
-            instance_key=f"sprint:{sprint_id}",
-            idempotency_key=f"triage-sprint-{sprint_id}",
-            sprint_id=sprint_id,
-            impact="none",
-            canonical_payload={"summary": "No downstream change."},
-        )
-    )
-    assert triaged.ok is True
-
-
-def _close_execution_sprint(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    sprint_id: int,
-    story_id: int,
-    task_id: int,
-) -> str:
-    """Complete one normalized single-Story Sprint through explicit close."""
-    assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
-    assert (
-        domain.transition(
-            CloseStory(
-                **_guards(
-                    domain, project_id, "execution.story.close", f"story:{story_id}"
-                ),
-                instance_key=f"story:{story_id}",
-                idempotency_key="close-story",
-                story_id=story_id,
-                resolution="Completed",
-                delivered="Execution graph delivered.",
-                evidence="Focused tests pass.",
-                known_gaps="None.",
-            )
-        ).ok
-        is True
-    )
-    review_decision = _decision(
-        domain,
-        project_id,
-        "execution.sprint.review",
-        f"sprint:{sprint_id}",
-    )
-    review_fingerprint = next(
-        ref.fingerprint
-        for ref in review_decision.fact_references
-        if ref.fact_type == "sprint_review"
-    )
-    assert (
-        domain.transition(
-            ReviewSprint(
-                **_guards(
-                    domain,
-                    project_id,
-                    "execution.sprint.review",
-                    f"sprint:{sprint_id}",
-                ),
-                instance_key=f"sprint:{sprint_id}",
-                idempotency_key="review-sprint",
-                sprint_id=sprint_id,
-                review_fingerprint=review_fingerprint,
-            )
-        ).ok
-        is True
-    )
-    assert (
-        domain.transition(
-            CloseSprint(
-                **_guards(
-                    domain,
-                    project_id,
-                    "execution.sprint.close",
-                    f"sprint:{sprint_id}",
-                ),
-                instance_key=f"sprint:{sprint_id}",
-                idempotency_key="close-sprint",
-                sprint_id=sprint_id,
-                review_fingerprint=review_fingerprint,
-            )
-        ).ok
-        is True
-    )
-    return review_fingerprint
 
 
 def test_future_selection_preserves_active_sprint_review_fingerprints(
@@ -1237,9 +1070,9 @@ def test_sprint_start_dependency_snapshot_rejects_structural_corruption(
             rows.append(duplicate)
         elif corruption == "duplicate_endpoint":
             duplicate = dict(rows[0])
-            duplicate["dependency_id"] = max(
-                int(item["dependency_id"]) for item in rows
-            ) + 1
+            duplicate["dependency_id"] = (
+                max(int(item["dependency_id"]) for item in rows) + 1
+            )
             rows.append(duplicate)
         else:
             rows[1]["prerequisite_story_id"] = story_c_id + 10_000
