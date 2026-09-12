@@ -12,7 +12,7 @@ import yaml
 WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 BOOLEAN_TAG = "tag:yaml.org,2002:bool"
-PYREPO_CHECK_REVISION = "8651b8b377bb96f8cf9705a5bb76e6380a308007"
+PYREPO_CHECK_REVISION = "ac41bbe8e8588b8f4232979c47d26be37d78d413"
 PYREPO_CHECK_SOURCE = (
     f"git+https://github.com/arduinitavares/pyrepo-check.git@{PYREPO_CHECK_REVISION}"
 )
