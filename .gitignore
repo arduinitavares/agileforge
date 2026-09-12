@@ -53,6 +53,7 @@ entities.json
 mempalace.yaml
 
 # Local agent skill caches
+/.diagram-design
 .agents/*
 !.agents/skills/
 .agents/skills/*

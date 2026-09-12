@@ -150,7 +150,7 @@ controller pinned in `.github/workflows/ci.yml`. Run from that checkout's root.
 Install the controller separately; `uv sync --frozen` does not install it:
 
 ```sh
-uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@8651b8b377bb96f8cf9705a5bb76e6380a308007"
+uv tool install --python 3.13.15 "git+https://github.com/arduinitavares/pyrepo-check.git@ac41bbe8e8588b8f4232979c47d26be37d78d413"
 uv tool update-shell
 ```
 
