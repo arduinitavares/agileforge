@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgileForge lifecycle: sequence and loops</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f5f5; color: #2d3142; font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 1360px; margin: auto; padding: 24px 32px; }
+    h1 { margin: 0 0 12px; font-size: 32px; font-weight: 600; }
+    .key { display: flex; flex-wrap: wrap; gap: 12px 28px; color: #4f5d75; }
+    .canvas { overflow-x: auto; }
+    object { display: block; width: 100%; min-width: 1040px; aspect-ratio: 4 / 3; }
+    a { color: #2e5aa8; }
+    footer { font-size: 14px; }
+    @media (max-width: 800px) { main { padding: 20px 12px; } h1 { font-size: 26px; } }
+    @media print { main { padding: 0; } .canvas { overflow: visible; } object { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AgileForge: sequence and loops</h1>
+    <div class="key">
+      <span><b>Solid arrows:</b> usual progression</span>
+      <span><b>Dashed loops:</b> conditional feedback / continuation</span>
+      <span>Hover a block for inputs and outputs</span>
+    </div>
+    <div class="canvas">
+      <object data="assets/agileforge-lifecycle.svg" type="image/svg+xml" aria-label="AgileForge lifecycle overview with conditional feedback loops">
+        <a href="assets/agileforge-lifecycle.svg">Open the lifecycle diagram</a>
+      </object>
+    </div>
+    <footer>
+      <p>Grouped stages; live workflow routes determine the available action.
+        <a href="agileforge-lifecycle.md">Read the stage-by-stage guide and implementation references.</a></p>
+    </footer>
+  </main>
+</body>
+</html>

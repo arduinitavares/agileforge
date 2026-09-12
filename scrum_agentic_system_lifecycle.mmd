@@ -3,7 +3,7 @@ config:
   theme: redux
 ---
 flowchart TD
-  Start([Start]) --> Vision[Vision Bootstrap and Review]
+  Start[Create Project] --> Vision[Vision Bootstrap, Interview, and Review]
   Vision --> Goal[Product Goal Interview and Review]
   Goal --> Source[Register Exact Specification Source]
   Source --> Structure[Structure agileforge.spec.v2]
@@ -11,7 +11,16 @@ flowchart TD
   Review --> Backlog[Backlog Generate and Review]
   Backlog --> Roadmap[Roadmap Generate and Review]
   Roadmap --> Stories[Stories Generate and Review]
-  Stories --> Sprint[Sprint Plan, Review, and Start]
-  Sprint --> Execution[Task and Story Execution]
-  Execution --> Triage[Post-Sprint Triage]
-  Triage --> Goal
+  Stories --> Readiness[Story Selection, Readiness, and Dependencies]
+  Readiness --> Sprint[Sprint Plan, Review, and Start]
+  Sprint --> Execution[Execute Tasks and Record Evidence]
+  Execution --> CloseStories[Close Stories]
+  CloseStories --> SprintReview[Review Sprint]
+  SprintReview --> SprintClose[Close Sprint]
+  SprintClose --> Triage[Record Post-Sprint Triage]
+  Triage --> Continue[Assess Continuation Under the Same Project]
+  Continue -. Eligible remaining work .-> Readiness
+  Continue -. Changed requirements and eligible amendment .-> Source
+  Execution -. Build, verify, and fix before completion .-> Execution
+  CloseStories -. Acceptance gaps within authorized scope .-> Execution
+  Review -. Feedback requiring source revision .-> Source

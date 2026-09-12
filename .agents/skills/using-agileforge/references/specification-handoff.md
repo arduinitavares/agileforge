@@ -13,6 +13,11 @@ agileforge workflow next --project-id <id>
 
 Use the active runtime prefix. Vision and Product Goal work may precede source registration. Follow the exact current command template.
 
+The [lifecycle map](lifecycle.md) groups source registration, structuring, and
+review into one Specification stage. Each remains a separate transition.
+Feedback loops require the appropriate revision and review; accepting an earlier
+candidate does not accept a changed candidate.
+
 Do not construct a registration or planning command from `--help`, guessed flags, or the source filename. `workflow next` supplies the command template and required operator inputs.
 
 ## Register the exact source

@@ -9,13 +9,19 @@ execution governed by one human-accepted Specification.
 
 ## Lifecycle
 
-One durable Project owns one ordered lifecycle:
+One durable Project owns planning, delivery, and learning across Sprints:
 
-```text
-Vision -> Product Goal -> Source Registration -> Specification Structuring
-       -> Specification Review -> Backlog -> Roadmap
-       -> Stories -> Sprint -> Execution -> Triage
-```
+![AgileForge lifecycle: Project, Vision, Product Goal, Specification, Backlog, Roadmap, Stories, Sprint planning and start, Task execution, Story closure, Sprint review and closure, and post-Sprint triage](docs/assets/agileforge-lifecycle.svg)
+
+Read the [lifecycle guide](docs/agileforge-lifecycle.md) for each stage's inputs,
+outputs, and human decisions. The [browser view](docs/agileforge-lifecycle.html)
+retains the diagram's hover descriptions; open the HTML locally after cloning.
+
+The diagram groups several workflow transitions into each stage. Dashed arrows
+show conditional feedback and continuation, not automatic resets. A later Sprint
+can reuse current accepted planning; changed requirements use an eligible
+Specification amendment and review. `workflow position` and `workflow next`
+remain authoritative for the available action, including blockers and recovery.
 
 After a human accepts a Product Goal, an external agent may run
 `grill-with-docs`, update the lazily created `CONTEXT.md`, record applicable

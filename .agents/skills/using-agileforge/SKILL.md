@@ -25,6 +25,13 @@ Do not use this skill for ordinary repository work that the user did not ask Agi
 
 ## Operating loop
 
+### Understand the lifecycle
+
+Read [lifecycle.md](references/lifecycle.md) when explaining the overall sequence,
+moving between planning and delivery, or continuing after Sprint triage. It maps
+the grouped stages and conditional loops; use the current CLI routes to choose
+the actual transition.
+
 ### Start or resume
 
 Read [project-bootstrap.md](references/project-bootstrap.md). Resolve the target repository, AgileForge runtime, profile when applicable, and exact project identity.

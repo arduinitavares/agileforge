@@ -46,3 +46,12 @@ Before any completion mutation, reread both workflow routes. Use the exact adver
 Parse the result. Do not discard unparsed JSON. Then reread both routes.
 
 Do not close a Story, review or close a Sprint, or record triage merely because all visible Tasks appear complete. Perform those actions only when currently advertised and authorized.
+
+## Continue after triage
+
+Use the [lifecycle map](lifecycle.md) to distinguish another Sprint, upstream
+revision, and a retry. Continue under the same Project and reread both routes.
+Triage records learning and impact; it does not itself apply follow-up changes.
+Existing accepted planning may remain usable, but Story selection, readiness,
+and dependency checks still govern the next Sprint. Amend requirements only
+through the eligible source registration, structuring, and review route.

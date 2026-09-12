@@ -1,0 +1,199 @@
+<svg viewBox="0 0 1280 960" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="flow-title flow-desc">
+<title id="flow-title">AgileForge: sequence and loops</title>
+<desc id="flow-desc">Usual progression through grouped stages: Create Project, Vision, Product Goal, Specification registration/structuring/review, Backlog, Roadmap, Stories, Sprint planning and start, Task execution and evidence, Story closure, Sprint review and closure, triage, and assessment of another Sprint. Dashed loops are conditional and preserve history. Live workflow position and next commands determine available actions. This overview omits other revision, Goal outcome and retry branches.</desc>
+<defs>
+<marker id="flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0,8 3,0 6" fill="#4f5d75"/>
+</marker>
+<marker id="flow-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0,8 3,0 6" fill="#eb6c36"/>
+</marker>
+<marker id="flow-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0,8 3,0 6" fill="#2e5aa8"/>
+</marker>
+</defs>
+<style>svg{font-family:system-ui,sans-serif}.node{fill:white;stroke:#4f5d75;stroke-width:1.4}.focal{fill:#fceae2;stroke:#eb6c36;stroke-width:1.6}.name{font-size:20px;font-weight:600;fill:#2d3142}.tag{font:12px ui-monospace,monospace;letter-spacing:.06em;fill:#4f5d75}.badge{font-size:12px;fill:#4f5d75}.legend{font-size:16px;fill:#4f5d75}.rule{stroke:#bfc0c0;stroke-width:1}</style>
+<rect width="1280" height="960" fill="#f5f5f5"/>
+<path id="sequence-1" data-from="1" data-to="2" d="M304 152 H364" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-1-head" data-arrowhead-for="sequence-1" points="378,152 364,160 364,144" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-2" data-from="2" data-to="3" d="M608 152 H668" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-2-head" data-arrowhead-for="sequence-2" points="682,152 668,160 668,144" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-3" data-from="3" data-to="4" d="M912 152 H972" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-3-head" data-arrowhead-for="sequence-3" points="986,152 972,160 972,144" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-4" data-from="4" data-to="5" d="M1104 208 V284" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-4-head" data-arrowhead-for="sequence-4" points="1104,298 1096,284 1112,284" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-5" data-from="5" data-to="6" d="M992 360 H932" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-5-head" data-arrowhead-for="sequence-5" points="918,360 932,352 932,368" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-6" data-from="6" data-to="7" d="M688 360 H628" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-6-head" data-arrowhead-for="sequence-6" points="614,360 628,352 628,368" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-7" data-from="7" data-to="8" d="M384 360 H324" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-7-head" data-arrowhead-for="sequence-7" points="310,360 324,352 324,368" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-8" data-from="8" data-to="9" d="M192 416 V492" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-8-head" data-arrowhead-for="sequence-8" points="192,506 184,492 200,492" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-9" data-from="9" data-to="10" d="M304 568 H364" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-9-head" data-arrowhead-for="sequence-9" points="378,568 364,576 364,560" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-10" data-from="10" data-to="11" d="M608 568 H668" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-10-head" data-arrowhead-for="sequence-10" points="682,568 668,576 668,560" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-11" data-from="11" data-to="12" d="M912 568 H972" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-11-head" data-arrowhead-for="sequence-11" points="986,568 972,576 972,560" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="sequence-12" data-from="12" data-to="13" d="M1104 624 V700" class="sequence" fill="none" stroke="#2d3142" stroke-width="4" stroke-linecap="round">
+</path>
+<polygon id="sequence-12-head" data-arrowhead-for="sequence-12" points="1104,714 1096,700 1112,700" fill="#2d3142" stroke="#2d3142" stroke-width="1"/>
+<path id="feedback-2" data-from="2" data-to="2" d="M472 96 V72 A8 8 0 0 1 480 64 H512 A8 8 0 0 1 520 72 V80" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-2-head" data-arrowhead-for="feedback-2" points="520,90 514,80 526,80" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-3" data-from="3" data-to="3" d="M776 96 V72 A8 8 0 0 1 784 64 H816 A8 8 0 0 1 824 72 V80" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-3-head" data-arrowhead-for="feedback-3" points="824,90 818,80 830,80" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-4" data-from="4" data-to="4" d="M1080 96 V72 A8 8 0 0 1 1088 64 H1120 A8 8 0 0 1 1128 72 V80" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-4-head" data-arrowhead-for="feedback-4" points="1128,90 1122,80 1134,80" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-5" data-from="5" data-to="5" d="M1128 416 V440 A8 8 0 0 1 1120 448 H1088 A8 8 0 0 1 1080 440 V432" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-5-head" data-arrowhead-for="feedback-5" points="1080,422 1086,432 1074,432" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-6" data-from="6" data-to="6" d="M776 304 V280 A8 8 0 0 1 784 272 H816 A8 8 0 0 1 824 280 V288" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-6-head" data-arrowhead-for="feedback-6" points="824,298 818,288 830,288" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-7" data-from="7" data-to="7" d="M472 304 V280 A8 8 0 0 1 480 272 H512 A8 8 0 0 1 520 280 V288" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-7-head" data-arrowhead-for="feedback-7" points="520,298 514,288 526,288" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="feedback-8" data-from="8" data-to="8" d="M168 304 V280 A8 8 0 0 1 176 272 H208 A8 8 0 0 1 216 280 V288" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Use the questions, feedback and revision actions supported by this stage. Prior authorization covers only its scope; changed candidates need review.</title>
+</path>
+<polygon id="feedback-8-head" data-arrowhead-for="feedback-8" points="216,298 210,288 222,288" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="develop-loop" data-from="9" data-to="9" d="M80 548 H56 A8 8 0 0 0 48 556 V584 A8 8 0 0 0 56 592 H64" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Build, verify and fix; repeat for the current Tasks until completion evidence is ready.</title>
+</path>
+<polygon id="develop-loop-head" data-arrowhead-for="develop-loop" points="74,592 64,598 64,586" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="story-gaps" data-from="10" data-to="9" d="M496 624 V664 A8 8 0 0 1 488 672 H200 A8 8 0 0 1 192 664 V640" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Resolve acceptance gaps within authorized Task and Story scope before closure, or report them. This conceptual loop does not reopen completed Tasks or rewrite evidence.</title>
+</path>
+<polygon id="story-gaps-head" data-arrowhead-for="story-gaps" points="192,630 198,640 186,640" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="requirements-loop" data-from="12" data-to="4" d="M1216 552 H1240 A8 8 0 0 0 1248 544 V40 A8 8 0 0 0 1240 32 H1192 A8 8 0 0 0 1184 40 V80" class="feedback" fill="none" stroke="#4f5d75" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4">
+<title>Changed requirements may use an eligible source amendment after completed and triaged delivery, with no active Sprint or retry and no unresolved reviews. Register, structure and review the revision; preserve accepted history.</title>
+</path>
+<polygon id="requirements-loop-head" data-arrowhead-for="requirements-loop" points="1184,90 1178,80 1190,80" fill="#4f5d75" stroke="#4f5d75" stroke-width="1"/>
+<path id="next-sprint-loop" data-from="13" data-to="8" d="M1104 832 V888 A8 8 0 0 1 1096 896 H24 A8 8 0 0 1 16 888 V368 A8 8 0 0 1 24 360 H64" class="sprint-loop" fill="none" stroke="#eb6c36" stroke-width="3" stroke-linecap="round" stroke-dasharray="10 6">
+<title>If continuing with eligible remaining Stories, reuse valid accepted planning under the same Project. Select scope, review readiness and dependencies, then plan, review and start.</title>
+</path>
+<polygon id="next-sprint-loop-head" data-arrowhead-for="next-sprint-loop" points="74,360 64,366 64,354" fill="#eb6c36" stroke="#eb6c36" stroke-width="1"/>
+<rect x="1112" y="0" width="160" height="24" fill="#f5f5f5"/>
+<text x="1192" y="16" class="tag" text-anchor="middle">AMENDMENT</text>
+<rect x="264" y="680" width="160" height="24" fill="#f5f5f5"/>
+<text x="344" y="696" class="tag" text-anchor="middle">GAPS</text>
+<rect x="448" y="864" width="176" height="24" fill="#f5f5f5"/>
+<text x="536" y="880" class="tag" text-anchor="middle">NEXT SPRINT</text>
+<g id="stage-1" data-stage="1" aria-label="Create Project. Input: Product identity and repository binding. Output: One durable Project. Your input: Missing setup details; an existing instruction to create it remains valid.">
+<title>Create Project. Input: Product identity and repository binding. Output: One durable Project. Your input: Missing setup details; an existing instruction to create it remains valid.</title>
+<rect x="80" y="96" width="224" height="112" rx="8" class="node"/>
+<text x="96" y="120" class="tag">01</text>
+<text x="192" y="152" class="name" text-anchor="middle">Create Project</text>
+<text x="192" y="192" class="badge" text-anchor="middle">You: if needed</text>
+</g>
+<g id="stage-2" data-stage="2" aria-label="Vision. Input: Project context, users and the problem to solve. Output: Accepted product Vision. Your input: Yes. Clarify direction and approve it.">
+<title>Vision. Input: Project context, users and the problem to solve. Output: Accepted product Vision. Your input: Yes. Clarify direction and approve it.</title>
+<rect x="384" y="96" width="224" height="112" rx="8" class="node"/>
+<text x="400" y="120" class="tag">02</text>
+<text x="496" y="152" class="name" text-anchor="middle">Vision</text>
+<text x="496" y="192" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-3" data-stage="3" aria-label="Product Goal. Input: Vision and priorities. Output: Accepted measurable Goal and success criteria. Your input: Yes. Choose the outcome and what success means.">
+<title>Product Goal. Input: Vision and priorities. Output: Accepted measurable Goal and success criteria. Your input: Yes. Choose the outcome and what success means.</title>
+<rect x="688" y="96" width="224" height="112" rx="8" class="node"/>
+<text x="704" y="120" class="tag">03</text>
+<text x="800" y="152" class="name" text-anchor="middle">Product Goal</text>
+<text x="800" y="192" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-4" data-stage="4" aria-label="Specification. Input: Accepted Vision and Goal plus exact prepared source bytes. Register the source, structure agileforge.spec.v2, and review the exact candidate. Output: Accepted requirements with immutable lineage. Your input: Source content and candidate acceptance.">
+<title>Specification. Input: Accepted Vision and Goal plus exact prepared source bytes. Register the source, structure agileforge.spec.v2, and review the exact candidate. Output: Accepted requirements with immutable lineage. Your input: Source content and candidate acceptance.</title>
+<rect x="992" y="96" width="224" height="112" rx="8" class="node"/>
+<text x="1008" y="120" class="tag">04</text>
+<text x="1104" y="152" class="name" text-anchor="middle">Specification</text>
+<text x="1104" y="192" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-5" data-stage="5" aria-label="Backlog. Input: Accepted Specification. Output: Accepted product work items. Your input: Yes. Confirm scope and product value.">
+<title>Backlog. Input: Accepted Specification. Output: Accepted product work items. Your input: Yes. Confirm scope and product value.</title>
+<rect x="992" y="304" width="224" height="112" rx="8" class="node"/>
+<text x="1008" y="328" class="tag">05</text>
+<text x="1104" y="360" class="name" text-anchor="middle">Backlog</text>
+<text x="1104" y="400" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-6" data-stage="6" aria-label="Roadmap. Input: Backlog, priorities and dependencies. Output: Accepted order of product work. Your input: Yes. Confirm sequencing and tradeoffs.">
+<title>Roadmap. Input: Backlog, priorities and dependencies. Output: Accepted order of product work. Your input: Yes. Confirm sequencing and tradeoffs.</title>
+<rect x="688" y="304" width="224" height="112" rx="8" class="node"/>
+<text x="704" y="328" class="tag">06</text>
+<text x="800" y="360" class="name" text-anchor="middle">Roadmap</text>
+<text x="800" y="400" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-7" data-stage="7" aria-label="Stories. Input: Accepted Backlog and Roadmap. Output: Reviewed Story content and acceptance criteria. Acceptance alone does not establish Sprint readiness; sizing, rank, structural evidence, selection and dependencies also matter. Your input: Expected behavior and human-owned readiness decisions.">
+<title>Stories. Input: Accepted Backlog and Roadmap. Output: Reviewed Story content and acceptance criteria. Acceptance alone does not establish Sprint readiness; sizing, rank, structural evidence, selection and dependencies also matter. Your input: Expected behavior and human-owned readiness decisions.</title>
+<rect x="384" y="304" width="224" height="112" rx="8" class="node"/>
+<text x="400" y="328" class="tag">07</text>
+<text x="496" y="360" class="name" text-anchor="middle">Stories</text>
+<text x="496" y="400" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-8" data-stage="8" aria-label="Sprint plan and start with Tasks. Input: Selected Stories, readiness evidence, reviewed dependencies and capacity. Output: Accepted plan with Tasks, followed by a separate Sprint start. Your input: Scope, dependencies, capacity, plan acceptance and start.">
+<title>Sprint plan and start with Tasks. Input: Selected Stories, readiness evidence, reviewed dependencies and capacity. Output: Accepted plan with Tasks, followed by a separate Sprint start. Your input: Scope, dependencies, capacity, plan acceptance and start.</title>
+<rect x="80" y="304" width="224" height="112" rx="8" class="focal"/>
+<text x="96" y="328" class="tag">08</text>
+<text x="192" y="352" class="name" text-anchor="middle">Sprint plan + start</text>
+<text x="192" y="376" class="name" text-anchor="middle">with Tasks</text>
+<text x="192" y="400" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-9" data-stage="9" aria-label="Develop and verify. Input: The current Task and accepted Story contract. Output: Implementation, verification, and separately recorded Task completion evidence. Your input: Usually unnecessary within authorized scope; needed for new product or scope decisions.">
+<title>Develop and verify. Input: The current Task and accepted Story contract. Output: Implementation, verification, and separately recorded Task completion evidence. Your input: Usually unnecessary within authorized scope; needed for new product or scope decisions.</title>
+<rect x="80" y="512" width="224" height="112" rx="8" class="node"/>
+<text x="96" y="536" class="tag">09</text>
+<text x="192" y="568" class="name" text-anchor="middle">Develop and verify</text>
+<text x="192" y="608" class="badge" text-anchor="middle">You: usually no</text>
+</g>
+<g id="stage-10" data-stage="10" aria-label="Close Stories. Input: Terminal Tasks, exact evidence and Story criteria. Output: Separate closure recording delivered results and known gaps. Story closure may interleave with other Task work. Your input: Confirm closure if not already authorized; readiness to close is not full product acceptance.">
+<title>Close Stories. Input: Terminal Tasks, exact evidence and Story criteria. Output: Separate closure recording delivered results and known gaps. Story closure may interleave with other Task work. Your input: Confirm closure if not already authorized; readiness to close is not full product acceptance.</title>
+<rect x="384" y="512" width="224" height="112" rx="8" class="node"/>
+<text x="400" y="536" class="tag">10</text>
+<text x="496" y="568" class="name" text-anchor="middle">Close Stories</text>
+<text x="496" y="608" class="badge" text-anchor="middle">You: if needed</text>
+</g>
+<g id="stage-11" data-stage="11" aria-label="Review and close Sprint. Input: Terminal Stories and exact delivery evidence. Output: Persisted Sprint review, followed by a separate Sprint closure. Your input: Assess results and authorize review and closure.">
+<title>Review and close Sprint. Input: Terminal Stories and exact delivery evidence. Output: Persisted Sprint review, followed by a separate Sprint closure. Your input: Assess results and authorize review and closure.</title>
+<rect x="688" y="512" width="224" height="112" rx="8" class="node"/>
+<text x="704" y="536" class="tag">11</text>
+<text x="800" y="560" class="name" text-anchor="middle">Review and close</text>
+<text x="800" y="584" class="name" text-anchor="middle">Sprint</text>
+<text x="800" y="608" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-12" data-stage="12" aria-label="Learn and triage. Input: Closed Sprint, feedback and lessons. Output: Recorded learning and impact. Triage does not itself apply follow-up changes or start a Sprint. Your input: Decide impact and intended follow-up.">
+<title>Learn and triage. Input: Closed Sprint, feedback and lessons. Output: Recorded learning and impact. Triage does not itself apply follow-up changes or start a Sprint. Your input: Decide impact and intended follow-up.</title>
+<rect x="992" y="512" width="224" height="112" rx="8" class="node"/>
+<text x="1008" y="536" class="tag">12</text>
+<text x="1104" y="568" class="name" text-anchor="middle">Learn and triage</text>
+<text x="1104" y="608" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<g id="stage-13" data-stage="13" aria-label="Assess next Sprint. Input: Learning, current Goal and eligible remaining work. Output: A continuation decision under the same Project. Another Sprint is conditional; revisions, blockers or optional Goal outcomes may need attention. Your input: Next priority and scope when appropriate.">
+<title>Assess next Sprint. Input: Learning, current Goal and eligible remaining work. Output: A continuation decision under the same Project. Another Sprint is conditional; revisions, blockers or optional Goal outcomes may need attention. Your input: Next priority and scope when appropriate.</title>
+<rect x="992" y="720" width="224" height="112" rx="8" class="node"/>
+<text x="1008" y="744" class="tag">13</text>
+<text x="1104" y="776" class="name" text-anchor="middle">Assess next Sprint</text>
+<text x="1104" y="816" class="badge" text-anchor="middle">You: yes</text>
+</g>
+<line x1="80" y1="928" x2="1216" y2="928" class="rule"/>
+<text x="80" y="952" class="legend">Small loops: questions / feedback / fixes</text>
+<text x="904" y="952" class="legend">Approvals bind exact scope.</text>
+</svg>
