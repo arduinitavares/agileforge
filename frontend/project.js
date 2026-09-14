@@ -3818,10 +3818,12 @@ function selectWorkspaceStage(stageId, { pushHistory = false, scroll = false } =
 
 function ensureWorkspaceView() {
     if (typeof AgileForgeWorkspace === 'undefined') return;
-    const current = AgileForgeWorkspace.currentStageIds(lifecycleState.position);
-    if (workspaceView === null) {
-        workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] ?? 1 };
-    }
+    if (workspaceView !== null) return;
+    const position = lifecycleState?.position;
+    if (!Array.isArray(position?.decisions)) return;
+    const current = AgileForgeWorkspace.currentStageIds(position);
+    if (!current.length) return;
+    workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] };
 }
 
 function renderWorkspaceMap() {
@@ -3986,6 +3988,7 @@ async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
 }
 
 async function refreshWorkspaceInventoryProjection() {
+    if (workspaceView?.stageId !== 9) return;
     const sprintId = currentWorkspaceSprintId();
     if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
     const currentSprintId = lifecycleState.sprintStatus?.data?.sprint?.sprint_id;
@@ -7305,6 +7308,8 @@ function installInteractions() {
         }
         if (button.dataset.stageJump) {
             selectedStageTab = button.dataset.stageJump;
+            const workspaceStage = workspaceStageForLegacy(button.dataset.stageJump);
+            if (workspaceStage) selectWorkspaceStage(workspaceStage, { pushHistory: true });
             updateStageView(true);
             return;
         }

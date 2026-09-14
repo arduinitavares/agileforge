@@ -4337,6 +4337,22 @@ test('fresh inventory replaces a same-Sprint cache without clearing selected pre
     assert.equal(vm.runInContext('workspaceView.tab', context), 'checks');
 });
 
+test('Sprint-plan refresh does not request a Task inventory outside Develop and verify', async () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 8, sprintId: null, taskId: null, tab: 'details', filter: 'all', scopeKey: null };
+        lifecycleState = { sprintStatus: { kind: 'ready', data: { sprint: { sprint_id: 31 } } } };
+        globalThis.__inventoryReads = [];
+        loadWorkspaceTaskInventory = async (sprintId) => __inventoryReads.push(sprintId);
+    `, context);
+    await vm.runInContext('refreshWorkspaceInventoryProjection()', context);
+    assert.deepEqual(
+        JSON.parse(vm.runInContext('JSON.stringify(__inventoryReads)', context)),
+        [],
+    );
+});
+
 test('historical Sprint scope fails closed for current mutation controls', () => {
     const context = loadFrontend();
     vm.runInContext(`
@@ -4452,6 +4468,55 @@ test('workspace click delegation selects only Task row buttons and leaves comple
     }
     assert.equal(prevented, 1);
     assert.equal(vm.runInContext('__completionSubmissions', context), 1);
+});
+
+test('workspace selection waits for the first authoritative position and preserves an inspected stage', () => {
+    const context = loadFrontend();
+    context.workspaceApi = {
+        createView() {
+            return { stageId: null, sprintId: null, taskId: null, tab: 'details', filter: 'all', scopeKey: null };
+        },
+        currentStageIds(position) {
+            return Array.isArray(position?.decisions) ? [4] : [];
+        },
+    };
+    vm.runInContext(`
+        AgileForgeWorkspace = workspaceApi;
+        lifecycleState = { position: {} };
+        workspaceView = null;
+        ensureWorkspaceView();
+    `, context);
+    assert.equal(vm.runInContext('workspaceView', context), null);
+
+    vm.runInContext('lifecycleState.position = { decisions: [{ request_kind: "structure_specification" }] }; ensureWorkspaceView();', context);
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 4);
+
+    vm.runInContext('workspaceView = { ...workspaceView, stageId: 7 }; lifecycleState.position = { decisions: [{ request_kind: "record_sprint_plan" }] }; ensureWorkspaceView();', context);
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 7);
+});
+
+test('repository stage jump selects the workspace map stage and records browser history', async () => {
+    const { context, documentListeners } = workspaceInteractionHarness();
+    vm.runInContext(`
+        globalThis.__workspaceJumps = [];
+        globalThis.__stageUpdates = [];
+        workspaceStageForLegacy = (stage) => stage === 'Repository' ? 1 : null;
+        selectWorkspaceStage = (stageId, options) => __workspaceJumps.push({ stageId, pushHistory: options?.pushHistory === true });
+        updateStageView = (scroll) => __stageUpdates.push(scroll === true);
+    `, context);
+    const button = {
+        dataset: { stageJump: 'Repository' },
+        closest(selector) { return selector === 'button' ? this : null; },
+    };
+    for (const listener of documentListeners.click ?? []) await listener({ target: button });
+    assert.deepEqual(
+        JSON.parse(vm.runInContext('JSON.stringify(__workspaceJumps)', context)),
+        [{ stageId: 1, pushHistory: true }],
+    );
+    assert.deepEqual(
+        JSON.parse(vm.runInContext('JSON.stringify(__stageUpdates)', context)),
+        [true],
+    );
 });
 
 function workspaceFocusHarness() {

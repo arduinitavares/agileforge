@@ -1360,6 +1360,7 @@ class FakeLifecycle:
             "child_graph_id": child,
             "request_kind": request_kind,
             "category": decision_category,
+            "recommendation_kind": "required",
             "instance_key": instance_key,
             "reason_code": specification_reason or "INTERNAL_REASON_CODE",
             "decision_fingerprint": decision_fingerprint,
@@ -1402,6 +1403,7 @@ class FakeLifecycle:
                     "child_graph_id": "specification",
                     "request_kind": "register_specification_source",
                     "category": "available",
+                    "recommendation_kind": "optional_reentry",
                     "instance_key": None,
                     "reason_code": (
                         "SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE"
@@ -2977,12 +2979,21 @@ def _assert_screenshot_size(path: Path, expected: ViewportSize) -> None:
     assert (width, height) == (expected["width"], expected["height"])
 
 
+def _select_workspace_stage(page: Page, stage_id: int) -> None:
+    """Navigate through the persistent lifecycle map before inspecting a stage."""
+    stage = page.locator(f"#workspace-stage-{stage_id}")
+    if "Viewing" not in stage.inner_text():
+        stage.click()
+    expect(stage).to_contain_text("Viewing")
+
+
 def _complete_vision_and_goal(
     page: Page,
     fake: FakeLifecycle,
     *,
     replace_vision_during_review: bool = False,
 ) -> None:
+    _select_workspace_stage(page, 2)
     expect(page.locator("#vision-response")).not_to_be_visible()
     expect(page.get_by_role("button", name="Generate Vision draft")).to_be_visible()
     page.get_by_role("button", name="Generate Vision draft").click()
@@ -3024,6 +3035,7 @@ def _complete_vision_and_goal(
             page.get_by_text("Give product teams a replacement lifecycle candidate.")
         ).to_be_visible()
     _accept_review(page, "vision")
+    _select_workspace_stage(page, 3)
     expect(page.locator("#goal-response")).to_be_visible()
     page.locator("#goal-response").fill(
         "One pilot team should finish the lifecycle with durable review evidence."
@@ -3054,6 +3066,7 @@ def _submit_specification_source(
     source_path: str,
     adr_path: str,
 ) -> None:
+    _select_workspace_stage(page, 4)
     form = page.locator('form[data-specification-source-form="true"]')
     form.locator('[name="source_path"]').fill(source_path)
     form.locator('[name="adr_paths"]').fill(adr_path)
@@ -3123,6 +3136,22 @@ def _assert_issue_204_failure_restores_source_controls(page: Page) -> None:
     )
 
 
+def _assert_workspace_viewing_current(
+    viewing_stage: Locator,
+    current_stage: Locator,
+    *,
+    same_stage: bool,
+    reconciled_content: Locator | None = None,
+) -> None:
+    """Keep local Viewing distinct from the graph's current-stage marker."""
+    if reconciled_content is not None:
+        reconciled_content.wait_for(state="attached")
+    expect(viewing_stage).to_contain_text("Viewing")
+    expect(current_stage).to_have_attribute("aria-current", "step")
+    if not same_stage:
+        expect(current_stage).not_to_contain_text("Viewing")
+
+
 def _assert_create_modal_keyboard_contract(page: Page) -> None:
     opener = page.locator("#open-create-project")
     opener.click()
@@ -3150,6 +3179,7 @@ def _attach_and_refresh_repository(
     fake: FakeLifecycle,
     repository_path: Path,
 ) -> None:
+    _select_workspace_stage(page, 1)
     page.locator('[data-repository-action="attach"]').click()
     page.locator("#human-action-path").fill(str(repository_path))
     page.locator("#human-action-submit").click()
@@ -3227,6 +3257,11 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
     button = page.locator('[data-direct-action="structure_specification"]')
     expect(button).to_be_visible()
     expect(button).to_contain_text("Retry structuring from unchanged source")
+    specification_stage = page.locator("#workspace-stage-4")
+    stories_stage = page.locator("#workspace-stage-7")
+    _assert_workspace_viewing_current(
+        specification_stage, specification_stage, same_stage=True
+    )
     button.click()
     page.wait_for_function("window.resolveIssue204Structure !== null")
 
@@ -3284,6 +3319,7 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
     ] == ["sha256:hidden-decision", "sha256:failed-decision"]
     fake.specification = {"rendered_markdown": "# Successor pending candidate"}
     fake.specification_feedback = None
+    stories_stage.click()
     page.evaluate(
         """window.resolveIssue204Structure({
             status: 200,
@@ -3291,6 +3327,15 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         })"""
     )
 
+    _assert_workspace_viewing_current(
+        stories_stage,
+        specification_stage,
+        same_stage=False,
+        reconciled_content=page.get_by_text(
+            "Successor pending candidate", exact=False
+        ),
+    )
+    specification_stage.click()
     expect(page.get_by_text("Successor pending candidate", exact=False)).to_be_visible()
     expect(
         page.locator(
@@ -3547,6 +3592,7 @@ def test_desktop_human_single_lifecycle(
 
     _assert_human_only_surface(page)
     _assert_no_horizontal_overflow(page)
+    _select_workspace_stage(page, 5)
     page.locator("#delivery-panel").scroll_into_view_if_needed()
     _assert_no_control_overlap(page)
     screenshot = tmp_path / "desktop-1440x900.png"
@@ -3576,6 +3622,7 @@ def test_mobile_dirty_repository_wraps_without_overflow(
         repository_path=str(repository_path),
     )
     expect(page.get_by_role("button", name="Generate Vision draft")).to_be_visible()
+    _select_workspace_stage(page, 1)
     expect(page.get_by_text("Dirty", exact=True)).to_be_visible()
     warning = page.get_by_text(
         "Working tree has uncommitted changes in a deliberately long nested "
@@ -3670,6 +3717,7 @@ def test_dashboard_live_surface_has_no_retired_stage_or_copy() -> None:
 
 
 def _verify_backlog_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
+    _select_workspace_stage(page, 5)
     backlog_card = page.locator('[data-lifecycle-card="Backlog"]')
     expect(backlog_card).to_contain_text("Ready")
     expect(backlog_card).to_contain_text("Ready for your input.")
@@ -3706,6 +3754,7 @@ def _verify_backlog_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
 
 
 def _verify_roadmap_lifecycle_flow(page: Page) -> None:
+    _select_workspace_stage(page, 6)
     roadmap_card = page.locator('[data-lifecycle-card="Roadmap"]')
     expect(roadmap_card).to_contain_text("Ready")
     generate_roadmap_btn = page.locator('[data-direct-action="record_roadmap_draft"]')
@@ -3727,6 +3776,7 @@ def _verify_roadmap_lifecycle_flow(page: Page) -> None:
 
 
 def _verify_story_lifecycle_flow(page: Page) -> None:
+    _select_workspace_stage(page, 7)
     stories_card = page.locator('[data-lifecycle-card="Stories"]')
     expect(stories_card).to_contain_text("Ready")
     generate_story_btn = page.locator('[data-direct-action="record_story_draft"]')
@@ -3753,6 +3803,7 @@ def _verify_story_lifecycle_flow(page: Page) -> None:
 
 
 def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
+    _select_workspace_stage(page, 8)
     sprint_card = page.locator('[data-lifecycle-card="Sprint"]')
     expect(sprint_card).to_contain_text("Ready")
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
@@ -4090,6 +4141,7 @@ def _assert_issue_260_retry_survives_reload(
     assert len(fake.retry_task_completion_requests) == 1
     assert fake.retry_task_completion_requests[0]["instance_key"] == "retry:101:task:71"
     page.reload(wait_until="networkidle")
+    _select_workspace_stage(page, 8)
     reloaded = page.locator('[data-sprint-status="active"]')
     progress = reloaded.locator('[data-sprint-retry-progress="true"]')
     expect(reloaded).to_contain_text("Attempt 2")
