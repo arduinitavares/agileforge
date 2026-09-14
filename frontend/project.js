@@ -4217,7 +4217,8 @@ function workspaceScopedActionBinding(button) {
         decision?.request_kind === requestKind
         && decision?.node_id === action?.node_id
         && decision?.instance_key === action?.instance_key
-        && decision?.category === 'available'
+        && (decision?.category === 'available'
+            || (requestKind === 'review_sprint' && decision?.category === 'waiting'))
         && typeof decision?.decision_fingerprint === 'string'
         && decision.decision_fingerprint.trim()
     ));

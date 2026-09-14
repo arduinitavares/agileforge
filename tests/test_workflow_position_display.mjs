@@ -4555,6 +4555,29 @@ test('Story-close controls expose their exact advertised instance', () => {
     assert.match(markup, /Close Story · story:101/);
 });
 
+test('Sprint review accepts its exact waiting-for-review decision while other waiting mutations stay locked', () => {
+    const context = loadFrontend();
+    const action = { request_kind: 'review_sprint', node_id: 'execution.sprint.review', instance_key: 'sprint:31', endpoint: 'sprint/review', availability: 'available' };
+    context.reviewAction = action;
+    context.reviewButton = directActionButton(action);
+    vm.runInContext(`
+        workspaceView = { stageId: 11, sprintId: 31 };
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 } } };
+        lifecycleState.actions = [reviewAction];
+        lifecycleState.position = { decisions: [{ ...reviewAction, category: 'waiting', decision_fingerprint: 'sha256:review-current' }] };
+    `, context);
+    assert.equal(vm.runInContext('workspaceScopedActionBinding(reviewButton)?.decision.category', context), 'waiting');
+    vm.runInContext("lifecycleState.position.decisions[0].category = 'blocked'", context);
+    assert.equal(vm.runInContext('workspaceScopedActionBinding(reviewButton)', context), null);
+    vm.runInContext("lifecycleState.position.decisions[0].category = 'waiting'; lifecycleState.actions[0].availability = 'locked'", context);
+    assert.equal(vm.runInContext('workspaceScopedActionBinding(reviewButton)', context), null);
+    const closeAction = { request_kind: 'close_sprint', node_id: 'execution.sprint.close', instance_key: 'sprint:31', endpoint: 'sprint/close', availability: 'available' };
+    context.closeAction = closeAction;
+    context.closeButton = directActionButton(closeAction);
+    vm.runInContext("lifecycleState.actions = [closeAction]; lifecycleState.position.decisions = [{ ...closeAction, category: 'waiting', decision_fingerprint: 'sha256:close-current' }]", context);
+    assert.equal(vm.runInContext('workspaceScopedActionBinding(closeButton)', context), null);
+});
+
 function workspaceScopedActionForm(requestKind, values = {}) {
     return {
         dataset: { workspaceScopedActionForm: requestKind },
