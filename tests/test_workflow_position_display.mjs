@@ -4360,3 +4360,32 @@ test('selected Task disclosure uses subject-unique draft fields and separates pl
     assert.match(checks, /Run focused tests/);
     assert.match(checks, /pending result/);
 });
+
+
+test('async selected Task rendering follows the current subject and preserves honest checks/activity copy', () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        workspaceView = { stageId: 9, sprintId: 31, taskId: 3, tab: 'activity', scopeKey: 'sprint:31' };
+        lifecycleState = { position: { decisions: [] }, actions: [], sprintStatus: { kind: 'ready', data: { sprint: { sprint_id: 31 } } } };
+        workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: { tasks: [{ task_id: 3, status: 'To Do', instance_key: 'task:3', fact_fingerprint: 'sha256:task-3', dependencies_satisfied: true }] } };
+    `, context);
+    context.oldSnapshot = { kind: 'ready', selection: { taskId: 1, sprintId: 31 }, data: { task: { task_id: 1, sprint_id: 31 } } };
+    const pending = vm.runInContext('workspaceTaskInspectorMarkup(oldSnapshot)', context);
+    assert.match(pending, /Loading selected Task/);
+    assert.doesNotMatch(pending, /Selected Task #1/);
+    context.doneTask = { metadata_json: JSON.stringify({ checklist_items: ['Run focused tests'] }) };
+    context.doneCompletion = { checklist_result: { 'Run focused tests': 'passed' } };
+    assert.match(vm.runInContext('workspacePlannedChecksMarkup(doneTask, doneCompletion)', context), /\(passed\)/);
+    assert.doesNotMatch(vm.runInContext('workspacePlannedChecksMarkup(doneTask, doneCompletion)', context), /pending result/);
+    context.activitySnapshot = { kind: 'ready', selection: { taskId: 3, sprintId: 31 }, data: { task: { task_id: 3, sprint_id: 31 }, execution: { items: [{ old_status: 'To Do', new_status: 'Done', outcome_summary: 'Retained transition' }] } } };
+    const activity = vm.runInContext('workspaceTaskDetailMarkup(activitySnapshot)', context);
+    assert.match(activity, /External activity is unavailable/);
+});
+
+test('Story-close controls expose their exact advertised instance', () => {
+    const context = loadFrontend();
+    context.closeState = { kind: 'ready', data: { stories: [{ story_id: 101, status: 'Done' }], story_completions: [], sprint: { sprint_id: 31 } } };
+    context.closeActions = [{ request_kind: 'close_story', instance_key: 'story:101', node_id: 'story.close', endpoint: 'sprint/story/close' }];
+    const markup = vm.runInContext('workspaceCloseStoriesMarkup(closeState, closeActions)', context);
+    assert.match(markup, /Close Story · story:101/);
+});

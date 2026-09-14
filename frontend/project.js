@@ -3532,7 +3532,7 @@ function workspaceCloseStoriesMarkup(sprintState, actions) {
     const completions = Array.isArray(status?.story_completions) ? status.story_completions : [];
     const completed = new Set(completions.map((item) => item?.story_id).filter(positiveInteger));
     const closeActions = (Array.isArray(actions) ? actions : []).filter((action) => action?.request_kind === 'close_story');
-    return `<section class="rounded-lg border border-slate-200 bg-white p-4" data-workspace-close-stories="true"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Close Stories</p><h3 class="mt-1 text-base font-semibold text-slate-900">Durable Story completion</h3><ul class="mt-3 space-y-2 text-sm text-slate-700">${stories.length ? stories.map((story) => `<li class="rounded border border-slate-200 bg-slate-50 p-2">Story #${escapeWorkflowText(story.story_id)} · Formal status: ${escapeWorkflowText(story.status || 'Unavailable')} · Completion evidence: ${completed.has(story.story_id) ? 'recorded' : 'Unavailable'}</li>`).join('') : '<li>No retained Story rows are available.</li>'}</ul>${closeActions.map((action) => workspaceScopedActionMarkup(action, 'Close Story')).join('')}</section>`;
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4" data-workspace-close-stories="true"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Close Stories</p><h3 class="mt-1 text-base font-semibold text-slate-900">Durable Story completion</h3><ul class="mt-3 space-y-2 text-sm text-slate-700">${stories.length ? stories.map((story) => `<li class="rounded border border-slate-200 bg-slate-50 p-2">Story #${escapeWorkflowText(story.story_id)} · Formal status: ${escapeWorkflowText(story.status || 'Unavailable')} · Completion evidence: ${completed.has(story.story_id) ? 'recorded' : 'Unavailable'}</li>`).join('') : '<li>No retained Story rows are available.</li>'}</ul>${closeActions.map((action) => workspaceScopedActionMarkup(action, `Close Story · ${action.instance_key || 'instance unavailable'}`)).join('')}</section>`;
 }
 
 function workspaceReviewClosureMarkup(sprintState, actions) {
@@ -3706,6 +3706,7 @@ let workspaceTaskInventory = null;
 let workspaceReadGeneration = 0;
 let workspaceRenderScope = null;
 let workspaceFocusedStageId = null;
+let workspaceInventoryConfirmedAt = null;
 const workspaceRenderMemory = new Map();
 
 function workspaceStageLabel(stageId) {
@@ -3815,7 +3816,7 @@ function renderWorkspaceMap() {
     if (Number.isInteger(focusStage)) document.getElementById(`workspace-stage-${focusStage}`)?.focus?.();
 }
 
-function workspacePlannedChecksMarkup(task) {
+function workspacePlannedChecksMarkup(task, completion) {
     let metadata = task?.metadata_json;
     if (typeof metadata === 'string') {
         try { metadata = JSON.parse(metadata); } catch (_error) { metadata = null; }
@@ -3823,8 +3824,13 @@ function workspacePlannedChecksMarkup(task) {
     const planned = Array.isArray(metadata?.checklist_items) ? metadata.checklist_items.filter((item) => (
         typeof item === 'string' && item.trim()
     )) : [];
+    const results = completion && typeof completion.checklist_result === 'object'
+        ? completion.checklist_result : {};
     return planned.length
-        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Planned checks</p><ul class="mt-1 list-disc pl-4 text-xs text-slate-700">${planned.map((item) => `<li>${escapeWorkflowText(item)} <span class="text-slate-500">(pending result)</span></li>`).join('')}</ul></section>`
+        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Planned checks</p><ul class="mt-1 list-disc pl-4 text-xs text-slate-700">${planned.map((item) => {
+            const result = results[item];
+            return `<li>${escapeWorkflowText(item)}${result ? ` <span class="text-slate-600">(${escapeWorkflowText(result)})</span>` : ' <span class="text-slate-500">(pending result)</span>'}</li>`;
+        }).join('')}</ul></section>`
         : '<p class="mt-2 text-xs text-slate-600">No planned checklist is retained for this Task.</p>';
 }
 
@@ -3832,7 +3838,7 @@ function workspaceTaskDetailMarkup(snapshot) {
     if (!snapshot || snapshot.kind === 'idle' || !snapshot.selection?.taskId) {
         return '<p class="text-sm text-slate-600">Select a Task to inspect its persisted details, checks, and retained activity.</p>';
     }
-    if (snapshot.kind === 'loading') return '<p class="text-sm text-slate-600">Loading selected Task…</p>';
+    if (snapshot.kind === 'loading' && !snapshot.data) return '<p class="text-sm text-slate-600">Loading selected Task…</p>';
     if (snapshot.kind === 'unavailable') return `<p class="text-sm text-amber-800">Task #${snapshot.selection.taskId} is unavailable in the retained Sprint scope. Select another Task.</p>`;
     if (snapshot.kind === 'error') return `<p class="text-sm text-red-800">${escapeWorkflowText(snapshot.error || 'Task detail could not be loaded.')}</p>`;
     const task = snapshot.data?.task;
@@ -3842,17 +3848,18 @@ function workspaceTaskDetailMarkup(snapshot) {
     const tab = workspaceView?.tab ?? 'details';
     const taskId = task.task_id;
     const details = `<p class="mt-1 text-sm font-semibold text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p><dl class="mt-2 grid gap-1 text-xs text-slate-600"><div>Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</div><div>Dependency condition: ${task.dependencies_satisfied === true ? 'satisfied' : (task.dependencies_satisfied === false ? 'not satisfied' : 'Unavailable')}</div><div>Effective Sprint status: ${escapeWorkflowText(snapshot.data?.effective_status || 'Unavailable')}</div><div>Scope: ${escapeWorkflowText(snapshot.data?.current_retry?.sprint_instance_key || `sprint:${task.sprint_id || snapshot.selection?.sprintId || 'Unavailable'}`)}</div></dl>`;
-    const checks = `${workspacePlannedChecksMarkup(task)}${completion
+    const checks = `${workspacePlannedChecksMarkup(task, completion)}${completion
         ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Persisted completion result</p><p class="mt-1 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div></section>`
         : '<p class="mt-3 text-xs text-slate-600">No persisted completion result.</p>'}`;
     const activityMarkup = activity.length
-        ? `<ul class="mt-2 space-y-2 text-xs text-slate-700">${activity.map((item) => `<li class="border-t border-slate-200 pt-2"><strong>${escapeWorkflowText(item.changed_at || 'Undated')}</strong> · ${escapeWorkflowText(item.old_status || 'Unknown')} → ${escapeWorkflowText(item.new_status || 'Unknown')}<br>${escapeWorkflowText(item.outcome_summary || 'No outcome summary recorded.')}</li>`).join('')}</ul>`
-        : '<p class="mt-2 text-xs text-slate-600">Unavailable (no retained execution records).</p>';
+        ? `<ul class="mt-2 space-y-2 text-xs text-slate-700">${activity.map((item) => `<li class="border-t border-slate-200 pt-2"><strong>${escapeWorkflowText(item.changed_at || 'Undated')}</strong> · ${escapeWorkflowText(item.old_status || 'Unknown')} → ${escapeWorkflowText(item.new_status || 'Unknown')}<br>${escapeWorkflowText(item.outcome_summary || 'No outcome summary recorded.')}</li>`).join('')}</ul><p class="mt-3 text-xs text-slate-600">External activity is unavailable; these are retained Task status records only.</p>`
+        : '<p class="mt-2 text-xs text-slate-600">Unavailable (no retained execution records). External activity is unavailable.</p>';
     const content = tab === 'checks' ? checks : (tab === 'activity' ? activityMarkup : details);
     return `<section class="rounded-md border border-slate-200 bg-slate-50 p-3" data-workspace-task-detail="${taskId}">
         <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Task #${taskId}</p>
         <div class="mt-2 flex gap-3 border-b border-slate-200 text-xs" role="tablist" aria-label="Selected Task inspector"><button id="workspace-task-tab-${taskId}-details" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="details" aria-selected="${tab === 'details'}" aria-controls="workspace-task-panel-${taskId}">Details</button><button id="workspace-task-tab-${taskId}-checks" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="checks" aria-selected="${tab === 'checks'}" aria-controls="workspace-task-panel-${taskId}">Checks</button><button id="workspace-task-tab-${taskId}-activity" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="activity" aria-selected="${tab === 'activity'}" aria-controls="workspace-task-panel-${taskId}">Activity</button></div>
         <div id="workspace-task-panel-${taskId}" class="mt-2" role="tabpanel" aria-labelledby="workspace-task-tab-${taskId}-${tab}">${content}</div>
+        ${snapshot.kind === 'loading' && snapshot.data ? '<p class="mt-2 text-xs text-slate-600">Refreshing selected Task…</p>' : ''}
         ${snapshot.kind === 'stale' ? `<p class="mt-2 text-xs text-amber-800">Manual refresh failed; showing last confirmed detail. ${escapeWorkflowText(snapshot.error || '')}</p>` : ''}
     </section>`;
 }
@@ -3872,8 +3879,20 @@ function currentWorkspaceTaskRows() {
 }
 
 function workspaceTaskInspectorMarkup(snapshot, rows = currentWorkspaceTaskRows()) {
-    const selected = rows.find((row) => row.task.task_id === snapshot?.selection?.taskId);
-    return `${workspaceTaskDetailMarkup(snapshot)}${workspaceTaskCompletionForm(selected)}`;
+    const selectedTaskId = workspaceView?.taskId ?? snapshot?.selection?.taskId;
+    const sameSubject = snapshot?.selection?.taskId === selectedTaskId
+        && snapshot?.selection?.sprintId === currentWorkspaceSprintId();
+    const displayed = sameSubject ? snapshot : (selectedTaskId
+        ? { kind: 'loading', selection: { taskId: selectedTaskId } } : snapshot);
+    const selected = rows.find((row) => row.task.task_id === selectedTaskId);
+    return `${workspaceTaskDetailMarkup(displayed)}${workspaceTaskCompletionForm(selected)}`;
+}
+
+function renderWorkspaceTaskDetail(snapshot) {
+    captureWorkspaceRenderState();
+    setMarkup('workspace-task-detail', workspaceTaskInspectorMarkup(snapshot));
+    restoreWorkspaceRenderState();
+    workspaceRenderScope = workspaceRenderKey();
 }
 
 function workspaceTaskBoardMarkup(status, position, actions) {
@@ -3889,7 +3908,7 @@ function workspaceTaskBoardMarkup(status, position, actions) {
     const sprintOptions = Array.isArray(lifecycleState.sprintHistory?.sprints) ? lifecycleState.sprintHistory.sprints : [];
     const selector = sprintOptions.length ? `<label class="text-xs text-slate-600">Sprint <select data-workspace-sprint-select="true">${sprintOptions.map((sprint) => `<option value="${sprint.sprint_id}"${sprint.sprint_id === selectedSprint ? ' selected' : ''}>Sprint #${sprint.sprint_id} · ${escapeWorkflowText(sprint.status || 'Unknown')}</option>`).join('')}</select></label>` : '';
     const inventoryMessage = workspaceTaskInventory?.kind === 'error' ? `<p class="text-xs text-amber-800">${escapeWorkflowText(workspaceTaskInventory.message)}</p>` : '';
-    return `<section class="space-y-3" data-workspace-task-board="true"><div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${detail?.lastConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(detail.lastConfirmedAt)}` : ''}</p></div>${selector}${inventoryMessage}<div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div><div class="workspace-task-board"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="workspace-task-row border-b border-slate-100"><td class="px-2 py-2"><button id="workspace-task-row-${row.task.task_id}" type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div><div id="workspace-task-detail">${workspaceTaskInspectorMarkup(detail, rows)}</div></section>`;
+    return `<section class="space-y-3" data-workspace-task-board="true"><div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${workspaceInventoryConfirmedAt || lastDashboardConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(workspaceInventoryConfirmedAt || lastDashboardConfirmedAt)}` : ''}</p></div>${selector}${inventoryMessage}<div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div><div class="workspace-task-board"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="workspace-task-row border-b border-slate-100"><td class="px-2 py-2"><button id="workspace-task-row-${row.task.task_id}" type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div><div id="workspace-task-detail">${workspaceTaskInspectorMarkup(detail, rows)}</div></section>`;
 }
 
 function currentWorkspaceSprintId() {
@@ -3920,6 +3939,7 @@ async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
             workspaceTaskInventory = { kind: 'error', sprintId, message: 'The Task inventory response did not match the selected Sprint.' };
         } else {
             workspaceTaskInventory = { kind: 'ready', sprintId, data: { ...data, tasks: data.items } };
+            workspaceInventoryConfirmedAt = new Date().toISOString();
         }
     } catch (error) {
         if (generation !== workspaceReadGeneration) return;
@@ -3984,10 +4004,11 @@ function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
     captureWorkspaceRenderState();
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
     if (pushHistory) persistWorkspaceHistory();
+    renderDashboard();
     if (!workspaceTaskController) {
         workspaceTaskController = AgileForgeWorkspace.createController({
             requestJson,
-            onChange: (snapshot) => setMarkup('workspace-task-detail', workspaceTaskInspectorMarkup(snapshot)),
+            onChange: (snapshot) => renderWorkspaceTaskDetail(snapshot),
         });
     }
     workspaceTaskController.select({ projectId: selectedProjectId, sprintId, taskId, scopeKey })
