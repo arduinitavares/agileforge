@@ -59,7 +59,10 @@ from utils.model_config import get_story_pipeline_mode
 
 assert files("config").joinpath("models.yaml").is_file()
 frontend = files("frontend")
-for name in ("index.html", "project.html", "app.js", "project.js", "lifecycle-workspace.js", "lifecycle-workspace.css"):
+for name in (
+    "index.html", "project.html", "app.js", "project.js",
+    "lifecycle-workspace.js", "lifecycle-workspace.css",
+):
     assert frontend.joinpath(name).is_file(), name
 assert get_story_pipeline_mode() in {"batch", "single"}
 parser = build_parser()
