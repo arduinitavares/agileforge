@@ -95,3 +95,89 @@ test('controller retains confirmed detail as stale after a refresh failure', asy
     assert.equal(controller.snapshot().kind, 'stale');
     assert.equal(controller.snapshot().data.task.task_id, 14);
 });
+
+test('controller clears old confirmed detail when a different Task selection fails', async () => {
+    let request = 0;
+    const controller = api().createController({ requestJson: async () => {
+        request += 1;
+        if (request <= 2) {
+            return { data: { project_id: 7, task: { task_id: 14, sprint_id: 31 }, current_retry: null, items: [] } };
+        }
+        throw new Error('Task 15 is unavailable');
+    } });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 14, scopeKey: 'sprint:31' });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 15, scopeKey: 'sprint:31' });
+    const snapshot = controller.snapshot();
+    assert.equal(snapshot.kind, 'error');
+    assert.equal(snapshot.selection.taskId, 15);
+    assert.equal(snapshot.data, null);
+});
+
+test('controller settles malformed or mismatched current responses as an error', async () => {
+    const controller = api().createController({ requestJson: async () => ({
+        data: { project_id: 7, task: { task_id: 14, sprint_id: 31 }, current_retry: { retry_attempt_id: 8 } },
+    }) });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 14, scopeKey: 'sprint:31' });
+    const snapshot = controller.snapshot();
+    assert.equal(snapshot.kind, 'error');
+    assert.equal(snapshot.data, null);
+    assert.match(snapshot.error, /identity/i);
+});
+
+test('map renders graph authority independently from viewing and exposes return to current work', () => {
+    const markup = api().mapMarkup({
+        position: { decisions: [{ request_kind: 'complete_task', category: 'available', recommendation_kind: 'required' }] },
+        view: { ...api().createView(), stageId: 7 },
+        lastConfirmedAt: '2026-09-14T10:30:00Z',
+    });
+    assert.match(markup, /data-workspace-stage="7"[^>]*Viewing/);
+    assert.match(markup, /data-workspace-stage="9"[^>]*aria-current="step"/);
+    assert.match(markup, /Return to current work/);
+    assert.match(markup, /Last confirmed 2026-09-14T10:30:00Z; manual refresh required/);
+});
+
+
+test('controller clears old detail when the current Task becomes unavailable', async () => {
+    let request = 0;
+    const controller = api().createController({ requestJson: async () => {
+        request += 1;
+        if (request <= 2) return { data: { project_id: 7, task: { task_id: 14, sprint_id: 31 }, current_retry: null, items: [] } };
+        throw Object.assign(new Error('Task removed from Sprint scope'), { status: 404 });
+    } });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 14, scopeKey: 'sprint:31' });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 15, scopeKey: 'sprint:31' });
+    assert.equal(controller.snapshot().kind, 'unavailable');
+    assert.equal(controller.snapshot().selection.taskId, 15);
+    assert.equal(controller.snapshot().data, null);
+});
+
+test('map mount preserves logical keyboard navigation and returns to graph current work', () => {
+    const listeners = new Map();
+    const buttons = Array.from({ length: 13 }, (_, index) => ({
+        dataset: { workspaceStage: String(index + 1) },
+        focused: false,
+        addEventListener(kind, listener) { listeners.set(`${index}:${kind}`, listener); },
+        focus() { this.focused = true; },
+    }));
+    const returnListeners = new Map();
+    const host = {
+        innerHTML: '',
+        querySelectorAll() { return buttons; },
+        querySelector() { return { addEventListener(kind, listener) { returnListeners.set(kind, listener); } }; },
+    };
+    const selected = [];
+    const returned = [];
+    api().mount(host, {
+        position: { decisions: [{ request_kind: 'complete_task', category: 'available', recommendation_kind: 'required' }] },
+        view: { ...api().createView(), stageId: 7 },
+        onStageSelect: (stageId) => selected.push(stageId),
+        onReturnToCurrent: (stageId) => returned.push(stageId),
+    });
+    let prevented = false;
+    listeners.get('6:keydown')({ key: 'ArrowRight', preventDefault() { prevented = true; } });
+    returnListeners.get('click')();
+    assert.equal(prevented, true);
+    assert.equal(buttons[7].focused, true);
+    assert.deepEqual(selected, [8]);
+    assert.deepEqual(returned, [9]);
+});

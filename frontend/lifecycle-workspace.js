@@ -88,7 +88,7 @@ const AgileForgeWorkspace = (() => {
             if (task.dependencies_satisfied === true) {
                 return { task, availability: 'Queued / not current', action: null };
             }
-            return { task, availability: 'Unknown dependency state', action: null };
+            return { task, availability: 'No completion action currently advertised', action: null };
         });
     }
 
@@ -129,6 +129,13 @@ const AgileForgeWorkspace = (() => {
             && retryScopeKey(data.current_retry, selection.sprintId) === selection.scopeKey;
     }
 
+    function sameSubject(left, right) {
+        return left?.projectId === right?.projectId
+            && left?.sprintId === right?.sprintId
+            && left?.taskId === right?.taskId
+            && left?.scopeKey === right?.scopeKey;
+    }
+
     function createController({ requestJson, onChange = () => {} } = {}) {
         if (typeof requestJson !== 'function') throw new TypeError('requestJson is required.');
         let selection = null;
@@ -147,10 +154,15 @@ const AgileForgeWorkspace = (() => {
                 throw new TypeError('A positive project, Sprint, Task and scope selection is required.');
             }
             const requestGeneration = ++generation;
+            const retainsConfirmedSubject = sameSubject(selection, nextSelection);
             activeController?.abort();
             activeController = new AbortController();
             selection = { ...nextSelection };
-            kind = isRefresh && data ? 'loading' : 'loading';
+            if (!retainsConfirmedSubject) {
+                data = null;
+                lastConfirmedAt = null;
+            }
+            kind = 'loading';
             error = null;
             notify();
             const base = `/api/projects/${selection.projectId}/sprints/${selection.sprintId}/tasks/${selection.taskId}`;
@@ -159,8 +171,14 @@ const AgileForgeWorkspace = (() => {
                     requestJson(base, { signal: activeController.signal }),
                     requestJson(`${base}/execution`, { signal: activeController.signal }),
                 ]);
-                if (requestGeneration !== generation || !validDetail(detail, selection)
-                    || !validDetail(execution, selection)) return snapshot();
+                if (requestGeneration !== generation) return snapshot();
+                if (!validDetail(detail, selection) || !validDetail(execution, selection)) {
+                    data = null;
+                    kind = 'error';
+                    error = 'The Task detail response identity did not match the selected Project, Sprint, Task, and retry scope.';
+                    notify();
+                    return snapshot();
+                }
                 data = { ...detail.data, execution: execution.data };
                 kind = 'ready';
                 error = null;
@@ -168,9 +186,10 @@ const AgileForgeWorkspace = (() => {
             } catch (caught) {
                 if (requestGeneration !== generation || caught?.name === 'AbortError') return snapshot();
                 if (caught?.status === 404) {
+                    data = null;
                     kind = 'unavailable';
                     error = caught.message;
-                } else if (data) {
+                } else if (retainsConfirmedSubject && data) {
                     kind = 'stale';
                     error = caught?.message || 'Manual refresh failed.';
                 } else {
@@ -185,28 +204,63 @@ const AgileForgeWorkspace = (() => {
             select(nextSelection) { return load(nextSelection, false); },
             refresh() { return selection ? load(selection, true) : Promise.resolve(snapshot()); },
             snapshot,
+            unavailable(message = 'Task is unavailable in the retained Sprint scope.') {
+                generation += 1;
+                activeController?.abort();
+                activeController = null;
+                data = null;
+                lastConfirmedAt = null;
+                kind = 'unavailable';
+                error = message;
+                notify();
+                return snapshot();
+            },
             dispose() { generation += 1; activeController?.abort(); activeController = null; },
         };
     }
 
-    function mapMarkup({ position = {}, view = createView(), onStageSelect } = {}) {
+    function mapMarkup({ position = {}, view = createView(), lastConfirmedAt = null } = {}) {
         const current = new Set(currentStageIds(position));
         const cards = stages().map((stage) => {
             const viewing = view.stageId === stage.id;
             const here = current.has(stage.id);
             return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
-        }).join('');
-        return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace"><div class="workspace-map" role="list">${cards}</div><p class="workspace-freshness">Manual refresh required</p></section>`;
+        });
+        const returnMarkup = current.size && !current.has(view.stageId)
+            ? '<button type="button" class="workspace-return-current" data-workspace-return-current="true">Return to current work</button>'
+            : '';
+        const freshness = lastConfirmedAt
+            ? `Last confirmed ${escapeText(lastConfirmedAt)}; manual refresh required`
+            : 'Manual refresh required';
+        return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace"><section class="workspace-stage-group" aria-label="Project framing"><p class="workspace-group-label">Project framing · 01–06</p><div class="workspace-map" role="list">${cards.slice(0, 6).join('')}</div></section><section class="workspace-stage-group" aria-label="Sprint delivery"><p class="workspace-group-label">Sprint delivery · 07–13</p><div class="workspace-map" role="list">${cards.slice(6).join('')}</div></section>${returnMarkup}<p class="workspace-freshness">${freshness}</p></section>`;
     }
 
     function mount(host, bridge = {}) {
         if (!host || typeof host.innerHTML !== 'string') return;
         const view = bridge.view || createView();
-        host.innerHTML = mapMarkup({ position: bridge.position, view });
-        host.querySelectorAll('[data-workspace-stage]').forEach((button) => button.addEventListener('click', () => {
-            const stageId = Number(button.dataset.workspaceStage);
-            bridge.onStageSelect?.(stageId);
-        }));
+        host.innerHTML = mapMarkup({ position: bridge.position, view, lastConfirmedAt: bridge.lastConfirmedAt });
+        const buttons = Array.from(host.querySelectorAll('[data-workspace-stage]'));
+        buttons.forEach((button, index) => {
+            button.addEventListener('click', () => {
+                const stageId = Number(button.dataset.workspaceStage);
+                bridge.onStageSelect?.(stageId);
+            });
+            button.addEventListener('keydown', (event) => {
+                const nextIndex = event.key === 'ArrowRight' ? index + 1
+                    : event.key === 'ArrowLeft' ? index - 1
+                        : event.key === 'Home' ? 0
+                            : event.key === 'End' ? buttons.length - 1 : null;
+                if (nextIndex === null) return;
+                event.preventDefault();
+                const target = buttons[(nextIndex + buttons.length) % buttons.length];
+                target.focus();
+                bridge.onStageSelect?.(Number(target.dataset.workspaceStage));
+            });
+        });
+        host.querySelector('[data-workspace-return-current]')?.addEventListener('click', () => {
+            const current = currentStageIds(bridge.position);
+            if (current.length) bridge.onReturnToCurrent?.(current[0]);
+        });
     }
 
     function escapeText(value) {

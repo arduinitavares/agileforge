@@ -49,7 +49,7 @@
     <title>Project | AgileForge</title>
 </head>
 
-<body class="bg-slate-50 font-sans text-ink antialiased">
+<body class="bg-[#f5f4f1] font-sans text-ink antialiased">
     <!-- Top Control Bar -->
     <header class="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-6">
         <div class="flex min-w-0 items-center gap-3">
@@ -78,7 +78,7 @@
     </header>
 
     <!-- Top Command Cockpit (4-Tile Analytical Matrix) -->
-    <section id="top-cockpit" class="shrink-0 border-b border-slate-200 bg-slate-100/70 px-4 py-3 lg:px-6 hidden sm:block">
+    <section id="top-cockpit" class="hidden" aria-hidden="true">
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <!-- Tile 1: Governing Outcome -->
             <div class="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-3 shadow-xs">
@@ -149,6 +149,10 @@
     <div id="project-error-container" class="px-4 pt-3 lg:px-6">
         <p id="project-error" class="hidden rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-medium text-red-800" role="alert"></p>
     </div>
+    <section class="shrink-0 border-b border-slate-200 bg-white px-4 py-2 lg:px-6" aria-label="Project goal">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Goal</p>
+        <p id="workspace-goal-strip" class="mt-0.5 text-sm text-slate-800">Loading project goal…</p>
+    </section>
 
     <!-- Main 3-Pane Body -->
     <div class="workspace-shell flex flex-1 min-h-0 overflow-hidden">
@@ -261,7 +265,7 @@
         </nav>
 
         <!-- Pane 2: Center Stage Detail Canvas -->
-        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-slate-50/60 p-4 lg:p-6 space-y-4">
+        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-[#f5f4f1] p-4 lg:p-6 space-y-4">
             <!-- Hidden original elements preserved for test compatibility & binding -->
             <div id="lifecycle-stage-strip" class="hidden"></div>
             <div id="project-summary" class="hidden">

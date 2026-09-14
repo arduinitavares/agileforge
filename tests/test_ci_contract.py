@@ -251,6 +251,8 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
         "node --test tests/test_workflow_position_display.mjs "
         "tests/test_lifecycle_workspace.mjs "
         "tests/test_sprint_retry_dashboard.mjs "
+        "tests/test_dashboard_review_safety.mjs "
+        "tests/test_cockpit_action_synchronization.mjs "
         "tests/test_create_project_modal_required_fields.mjs "
         "tests/test_vision_interview_ui.mjs"
     ) in " ".join(frontend.split())

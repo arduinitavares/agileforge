@@ -1,10 +1,12 @@
 /* frontend/lifecycle-workspace.css */
 :root { --workspace-teal: #0f766e; --workspace-blue: #2563eb; }
 .workspace-shell { min-height: 0; }
-#workspace-map-host { overflow-y: auto; background: #f8fafc; }
+#workspace-map-host { overflow-y: auto; background: #f5f4f1; }
 .lifecycle-workspace { padding: 12px; font-family: Inter, sans-serif; }
+.workspace-stage-group + .workspace-stage-group { margin-top: 14px; }
+.workspace-group-label { margin: 0 0 7px; color: #64748b; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .workspace-map { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.workspace-stage { min-height: 78px; border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; color: #334155; padding: 8px; text-align: left; position: relative; font-size: 14px; line-height: 1.25; }
+.workspace-stage { min-height: 68px; border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; color: #334155; padding: 8px; text-align: left; position: relative; font-size: 14px; line-height: 1.25; }
 .workspace-stage:hover { border-color: #94a3b8; }
 .workspace-stage:focus-visible, .workspace-tab:focus-visible { outline: 2px solid var(--workspace-blue); outline-offset: 2px; }
 .workspace-stage-number { display: block; color: #64748b; font: 600 12px/1.2 ui-monospace, monospace; }
@@ -15,6 +17,7 @@
 .workspace-here { background: var(--workspace-teal); color: #fff; }
 .workspace-viewing { background: #dbeafe; color: #1d4ed8; }
 .workspace-freshness { margin: 12px 0 0; color: #64748b; font-size: 12px; }
+.workspace-return-current { margin-top: 12px; border: 1px solid #99f6e4; border-radius: 8px; background: #f0fdfa; color: #115e59; padding: 6px 8px; font-size: 12px; font-weight: 600; }
 .workspace-inspector { min-width: 0; overflow-y: auto; }
 .workspace-viewing-label { font-size: 12px; color: #2563eb; font-weight: 600; }
 @media (min-width: 1024px) { #workspace-map-host { display: block; flex: 0 0 360px; border-right: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

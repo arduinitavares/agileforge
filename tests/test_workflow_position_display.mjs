@@ -4245,3 +4245,43 @@ test('unknown 409 error retains uncertain outcome message', () => {
     assert.match(message, /Specification structuring outcome is uncertain\./);
     assert.doesNotMatch(message, /No new candidate was produced/);
 });
+
+
+test('workspace delivery subviews keep Story closure, Sprint review, and triage evidence separate', () => {
+    const context = loadFrontend();
+    context.workspaceSprint = {
+        kind: 'ready',
+        data: {
+            project_id: 7,
+            sprint: { sprint_id: 31, status: 'active' },
+            current_retry: { retry_attempt_id: 9 },
+            stories: [{ story_id: 101, status: 'Done' }, { story_id: 102, status: 'To Do' }],
+            story_completions: [{ story_id: 101, completion_id: 1 }],
+            review: { state: 'approved' },
+            closure: null,
+        },
+    };
+    context.workspaceActions = [{
+        node_id: 'story.close', instance_key: 'story:101', endpoint: 'sprint/story/close',
+        request_kind: 'close_story', transport: 'semantic', availability: 'available',
+    }, {
+        node_id: 'sprint.review', instance_key: 'retry:9:sprint:31', endpoint: 'sprint/review',
+        request_kind: 'review_sprint', transport: 'semantic', availability: 'available',
+    }];
+    context.workspaceHistory = {
+        project_id: 7,
+        execution_attempts: [{ sprint_id: 31, retry_attempt_id: 9, ordinal: 2, status: 'active', triage: [{ summary: 'Retained retry triage' }] }],
+    };
+    const closeStories = vm.runInContext('workspaceCloseStoriesMarkup(workspaceSprint, workspaceActions)', context);
+    const reviewClose = vm.runInContext('workspaceReviewClosureMarkup(workspaceSprint, workspaceActions)', context);
+    const triage = vm.runInContext('workspaceTriageMarkup(workspaceSprint, workspaceHistory, workspaceActions)', context);
+    assert.match(closeStories, /data-workspace-close-stories="true"/);
+    assert.match(closeStories, /Story #101.*Completion evidence: recorded/);
+    assert.doesNotMatch(closeStories, /data-sprint-status/);
+    assert.match(reviewClose, /data-workspace-review-close="true"/);
+    assert.match(reviewClose, /Review:/);
+    assert.doesNotMatch(reviewClose, /data-sprint-status/);
+    assert.match(triage, /data-workspace-triage="true"/);
+    assert.match(triage, /Attempt 2.*active/);
+    assert.match(triage, /Retained retry triage/);
+});

@@ -129,6 +129,7 @@ let selectedProjectId = null;
 let pendingHumanAction = null;
 let dashboardLoadSequence = 0;
 let lastSuccessfulDashboardLoadSequence = 0;
+let lastDashboardConfirmedAt = null;
 let activeDashboardLoadController = null;
 
 function isDashboardReconciled(requiredSequence) {
@@ -3505,6 +3506,49 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
     </section>`;
 }
 
+function workspaceScopedActionMarkup(action, label) {
+    if (!action) return '';
+    const locked = action.availability === 'locked';
+    const reason = typeof action.reason_code === 'string' && action.reason_code.trim()
+        ? `<p class="mt-2 text-xs text-slate-600">${escapeWorkflowText(action.reason_code)}</p>` : '';
+    return `<div class="mt-3" data-workspace-scoped-action="${escapeWorkflowText(action.request_kind)}">
+        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}" ${deliveryActionBindingAttributes(action)}${locked ? ' disabled aria-disabled="true"' : ''} class="${BUTTON_PRIMARY}">${escapeWorkflowText(label)} (${escapeWorkflowText(action.request_kind)})</button>${reason}
+    </div>`;
+}
+
+function workspaceCloseStoriesMarkup(sprintState, actions) {
+    if (sprintState?.kind !== 'ready') return '<p class="text-sm text-slate-600">Selected Sprint Story closure is unavailable.</p>';
+    const status = sprintState.data;
+    const stories = Array.isArray(status?.stories) ? status.stories : [];
+    const completions = Array.isArray(status?.story_completions) ? status.story_completions : [];
+    const completed = new Set(completions.map((item) => item?.story_id).filter(positiveInteger));
+    const closeActions = (Array.isArray(actions) ? actions : []).filter((action) => action?.request_kind === 'close_story');
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4" data-workspace-close-stories="true"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Close Stories</p><h3 class="mt-1 text-base font-semibold text-slate-900">Durable Story completion</h3><ul class="mt-3 space-y-2 text-sm text-slate-700">${stories.length ? stories.map((story) => `<li class="rounded border border-slate-200 bg-slate-50 p-2">Story #${escapeWorkflowText(story.story_id)} · Formal status: ${escapeWorkflowText(story.status || 'Unavailable')} · Completion evidence: ${completed.has(story.story_id) ? 'recorded' : 'Unavailable'}</li>`).join('') : '<li>No retained Story rows are available.</li>'}</ul>${closeActions.map((action) => workspaceScopedActionMarkup(action, 'Close Story')).join('')}</section>`;
+}
+
+function workspaceReviewClosureMarkup(sprintState, actions) {
+    if (sprintState?.kind !== 'ready') return '<p class="text-sm text-slate-600">Selected Sprint review and closure are unavailable.</p>';
+    const status = sprintState.data;
+    const review = reviewObject(status?.review);
+    const closure = reviewObject(status?.closure);
+    const transitions = (Array.isArray(actions) ? actions : []).filter((action) => ['review_sprint', 'close_sprint'].includes(action?.request_kind));
+    const fact = (label, value) => `<div class="rounded border border-slate-200 bg-slate-50 p-2"><strong>${label}:</strong> ${value ? humanValueMarkup(value) : 'Unavailable'}</div>`;
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" data-workspace-review-close="true"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Review and close Sprint</p>${fact('Review', review)}${fact('Closure', closure)}${transitions.map((action) => workspaceScopedActionMarkup(action, action.request_kind === 'review_sprint' ? 'Review Sprint' : 'Close Sprint')).join('')}</section>`;
+}
+
+function workspaceTriageMarkup(sprintState, history, actions) {
+    if (sprintState?.kind !== 'ready') return '<p class="text-sm text-slate-600">Selected Sprint triage is unavailable.</p>';
+    const status = sprintState.data;
+    const sprintId = status?.sprint?.sprint_id;
+    const retryId = status?.current_retry?.retry_attempt_id ?? null;
+    const attempts = history?.project_id === status?.project_id && Array.isArray(history?.execution_attempts)
+        ? history.execution_attempts.filter((attempt) => attempt?.sprint_id === sprintId && (attempt?.retry_attempt_id ?? null) === retryId) : [];
+    const attempt = attempts.length === 1 ? attempts[0] : null;
+    const triage = Array.isArray(attempt?.triage) ? attempt.triage : null;
+    const triageAction = (Array.isArray(actions) ? actions : []).find((action) => action?.request_kind === 'record_post_sprint_triage');
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4" data-workspace-triage="true"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Learn and triage</p><p class="mt-1 text-sm text-slate-700">${attempt ? `Attempt ${escapeWorkflowText(attempt.ordinal)} · ${escapeWorkflowText(attempt.status)}` : 'Retained execution attempt is unavailable for the selected scope.'}</p>${triage ? `<div class="mt-3 text-sm text-slate-700">${triage.length ? triage.map((entry) => `<div class="mt-2 rounded border border-slate-200 bg-slate-50 p-2">${humanValueMarkup(entry)}</div>`).join('') : 'No retained triage entries.'}</div>` : '<p class="mt-3 text-sm text-slate-600">Triage evidence unavailable.</p>'}${workspaceScopedActionMarkup(triageAction, 'Record Sprint triage')}</section>`;
+}
+
 function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {}) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
     const backlogState = { position, planningReviews: reviews, actions };
@@ -3580,16 +3624,32 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const actionMarkup = availableDeliveryActions.map((action, index) =>
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
     );
-
-    const sections = [
-        taskBoard,
-        sprintSection,
-        cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
-        readinessSection,
-        dependencySection,
-        candidateSection,
-        actionMarkup.length ? actionMarkup.join('') : '',
-    ].filter(Boolean);
+    const stageId = workspaceView?.stageId ?? null;
+    const actionFor = (requestKind) => actionMarkup.filter((markup) => (
+        markup.includes(`data-delivery-generation-action="${requestKind}"`)
+    ));
+    const storyCards = cards.slice(2, -1);
+    const stageSections = {
+        5: [backlogCard, ...actionFor('record_backlog_draft')],
+        6: [cards[1], ...actionFor('record_roadmap_draft')],
+        7: [...storyCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
+        8: [cards.at(-1), candidateSection, sprintSection, ...actionFor('record_sprint_plan')],
+        9: [taskBoard, sprintSection],
+        10: [workspaceCloseStoriesMarkup(context?.sprintStatus, actions)],
+        11: [workspaceReviewClosureMarkup(context?.sprintStatus, actions)],
+        12: [workspaceTriageMarkup(context?.sprintStatus, context.sprintHistory, actions)],
+        13: [candidateSection, sprintExecutionHistoryMarkup(context.sprintHistory, context?.sprintStatus?.data), sprintSection],
+    };
+    const sections = (stageId && stageSections[stageId]
+        ? stageSections[stageId]
+        : [
+            sprintSection,
+            cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
+            readinessSection,
+            dependencySection,
+            candidateSection,
+            actionMarkup.length ? actionMarkup.join('') : '',
+        ]).filter(Boolean);
 
     if (sections.length) {
         return `<div class="space-y-4">
@@ -3635,6 +3695,11 @@ function setInterviewStatus(scope, message) {
 let selectedStageTab = null;
 let workspaceView = null;
 let workspaceTaskController = null;
+let workspaceSprintStatus = null;
+let workspaceTaskInventory = null;
+let workspaceReadGeneration = 0;
+let workspaceRenderScope = null;
+const workspaceRenderMemory = new Map();
 
 function workspaceStageLabel(stageId) {
     if (typeof AgileForgeWorkspace === 'undefined') return null;
@@ -3656,28 +3721,78 @@ function workspaceStageForLegacy(stage) {
     })[stage] ?? null;
 }
 
+function workspaceRenderKey() {
+    return [selectedProjectId, workspaceView?.stageId ?? '', workspaceView?.sprintId ?? '', workspaceView?.taskId ?? '', workspaceView?.scopeKey ?? ''].join(':');
+}
+
+function persistWorkspaceHistory({ replace = false } = {}) {
+    if (typeof window?.history?.pushState !== 'function' || !workspaceView) return;
+    const state = { agileForgeWorkspace: { ...workspaceView } };
+    if (replace) window.history.replaceState(state, '', window.location.href);
+    else window.history.pushState(state, '', window.location.href);
+}
+
+function captureWorkspaceRenderState() {
+    const workbench = document.getElementById('stage-workbench');
+    if (!workbench || workspaceRenderScope !== workspaceRenderKey()) return;
+    const fields = {};
+    workbench.querySelectorAll('input, textarea, select').forEach((field, index) => {
+        const key = field.id || field.name || `field-${index}`;
+        fields[key] = field.type === 'checkbox' ? Boolean(field.checked) : field.value;
+    });
+    const active = document.activeElement;
+    const activeKey = active && workbench.contains(active)
+        ? (active.id || active.name || null) : null;
+    workspaceRenderMemory.set(workspaceRenderScope, { fields, activeKey, scrollTop: workbench.scrollTop });
+}
+
+function restoreWorkspaceRenderState() {
+    const workbench = document.getElementById('stage-workbench');
+    const memory = workspaceRenderMemory.get(workspaceRenderKey());
+    if (!workbench || !memory) return;
+    workbench.querySelectorAll('input, textarea, select').forEach((field, index) => {
+        const key = field.id || field.name || `field-${index}`;
+        if (!(key in memory.fields)) return;
+        if (field.type === 'checkbox') field.checked = Boolean(memory.fields[key]);
+        else field.value = memory.fields[key];
+    });
+    workbench.scrollTop = memory.scrollTop;
+    if (memory.activeKey) {
+        const focused = document.getElementById(memory.activeKey)
+            ?? Array.from(workbench.querySelectorAll('input, textarea, select')).find((field) => field.name === memory.activeKey);
+        if (focused && workbench.contains(focused)) focused.focus?.();
+    }
+}
+
 function selectWorkspaceStage(stageId, { pushHistory = false, scroll = false } = {}) {
     if (typeof AgileForgeWorkspace === 'undefined') return;
     if (!Number.isInteger(stageId) || !workspaceStageLabel(stageId)) return;
+    captureWorkspaceRenderState();
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), stageId };
-    if (pushHistory && typeof window?.history?.pushState === 'function') {
-        window.history.pushState({ agileForgeWorkspace: workspaceView }, '', window.location.href);
+    if (pushHistory) persistWorkspaceHistory();
+    renderDashboard();
+    if (scroll) updateStageView(true);
+}
+
+function ensureWorkspaceView() {
+    if (typeof AgileForgeWorkspace === 'undefined') return;
+    const current = AgileForgeWorkspace.currentStageIds(lifecycleState.position);
+    if (workspaceView === null) {
+        workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] ?? 1 };
     }
-    updateStageView(scroll);
 }
 
 function renderWorkspaceMap() {
     if (typeof AgileForgeWorkspace === 'undefined') return;
     const host = document.getElementById('workspace-map-host');
     if (!host) return;
-    const current = AgileForgeWorkspace.currentStageIds(lifecycleState.position);
-    if (workspaceView === null) {
-        workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] ?? 1 };
-    }
+    ensureWorkspaceView();
     AgileForgeWorkspace.mount(host, {
         position: lifecycleState.position,
         view: workspaceView,
+        lastConfirmedAt: lastDashboardConfirmedAt,
         onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
+        onReturnToCurrent: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: true }),
     });
 }
 
@@ -3692,38 +3807,116 @@ function workspaceTaskDetailMarkup(snapshot) {
     if (!task) return '<p class="text-sm text-slate-600">No confirmed Task detail is available.</p>';
     const completion = snapshot.data?.completion;
     const activity = Array.isArray(snapshot.data?.execution?.items) ? snapshot.data.execution.items : [];
+    const tab = workspaceView?.tab ?? 'details';
+    const details = `<p class="mt-1 text-sm font-semibold text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p><dl class="mt-2 grid gap-1 text-xs text-slate-600"><div>Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</div><div>Dependency condition: ${task.dependencies_satisfied === true ? 'satisfied' : (task.dependencies_satisfied === false ? 'not satisfied' : 'Unavailable')}</div><div>Effective Sprint status: ${escapeWorkflowText(snapshot.data?.effective_status || 'Unavailable')}</div><div>Scope: ${escapeWorkflowText(snapshot.data?.current_retry?.sprint_instance_key || `sprint:${task.sprint_id || snapshot.selection?.sprintId || 'Unavailable'}`)}</div></dl>`;
+    const checks = completion
+        ? `<p class="mt-2 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div>`
+        : '<p class="mt-2 text-xs text-slate-600">No persisted completion evidence.</p>';
+    const activityMarkup = activity.length
+        ? `<ul class="mt-2 space-y-2 text-xs text-slate-700">${activity.map((item) => `<li class="border-t border-slate-200 pt-2"><strong>${escapeWorkflowText(item.changed_at || 'Undated')}</strong> · ${escapeWorkflowText(item.old_status || 'Unknown')} → ${escapeWorkflowText(item.new_status || 'Unknown')}<br>${escapeWorkflowText(item.outcome_summary || 'No outcome summary recorded.')}</li>`).join('')}</ul>`
+        : '<p class="mt-2 text-xs text-slate-600">Unavailable (no retained execution records).</p>';
+    const content = tab === 'checks' ? checks : (tab === 'activity' ? activityMarkup : details);
     return `<section class="rounded-md border border-slate-200 bg-slate-50 p-3" data-workspace-task-detail="${task.task_id}">
         <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Task #${task.task_id}</p>
-        <p class="mt-1 text-sm font-semibold text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p>
-        <p class="mt-2 text-xs text-slate-600">Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</p>
-        <p class="mt-1 text-xs text-slate-600">Checks: ${completion ? escapeWorkflowText(completion.acceptance_result || 'Completion evidence retained') : 'No persisted completion evidence.'}</p>
-        <p class="mt-1 text-xs text-slate-600">Activity: ${activity.length ? `${activity.length} retained status record${activity.length === 1 ? '' : 's'}` : 'Unavailable (no retained execution records).'}</p>
+        <div class="mt-2 flex gap-3 border-b border-slate-200 text-xs"><button type="button" data-workspace-task-tab="details" aria-selected="${tab === 'details'}">Details</button><button type="button" data-workspace-task-tab="checks" aria-selected="${tab === 'checks'}">Checks</button><button type="button" data-workspace-task-tab="activity" aria-selected="${tab === 'activity'}">Activity</button></div>
+        ${content}
         ${snapshot.kind === 'stale' ? `<p class="mt-2 text-xs text-amber-800">Manual refresh failed; showing last confirmed detail. ${escapeWorkflowText(snapshot.error || '')}</p>` : ''}
     </section>`;
 }
 
+function workspaceTaskCompletionForm(row) {
+    if (!row.action) return '';
+    return `<form class="mt-2 grid gap-2 rounded border border-teal-200 bg-teal-50 p-2 text-xs" data-workspace-task-completion="true" data-workspace-task-id="${row.task.task_id}" data-workspace-action-node="${escapeWorkflowText(row.action.node_id)}" data-workspace-action-instance="${escapeWorkflowText(row.action.instance_key)}"><label>Outcome summary<textarea required name="outcome_summary" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Artifact references (one per line)<textarea required name="artifact_refs" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Acceptance result<select required name="acceptance_result" class="mt-1 w-full rounded border-slate-300"><option value="fully_met">Fully met</option><option value="partially_met">Partially met</option></select></label><label>Checklist evidence (criterion: result, one per line)<textarea required name="checklist_result" class="mt-1 w-full rounded border-slate-300"></textarea></label><button type="submit" class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">Record Task completion</button><p data-workspace-task-completion-status="true" hidden></p></form>`;
+}
+
 function workspaceTaskBoardMarkup(status, position, actions) {
     if (typeof AgileForgeWorkspace === 'undefined' || workspaceView?.stageId !== 9) return '';
-    const data = status?.data ?? status ?? {};
+    const data = workspaceTaskInventory?.kind === 'ready'
+        ? workspaceTaskInventory.data
+        : (status?.data ?? status ?? {});
     const rows = AgileForgeWorkspace.taskRows(data, position, actions);
     const counts = AgileForgeWorkspace.taskCounts(rows.map((row) => row.task));
     const detail = workspaceTaskController?.snapshot?.() ?? null;
     const filtered = rows.filter((row) => workspaceView?.filter !== 'open' || row.task.status !== 'Done');
+    const selectedSprint = workspaceView?.sprintId ?? data?.sprint?.sprint_id;
+    const sprintOptions = Array.isArray(lifecycleState.sprintHistory?.sprints)
+        ? lifecycleState.sprintHistory.sprints : [];
+    const selector = sprintOptions.length
+        ? `<label class="text-xs text-slate-600">Sprint <select data-workspace-sprint-select="true">${sprintOptions.map((sprint) => `<option value="${sprint.sprint_id}"${sprint.sprint_id === selectedSprint ? ' selected' : ''}>Sprint #${sprint.sprint_id} · ${escapeWorkflowText(sprint.status || 'Unknown')}</option>`).join('')}</select></label>`
+        : '';
+    const inventoryMessage = workspaceTaskInventory?.kind === 'error'
+        ? `<p class="text-xs text-amber-800">${escapeWorkflowText(workspaceTaskInventory.message)}</p>` : '';
     return `<section class="space-y-3" data-workspace-task-board="true">
         <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${detail?.lastConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(detail.lastConfirmedAt)}` : ''}</p></div>
-        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="border-b border-slate-100"><td class="px-2 py-2"><button type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div>
+        ${selector}${inventoryMessage}
+        <div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="border-b border-slate-100"><td class="px-2 py-2"><button type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button>${workspaceTaskCompletionForm(row)}</td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div>
         <div id="workspace-task-detail">${workspaceTaskDetailMarkup(detail)}</div>
     </section>`;
 }
 
-function selectWorkspaceTask(taskId) {
-    const status = lifecycleState.sprintStatus?.data;
+function currentWorkspaceSprintId() {
+    return workspaceView?.sprintId
+        ?? workspaceSprintStatus?.data?.sprint?.sprint_id
+        ?? lifecycleState.sprintStatus?.data?.sprint?.sprint_id
+        ?? null;
+}
+
+async function loadWorkspaceTaskInventory(sprintId) {
+    if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
+    const generation = ++workspaceReadGeneration;
+    workspaceTaskInventory = { kind: 'loading', sprintId };
+    try {
+        const response = await requestJson(`/api/projects/${selectedProjectId}/sprints/${sprintId}/tasks`);
+        const data = response?.data;
+        if (generation !== workspaceReadGeneration) return;
+        if (data?.project_id !== selectedProjectId || data?.sprint_id !== sprintId || !Array.isArray(data?.items)) {
+            workspaceTaskInventory = { kind: 'error', sprintId, message: 'The Task inventory response did not match the selected Sprint.' };
+        } else {
+            workspaceTaskInventory = { kind: 'ready', sprintId, data: { ...data, tasks: data.items } };
+        }
+    } catch (error) {
+        if (generation !== workspaceReadGeneration) return;
+        workspaceTaskInventory = { kind: 'error', sprintId, message: error.message || 'Task inventory could not be loaded.' };
+    }
+    if (workspaceView?.stageId === 9 && currentWorkspaceSprintId() === sprintId) renderDashboard();
+}
+
+async function selectWorkspaceSprint(sprintId, { pushHistory = true } = {}) {
+    if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
+    const generation = ++workspaceReadGeneration;
+    captureWorkspaceRenderState();
+    workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), sprintId, taskId: null, scopeKey: null };
+    if (pushHistory) persistWorkspaceHistory();
+    workspaceTaskInventory = null;
+    try {
+        const response = await requestJson(`/api/projects/${selectedProjectId}/sprints/${sprintId}`);
+        if (generation !== workspaceReadGeneration) return;
+        const data = response?.data;
+        if (data?.project_id !== selectedProjectId || data?.sprint?.sprint_id !== sprintId) {
+            throw new Error('The selected Sprint response did not match this Project and Sprint.');
+        }
+        workspaceSprintStatus = { kind: 'ready', data };
+        await loadWorkspaceTaskInventory(sprintId);
+    } catch (error) {
+        if (generation !== workspaceReadGeneration) return;
+        workspaceSprintStatus = { kind: 'error', message: error.message || 'Selected Sprint could not be loaded.' };
+    }
+    renderDashboard();
+}
+
+function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
+    const status = workspaceSprintStatus?.kind === 'ready'
+        ? workspaceSprintStatus.data
+        : lifecycleState.sprintStatus?.data;
     const sprintId = status?.sprint?.sprint_id;
     if (!positiveInteger(taskId) || !positiveInteger(sprintId) || typeof AgileForgeWorkspace === 'undefined') return;
     const retry = reviewObject(status?.current_retry);
     const scopeKey = retry?.retry_attempt_id
         ? `retry:${retry.retry_attempt_id}:sprint:${sprintId}` : `sprint:${sprintId}`;
+    captureWorkspaceRenderState();
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
+    if (pushHistory) persistWorkspaceHistory();
     if (!workspaceTaskController) {
         workspaceTaskController = AgileForgeWorkspace.createController({
             requestJson,
@@ -3732,6 +3925,160 @@ function selectWorkspaceTask(taskId) {
     }
     workspaceTaskController.select({ projectId: selectedProjectId, sprintId, taskId, scopeKey })
         .catch((error) => setProjectError(error.message));
+}
+
+function workspaceTaskCompletionBinding(form) {
+    const taskId = Number.parseInt(form?.dataset?.workspaceTaskId ?? '', 10);
+    const rows = typeof AgileForgeWorkspace === 'undefined'
+        ? []
+        : AgileForgeWorkspace.taskRows(
+            workspaceTaskInventory?.kind === 'ready'
+                ? workspaceTaskInventory.data
+                : (workspaceSprintStatus?.kind === 'ready'
+                    ? workspaceSprintStatus.data
+                    : lifecycleState.sprintStatus?.data),
+            lifecycleState.position,
+            lifecycleState.actions,
+        );
+    const row = rows.find((item) => item.task.task_id === taskId);
+    const action = row?.action;
+    const decision = (lifecycleState.position?.decisions ?? []).filter((item) => (
+        item?.request_kind === 'complete_task'
+        && item?.node_id === action?.node_id
+        && item?.instance_key === action?.instance_key
+        && item?.category === 'available'
+    ));
+    if (decision.length !== 1 || !action
+        || form.dataset.workspaceActionNode !== action.node_id
+        || form.dataset.workspaceActionInstance !== action.instance_key) return null;
+    return { taskId, action, decision: decision[0] };
+}
+
+function workspaceScopedActionBinding(button) {
+    const requestKind = button?.dataset?.directAction;
+    const action = captureDeliveryActionBinding(lifecycleState, button, requestKind);
+    const decisions = (lifecycleState.position?.decisions ?? []).filter((decision) => (
+        decision?.request_kind === requestKind
+        && decision?.node_id === action?.node_id
+        && decision?.instance_key === action?.instance_key
+        && decision?.category === 'available'
+        && typeof decision?.decision_fingerprint === 'string'
+        && decision.decision_fingerprint.trim()
+    ));
+    return action && decisions.length === 1 && action.availability !== 'locked'
+        ? { action, decision: decisions[0] } : null;
+}
+
+async function runWorkspaceScopedAction(button) {
+    if (button.disabled || activeCockpitAction || activeDeliveryUnreconciled) return;
+    const binding = workspaceScopedActionBinding(button);
+    if (!binding) {
+        setProjectError('This displayed Sprint action changed. Refresh and use the current graph action.');
+        return;
+    }
+    const token = crypto.randomUUID();
+    const requiredSequence = dashboardLoadSequence + 1;
+    let mutationCompleted = false;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    setCockpitActionBusy(true, binding.action.request_kind, { token, busyLabel: 'Submitting current Sprint action...' });
+    try {
+        const fields = binding.action.instance_key === null || binding.action.instance_key === undefined
+            ? {} : { instance_key: binding.action.instance_key };
+        await postAction(binding.action, fields, {
+            expectedDecision: binding.decision.decision_fingerprint,
+            expectedInstance: binding.action.instance_key,
+        });
+        mutationCompleted = true;
+        const refreshed = await loadDashboard();
+        if (!refreshed || !isDashboardReconciled(requiredSequence)) {
+            activeDeliveryUnreconciled = true;
+            throw new Error('The Sprint action was accepted, but the dashboard could not confirm the current projection. Controls remain locked.');
+        }
+    } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(requiredSequence)) activeDeliveryUnreconciled = true;
+        setProjectError(error.message);
+    } finally {
+        button.removeAttribute('aria-busy');
+        button.disabled = activeDeliveryUnreconciled;
+        setCockpitActionBusy(false, binding.action.request_kind, { token });
+    }
+}
+
+function checklistResult(value) {
+    const result = {};
+    for (const line of String(value ?? '').split('\n')) {
+        const [criterion, ...rest] = line.split(':');
+        const outcome = rest.join(':').trim();
+        if (!criterion?.trim() || !outcome) return null;
+        result[criterion.trim()] = outcome;
+    }
+    return Object.keys(result).length ? result : null;
+}
+
+async function submitWorkspaceTaskCompletion(form) {
+    if (activeCockpitAction || activeDeliveryUnreconciled || form.dataset.submitting === 'true') return;
+    const binding = workspaceTaskCompletionBinding(form);
+    if (!binding) {
+        setProjectError('This Task completion action changed. Refresh and use the currently advertised Task action.');
+        return;
+    }
+    const refs = String(form.elements.artifact_refs?.value ?? '').split('\n').map((item) => item.trim()).filter(Boolean);
+    const checklist = checklistResult(form.elements.checklist_result?.value);
+    const outcome = String(form.elements.outcome_summary?.value ?? '').trim();
+    if (!outcome || !refs.length || !checklist) {
+        setProjectError('Record an outcome, at least one artifact reference, and checklist evidence for this Task.');
+        return;
+    }
+    const submit = form.querySelector('button[type="submit"]');
+    const status = form.querySelector('[data-workspace-task-completion-status]');
+    form.dataset.submitting = 'true';
+    if (submit) submit.disabled = true;
+    if (status) { status.hidden = false; status.textContent = 'Recording completion and awaiting authoritative refresh…'; }
+    const token = crypto.randomUUID();
+    setCockpitActionBusy(true, 'complete_task', { token, busyLabel: 'Recording Task completion...' });
+    let mutationCompleted = false;
+    const requiredSequence = dashboardLoadSequence + 1;
+    try {
+        await postAction(binding.action, {
+            instance_key: binding.action.instance_key,
+            outcome_summary: outcome,
+            artifact_refs: refs,
+            acceptance_result: form.elements.acceptance_result.value,
+            checklist_result: checklist,
+        }, {
+            expectedDecision: binding.decision.decision_fingerprint,
+            expectedInstance: binding.action.instance_key,
+        });
+        mutationCompleted = true;
+        const refreshed = await loadDashboard();
+        if (!refreshed || !isDashboardReconciled(requiredSequence)) {
+            activeDeliveryUnreconciled = true;
+            throw new Error('Task completion was accepted, but the dashboard could not confirm the current projection. Controls remain locked.');
+        }
+    } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(requiredSequence)) activeDeliveryUnreconciled = true;
+        setProjectError(error.message);
+        if (status) { status.hidden = false; status.textContent = error.message; }
+    } finally {
+        delete form.dataset.submitting;
+        if (submit) submit.disabled = activeDeliveryUnreconciled;
+        setCockpitActionBusy(false, 'complete_task', { token });
+    }
+}
+
+function reconcileWorkspaceSelection() {
+    if (!workspaceView || typeof AgileForgeWorkspace === 'undefined') return;
+    const selectedStatus = workspaceSprintStatus?.kind === 'ready'
+        && workspaceSprintStatus.data?.sprint?.sprint_id === workspaceView.sprintId
+        ? workspaceSprintStatus.data : lifecycleState.sprintStatus?.data;
+    workspaceView = AgileForgeWorkspace.reconcileView(workspaceView, selectedStatus);
+    if (!workspaceTaskController) return;
+    if (workspaceView.taskAvailability === 'unavailable') {
+        workspaceTaskController.unavailable('Task is unavailable in the latest retained Sprint scope.');
+        return;
+    }
+    workspaceTaskController.refresh().catch((error) => setProjectError(error.message));
 }
 
 function resolveActiveWorkflowStage(position, actions = []) {
@@ -4078,6 +4425,11 @@ function updateContextInspector() {
 }
 
 function renderDashboard() {
+    captureWorkspaceRenderState();
+    ensureWorkspaceView();
+    const workspaceState = workspaceSprintStatus?.kind === 'ready'
+        ? { ...lifecycleState, sprintStatus: workspaceSprintStatus }
+        : lifecycleState;
     const project = lifecycleState.project ?? {};
     setText('project-page-title', project.name || `Project ${selectedProjectId}`);
     document.title = `${project.name || 'Project'} | AgileForge`;
@@ -4088,6 +4440,13 @@ function renderDashboard() {
             ?? lifecycleState.goal?.candidate?.statement
             ?? lifecycleState.goal?.outcome?.statement
             ?? 'Not set',
+    );
+    setText(
+        'workspace-goal-strip',
+        lifecycleState.goal?.active?.statement
+            ?? lifecycleState.goal?.candidate?.statement
+            ?? lifecycleState.goal?.outcome?.statement
+            ?? 'No Product Goal has been recorded.',
     );
     setText(
         'project-repository-summary',
@@ -4124,10 +4483,10 @@ function renderDashboard() {
     setMarkup(
         'delivery-panel',
         deliveryPanelMarkup(
-            lifecycleState.position,
-            lifecycleState.planningReviews,
-            lifecycleState.actions,
-            lifecycleState,
+            workspaceState.position,
+            workspaceState.planningReviews,
+            workspaceState.actions,
+            workspaceState,
         ),
     );
     reapplyActiveSpecificationMutation();
@@ -4136,7 +4495,14 @@ function renderDashboard() {
     renderTopCockpit();
     renderMasterStageNav();
     updateStageView();
+    restoreWorkspaceRenderState();
+    workspaceRenderScope = workspaceRenderKey();
     updateContextInspector();
+    const sprintId = currentWorkspaceSprintId();
+    if (workspaceView?.stageId === 9 && positiveInteger(sprintId)
+        && workspaceTaskInventory?.sprintId !== sprintId) {
+        loadWorkspaceTaskInventory(sprintId);
+    }
 }
 
 function validationIssueMessage(issue) {
@@ -4360,6 +4726,9 @@ async function loadDashboard() {
             completeSprintRetryReconciliation(activeSprintRetryMutation.token);
         }
         lastSuccessfulDashboardLoadSequence = sequence;
+        lastDashboardConfirmedAt = new Date().toISOString();
+        setText('dashboard-refresh-time', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
+        reconcileWorkspaceSelection();
         const awaitingConfirmation = Boolean(
             (activeBacklogCorrectionMutation !== null
                 && (activeBacklogCorrectionMutation.phase === 'awaiting_authority'
@@ -6191,6 +6560,11 @@ function installInteractions() {
     });
     document.addEventListener('submit', async (event) => {
         const form = event.target;
+        if (form?.dataset?.workspaceTaskCompletion === 'true') {
+            event.preventDefault();
+            await submitWorkspaceTaskCompletion(form);
+            return;
+        }
         if (form?.id === 'human-action-form') {
             event.preventDefault();
             if (activeCockpitAction || activeDeliveryUnreconciled) {
@@ -6428,6 +6802,20 @@ function installInteractions() {
             selectWorkspaceTask(Number.parseInt(workspaceTask.dataset.workspaceTaskId, 10));
             return;
         }
+        const workspaceTab = event.target?.closest?.('[data-workspace-task-tab]');
+        if (workspaceTab && workspaceView) {
+            workspaceView = { ...workspaceView, tab: workspaceTab.dataset.workspaceTaskTab };
+            persistWorkspaceHistory();
+            renderDashboard();
+            return;
+        }
+        const workspaceFilter = event.target?.closest?.('[data-workspace-task-filter]');
+        if (workspaceFilter && workspaceView) {
+            workspaceView = { ...workspaceView, filter: workspaceFilter.dataset.workspaceTaskFilter };
+            persistWorkspaceHistory();
+            renderDashboard();
+            return;
+        }
         const button = event.target.closest('button');
         if (!button) return;
         if (button.dataset.reviewScope) {
@@ -6557,6 +6945,10 @@ function installInteractions() {
         }
         if (button.dataset.directAction === 'retry_sprint') {
             await openSprintRetryPreview(button);
+            return;
+        }
+        if (button.closest?.('[data-workspace-scoped-action]')) {
+            await runWorkspaceScopedAction(button);
             return;
         }
         if (button.dataset.directAction) {
@@ -6817,6 +7209,11 @@ function installInteractions() {
         updateStageView(true);
     });
 
+    document.addEventListener('change', (event) => {
+        const selector = event.target?.closest?.('[data-workspace-sprint-select]');
+        if (selector) selectWorkspaceSprint(Number.parseInt(selector.value, 10));
+    });
+
     document.getElementById('human-action-cancel')?.addEventListener('click', closeHumanDialog);
     document.getElementById('human-action-close')?.addEventListener('click', closeHumanDialog);
     document.getElementById('human-action-dialog')?.addEventListener('close', () => {
@@ -6845,16 +7242,21 @@ window.addEventListener('DOMContentLoaded', async () => {
         return;
     }
     installInteractions();
+    const seededWorkspace = window.history.state?.agileForgeWorkspace;
+    if (seededWorkspace && typeof AgileForgeWorkspace !== 'undefined') {
+        workspaceView = { ...AgileForgeWorkspace.createView(), ...seededWorkspace };
+    }
     window.addEventListener('popstate', (event) => {
         const restored = event.state?.agileForgeWorkspace;
-        if (restored && typeof AgileForgeWorkspace !== 'undefined') {
-            workspaceView = { ...AgileForgeWorkspace.createView(), ...restored };
-            renderWorkspaceMap();
-            updateStageView(false);
-        }
+        if (!restored || typeof AgileForgeWorkspace === 'undefined') return;
+        workspaceView = { ...AgileForgeWorkspace.createView(), ...restored };
+        renderDashboard();
+        if (positiveInteger(workspaceView.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false });
     });
     try {
         await loadDashboard();
+        if (positiveInteger(workspaceView?.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false });
+        persistWorkspaceHistory({ replace: true });
     } catch (error) {
         setProjectError(error.message);
     }
