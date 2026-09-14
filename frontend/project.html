@@ -45,13 +45,13 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
-    <link rel="stylesheet" href="/dashboard/lifecycle-workspace.css" />
+    <link rel="stylesheet" href="/dashboard/lifecycle-workspace.css?v=20260914-layout3" />
     <title>Project | AgileForge</title>
 </head>
 
 <body class="bg-[#f5f4f1] font-sans text-ink antialiased">
     <!-- Top Control Bar -->
-    <header class="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-6">
+    <header class="workspace-topbar sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 lg:px-6">
         <div class="flex min-w-0 items-center gap-3">
             <a href="/dashboard" title="Back to projects"
                 class="grid size-8 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
@@ -59,7 +59,7 @@
                 <span class="sr-only">Back to projects</span>
             </a>
             <div class="flex items-center gap-2 min-w-0">
-                <span class="grid size-6 shrink-0 place-items-center rounded bg-blue-50 text-blue-600 font-mono text-xs font-bold">AF</span>
+                <span class="workspace-brand grid size-6 shrink-0 place-items-center rounded font-mono text-xs font-bold">AF</span>
                 <h1 id="project-page-title" class="truncate text-sm font-semibold text-slate-900">Project</h1>
                 <span id="project-repo-badge" class="hidden md:inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600">
                     <span class="material-symbols-outlined text-[14px]">terminal</span>
@@ -68,7 +68,7 @@
             </div>
         </div>
         <div class="flex items-center gap-2">
-            <span id="dashboard-refresh-time" class="hidden md:inline text-xs text-slate-500 font-mono">Loading lifecycle…</span>
+            <span id="dashboard-refresh-time" class="hidden md:inline text-xs text-slate-500">Loading lifecycle…</span>
             <button id="refresh-project" type="button" title="Refresh project"
                 class="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-wait disabled:opacity-50 transition-colors">
                 <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
@@ -149,13 +149,13 @@
     <div id="project-error-container" class="px-4 pt-3 lg:px-6">
         <p id="project-error" class="hidden rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-medium text-red-800" role="alert"></p>
     </div>
-    <section class="shrink-0 border-b border-slate-200 bg-white px-4 py-2 lg:px-6" aria-label="Project goal">
-        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Goal</p>
-        <p id="workspace-goal-strip" class="mt-0.5 text-sm text-slate-800">Loading project goal…</p>
+    <section class="workspace-goal-bar" aria-label="Project goal">
+        <span class="workspace-goal-label">Product goal</span>
+        <p id="workspace-goal-strip">Loading project goal…</p>
     </section>
 
     <!-- Main 3-Pane Body -->
-    <div class="workspace-shell flex flex-1 min-h-0 overflow-hidden">
+    <div class="workspace-shell flex-1 min-h-0 overflow-hidden">
         <aside id="workspace-map-host" aria-label="Project lifecycle map"></aside>
         <!-- Pane 1: Left Master Stage Navigator -->
         <nav id="master-stage-nav" aria-label="Legacy lifecycle navigation"
@@ -265,7 +265,7 @@
         </nav>
 
         <!-- Pane 2: Center Stage Detail Canvas -->
-        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-[#f5f4f1] p-4 lg:p-6 space-y-4" tabindex="-1">
+        <main id="stage-workbench" class="workspace-inspector" tabindex="-1">
             <!-- Hidden original elements preserved for test compatibility & binding -->
             <div id="lifecycle-stage-strip" class="hidden"></div>
             <div id="project-summary" class="hidden">
@@ -275,10 +275,10 @@
             </div>
 
             <!-- Workbench Header & Active Stage Indicator -->
-            <div class="flex items-center justify-between border-b border-slate-200 pb-3">
+            <div class="workspace-inspector-heading">
                 <div class="min-w-0">
                     <span id="workbench-stage-kicker" class="text-[11px] font-semibold uppercase tracking-wider text-blue-600">Active Workspace</span>
-                    <h2 id="workbench-stage-title" class="text-base font-bold text-slate-900 truncate">Delivery Workbench</h2>
+                    <h2 id="workbench-stage-title" aria-live="polite">Delivery Workbench</h2>
                 </div>
                 <div id="workbench-stage-actions" class="flex items-center gap-2 shrink-0"></div>
             </div>
@@ -357,8 +357,8 @@
         </form>
     </dialog>
 
-    <script src="/dashboard/lifecycle-workspace.js"></script>
-    <script src="/dashboard/project.js"></script>
+    <script src="/dashboard/lifecycle-workspace.js?v=20260914-layout3"></script>
+    <script src="/dashboard/project.js?v=20260914-layout3"></script>
 </body>
 
 </html>

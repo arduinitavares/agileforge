@@ -3448,6 +3448,7 @@ test('browser renders the exact structural proof and non-proof disclosure from t
     for (const item of [...scope.proves, ...scope.does_not_prove]) {
         assert.ok(markup.includes(item));
     }
+    assert.match(markup, /data-story-evidence-boundary="true">Structural checks do not establish quality, product value, selection, dependency safety, or Sprint readiness\.<\/p><details/);
 });
 
 test('selected scope retains external prerequisites and excludes unselected dependents', () => {

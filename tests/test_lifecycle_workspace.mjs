@@ -133,7 +133,9 @@ test('map renders graph authority independently from viewing and exposes return 
     assert.match(markup, /data-workspace-stage="7"[^>]*Viewing/);
     assert.match(markup, /data-workspace-stage="9"[^>]*aria-current="step"/);
     assert.match(markup, /Return to current work/);
-    assert.match(markup, /Last confirmed 2026-09-14T10:30:00Z; manual refresh required/);
+    assert.match(markup, /Current work follows the confirmed workflow position/);
+    assert.match(markup, /datetime="2026-09-14T10:30:00Z"/);
+    assert.match(markup, /Manual refresh required/);
 });
 
 

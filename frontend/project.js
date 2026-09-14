@@ -2762,7 +2762,7 @@ function structuralEvidenceScopeMarkup(scope) {
         return `<p role="alert" class="text-xs leading-5 text-red-700" data-story-evidence-scope-unavailable="true">Structural evidence scope is unavailable. Story controls are locked until the current exact proof boundary is loaded.</p>`;
     }
     const list = (items) => `<ul role="list" class="list-disc pl-5 space-y-1">${items.map((item) => `<li>${escapeWorkflowText(item)}</li>`).join('')}</ul>`;
-    return `<section class="rounded border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700" data-story-evidence-scope="true"><p><strong>Provider-free structural evidence proves:</strong></p>${list(scope.proves)}<p class="mt-2"><strong>It does not prove:</strong></p>${list(scope.does_not_prove)}</section>`;
+    return `<section class="rounded border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700" data-story-evidence-scope="true"><p data-story-evidence-boundary="true">Structural checks do not establish quality, product value, selection, dependency safety, or Sprint readiness.</p><details class="mt-2"><summary class="cursor-pointer font-medium">View structural checks and limits</summary><div class="mt-3"><p><strong>Provider-free structural evidence proves:</strong></p>${list(scope.proves)}<p class="mt-2"><strong>It does not prove:</strong></p>${list(scope.does_not_prove)}</div></details></section>`;
 }
 
 function storyMutationPhase() {
@@ -4706,7 +4706,7 @@ function updateStageView(shouldScroll = false) {
     });
 
     setText('workbench-stage-title', currentStage);
-    const framingStages = ['Vision', 'Product Goal', 'Specification', 'Backlog', 'Roadmap'];
+    const framingStages = ['Create Project', 'Repository', 'Vision', 'Product Goal', 'Specification', 'Backlog', 'Roadmap'];
     setText('workbench-stage-kicker', framingStages.includes(currentStage) ? 'Project Framing' : 'Delivery Loop');
 
     const panelMap = {
@@ -5053,7 +5053,8 @@ async function loadDashboard() {
         }
         lastSuccessfulDashboardLoadSequence = sequence;
         lastDashboardConfirmedAt = new Date().toISOString();
-        setText('dashboard-refresh-time', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
+        setText('dashboard-refresh-time', `Confirmed ${new Date(lastDashboardConfirmedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Manual refresh`);
+        document.getElementById('dashboard-refresh-time')?.setAttribute('title', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
         await refreshWorkspaceInventoryProjection();
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         reconcileWorkspaceSelection();

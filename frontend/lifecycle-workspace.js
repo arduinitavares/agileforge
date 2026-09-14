@@ -224,18 +224,35 @@ const AgileForgeWorkspace = (() => {
 
     function mapMarkup({ position = {}, view = createView(), lastConfirmedAt = null } = {}) {
         const current = new Set(currentStageIds(position));
+        const descriptions = [
+            'Identity & repository', 'Direction & purpose', 'Outcome & success',
+            'Requirements & sources', 'Scope & work items', 'Order & priorities',
+            'Readiness & selection', 'Scope, Tasks & capacity', 'Tasks, checks & evidence',
+            'Results & completion', 'Review, then closure', 'Learning & follow-up',
+            'Next eligible work',
+        ];
         const cards = stages().map((stage) => {
             const viewing = view.stageId === stage.id;
             const here = current.has(stage.id);
-            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" id="workspace-stage-${stage.id}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
+            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" id="workspace-stage-${stage.id}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span><span class="workspace-stage-description">${escapeText(descriptions[stage.id - 1])}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
         });
         const returnMarkup = current.size && !current.has(view.stageId)
             ? '<button type="button" class="workspace-return-current" data-workspace-return-current="true">Return to current work</button>'
             : '';
+        const routeNote = !lastConfirmedAt ? 'Loading workflow position…'
+            : current.size ? 'Current work follows the confirmed workflow position.'
+                : 'No required stage is currently advertised by the workflow.';
         const freshness = lastConfirmedAt
-            ? `Last confirmed ${escapeText(lastConfirmedAt)}; manual refresh required`
-            : 'Loading lifecycle; manual refresh required';
-        return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace"><section class="workspace-stage-group" aria-label="Project framing"><p class="workspace-group-label">Project framing · 01–06</p><div class="workspace-map" role="list">${cards.slice(0, 6).join('')}</div></section><section class="workspace-stage-group" aria-label="Sprint delivery"><p class="workspace-group-label">Sprint delivery · 07–13</p><div class="workspace-map" role="list">${cards.slice(6).join('')}</div></section>${returnMarkup}<p class="workspace-freshness">${freshness}</p></section>`;
+            ? `Confirmed <time datetime="${escapeText(lastConfirmedAt)}" title="${escapeText(lastConfirmedAt)}">${escapeText(new Date(lastConfirmedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</time> · Manual refresh required`
+            : 'Loading lifecycle · Manual refresh required';
+        return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace">
+            <div class="workspace-map-heading"><div><h2>Project lifecycle</h2><p>Select a stage to inspect its work.</p></div><div class="workspace-legend" aria-label="Map legend"><span><i class="workspace-legend-current" aria-hidden="true"></i>You are here</span><span><i class="workspace-legend-viewing" aria-hidden="true"></i>Viewing</span></div>${returnMarkup}</div>
+            <p class="workspace-map-freshness">${freshness}</p>
+            <section class="workspace-stage-group workspace-framing" aria-label="Project framing"><h3 class="workspace-group-label">Project framing <span>01–06</span></h3><div class="workspace-map">${cards.slice(0, 6).join('')}</div></section>
+            <p class="workspace-handoff">Roadmap to Stories <span>Project framing hands off to Sprint delivery</span></p>
+            <section class="workspace-stage-group workspace-delivery" aria-label="Sprint delivery"><h3 class="workspace-group-label">Sprint delivery <span>07–13 · recurring cycle</span></h3><div class="workspace-map">${cards.slice(6).join('')}</div><p class="workspace-cycle-note">Assess the next Sprint after review and triage.</p></section>
+            <p class="workspace-route-note">${routeNote}</p>
+        </section>`;
     }
 
     function mount(host, bridge = {}) {
