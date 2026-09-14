@@ -1972,7 +1972,16 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
                 "endpoint": "story/close",
                 "transport": "semantic",
             }
-        elif self.retry_state == "active" and not self.retry_triage_recorded:
+        elif self.retry_state == "active":
+            return {
+                "graph_version": "agileforge.workflow.hidden",
+                "fact_fingerprint": _fingerprint("a"),
+                "decisions": [],
+                "terminal": False,
+                "actions": [],
+                "_actions": [],
+            }
+        elif self.retry_state == "completed" and not self.retry_triage_recorded:
             decision = {
                 "node_id": "execution.sprint.triage",
                 "child_graph_id": "execution",
@@ -1996,15 +2005,6 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
                 "request_kind": "record_post_sprint_triage",
                 "endpoint": "sprint/triage",
                 "transport": "semantic",
-            }
-        elif self.retry_state == "active":
-            return {
-                "graph_version": "agileforge.workflow.hidden",
-                "fact_fingerprint": _fingerprint("a"),
-                "decisions": [],
-                "terminal": False,
-                "actions": [],
-                "_actions": [],
             }
         else:
             decision = {
@@ -4241,6 +4241,35 @@ def _assert_issue_260_retry_survives_reload(
     story_form.get_by_role("button", name="Record Story closure", exact=True).click()
     assert len(fake.retry_story_close_requests) == 1
     assert fake.retry_story_close_requests[0]["instance_key"] == "retry:101:story:101"
+    page.reload(wait_until="networkidle")
+    _select_workspace_stage(page, 8)
+    reloaded_after_story_close = page.locator('[data-sprint-status="active"]')
+    progress_after_story_close = reloaded_after_story_close.locator(
+        '[data-sprint-retry-progress="true"]'
+    )
+    expect(
+        progress_after_story_close.locator('[data-sprint-retry-task-id="71"]')
+    ).to_contain_text("Status: Done")
+    expect(
+        progress_after_story_close.locator('[data-sprint-retry-story-id="101"]')
+    ).to_contain_text("Status: Done")
+    expect(
+        reloaded_after_story_close.locator('[data-sprint-execution-history="true"]')
+    ).to_contain_text("Attempt 1")
+
+    # Review and Sprint closure are separate transitions; this fixture advances
+    # only after their already-tested server state is explicitly represented.
+    fake.retry_state = "completed"
+    page.reload(wait_until="networkidle")
+    _select_workspace_stage(page, 13)
+    completed_retry = page.locator('[data-sprint-status="completed"]')
+    expect(completed_retry).to_contain_text("Attempt 2 is completed")
+    expect(
+        completed_retry.locator('[data-sprint-execution-history="true"]')
+    ).to_contain_text("Attempt 1")
+    expect(
+        completed_retry.locator('[data-sprint-execution-history="true"]')
+    ).to_contain_text("Attempt 2")
     _select_workspace_stage(page, 12)
     triage_disclosure = page.locator(
         'details[data-workspace-scoped-action-disclosure="record_post_sprint_triage:retry:101:sprint:31"]'
