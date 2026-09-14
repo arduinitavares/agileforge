@@ -4046,11 +4046,25 @@ function workspaceScopeKeyForStatus(status) {
 
 function workspaceViewIsCurrentScope() {
     const current = lifecycleState.sprintStatus?.data;
-    const selected = workspaceSprintStatus?.kind === 'ready' ? workspaceSprintStatus.data : current;
+    const selectedState = workspaceSelectedSprintState();
+    const selected = selectedState?.kind === 'ready' ? selectedState.data : null;
     if (!positiveInteger(current?.sprint?.sprint_id) || selected?.sprint?.sprint_id !== current.sprint.sprint_id) return false;
     const currentRetry = current.current_retry?.retry_attempt_id ?? null;
     const selectedRetry = selected.current_retry?.retry_attempt_id ?? null;
     return currentRetry === selectedRetry;
+}
+
+function workspaceSelectedSprintState() {
+    const current = lifecycleState.sprintStatus;
+    const sprintId = workspaceView?.sprintId;
+    if (!positiveInteger(sprintId)) return current;
+    if (workspaceSprintStatus) {
+        if (workspaceSprintStatus.kind !== 'ready') return workspaceSprintStatus;
+        if (workspaceSprintStatus.data?.sprint?.sprint_id === sprintId) return workspaceSprintStatus;
+    }
+    return current?.data?.sprint?.sprint_id === sprintId
+        ? current
+        : { kind: 'loading', message: 'Loading the selected Sprint.' };
 }
 
 async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
@@ -4075,19 +4089,25 @@ async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
 }
 
 async function refreshWorkspaceInventoryProjection() {
-    if (workspaceView?.stageId !== 9 && !workspaceTaskInventory) return;
     const sprintId = currentWorkspaceSprintId();
-    if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
+    if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return true;
+    const projectId = selectedProjectId;
+    const generation = ++workspaceReadGeneration;
+    const matchesSelection = () => generation === workspaceReadGeneration
+        && projectId === selectedProjectId && sprintId === currentWorkspaceSprintId();
+    const readInventory = workspaceView?.stageId === 9 || Boolean(workspaceTaskInventory);
     const currentSprintId = lifecycleState.sprintStatus?.data?.sprint?.sprint_id;
     if (workspaceView?.sprintId && sprintId !== currentSprintId) {
         try {
             const response = await requestJson(`/api/projects/${selectedProjectId}/sprints/${sprintId}`);
+            if (!matchesSelection()) return false;
             const data = response?.data;
             if (data?.project_id !== selectedProjectId || data?.sprint?.sprint_id !== sprintId) {
                 throw new Error('The selected Sprint response did not match this Project and Sprint.');
             }
             workspaceSprintStatus = { kind: 'ready', data };
         } catch (error) {
+            if (!matchesSelection()) return false;
             workspaceSprintStatus = { kind: 'error', message: error.message || 'Selected Sprint could not be refreshed.' };
         }
     } else if (workspaceView?.sprintId && sprintId === currentSprintId) {
@@ -4097,7 +4117,8 @@ async function refreshWorkspaceInventoryProjection() {
     } else if (!workspaceView?.sprintId) {
         workspaceSprintStatus = null;
     }
-    await loadWorkspaceTaskInventory(sprintId, { render: false });
+    if (readInventory) await loadWorkspaceTaskInventory(sprintId, { render: false });
+    return true;
 }
 
 async function selectWorkspaceSprint(sprintId, { pushHistory = true } = {}) {
@@ -4123,17 +4144,20 @@ async function selectWorkspaceSprint(sprintId, { pushHistory = true } = {}) {
     renderDashboard();
 }
 
-function selectWorkspaceTask(taskId, { pushHistory = true, focusRow = false } = {}) {
-    const status = workspaceSprintStatus?.kind === 'ready'
-        ? workspaceSprintStatus.data
-        : lifecycleState.sprintStatus?.data;
+function selectWorkspaceTask(taskId, { pushHistory = true, focusRow = false, preserveStage = false } = {}) {
+    const selectedState = workspaceSelectedSprintState();
+    const status = selectedState?.kind === 'ready' ? selectedState.data : null;
     const sprintId = status?.sprint?.sprint_id;
     if (!positiveInteger(taskId) || !positiveInteger(sprintId) || typeof AgileForgeWorkspace === 'undefined') return;
     const scopeKey = workspaceScopeKeyForStatus(status);
     if (!scopeKey) return;
     captureWorkspaceRenderState();
     workspaceTaskFocusIntent = focusRow ? taskId : null;
-    workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
+    workspaceView = {
+        ...(workspaceView ?? AgileForgeWorkspace.createView()),
+        taskId, sprintId, scopeKey,
+        stageId: preserveStage ? workspaceView?.stageId ?? 9 : 9,
+    };
     if (pushHistory) persistWorkspaceHistory();
     renderDashboard();
     if (!workspaceTaskController) {
@@ -4292,9 +4316,8 @@ async function submitWorkspaceTaskCompletion(form) {
 
 function reconcileWorkspaceSelection() {
     if (!workspaceView || typeof AgileForgeWorkspace === 'undefined') return;
-    const selectedStatus = workspaceSprintStatus?.kind === 'ready'
-        && workspaceSprintStatus.data?.sprint?.sprint_id === workspaceView.sprintId
-        ? workspaceSprintStatus.data : lifecycleState.sprintStatus?.data;
+    const selectedState = workspaceSelectedSprintState();
+    const selectedStatus = selectedState?.kind === 'ready' ? selectedState.data : null;
     const nextScopeKey = workspaceScopeKeyForStatus(selectedStatus);
     const scopeChanged = positiveInteger(workspaceView.taskId)
         && nextScopeKey !== null
@@ -4714,9 +4737,12 @@ function updateContextInspector() {
 function renderDashboard() {
     captureWorkspaceRenderState();
     ensureWorkspaceView();
-    const workspaceState = workspaceSprintStatus?.kind === 'ready'
-        ? { ...lifecycleState, sprintStatus: workspaceSprintStatus, actions: workspaceViewIsCurrentScope() ? lifecycleState.actions : [] }
-        : lifecycleState;
+    const selectedSprintState = workspaceSelectedSprintState();
+    const workspaceState = {
+        ...lifecycleState,
+        sprintStatus: selectedSprintState,
+        actions: workspaceViewIsCurrentScope() || !positiveInteger(workspaceView?.sprintId) ? lifecycleState.actions : [],
+    };
     const project = lifecycleState.project ?? {};
     setText('project-page-title', project.name || `Project ${selectedProjectId}`);
     document.title = `${project.name || 'Project'} | AgileForge`;
@@ -7549,16 +7575,24 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     setText('dashboard-refresh-time', 'Loading lifecycle; manual refresh required');
     renderWorkspaceMap();
-    window.addEventListener('popstate', (event) => {
+    window.addEventListener('popstate', async (event) => {
         const restored = event.state?.agileForgeWorkspace;
         if (!restored || typeof AgileForgeWorkspace === 'undefined') return;
+        captureWorkspaceRenderState();
         workspaceView = { ...AgileForgeWorkspace.createView(), ...restored };
+        workspaceSprintStatus = null;
+        workspaceTaskInventory = null;
+        const restoredProjectId = selectedProjectId;
         renderDashboard();
-        if (positiveInteger(workspaceView.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false });
+        const refreshed = await refreshWorkspaceInventoryProjection();
+        if (!refreshed || selectedProjectId !== restoredProjectId
+            || workspaceView.sprintId !== restored.sprintId || workspaceView.taskId !== restored.taskId) return;
+        renderDashboard();
+        if (positiveInteger(workspaceView.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false, preserveStage: true });
     });
     try {
         await loadDashboard();
-        if (positiveInteger(workspaceView?.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false });
+        if (positiveInteger(workspaceView?.taskId)) selectWorkspaceTask(workspaceView.taskId, { pushHistory: false, preserveStage: true });
         persistWorkspaceHistory({ replace: true });
     } catch (error) {
         setProjectError(error.message);

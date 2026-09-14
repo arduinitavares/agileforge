@@ -8,7 +8,7 @@ import vm from 'node:vm';
 const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
 
-function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}' })) {
+function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}' }), windowOverrides = {}) {
     const createElement = () => ({
         _textContent: '',
         innerHTML: '',
@@ -35,7 +35,7 @@ function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}
         fetch: fetchImpl,
         URLSearchParams,
         TextEncoder,
-        window: { addEventListener() {}, location: { href: '' } },
+        window: { addEventListener() {}, location: { href: '' }, ...windowOverrides },
     });
     vm.runInContext(source, context, { filename: sourcePath });
     return context;
@@ -4857,6 +4857,94 @@ test('repository stage jump selects the workspace map stage and records browser 
         JSON.parse(vm.runInContext('JSON.stringify(__stageUpdates)', context)),
         [true],
     );
+});
+
+test('restoring Task detail on load and browser history preserves the independently viewed stage', async () => {
+    const listeners = {};
+    const history = {
+        state: { agileForgeWorkspace: { stageId: 8, sprintId: 31, taskId: 3, tab: 'checks', scopeKey: 'sprint:31' } },
+        pushState(state) { this.state = state; },
+        replaceState(state) { this.state = state; },
+    };
+    const context = loadFrontend(undefined, {
+        addEventListener(type, listener) { listeners[type] = listener; },
+        history,
+        location: { search: '?id=7', href: 'http://localhost/dashboard/project.html?id=7' },
+    });
+    vm.runInContext(`
+        AgileForgeWorkspace = { createView: () => ({ stageId: 1, tab: 'details' }) };
+        installInteractions = () => {};
+        renderWorkspaceMap = () => {};
+        renderDashboard = () => {};
+        workspaceStageLabel = (stageId) => String(stageId);
+        globalThis.__restoredTaskReads = [];
+        workspaceTaskController = { select: async (selection) => __restoredTaskReads.push(selection) };
+        loadDashboard = () => new Promise((resolve) => { globalThis.__finishInitialLoad = resolve; });
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 }, current_retry: null } };
+    `, context);
+
+    const initialLoad = listeners.DOMContentLoaded();
+    vm.runInContext('selectWorkspaceStage(10, { pushHistory: true }); __finishInitialLoad(true);', context);
+    await initialLoad;
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 10);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 3);
+    assert.equal(vm.runInContext('workspaceView.tab', context), 'checks');
+    assert.equal(history.state.agileForgeWorkspace.stageId, 10);
+    assert.equal(vm.runInContext('__restoredTaskReads.length', context), 1);
+
+    await listeners.popstate({ state: { agileForgeWorkspace: {
+        stageId: 12, sprintId: 31, taskId: 3, tab: 'activity', scopeKey: 'sprint:31',
+    } } });
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 12);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 3);
+    assert.equal(vm.runInContext('workspaceView.tab', context), 'activity');
+    assert.equal(vm.runInContext('__restoredTaskReads.length', context), 2);
+});
+
+test('off-board historical restoration reads the retained Sprint and never falls back to current mutation authority', async () => {
+    const context = loadFrontend();
+    context.historicalStatus = { project_id: 7, sprint: { sprint_id: 30 }, current_retry: null, tasks: [{ task_id: 3, sprint_id: 30 }] };
+    vm.runInContext(`
+        selectedProjectId = 7;
+        AgileForgeWorkspace = { createView: () => ({ stageId: 1 }) };
+        workspaceView = { stageId: 10, sprintId: 30, taskId: 3, tab: 'checks', scopeKey: 'sprint:30' };
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 }, current_retry: null } };
+        workspaceSprintStatus = null;
+        workspaceTaskInventory = null;
+        globalThis.__historyReads = [];
+        globalThis.__taskReads = [];
+        requestJson = async (url) => { __historyReads.push(url); return { data: historicalStatus }; };
+        workspaceTaskController = { select: async (selection) => __taskReads.push(selection) };
+        renderDashboard = () => {};
+    `, context);
+    assert.equal(vm.runInContext('workspaceViewIsCurrentScope()', context), false);
+    await vm.runInContext('refreshWorkspaceInventoryProjection()', context);
+    vm.runInContext('selectWorkspaceTask(3, { pushHistory: false, preserveStage: true })', context);
+    assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(__historyReads)', context)), ['/api/projects/7/sprints/30']);
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 10);
+    assert.equal(vm.runInContext('workspaceView.sprintId', context), 30);
+    assert.equal(vm.runInContext('__taskReads[0].sprintId', context), 30);
+    assert.equal(vm.runInContext('workspaceViewIsCurrentScope()', context), false);
+});
+
+test('late historical Sprint responses cannot replace a newer selected scope', async () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 10, sprintId: 30, taskId: 3, tab: 'checks', scopeKey: 'sprint:30' };
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 } } };
+        requestJson = () => new Promise((resolve) => { globalThis.__resolveOldSprint = resolve; });
+    `, context);
+    const oldRefresh = vm.runInContext('refreshWorkspaceInventoryProjection()', context);
+    vm.runInContext(`
+        workspaceReadGeneration += 1;
+        workspaceView = { ...workspaceView, sprintId: 32, taskId: 4, scopeKey: 'sprint:32' };
+        workspaceSprintStatus = { kind: 'ready', data: { project_id: 7, sprint: { sprint_id: 32 } } };
+        __resolveOldSprint({ data: { project_id: 7, sprint: { sprint_id: 30 } } });
+    `, context);
+    assert.equal(await oldRefresh, false);
+    assert.equal(vm.runInContext('workspaceSprintStatus.data.sprint.sprint_id', context), 32);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 4);
 });
 
 function workspaceFocusHarness() {
