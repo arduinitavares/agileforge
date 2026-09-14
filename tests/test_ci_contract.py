@@ -249,6 +249,7 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
     assert "scripts/verify_distribution.py" not in python_313
     assert (
         "node --test tests/test_workflow_position_display.mjs "
+        "tests/test_lifecycle_workspace.mjs "
         "tests/test_sprint_retry_dashboard.mjs "
         "tests/test_create_project_modal_required_fields.mjs "
         "tests/test_vision_interview_ui.mjs"

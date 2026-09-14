@@ -45,6 +45,7 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
+    <link rel="stylesheet" href="/dashboard/lifecycle-workspace.css" />
     <title>Project | AgileForge</title>
 </head>
 
@@ -150,10 +151,11 @@
     </div>
 
     <!-- Main 3-Pane Body -->
-    <div class="flex flex-1 min-h-0 overflow-hidden">
+    <div class="workspace-shell flex flex-1 min-h-0 overflow-hidden">
+        <aside id="workspace-map-host" aria-label="Project lifecycle map"></aside>
         <!-- Pane 1: Left Master Stage Navigator -->
-        <nav id="master-stage-nav" aria-label="Lifecycle Master Navigation"
-            class="w-64 shrink-0 hidden md:flex flex-col border-r border-slate-200 bg-white overflow-y-auto">
+        <nav id="master-stage-nav" aria-label="Legacy lifecycle navigation"
+            class="hidden">
             <!-- Framing Group -->
             <div class="p-3 border-b border-slate-100">
                 <div class="flex items-center justify-between mb-1 px-2">
@@ -259,7 +261,7 @@
         </nav>
 
         <!-- Pane 2: Center Stage Detail Canvas -->
-        <main id="stage-workbench" class="flex-1 min-w-0 overflow-y-auto bg-slate-50/60 p-4 lg:p-6 space-y-4">
+        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-slate-50/60 p-4 lg:p-6 space-y-4">
             <!-- Hidden original elements preserved for test compatibility & binding -->
             <div id="lifecycle-stage-strip" class="hidden"></div>
             <div id="project-summary" class="hidden">
@@ -287,7 +289,7 @@
 
         <!-- Pane 3: Right Context & Traceability Drawer -->
         <aside id="context-drawer" aria-label="Context and Traceability Inspector"
-            class="w-72 shrink-0 hidden xl:flex flex-col border-l border-slate-200 bg-white p-4 overflow-y-auto space-y-4">
+            class="hidden">
             <div class="flex items-center justify-between border-b border-slate-100 pb-2">
                 <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Context Inspector</span>
                 <span class="material-symbols-outlined text-slate-400 text-sm">info</span>
@@ -351,6 +353,7 @@
         </form>
     </dialog>
 
+    <script src="/dashboard/lifecycle-workspace.js"></script>
     <script src="/dashboard/project.js"></script>
 </body>
 

@@ -3566,6 +3566,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         actions,
         context,
     );
+    const taskBoard = workspaceTaskBoardMarkup(context?.sprintStatus, position, actions);
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) => (
         Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind])
@@ -3581,6 +3582,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     );
 
     const sections = [
+        taskBoard,
         sprintSection,
         cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
         readinessSection,
@@ -3631,6 +3633,106 @@ function setInterviewStatus(scope, message) {
 }
 
 let selectedStageTab = null;
+let workspaceView = null;
+let workspaceTaskController = null;
+
+function workspaceStageLabel(stageId) {
+    if (typeof AgileForgeWorkspace === 'undefined') return null;
+    return AgileForgeWorkspace.stages().find((stage) => stage.id === stageId)?.label ?? null;
+}
+
+function workspaceStageForLegacy(stage) {
+    return ({
+        'Vision': 2,
+        'Product Goal': 3,
+        'Specification': 4,
+        'Backlog': 5,
+        'Roadmap': 6,
+        'Stories': 7,
+        'Sprint': 8,
+        'Execution': 9,
+        'Review': 11,
+        'Repository': 1,
+    })[stage] ?? null;
+}
+
+function selectWorkspaceStage(stageId, { pushHistory = false, scroll = false } = {}) {
+    if (typeof AgileForgeWorkspace === 'undefined') return;
+    if (!Number.isInteger(stageId) || !workspaceStageLabel(stageId)) return;
+    workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), stageId };
+    if (pushHistory && typeof window?.history?.pushState === 'function') {
+        window.history.pushState({ agileForgeWorkspace: workspaceView }, '', window.location.href);
+    }
+    updateStageView(scroll);
+}
+
+function renderWorkspaceMap() {
+    if (typeof AgileForgeWorkspace === 'undefined') return;
+    const host = document.getElementById('workspace-map-host');
+    if (!host) return;
+    const current = AgileForgeWorkspace.currentStageIds(lifecycleState.position);
+    if (workspaceView === null) {
+        workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] ?? 1 };
+    }
+    AgileForgeWorkspace.mount(host, {
+        position: lifecycleState.position,
+        view: workspaceView,
+        onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
+    });
+}
+
+function workspaceTaskDetailMarkup(snapshot) {
+    if (!snapshot || snapshot.kind === 'idle' || !snapshot.selection?.taskId) {
+        return '<p class="text-sm text-slate-600">Select a Task to inspect its persisted details, checks, and retained activity.</p>';
+    }
+    if (snapshot.kind === 'loading') return '<p class="text-sm text-slate-600">Loading selected Task…</p>';
+    if (snapshot.kind === 'unavailable') return `<p class="text-sm text-amber-800">Task #${snapshot.selection.taskId} is unavailable in the retained Sprint scope. Select another Task.</p>`;
+    if (snapshot.kind === 'error') return `<p class="text-sm text-red-800">${escapeWorkflowText(snapshot.error || 'Task detail could not be loaded.')}</p>`;
+    const task = snapshot.data?.task;
+    if (!task) return '<p class="text-sm text-slate-600">No confirmed Task detail is available.</p>';
+    const completion = snapshot.data?.completion;
+    const activity = Array.isArray(snapshot.data?.execution?.items) ? snapshot.data.execution.items : [];
+    return `<section class="rounded-md border border-slate-200 bg-slate-50 p-3" data-workspace-task-detail="${task.task_id}">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Task #${task.task_id}</p>
+        <p class="mt-1 text-sm font-semibold text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p>
+        <p class="mt-2 text-xs text-slate-600">Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</p>
+        <p class="mt-1 text-xs text-slate-600">Checks: ${completion ? escapeWorkflowText(completion.acceptance_result || 'Completion evidence retained') : 'No persisted completion evidence.'}</p>
+        <p class="mt-1 text-xs text-slate-600">Activity: ${activity.length ? `${activity.length} retained status record${activity.length === 1 ? '' : 's'}` : 'Unavailable (no retained execution records).'}</p>
+        ${snapshot.kind === 'stale' ? `<p class="mt-2 text-xs text-amber-800">Manual refresh failed; showing last confirmed detail. ${escapeWorkflowText(snapshot.error || '')}</p>` : ''}
+    </section>`;
+}
+
+function workspaceTaskBoardMarkup(status, position, actions) {
+    if (typeof AgileForgeWorkspace === 'undefined' || workspaceView?.stageId !== 9) return '';
+    const data = status?.data ?? status ?? {};
+    const rows = AgileForgeWorkspace.taskRows(data, position, actions);
+    const counts = AgileForgeWorkspace.taskCounts(rows.map((row) => row.task));
+    const detail = workspaceTaskController?.snapshot?.() ?? null;
+    const filtered = rows.filter((row) => workspaceView?.filter !== 'open' || row.task.status !== 'Done');
+    return `<section class="space-y-3" data-workspace-task-board="true">
+        <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${detail?.lastConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(detail.lastConfirmedAt)}` : ''}</p></div>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="border-b border-slate-100"><td class="px-2 py-2"><button type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div>
+        <div id="workspace-task-detail">${workspaceTaskDetailMarkup(detail)}</div>
+    </section>`;
+}
+
+function selectWorkspaceTask(taskId) {
+    const status = lifecycleState.sprintStatus?.data;
+    const sprintId = status?.sprint?.sprint_id;
+    if (!positiveInteger(taskId) || !positiveInteger(sprintId) || typeof AgileForgeWorkspace === 'undefined') return;
+    const retry = reviewObject(status?.current_retry);
+    const scopeKey = retry?.retry_attempt_id
+        ? `retry:${retry.retry_attempt_id}:sprint:${sprintId}` : `sprint:${sprintId}`;
+    workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
+    if (!workspaceTaskController) {
+        workspaceTaskController = AgileForgeWorkspace.createController({
+            requestJson,
+            onChange: (snapshot) => setMarkup('workspace-task-detail', workspaceTaskDetailMarkup(snapshot)),
+        });
+    }
+    workspaceTaskController.select({ projectId: selectedProjectId, sprintId, taskId, scopeKey })
+        .catch((error) => setProjectError(error.message));
+}
 
 function resolveActiveWorkflowStage(position, actions = []) {
     const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
@@ -3915,7 +4017,11 @@ function renderMasterStageNav() {
 
 function updateStageView(shouldScroll = false) {
     const activeWorkflowStage = resolveActiveWorkflowStage(lifecycleState.position, lifecycleState.actions);
-    const currentStage = selectedStageTab || activeWorkflowStage || 'Stories';
+    const workspaceStage = workspaceView?.stageId;
+    const currentStage = workspaceStageLabel(workspaceStage)
+        ?? selectedStageTab
+        ?? activeWorkflowStage
+        ?? 'Stories';
 
     const stageBtns = typeof document?.querySelectorAll === 'function'
         ? Array.from(document.querySelectorAll('.stage-nav-btn'))
@@ -3940,11 +4046,20 @@ function updateStageView(shouldScroll = false) {
         'Vision': 'vision-panel',
         'Product Goal': 'goal-panel',
         'Specification': 'specification-panel',
+        'Create Project': 'repository-panel',
         'Repository': 'repository-panel',
     };
 
+    const directPanelIds = ['vision-panel', 'goal-panel', 'specification-panel', 'repository-panel'];
+    const targetPanelId = panelMap[currentStage] || 'delivery-panel';
+    directPanelIds.forEach((panelId) => {
+        const panel = document.getElementById(panelId);
+        if (panel) panel.hidden = panelId !== targetPanelId;
+    });
+    const delivery = document.getElementById('delivery-panel');
+    if (delivery) delivery.hidden = targetPanelId !== 'delivery-panel';
+
     if (shouldScroll) {
-        const targetPanelId = panelMap[currentStage] || 'delivery-panel';
         const targetEl = document.getElementById(targetPanelId);
         targetEl?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     }
@@ -4017,6 +4132,7 @@ function renderDashboard() {
     );
     reapplyActiveSpecificationMutation();
     reapplyActiveBacklogCorrectionMutation();
+    renderWorkspaceMap();
     renderTopCockpit();
     renderMasterStageNav();
     updateStageView();
@@ -6307,6 +6423,11 @@ function installInteractions() {
     });
 
     document.addEventListener('click', async (event) => {
+        const workspaceTask = event.target?.closest?.('[data-workspace-task-id]');
+        if (workspaceTask) {
+            selectWorkspaceTask(Number.parseInt(workspaceTask.dataset.workspaceTaskId, 10));
+            return;
+        }
         const button = event.target.closest('button');
         if (!button) return;
         if (button.dataset.reviewScope) {
@@ -6683,6 +6804,8 @@ function installInteractions() {
             const stage = btn.dataset.stage;
             if (stage) {
                 selectedStageTab = stage;
+                const workspaceStage = workspaceStageForLegacy(stage);
+                if (workspaceStage) selectWorkspaceStage(workspaceStage, { pushHistory: true });
                 updateStageView(true);
             }
         });
@@ -6690,6 +6813,7 @@ function installInteractions() {
 
     document.getElementById('cockpit-view-blockers-btn')?.addEventListener('click', () => {
         selectedStageTab = 'Stories';
+        selectWorkspaceStage(7, { pushHistory: true });
         updateStageView(true);
     });
 
@@ -6721,6 +6845,14 @@ window.addEventListener('DOMContentLoaded', async () => {
         return;
     }
     installInteractions();
+    window.addEventListener('popstate', (event) => {
+        const restored = event.state?.agileForgeWorkspace;
+        if (restored && typeof AgileForgeWorkspace !== 'undefined') {
+            workspaceView = { ...AgileForgeWorkspace.createView(), ...restored };
+            renderWorkspaceMap();
+            updateStageView(false);
+        }
+    });
     try {
         await loadDashboard();
     } catch (error) {

@@ -30,6 +30,8 @@ REQUIRED_ARCHIVE_RESOURCES: frozenset[str] = frozenset(
         "frontend/project.html",
         "frontend/app.js",
         "frontend/project.js",
+        "frontend/lifecycle-workspace.js",
+        "frontend/lifecycle-workspace.css",
     }
 )
 EXPECTED_BUSINESS_TABLES: frozenset[str] = frozenset(
@@ -57,7 +59,7 @@ from utils.model_config import get_story_pipeline_mode
 
 assert files("config").joinpath("models.yaml").is_file()
 frontend = files("frontend")
-for name in ("index.html", "project.html", "app.js", "project.js"):
+for name in ("index.html", "project.html", "app.js", "project.js", "lifecycle-workspace.js", "lifecycle-workspace.css"):
     assert frontend.joinpath(name).is_file(), name
 assert get_story_pipeline_mode() in {"batch", "single"}
 parser = build_parser()
@@ -723,6 +725,14 @@ def _verify_installed_api(
                 _require_nonempty_resource(
                     _read_bytes(f"{root}/dashboard/project.js"),
                     name="frontend/project.js",
+                )
+                _require_nonempty_resource(
+                    _read_bytes(f"{root}/dashboard/lifecycle-workspace.js"),
+                    name="frontend/lifecycle-workspace.js",
+                )
+                _require_nonempty_resource(
+                    _read_bytes(f"{root}/dashboard/lifecycle-workspace.css"),
+                    name="frontend/lifecycle-workspace.css",
                 )
                 _verify_schema(layout.business_database)
             except Exception as error:

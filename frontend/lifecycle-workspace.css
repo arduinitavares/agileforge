@@ -1,0 +1,23 @@
+/* frontend/lifecycle-workspace.css */
+:root { --workspace-teal: #0f766e; --workspace-blue: #2563eb; }
+.workspace-shell { min-height: 0; }
+#workspace-map-host { overflow-y: auto; background: #f8fafc; }
+.lifecycle-workspace { padding: 12px; font-family: Inter, sans-serif; }
+.workspace-map { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.workspace-stage { min-height: 78px; border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; color: #334155; padding: 8px; text-align: left; position: relative; font-size: 14px; line-height: 1.25; }
+.workspace-stage:hover { border-color: #94a3b8; }
+.workspace-stage:focus-visible, .workspace-tab:focus-visible { outline: 2px solid var(--workspace-blue); outline-offset: 2px; }
+.workspace-stage-number { display: block; color: #64748b; font: 600 12px/1.2 ui-monospace, monospace; }
+.workspace-stage-label { display: block; margin-top: 5px; font-weight: 600; }
+.workspace-stage.is-current { border-color: #5eead4; background: #f0fdfa; color: #134e4a; }
+.workspace-stage.is-viewing { border: 2px solid var(--workspace-blue); box-shadow: 0 0 0 2px #dbeafe; }
+.workspace-here, .workspace-viewing { display: inline-block; margin-top: 5px; border-radius: 4px; padding: 2px 4px; font-size: 12px; font-weight: 600; }
+.workspace-here { background: var(--workspace-teal); color: #fff; }
+.workspace-viewing { background: #dbeafe; color: #1d4ed8; }
+.workspace-freshness { margin: 12px 0 0; color: #64748b; font-size: 12px; }
+.workspace-inspector { min-width: 0; overflow-y: auto; }
+.workspace-viewing-label { font-size: 12px; color: #2563eb; font-weight: 600; }
+@media (min-width: 1024px) { #workspace-map-host { display: block; flex: 0 0 360px; border-right: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { #workspace-map-host { flex-basis: 430px; } .workspace-map { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 1023px) { #workspace-map-host { display: block; border-bottom: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }

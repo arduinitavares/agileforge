@@ -44,7 +44,7 @@ py-modules = ["agile_sqlmodel", "api"]
 [tool.setuptools.package-data]
 "adapters.adk.prompts" = ["*.txt"]
 config = ["*.yaml"]
-frontend = ["*.html", "*.js"]
+frontend = ["*.html", "*.js", "*.css"]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -25,6 +25,8 @@ def test_frontend_assets_are_available_as_package_resources() -> None:
     assert frontend_root.joinpath("project.html").is_file()
     assert frontend_root.joinpath("app.js").is_file()
     assert frontend_root.joinpath("project.js").is_file()
+    assert frontend_root.joinpath("lifecycle-workspace.js").is_file()
+    assert frontend_root.joinpath("lifecycle-workspace.css").is_file()
 
 
 def test_dashboard_mount_is_independent_of_process_cwd(
