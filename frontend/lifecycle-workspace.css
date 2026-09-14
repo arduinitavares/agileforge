@@ -1,26 +1,29 @@
 /* frontend/lifecycle-workspace.css */
 :root { --workspace-teal: #0f766e; --workspace-blue: #2563eb; }
-.workspace-shell { min-height: 0; }
-#workspace-map-host { overflow-y: auto; background: #f5f4f1; }
+.workspace-shell { min-height: 0; height: 100%; }
+#workspace-map-host { overflow: hidden; background: #f5f4f1; }
 .lifecycle-workspace { padding: 12px; font-family: Inter, sans-serif; }
 .workspace-stage-group + .workspace-stage-group { margin-top: 14px; }
 .workspace-group-label { margin: 0 0 7px; color: #64748b; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .workspace-map { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.workspace-stage { min-height: 68px; border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; color: #334155; padding: 8px; text-align: left; position: relative; font-size: 14px; line-height: 1.25; }
+.workspace-stage { min-width: 0; min-height: 62px; overflow-wrap: anywhere; border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; color: #334155; padding: 7px; text-align: left; position: relative; font-size: 14px; line-height: 1.2; }
 .workspace-stage:hover { border-color: #94a3b8; }
 .workspace-stage:focus-visible, .workspace-tab:focus-visible { outline: 2px solid var(--workspace-blue); outline-offset: 2px; }
 .workspace-stage-number { display: block; color: #64748b; font: 600 12px/1.2 ui-monospace, monospace; }
-.workspace-stage-label { display: block; margin-top: 5px; font-weight: 600; }
+.workspace-stage-label { display: block; margin-top: 4px; font-weight: 600; }
 .workspace-stage.is-current { border-color: #5eead4; background: #f0fdfa; color: #134e4a; }
 .workspace-stage.is-viewing { border: 2px solid var(--workspace-blue); box-shadow: 0 0 0 2px #dbeafe; }
-.workspace-here, .workspace-viewing { display: inline-block; margin-top: 5px; border-radius: 4px; padding: 2px 4px; font-size: 12px; font-weight: 600; }
+.workspace-here, .workspace-viewing { display: inline-block; margin-top: 4px; border-radius: 4px; padding: 2px 4px; font-size: 12px; font-weight: 600; }
 .workspace-here { background: var(--workspace-teal); color: #fff; }
 .workspace-viewing { background: #dbeafe; color: #1d4ed8; }
-.workspace-freshness { margin: 12px 0 0; color: #64748b; font-size: 12px; }
-.workspace-return-current { margin-top: 12px; border: 1px solid #99f6e4; border-radius: 8px; background: #f0fdfa; color: #115e59; padding: 6px 8px; font-size: 12px; font-weight: 600; }
-.workspace-inspector { min-width: 0; overflow-y: auto; }
+.workspace-freshness { margin: 10px 0 0; color: #64748b; font-size: 12px; }
+.workspace-return-current { margin-top: 10px; border: 1px solid #99f6e4; border-radius: 8px; background: #f0fdfa; color: #115e59; padding: 6px 8px; font-size: 12px; font-weight: 600; }
+.workspace-inspector { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .workspace-viewing-label { font-size: 12px; color: #2563eb; font-weight: 600; }
+.workspace-task-board { max-height: 360px; overflow-y: auto; }
+.workspace-task-row { min-height: 38px; }
+.workspace-tab[aria-selected="true"] { border-bottom: 2px solid var(--workspace-blue); color: #1d4ed8; font-weight: 700; }
 @media (min-width: 1024px) { #workspace-map-host { display: block; flex: 0 0 360px; border-right: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (min-width: 1280px) { #workspace-map-host { flex-basis: 430px; } .workspace-map { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 1023px) { #workspace-map-host { display: block; border-bottom: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1023px) { body { overflow-y: auto; } .workspace-shell { height: auto; overflow: visible; flex-direction: column; } #workspace-map-host { display: block; border-bottom: 1px solid #e2e8f0; } .workspace-map { grid-template-columns: repeat(3, minmax(0, 1fr)); } .workspace-inspector { overflow: visible; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }

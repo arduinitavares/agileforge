@@ -3506,6 +3506,15 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
     </section>`;
 }
 
+function workspaceSprintContextMarkup(sprintState) {
+    if (sprintState?.kind !== 'ready') return '<p class="text-xs text-slate-600">Sprint context unavailable.</p>';
+    const status = sprintState.data;
+    const sprint = status?.sprint;
+    if (!positiveInteger(sprint?.sprint_id)) return '<p class="text-xs text-slate-600">Sprint context unavailable.</p>';
+    const attempt = status?.current_retry?.ordinal ? `Attempt ${status.current_retry.ordinal}` : 'Original attempt';
+    return `<section class="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700" data-workspace-sprint-context="true"><strong>Sprint #${sprint.sprint_id}</strong> · ${escapeWorkflowText(status.effective_status || sprint.status || 'Unavailable')} · ${attempt}</section>`;
+}
+
 function workspaceScopedActionMarkup(action, label) {
     if (!action) return '';
     const locked = action.availability === 'locked';
@@ -3572,18 +3581,16 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         : (hasContinuation
             ? backlogFeedbackContinuationMarkup(backlogContinuation, backlogCorrection)
             : planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'));
-    const cards = [
-        backlogCard,
-        planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap'),
-        ...storyItems.map((item, index) => {
-            const pbiId = item?.binding?.instance_key?.startsWith('backlog_item:')
-                ? item.binding.instance_key.slice('backlog_item:'.length)
-                : (item?.binding?.instance_key || null);
-            const cardTitle = pbiId ? `Story review for ${pbiId}` : `Story review ${index + 1}`;
-            return planningReviewCardMarkup(cardTitle, item, 'story', index);
-        }),
-        planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
-    ].filter(Boolean);
+    const roadmapCard = planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap');
+    const storyReviewCards = storyItems.map((item, index) => {
+        const pbiId = item?.binding?.instance_key?.startsWith('backlog_item:')
+            ? item.binding.instance_key.slice('backlog_item:'.length)
+            : (item?.binding?.instance_key || null);
+        const cardTitle = pbiId ? `Story review for ${pbiId}` : `Story review ${index + 1}`;
+        return planningReviewCardMarkup(cardTitle, item, 'story', index);
+    }).filter(Boolean);
+    const sprintPlanCard = planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0);
+    const allReviewCards = [backlogCard, roadmapCard, ...storyReviewCards, sprintPlanCard].filter(Boolean);
 
     const stories = Array.isArray(context?.storyDependencies?.stories)
         ? context.storyDependencies.stories
@@ -3628,13 +3635,12 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const actionFor = (requestKind) => actionMarkup.filter((markup) => (
         markup.includes(`data-delivery-generation-action="${requestKind}"`)
     ));
-    const storyCards = cards.slice(2, -1);
     const stageSections = {
         5: [backlogCard, ...actionFor('record_backlog_draft')],
-        6: [cards[1], ...actionFor('record_roadmap_draft')],
-        7: [...storyCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
-        8: [cards.at(-1), candidateSection, sprintSection, ...actionFor('record_sprint_plan')],
-        9: [taskBoard, sprintSection],
+        6: [roadmapCard, ...actionFor('record_roadmap_draft')],
+        7: [...storyReviewCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
+        8: [sprintPlanCard, candidateSection, sprintSection, ...actionFor('record_sprint_plan')],
+        9: [taskBoard, workspaceSprintContextMarkup(context?.sprintStatus)],
         10: [workspaceCloseStoriesMarkup(context?.sprintStatus, actions)],
         11: [workspaceReviewClosureMarkup(context?.sprintStatus, actions)],
         12: [workspaceTriageMarkup(context?.sprintStatus, context.sprintHistory, actions)],
@@ -3644,7 +3650,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         ? stageSections[stageId]
         : [
             sprintSection,
-            cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
+            allReviewCards.length ? `<div class="grid gap-4">${allReviewCards.join('')}</div>` : '',
             readinessSection,
             dependencySection,
             candidateSection,
@@ -3699,6 +3705,7 @@ let workspaceSprintStatus = null;
 let workspaceTaskInventory = null;
 let workspaceReadGeneration = 0;
 let workspaceRenderScope = null;
+let workspaceFocusedStageId = null;
 const workspaceRenderMemory = new Map();
 
 function workspaceStageLabel(stageId) {
@@ -3736,30 +3743,37 @@ function captureWorkspaceRenderState() {
     const workbench = document.getElementById('stage-workbench');
     if (!workbench || workspaceRenderScope !== workspaceRenderKey()) return;
     const fields = {};
-    workbench.querySelectorAll('input, textarea, select').forEach((field, index) => {
-        const key = field.id || field.name || `field-${index}`;
+    workbench.querySelectorAll('input, textarea, select').forEach((field) => {
+        const key = field.id || field.name;
+        if (!key) return;
         fields[key] = field.type === 'checkbox' ? Boolean(field.checked) : field.value;
     });
+    const disclosures = {};
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure]').forEach((detail) => {
+        disclosures[detail.dataset.workspaceTaskCompletionDisclosure] = detail.open;
+    });
     const active = document.activeElement;
-    const activeKey = active && workbench.contains(active)
-        ? (active.id || active.name || null) : null;
-    workspaceRenderMemory.set(workspaceRenderScope, { fields, activeKey, scrollTop: workbench.scrollTop });
+    const activeKey = active && workbench.contains(active) ? active.id : null;
+    workspaceRenderMemory.set(workspaceRenderScope, { fields, disclosures, activeKey, scrollTop: workbench.scrollTop });
 }
 
 function restoreWorkspaceRenderState() {
     const workbench = document.getElementById('stage-workbench');
     const memory = workspaceRenderMemory.get(workspaceRenderKey());
     if (!workbench || !memory) return;
-    workbench.querySelectorAll('input, textarea, select').forEach((field, index) => {
-        const key = field.id || field.name || `field-${index}`;
-        if (!(key in memory.fields)) return;
+    workbench.querySelectorAll('input, textarea, select').forEach((field) => {
+        const key = field.id || field.name;
+        if (!key || !(key in memory.fields)) return;
         if (field.type === 'checkbox') field.checked = Boolean(memory.fields[key]);
         else field.value = memory.fields[key];
     });
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure]').forEach((detail) => {
+        const key = detail.dataset.workspaceTaskCompletionDisclosure;
+        if (Object.prototype.hasOwnProperty.call(memory.disclosures ?? {}, key)) detail.open = memory.disclosures[key];
+    });
     workbench.scrollTop = memory.scrollTop;
     if (memory.activeKey) {
-        const focused = document.getElementById(memory.activeKey)
-            ?? Array.from(workbench.querySelectorAll('input, textarea, select')).find((field) => field.name === memory.activeKey);
+        const focused = document.getElementById(memory.activeKey);
         if (focused && workbench.contains(focused)) focused.focus?.();
     }
 }
@@ -3768,6 +3782,8 @@ function selectWorkspaceStage(stageId, { pushHistory = false, scroll = false } =
     if (typeof AgileForgeWorkspace === 'undefined') return;
     if (!Number.isInteger(stageId) || !workspaceStageLabel(stageId)) return;
     captureWorkspaceRenderState();
+    const activeStage = Number(document.activeElement?.dataset?.workspaceStage);
+    workspaceFocusedStageId = Number.isInteger(activeStage) ? activeStage : null;
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), stageId };
     if (pushHistory) persistWorkspaceHistory();
     renderDashboard();
@@ -3794,6 +3810,22 @@ function renderWorkspaceMap() {
         onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
         onReturnToCurrent: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: true }),
     });
+    const focusStage = workspaceFocusedStageId;
+    workspaceFocusedStageId = null;
+    if (Number.isInteger(focusStage)) document.getElementById(`workspace-stage-${focusStage}`)?.focus?.();
+}
+
+function workspacePlannedChecksMarkup(task) {
+    let metadata = task?.metadata_json;
+    if (typeof metadata === 'string') {
+        try { metadata = JSON.parse(metadata); } catch (_error) { metadata = null; }
+    }
+    const planned = Array.isArray(metadata?.checklist_items) ? metadata.checklist_items.filter((item) => (
+        typeof item === 'string' && item.trim()
+    )) : [];
+    return planned.length
+        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Planned checks</p><ul class="mt-1 list-disc pl-4 text-xs text-slate-700">${planned.map((item) => `<li>${escapeWorkflowText(item)} <span class="text-slate-500">(pending result)</span></li>`).join('')}</ul></section>`
+        : '<p class="mt-2 text-xs text-slate-600">No planned checklist is retained for this Task.</p>';
 }
 
 function workspaceTaskDetailMarkup(snapshot) {
@@ -3808,25 +3840,40 @@ function workspaceTaskDetailMarkup(snapshot) {
     const completion = snapshot.data?.completion;
     const activity = Array.isArray(snapshot.data?.execution?.items) ? snapshot.data.execution.items : [];
     const tab = workspaceView?.tab ?? 'details';
+    const taskId = task.task_id;
     const details = `<p class="mt-1 text-sm font-semibold text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p><dl class="mt-2 grid gap-1 text-xs text-slate-600"><div>Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</div><div>Dependency condition: ${task.dependencies_satisfied === true ? 'satisfied' : (task.dependencies_satisfied === false ? 'not satisfied' : 'Unavailable')}</div><div>Effective Sprint status: ${escapeWorkflowText(snapshot.data?.effective_status || 'Unavailable')}</div><div>Scope: ${escapeWorkflowText(snapshot.data?.current_retry?.sprint_instance_key || `sprint:${task.sprint_id || snapshot.selection?.sprintId || 'Unavailable'}`)}</div></dl>`;
-    const checks = completion
-        ? `<p class="mt-2 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div>`
-        : '<p class="mt-2 text-xs text-slate-600">No persisted completion evidence.</p>';
+    const checks = `${workspacePlannedChecksMarkup(task)}${completion
+        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Persisted completion result</p><p class="mt-1 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div></section>`
+        : '<p class="mt-3 text-xs text-slate-600">No persisted completion result.</p>'}`;
     const activityMarkup = activity.length
         ? `<ul class="mt-2 space-y-2 text-xs text-slate-700">${activity.map((item) => `<li class="border-t border-slate-200 pt-2"><strong>${escapeWorkflowText(item.changed_at || 'Undated')}</strong> · ${escapeWorkflowText(item.old_status || 'Unknown')} → ${escapeWorkflowText(item.new_status || 'Unknown')}<br>${escapeWorkflowText(item.outcome_summary || 'No outcome summary recorded.')}</li>`).join('')}</ul>`
         : '<p class="mt-2 text-xs text-slate-600">Unavailable (no retained execution records).</p>';
     const content = tab === 'checks' ? checks : (tab === 'activity' ? activityMarkup : details);
-    return `<section class="rounded-md border border-slate-200 bg-slate-50 p-3" data-workspace-task-detail="${task.task_id}">
-        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Task #${task.task_id}</p>
-        <div class="mt-2 flex gap-3 border-b border-slate-200 text-xs"><button type="button" data-workspace-task-tab="details" aria-selected="${tab === 'details'}">Details</button><button type="button" data-workspace-task-tab="checks" aria-selected="${tab === 'checks'}">Checks</button><button type="button" data-workspace-task-tab="activity" aria-selected="${tab === 'activity'}">Activity</button></div>
-        ${content}
+    return `<section class="rounded-md border border-slate-200 bg-slate-50 p-3" data-workspace-task-detail="${taskId}">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Task #${taskId}</p>
+        <div class="mt-2 flex gap-3 border-b border-slate-200 text-xs" role="tablist" aria-label="Selected Task inspector"><button id="workspace-task-tab-${taskId}-details" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="details" aria-selected="${tab === 'details'}" aria-controls="workspace-task-panel-${taskId}">Details</button><button id="workspace-task-tab-${taskId}-checks" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="checks" aria-selected="${tab === 'checks'}" aria-controls="workspace-task-panel-${taskId}">Checks</button><button id="workspace-task-tab-${taskId}-activity" class="workspace-tab" type="button" role="tab" data-workspace-task-tab="activity" aria-selected="${tab === 'activity'}" aria-controls="workspace-task-panel-${taskId}">Activity</button></div>
+        <div id="workspace-task-panel-${taskId}" class="mt-2" role="tabpanel" aria-labelledby="workspace-task-tab-${taskId}-${tab}">${content}</div>
         ${snapshot.kind === 'stale' ? `<p class="mt-2 text-xs text-amber-800">Manual refresh failed; showing last confirmed detail. ${escapeWorkflowText(snapshot.error || '')}</p>` : ''}
     </section>`;
 }
 
 function workspaceTaskCompletionForm(row) {
-    if (!row.action) return '';
-    return `<form class="mt-2 grid gap-2 rounded border border-teal-200 bg-teal-50 p-2 text-xs" data-workspace-task-completion="true" data-workspace-task-id="${row.task.task_id}" data-workspace-action-node="${escapeWorkflowText(row.action.node_id)}" data-workspace-action-instance="${escapeWorkflowText(row.action.instance_key)}"><label>Outcome summary<textarea required name="outcome_summary" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Artifact references (one per line)<textarea required name="artifact_refs" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Acceptance result<select required name="acceptance_result" class="mt-1 w-full rounded border-slate-300"><option value="fully_met">Fully met</option><option value="partially_met">Partially met</option></select></label><label>Checklist evidence (criterion: result, one per line)<textarea required name="checklist_result" class="mt-1 w-full rounded border-slate-300"></textarea></label><button type="submit" class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">Record Task completion</button><p data-workspace-task-completion-status="true" hidden></p></form>`;
+    if (!row?.action) return '';
+    const taskId = row.task.task_id;
+    return `<details class="mt-3 rounded border border-teal-200 bg-teal-50 p-2" data-workspace-task-completion-disclosure="${taskId}"><summary class="cursor-pointer text-xs font-semibold text-teal-900">Record completion for Task #${taskId}</summary><form class="mt-2 grid gap-2 text-xs" data-workspace-task-completion="true" data-workspace-task-id="${taskId}" data-workspace-action-node="${escapeWorkflowText(row.action.node_id)}" data-workspace-action-instance="${escapeWorkflowText(row.action.instance_key)}"><label>Outcome summary<textarea required id="workspace-task-${taskId}-outcome" name="outcome_summary" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Artifact references (one per line)<textarea required id="workspace-task-${taskId}-artifacts" name="artifact_refs" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Acceptance result<select required id="workspace-task-${taskId}-acceptance" name="acceptance_result" class="mt-1 w-full rounded border-slate-300"><option value="fully_met">Fully met</option><option value="partially_met">Partially met</option></select></label><label>Checklist evidence (criterion: result, one per line)<textarea required id="workspace-task-${taskId}-checklist" name="checklist_result" class="mt-1 w-full rounded border-slate-300"></textarea></label><button type="submit" class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">Record Task completion</button><p data-workspace-task-completion-status="true" hidden></p></form></details>`;
+}
+
+function currentWorkspaceTaskRows() {
+    if (typeof AgileForgeWorkspace === 'undefined') return [];
+    const data = workspaceTaskInventory?.kind === 'ready'
+        ? workspaceTaskInventory.data
+        : (workspaceSprintStatus?.kind === 'ready' ? workspaceSprintStatus.data : lifecycleState.sprintStatus?.data);
+    return AgileForgeWorkspace.taskRows(data, lifecycleState.position, lifecycleState.actions);
+}
+
+function workspaceTaskInspectorMarkup(snapshot, rows = currentWorkspaceTaskRows()) {
+    const selected = rows.find((row) => row.task.task_id === snapshot?.selection?.taskId);
+    return `${workspaceTaskDetailMarkup(snapshot)}${workspaceTaskCompletionForm(selected)}`;
 }
 
 function workspaceTaskBoardMarkup(status, position, actions) {
@@ -3839,20 +3886,10 @@ function workspaceTaskBoardMarkup(status, position, actions) {
     const detail = workspaceTaskController?.snapshot?.() ?? null;
     const filtered = rows.filter((row) => workspaceView?.filter !== 'open' || row.task.status !== 'Done');
     const selectedSprint = workspaceView?.sprintId ?? data?.sprint?.sprint_id;
-    const sprintOptions = Array.isArray(lifecycleState.sprintHistory?.sprints)
-        ? lifecycleState.sprintHistory.sprints : [];
-    const selector = sprintOptions.length
-        ? `<label class="text-xs text-slate-600">Sprint <select data-workspace-sprint-select="true">${sprintOptions.map((sprint) => `<option value="${sprint.sprint_id}"${sprint.sprint_id === selectedSprint ? ' selected' : ''}>Sprint #${sprint.sprint_id} · ${escapeWorkflowText(sprint.status || 'Unknown')}</option>`).join('')}</select></label>`
-        : '';
-    const inventoryMessage = workspaceTaskInventory?.kind === 'error'
-        ? `<p class="text-xs text-amber-800">${escapeWorkflowText(workspaceTaskInventory.message)}</p>` : '';
-    return `<section class="space-y-3" data-workspace-task-board="true">
-        <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${detail?.lastConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(detail.lastConfirmedAt)}` : ''}</p></div>
-        ${selector}${inventoryMessage}
-        <div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div>
-        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="border-b border-slate-100"><td class="px-2 py-2"><button type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button>${workspaceTaskCompletionForm(row)}</td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div>
-        <div id="workspace-task-detail">${workspaceTaskDetailMarkup(detail)}</div>
-    </section>`;
+    const sprintOptions = Array.isArray(lifecycleState.sprintHistory?.sprints) ? lifecycleState.sprintHistory.sprints : [];
+    const selector = sprintOptions.length ? `<label class="text-xs text-slate-600">Sprint <select data-workspace-sprint-select="true">${sprintOptions.map((sprint) => `<option value="${sprint.sprint_id}"${sprint.sprint_id === selectedSprint ? ' selected' : ''}>Sprint #${sprint.sprint_id} · ${escapeWorkflowText(sprint.status || 'Unknown')}</option>`).join('')}</select></label>` : '';
+    const inventoryMessage = workspaceTaskInventory?.kind === 'error' ? `<p class="text-xs text-amber-800">${escapeWorkflowText(workspaceTaskInventory.message)}</p>` : '';
+    return `<section class="space-y-3" data-workspace-task-board="true"><div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${detail?.lastConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(detail.lastConfirmedAt)}` : ''}</p></div>${selector}${inventoryMessage}<div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div><div class="workspace-task-board"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="workspace-task-row border-b border-slate-100"><td class="px-2 py-2"><button id="workspace-task-row-${row.task.task_id}" type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div><div id="workspace-task-detail">${workspaceTaskInspectorMarkup(detail, rows)}</div></section>`;
 }
 
 function currentWorkspaceSprintId() {
@@ -3862,7 +3899,16 @@ function currentWorkspaceSprintId() {
         ?? null;
 }
 
-async function loadWorkspaceTaskInventory(sprintId) {
+function workspaceViewIsCurrentScope() {
+    const current = lifecycleState.sprintStatus?.data;
+    const selected = workspaceSprintStatus?.kind === 'ready' ? workspaceSprintStatus.data : current;
+    if (!positiveInteger(current?.sprint?.sprint_id) || selected?.sprint?.sprint_id !== current.sprint.sprint_id) return false;
+    const currentRetry = current.current_retry?.retry_attempt_id ?? null;
+    const selectedRetry = selected.current_retry?.retry_attempt_id ?? null;
+    return currentRetry === selectedRetry;
+}
+
+async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
     if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
     const generation = ++workspaceReadGeneration;
     workspaceTaskInventory = { kind: 'loading', sprintId };
@@ -3879,7 +3925,28 @@ async function loadWorkspaceTaskInventory(sprintId) {
         if (generation !== workspaceReadGeneration) return;
         workspaceTaskInventory = { kind: 'error', sprintId, message: error.message || 'Task inventory could not be loaded.' };
     }
-    if (workspaceView?.stageId === 9 && currentWorkspaceSprintId() === sprintId) renderDashboard();
+    if (render && workspaceView?.stageId === 9 && currentWorkspaceSprintId() === sprintId) renderDashboard();
+}
+
+async function refreshWorkspaceInventoryProjection() {
+    const sprintId = currentWorkspaceSprintId();
+    if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
+    const currentSprintId = lifecycleState.sprintStatus?.data?.sprint?.sprint_id;
+    if (workspaceView?.sprintId && sprintId !== currentSprintId) {
+        try {
+            const response = await requestJson(`/api/projects/${selectedProjectId}/sprints/${sprintId}`);
+            const data = response?.data;
+            if (data?.project_id !== selectedProjectId || data?.sprint?.sprint_id !== sprintId) {
+                throw new Error('The selected Sprint response did not match this Project and Sprint.');
+            }
+            workspaceSprintStatus = { kind: 'ready', data };
+        } catch (error) {
+            workspaceSprintStatus = { kind: 'error', message: error.message || 'Selected Sprint could not be refreshed.' };
+        }
+    } else if (!workspaceView?.sprintId) {
+        workspaceSprintStatus = null;
+    }
+    await loadWorkspaceTaskInventory(sprintId, { render: false });
 }
 
 async function selectWorkspaceSprint(sprintId, { pushHistory = true } = {}) {
@@ -3920,7 +3987,7 @@ function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
     if (!workspaceTaskController) {
         workspaceTaskController = AgileForgeWorkspace.createController({
             requestJson,
-            onChange: (snapshot) => setMarkup('workspace-task-detail', workspaceTaskDetailMarkup(snapshot)),
+            onChange: (snapshot) => setMarkup('workspace-task-detail', workspaceTaskInspectorMarkup(snapshot)),
         });
     }
     workspaceTaskController.select({ projectId: selectedProjectId, sprintId, taskId, scopeKey })
@@ -3928,6 +3995,7 @@ function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
 }
 
 function workspaceTaskCompletionBinding(form) {
+    if (!workspaceViewIsCurrentScope()) return null;
     const taskId = Number.parseInt(form?.dataset?.workspaceTaskId ?? '', 10);
     const rows = typeof AgileForgeWorkspace === 'undefined'
         ? []
@@ -3947,6 +4015,8 @@ function workspaceTaskCompletionBinding(form) {
         && item?.node_id === action?.node_id
         && item?.instance_key === action?.instance_key
         && item?.category === 'available'
+        && typeof item?.decision_fingerprint === 'string'
+        && item.decision_fingerprint.trim()
     ));
     if (decision.length !== 1 || !action
         || form.dataset.workspaceActionNode !== action.node_id
@@ -3955,6 +4025,7 @@ function workspaceTaskCompletionBinding(form) {
 }
 
 function workspaceScopedActionBinding(button) {
+    if (!workspaceViewIsCurrentScope()) return null;
     const requestKind = button?.dataset?.directAction;
     const action = captureDeliveryActionBinding(lifecycleState, button, requestKind);
     const decisions = (lifecycleState.position?.decisions ?? []).filter((decision) => (
@@ -4428,7 +4499,7 @@ function renderDashboard() {
     captureWorkspaceRenderState();
     ensureWorkspaceView();
     const workspaceState = workspaceSprintStatus?.kind === 'ready'
-        ? { ...lifecycleState, sprintStatus: workspaceSprintStatus }
+        ? { ...lifecycleState, sprintStatus: workspaceSprintStatus, actions: workspaceViewIsCurrentScope() ? lifecycleState.actions : [] }
         : lifecycleState;
     const project = lifecycleState.project ?? {};
     setText('project-page-title', project.name || `Project ${selectedProjectId}`);
@@ -4728,6 +4799,8 @@ async function loadDashboard() {
         lastSuccessfulDashboardLoadSequence = sequence;
         lastDashboardConfirmedAt = new Date().toISOString();
         setText('dashboard-refresh-time', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
+        await refreshWorkspaceInventoryProjection();
+        if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         reconcileWorkspaceSelection();
         const awaitingConfirmation = Boolean(
             (activeBacklogCorrectionMutation !== null
@@ -7246,6 +7319,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (seededWorkspace && typeof AgileForgeWorkspace !== 'undefined') {
         workspaceView = { ...AgileForgeWorkspace.createView(), ...seededWorkspace };
     }
+    setText('dashboard-refresh-time', 'Loading lifecycle; manual refresh required');
+    renderWorkspaceMap();
     window.addEventListener('popstate', (event) => {
         const restored = event.state?.agileForgeWorkspace;
         if (!restored || typeof AgileForgeWorkspace === 'undefined') return;

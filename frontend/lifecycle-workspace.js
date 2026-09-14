@@ -59,6 +59,8 @@ const AgileForgeWorkspace = (() => {
             && decision?.category === 'available'
             && ['NEXT_TASK_READY', 'IN_PROGRESS_TASK_REQUIRED'].includes(decision?.reason_code)
             && decision?.instance_key === task.instance_key
+            && typeof decision?.decision_fingerprint === 'string'
+            && decision.decision_fingerprint.trim()
             && Array.isArray(decision?.fact_references)
             && decision.fact_references.some((reference) => (
                 reference?.fact_type === 'task'
@@ -72,6 +74,7 @@ const AgileForgeWorkspace = (() => {
             && action?.node_id === decisions[0].node_id
             && action?.instance_key === task.instance_key
             && action?.endpoint === 'sprint/task/complete'
+            && action?.availability !== 'locked'
         ));
         return matches.length === 1 ? { ...matches[0] } : null;
     }
@@ -224,14 +227,14 @@ const AgileForgeWorkspace = (() => {
         const cards = stages().map((stage) => {
             const viewing = view.stageId === stage.id;
             const here = current.has(stage.id);
-            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
+            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" id="workspace-stage-${stage.id}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
         });
         const returnMarkup = current.size && !current.has(view.stageId)
             ? '<button type="button" class="workspace-return-current" data-workspace-return-current="true">Return to current work</button>'
             : '';
         const freshness = lastConfirmedAt
             ? `Last confirmed ${escapeText(lastConfirmedAt)}; manual refresh required`
-            : 'Manual refresh required';
+            : 'Loading lifecycle; manual refresh required';
         return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace"><section class="workspace-stage-group" aria-label="Project framing"><p class="workspace-group-label">Project framing · 01–06</p><div class="workspace-map" role="list">${cards.slice(0, 6).join('')}</div></section><section class="workspace-stage-group" aria-label="Sprint delivery"><p class="workspace-group-label">Sprint delivery · 07–13</p><div class="workspace-map" role="list">${cards.slice(6).join('')}</div></section>${returnMarkup}<p class="workspace-freshness">${freshness}</p></section>`;
     }
 

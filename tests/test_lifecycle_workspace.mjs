@@ -53,7 +53,7 @@ test('task rows pair only exact advertised task actions and retain queued invent
     const fingerprint = 'sha256:task-14';
     const position = { decisions: [{
         node_id: 'execution.task.complete', instance_key: 'task:14', request_kind: 'complete_task',
-        category: 'available', recommendation_kind: 'required', reason_code: 'NEXT_TASK_READY',
+        category: 'available', recommendation_kind: 'required', reason_code: 'NEXT_TASK_READY', decision_fingerprint: 'decision-14',
         fact_references: [{ fact_type: 'task', fact_id: '14', fingerprint }],
     }] };
     const actions = [{ node_id: 'execution.task.complete', instance_key: 'task:14', request_kind: 'complete_task', endpoint: 'sprint/task/complete' }];
@@ -180,4 +180,14 @@ test('map mount preserves logical keyboard navigation and returns to graph curre
     assert.equal(buttons[7].focused, true);
     assert.deepEqual(selected, [8]);
     assert.deepEqual(returned, [9]);
+});
+
+
+test('locked or fingerprintless Task actions never become executable', () => {
+    const task = { task_id: 14, status: 'To Do', instance_key: 'task:14', fact_fingerprint: 'sha256:task-14', dependencies_satisfied: true };
+    const position = { decisions: [{ node_id: 'execution.task.complete', instance_key: 'task:14', request_kind: 'complete_task', category: 'available', recommendation_kind: 'required', reason_code: 'NEXT_TASK_READY', fact_references: [{ fact_type: 'task', fact_id: '14', fingerprint: task.fact_fingerprint }] }] };
+    const locked = [{ node_id: 'execution.task.complete', instance_key: 'task:14', request_kind: 'complete_task', endpoint: 'sprint/task/complete', availability: 'locked' }];
+    assert.equal(api().taskRows({ tasks: [task] }, position, locked)[0].action, null);
+    position.decisions[0].decision_fingerprint = 'decision-14';
+    assert.equal(api().taskRows({ tasks: [task] }, position, locked)[0].action, null);
 });

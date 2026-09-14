@@ -4285,3 +4285,78 @@ test('workspace delivery subviews keep Story closure, Sprint review, and triage 
     assert.match(triage, /Attempt 2.*active/);
     assert.match(triage, /Retained retry triage/);
 });
+
+
+test('stage-scoped delivery reviews do not shift when neighboring reviews are absent', () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        planningReviewCardMarkup = (title, review) => review?.show ? '<article>' + title + '</article>' : '';
+        backlogFeedbackContinuationProjection = () => ({ kind: 'none' });
+        backlogCorrectionActionBinding = () => null;
+        storyReadinessMarkup = () => '';
+        storyDependencyReviewMarkup = () => '';
+        sprintCandidatePoolMarkup = () => '';
+        sprintStatusMarkup = () => '';
+        workspaceTaskBoardMarkup = () => '';
+        workspaceCloseStoriesMarkup = () => '';
+        workspaceReviewClosureMarkup = () => '';
+        workspaceTriageMarkup = () => '';
+        sprintExecutionHistoryMarkup = () => '';
+        deliveryGenerationActionMarkup = () => '';
+        workspaceView = { stageId: 7 };
+    `, context);
+    context.reviewFixture = { backlog: {}, roadmap: {}, stories: { items: [{ show: true, binding: { instance_key: 'backlog_item:PBI-1' } }] }, sprintPlan: {} };
+    const storyOnly = vm.runInContext('deliveryPanelMarkup({}, reviewFixture, [], {})', context);
+    assert.match(storyOnly, /Story review for PBI-1/);
+    assert.doesNotMatch(storyOnly, /Sprint plan review/);
+    vm.runInContext('workspaceView = { stageId: 6 }', context);
+    context.reviewFixture = { backlog: {}, roadmap: { show: true }, stories: { items: [] }, sprintPlan: {} };
+    const roadmapOnly = vm.runInContext('deliveryPanelMarkup({}, reviewFixture, [], {})', context);
+    assert.match(roadmapOnly, /Roadmap review/);
+    vm.runInContext('workspaceView = { stageId: 7 }', context);
+    context.reviewFixture = { backlog: {}, roadmap: {}, stories: { items: [{ show: true, binding: { instance_key: 'backlog_item:PBI-1' } }, { show: true, binding: { instance_key: 'backlog_item:PBI-2' } }] }, sprintPlan: {} };
+    const stories = vm.runInContext('deliveryPanelMarkup({}, reviewFixture, [], {})', context);
+    assert.match(stories, /Story review for PBI-1/);
+    assert.match(stories, /Story review for PBI-2/);
+});
+
+test('fresh inventory replaces a same-Sprint cache without clearing selected presentation state', async () => {
+    const context = loadFrontend();
+    context.inventoryResponse = { data: { project_id: 7, sprint_id: 31, count: 3, current_retry: null, effective_status: 'active', items: [
+        { task_id: 1, status: 'Done' }, { task_id: 2, status: 'To Do' }, { task_id: 3, status: 'To Do' },
+    ] } };
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 9, sprintId: 31, taskId: 2, tab: 'checks', filter: 'all', scopeKey: 'sprint:31' };
+        workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: { project_id: 7, sprint_id: 31, items: [{ task_id: 1, status: 'To Do' }, { task_id: 2, status: 'To Do' }, { task_id: 3, status: 'To Do' }] } };
+        requestJson = async () => inventoryResponse;
+    `, context);
+    await vm.runInContext('loadWorkspaceTaskInventory(31, { render: false })', context);
+    assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('workspaceTaskInventory.data.items.map((task) => task.status)', context))), ['Done', 'To Do', 'To Do']);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 2);
+    assert.equal(vm.runInContext('workspaceView.tab', context), 'checks');
+});
+
+test('historical Sprint scope fails closed for current mutation controls', () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        lifecycleState = { sprintStatus: { kind: 'ready', data: { sprint: { sprint_id: 31 }, current_retry: null } }, position: { decisions: [] }, actions: [] };
+        workspaceSprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 30 }, current_retry: null } };
+        workspaceView = { sprintId: 30, stageId: 10 };
+    `, context);
+    assert.equal(vm.runInContext('workspaceViewIsCurrentScope()', context), false);
+});
+
+
+test('selected Task disclosure uses subject-unique draft fields and separates planned checks', () => {
+    const context = loadFrontend();
+    context.readyRow = { task: { task_id: 3 }, action: { node_id: 'execution.task.complete', instance_key: 'task:3' } };
+    const form = vm.runInContext('workspaceTaskCompletionForm(readyRow)', context);
+    assert.match(form, /data-workspace-task-completion-disclosure="3"/);
+    assert.match(form, /id="workspace-task-3-outcome"/);
+    assert.match(form, /id="workspace-task-3-checklist"/);
+    context.plannedTask = { metadata_json: JSON.stringify({ checklist_items: ['Run focused tests'] }) };
+    const checks = vm.runInContext('workspacePlannedChecksMarkup(plannedTask)', context);
+    assert.match(checks, /Run focused tests/);
+    assert.match(checks, /pending result/);
+});

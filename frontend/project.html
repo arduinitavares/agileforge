@@ -36,7 +36,7 @@
     </script>
     <style>
         html { overflow-x: hidden; height: 100%; }
-        body { min-width: 0; min-height: 100%; display: flex; flex-direction: column; }
+        body { min-width: 0; height: 100%; overflow: hidden; display: flex; flex-direction: column; }
         .material-symbols-outlined { font-size: 18px; line-height: 1; vertical-align: middle; }
         .break-anywhere { overflow-wrap: anywhere; word-break: break-word; }
         dialog::backdrop { background: rgb(15 23 42 / 0.55); backdrop-filter: blur(2px); }
@@ -68,7 +68,7 @@
             </div>
         </div>
         <div class="flex items-center gap-2">
-            <span id="dashboard-refresh-time" class="hidden md:inline text-xs text-slate-500 font-mono">Live</span>
+            <span id="dashboard-refresh-time" class="hidden md:inline text-xs text-slate-500 font-mono">Loading lifecycle…</span>
             <button id="refresh-project" type="button" title="Refresh project"
                 class="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-wait disabled:opacity-50 transition-colors">
                 <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
@@ -265,7 +265,7 @@
         </nav>
 
         <!-- Pane 2: Center Stage Detail Canvas -->
-        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-[#f5f4f1] p-4 lg:p-6 space-y-4">
+        <main id="stage-workbench" class="workspace-inspector flex-1 min-w-0 bg-[#f5f4f1] p-4 lg:p-6 space-y-4" tabindex="-1">
             <!-- Hidden original elements preserved for test compatibility & binding -->
             <div id="lifecycle-stage-strip" class="hidden"></div>
             <div id="project-summary" class="hidden">
