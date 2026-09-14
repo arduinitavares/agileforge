@@ -4286,6 +4286,49 @@ test('workspace delivery subviews keep Story closure, Sprint review, and triage 
     assert.match(triage, /Retained retry triage/);
 });
 
+test('workspace Sprint planning and assessment keep review transitions in the review stage', () => {
+    const context = loadFrontend();
+    const active = acceptedSprintStatus();
+    active.sprint.status = 'active';
+    active.accepted_plan.status = 'active';
+    context.activeSprintContext = { sprintStatus: { kind: 'ready', data: active } };
+    context.reviewSprintAction = {
+        node_id: 'sprint.review', instance_key: 'sprint:31', endpoint: 'sprint/review',
+        request_kind: 'review_sprint', transport: 'semantic', availability: 'available',
+    };
+
+    vm.runInContext('workspaceView = { stageId: 8 }', context);
+    const planning = vm.runInContext(
+        'deliveryPanelMarkup({ decisions: [] }, {}, [reviewSprintAction], activeSprintContext)',
+        context,
+    );
+    assert.match(planning, /data-sprint-status="active"/);
+    assert.match(planning, /data-sprint-plan-evidence="true"/);
+    assert.match(planning, /data-stage-jump="Execution"/);
+    assert.doesNotMatch(planning, /All Sprint Tasks Verified/);
+    assert.doesNotMatch(planning, /data-sprint-review-transition="true"/);
+    assert.doesNotMatch(planning, /data-direct-action="review_sprint"/);
+
+    vm.runInContext('workspaceView = { stageId: 13 }', context);
+    const assessment = vm.runInContext(
+        'deliveryPanelMarkup({ decisions: [] }, {}, [reviewSprintAction], activeSprintContext)',
+        context,
+    );
+    assert.match(assessment, /data-sprint-status="active"/);
+    assert.match(assessment, /data-sprint-plan-evidence="true"/);
+    assert.doesNotMatch(assessment, /All Sprint Tasks Verified/);
+    assert.doesNotMatch(assessment, /data-sprint-review-transition="true"/);
+    assert.doesNotMatch(assessment, /data-direct-action="review_sprint"/);
+
+    vm.runInContext('workspaceView = { stageId: 11 }', context);
+    const review = vm.runInContext(
+        'deliveryPanelMarkup({ decisions: [] }, {}, [reviewSprintAction], activeSprintContext)',
+        context,
+    );
+    assert.match(review, /data-workspace-review-close="true"/);
+    assert.match(review, /data-direct-action="review_sprint"/);
+});
+
 
 test('stage-scoped delivery reviews do not shift when neighboring reviews are absent', () => {
     const context = loadFrontend();
@@ -4351,6 +4394,53 @@ test('Sprint-plan refresh does not request a Task inventory outside Develop and 
         JSON.parse(vm.runInContext('JSON.stringify(__inventoryReads)', context)),
         [],
     );
+});
+
+test('Sprint-plan refresh updates a previously loaded Task inventory before returning to the board', async () => {
+    const context = loadFrontend();
+    context.AgileForgeWorkspace = {
+        taskRows(data) { return (data?.tasks ?? []).map((task) => ({ task, action: null, availability: task.status })); },
+        taskCounts(tasks) {
+            const done = tasks.filter((task) => task.status === 'Done').length;
+            return { total: tasks.length, done, remaining: tasks.length - done };
+        },
+    };
+    context.refreshedInventory = { data: {
+        project_id: 7,
+        sprint_id: 31,
+        items: [{ task_id: 1, status: 'Done' }, { task_id: 2, status: 'To Do' }],
+    } };
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 8, sprintId: 31, taskId: 2, tab: 'details', filter: 'all', scopeKey: 'retry:10:sprint:31' };
+        lifecycleState = { position: { decisions: [] }, actions: [], sprintStatus: { kind: 'ready', data: {
+            sprint: { sprint_id: 31, status: 'active' }, current_retry: { retry_attempt_id: 10 }, effective_status: 'active',
+        } } };
+        workspaceSprintStatus = { kind: 'ready', data: {
+            sprint: { sprint_id: 31, status: 'active' }, current_retry: { retry_attempt_id: 9 }, effective_status: 'planned',
+        } };
+        workspaceTaskInventory = {
+            kind: 'ready', sprintId: 31,
+            data: { project_id: 7, sprint_id: 31, items: [{ task_id: 1, status: 'To Do' }, { task_id: 2, status: 'To Do' }] },
+        };
+        requestJson = async () => refreshedInventory;
+    `, context);
+
+    await vm.runInContext('refreshWorkspaceInventoryProjection()', context);
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(vm.runInContext('workspaceTaskInventory.data.items.map((task) => task.status)', context))),
+        ['Done', 'To Do'],
+    );
+    assert.equal(vm.runInContext('workspaceSprintStatus.data.current_retry.retry_attempt_id', context), 10);
+    assert.equal(vm.runInContext('workspaceSprintStatus.data.effective_status', context), 'active');
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 2);
+    assert.equal(vm.runInContext('workspaceView.scopeKey', context), 'retry:10:sprint:31');
+    vm.runInContext('workspaceView = { ...workspaceView, stageId: 9 }', context);
+    const board = vm.runInContext(
+        'workspaceTaskBoardMarkup(lifecycleState.sprintStatus, lifecycleState.position, lifecycleState.actions)',
+        context,
+    );
+    assert.match(board, /1\/2 Done/);
 });
 
 test('historical Sprint scope fails closed for current mutation controls', () => {

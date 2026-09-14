@@ -3407,7 +3407,13 @@ function sprintExecutionHistoryMarkup(history, status) {
     </details>`;
 }
 
-function sprintStatusMarkup(sprintState, position = {}, actions = [], context = {}) {
+function sprintStatusMarkup(
+    sprintState,
+    position = {},
+    actions = [],
+    context = {},
+    { includeExecution = true } = {},
+) {
     if (sprintState?.kind === 'absent') return '';
     if (sprintState?.kind !== 'ready') {
         return `<section role="alert" data-sprint-status-error="true" class="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800"><strong>Sprint status unavailable.</strong> Reload before starting or continuing Sprint work. Controls remain locked.</section>`;
@@ -3451,7 +3457,7 @@ function sprintStatusMarkup(sprintState, position = {}, actions = [], context = 
     </details>` : '';
 
     let executionMarkup = '';
-    if (effectiveStatus === 'active') {
+    if (includeExecution && effectiveStatus === 'active') {
         const execution = sprintExecutionProjection(status, position, actions);
         if (execution.kind === 'error') {
             executionMarkup = '<p role="alert" class="mt-4 text-sm text-red-800">Current execution action projection is inconsistent. Task controls remain locked.</p>';
@@ -3513,6 +3519,17 @@ function workspaceSprintContextMarkup(sprintState) {
     if (!positiveInteger(sprint?.sprint_id)) return '<p class="text-xs text-slate-600">Sprint context unavailable.</p>';
     const attempt = status?.current_retry?.ordinal ? `Attempt ${status.current_retry.ordinal}` : 'Original attempt';
     return `<section class="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700" data-workspace-sprint-context="true"><strong>Sprint #${sprint.sprint_id}</strong> · ${escapeWorkflowText(status.effective_status || sprint.status || 'Unavailable')} · ${attempt}</section>`;
+}
+
+function workspaceSprintBoardNavigationMarkup(sprintState) {
+    if (sprintState?.kind !== 'ready') return '';
+    const status = sprintState.data;
+    const effectiveStatus = status?.effective_status ?? status?.sprint?.status;
+    if (effectiveStatus !== 'active') return '';
+    return `<button type="button" data-stage-jump="Execution" class="${BUTTON_SECONDARY}">
+        <span class="material-symbols-outlined" aria-hidden="true">view_kanban</span>
+        <span>Inspect Sprint board</span>
+    </button>`;
 }
 
 function workspaceScopedActionMarkup(action, label) {
@@ -3617,6 +3634,14 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         actions,
         context,
     );
+    const workspaceSprintSection = sprintStatusMarkup(
+        context?.sprintStatus,
+        position,
+        actions,
+        context,
+        { includeExecution: false },
+    );
+    const sprintBoardNavigation = workspaceSprintBoardNavigationMarkup(context?.sprintStatus);
     const taskBoard = workspaceTaskBoardMarkup(context?.sprintStatus, position, actions);
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) => (
@@ -3639,12 +3664,12 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         5: [backlogCard, ...actionFor('record_backlog_draft')],
         6: [roadmapCard, ...actionFor('record_roadmap_draft')],
         7: [...storyReviewCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
-        8: [sprintPlanCard, candidateSection, sprintSection, ...actionFor('record_sprint_plan')],
+        8: [sprintPlanCard, candidateSection, workspaceSprintSection, sprintBoardNavigation, ...actionFor('record_sprint_plan')],
         9: [taskBoard, workspaceSprintContextMarkup(context?.sprintStatus)],
         10: [workspaceCloseStoriesMarkup(context?.sprintStatus, actions)],
         11: [workspaceReviewClosureMarkup(context?.sprintStatus, actions)],
         12: [workspaceTriageMarkup(context?.sprintStatus, context.sprintHistory, actions)],
-        13: [candidateSection, sprintExecutionHistoryMarkup(context.sprintHistory, context?.sprintStatus?.data), sprintSection],
+        13: [candidateSection, sprintExecutionHistoryMarkup(context.sprintHistory, context?.sprintStatus?.data), workspaceSprintSection],
     };
     const sections = (stageId && stageSections[stageId]
         ? stageSections[stageId]
@@ -3988,7 +4013,7 @@ async function loadWorkspaceTaskInventory(sprintId, { render = true } = {}) {
 }
 
 async function refreshWorkspaceInventoryProjection() {
-    if (workspaceView?.stageId !== 9) return;
+    if (workspaceView?.stageId !== 9 && !workspaceTaskInventory) return;
     const sprintId = currentWorkspaceSprintId();
     if (!positiveInteger(sprintId) || !positiveInteger(selectedProjectId)) return;
     const currentSprintId = lifecycleState.sprintStatus?.data?.sprint?.sprint_id;
@@ -4003,6 +4028,10 @@ async function refreshWorkspaceInventoryProjection() {
         } catch (error) {
             workspaceSprintStatus = { kind: 'error', message: error.message || 'Selected Sprint could not be refreshed.' };
         }
+    } else if (workspaceView?.sprintId && sprintId === currentSprintId) {
+        workspaceSprintStatus = lifecycleState.sprintStatus?.kind === 'ready'
+            ? lifecycleState.sprintStatus
+            : null;
     } else if (!workspaceView?.sprintId) {
         workspaceSprintStatus = null;
     }
