@@ -3982,6 +3982,15 @@ function currentWorkspaceSprintId() {
         ?? null;
 }
 
+function workspaceScopeKeyForStatus(status) {
+    const sprintId = status?.sprint?.sprint_id;
+    if (!positiveInteger(sprintId)) return null;
+    const retry = reviewObject(status?.current_retry);
+    return positiveInteger(retry?.retry_attempt_id)
+        ? `retry:${retry.retry_attempt_id}:sprint:${sprintId}`
+        : `sprint:${sprintId}`;
+}
+
 function workspaceViewIsCurrentScope() {
     const current = lifecycleState.sprintStatus?.data;
     const selected = workspaceSprintStatus?.kind === 'ready' ? workspaceSprintStatus.data : current;
@@ -4067,9 +4076,8 @@ function selectWorkspaceTask(taskId, { pushHistory = true, focusRow = false } = 
         : lifecycleState.sprintStatus?.data;
     const sprintId = status?.sprint?.sprint_id;
     if (!positiveInteger(taskId) || !positiveInteger(sprintId) || typeof AgileForgeWorkspace === 'undefined') return;
-    const retry = reviewObject(status?.current_retry);
-    const scopeKey = retry?.retry_attempt_id
-        ? `retry:${retry.retry_attempt_id}:sprint:${sprintId}` : `sprint:${sprintId}`;
+    const scopeKey = workspaceScopeKeyForStatus(status);
+    if (!scopeKey) return;
     captureWorkspaceRenderState();
     workspaceTaskFocusIntent = focusRow ? taskId : null;
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
@@ -4234,10 +4242,26 @@ function reconcileWorkspaceSelection() {
     const selectedStatus = workspaceSprintStatus?.kind === 'ready'
         && workspaceSprintStatus.data?.sprint?.sprint_id === workspaceView.sprintId
         ? workspaceSprintStatus.data : lifecycleState.sprintStatus?.data;
-    workspaceView = AgileForgeWorkspace.reconcileView(workspaceView, selectedStatus);
+    const nextScopeKey = workspaceScopeKeyForStatus(selectedStatus);
+    const scopeChanged = positiveInteger(workspaceView.taskId)
+        && nextScopeKey !== null
+        && workspaceView.scopeKey !== nextScopeKey;
+    workspaceView = AgileForgeWorkspace.reconcileView(
+        scopeChanged ? { ...workspaceView, scopeKey: nextScopeKey } : workspaceView,
+        selectedStatus,
+    );
     if (!workspaceTaskController) return;
     if (workspaceView.taskAvailability === 'unavailable') {
         workspaceTaskController.unavailable('Task is unavailable in the latest retained Sprint scope.');
+        return;
+    }
+    if (scopeChanged) {
+        workspaceTaskController.select({
+            projectId: selectedProjectId,
+            sprintId: workspaceView.sprintId,
+            taskId: workspaceView.taskId,
+            scopeKey: workspaceView.scopeKey,
+        }).catch((error) => setProjectError(error.message));
         return;
     }
     workspaceTaskController.refresh().catch((error) => setProjectError(error.message));

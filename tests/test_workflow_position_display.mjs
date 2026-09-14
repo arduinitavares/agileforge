@@ -4443,6 +4443,65 @@ test('Sprint-plan refresh updates a previously loaded Task inventory before retu
     assert.match(board, /1\/2 Done/);
 });
 
+test('off-board refresh reselects a retained Task under the current retry scope', async () => {
+    const context = loadFrontend();
+    const workspaceSourcePath = path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js');
+    vm.runInContext(fs.readFileSync(workspaceSourcePath, 'utf8'), context, { filename: workspaceSourcePath });
+    context.__currentRetry = 9;
+    context.__detailRequests = [];
+    vm.runInContext(`
+        requestJson = async (url) => {
+            __detailRequests.push(url);
+            if (url.endsWith('/tasks')) {
+                return { data: {
+                    project_id: 7, sprint_id: 31,
+                    items: [{ task_id: 2, sprint_id: 31, status: 'To Do' }],
+                } };
+            }
+            return { data: {
+                project_id: 7,
+                task: { task_id: 2, sprint_id: 31 },
+                current_retry: { retry_attempt_id: __currentRetry },
+            } };
+        };
+        selectedProjectId = 7;
+        workspaceView = {
+            stageId: 8, sprintId: 31, taskId: 2, tab: 'checks', filter: 'open',
+            scopeKey: 'retry:9:sprint:31', drafts: { outcome: 'Retained draft' },
+        };
+        workspaceSprintStatus = { kind: 'ready', data: {
+            project_id: 7, sprint: { sprint_id: 31, status: 'active' },
+            current_retry: { retry_attempt_id: 9 }, effective_status: 'active',
+            tasks: [{ task_id: 2, sprint_id: 31, status: 'To Do' }],
+        } };
+        lifecycleState = { position: { decisions: [] }, actions: [], sprintStatus: { kind: 'ready', data: {
+            project_id: 7, sprint: { sprint_id: 31, status: 'active' },
+            current_retry: { retry_attempt_id: 10 }, effective_status: 'active',
+            tasks: [{ task_id: 2, sprint_id: 31, status: 'To Do' }],
+        } } };
+        workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: {
+            project_id: 7, sprint_id: 31,
+            items: [{ task_id: 2, sprint_id: 31, status: 'To Do' }],
+        } };
+        workspaceTaskController = AgileForgeWorkspace.createController({ requestJson, onChange: () => {} });
+    `, context);
+
+    await vm.runInContext("workspaceTaskController.select({ projectId: 7, sprintId: 31, taskId: 2, scopeKey: 'retry:9:sprint:31' })", context);
+    vm.runInContext('__currentRetry = 10', context);
+    await vm.runInContext('refreshWorkspaceInventoryProjection()', context);
+    vm.runInContext('reconcileWorkspaceSelection()', context);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 8);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 2);
+    assert.equal(vm.runInContext('workspaceView.tab', context), 'checks');
+    assert.equal(vm.runInContext('workspaceView.filter', context), 'open');
+    assert.equal(vm.runInContext('workspaceView.drafts.outcome', context), 'Retained draft');
+    assert.equal(vm.runInContext('workspaceView.scopeKey', context), 'retry:10:sprint:31');
+    assert.equal(vm.runInContext('workspaceTaskController.snapshot().kind', context), 'ready');
+    assert.equal(vm.runInContext('workspaceTaskController.snapshot().selection.scopeKey', context), 'retry:10:sprint:31');
+});
+
 test('historical Sprint scope fails closed for current mutation controls', () => {
     const context = loadFrontend();
     vm.runInContext(`
