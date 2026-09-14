@@ -781,7 +781,7 @@ function reviewControlsMarkup(scope, action) {
 }
 
 function interviewFormMarkup(scope, questions, transcript, label) {
-    return `<div class="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,28rem)]">
+    return `<div class="interview-form-layout grid min-w-0 gap-6">
         <div class="min-w-0">
             <p class="mb-3 text-sm font-semibold">Focused questions</p>
             ${questions.length > 0
