@@ -4947,6 +4947,22 @@ test('late historical Sprint responses cannot replace a newer selected scope', a
     assert.equal(vm.runInContext('workspaceView.taskId', context), 4);
 });
 
+test('historical Sprint selection keeps project planning actions reachable and locks only Sprint inspectors', () => {
+    const context = loadFrontend();
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 5, sprintId: 30, taskId: 3, scopeKey: 'sprint:30' };
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 } } };
+        workspaceSprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 30 } } };
+        lifecycleState.actions = [{ request_kind: 'record_backlog_draft', node_id: 'planning.backlog', endpoint: 'backlog/draft' }];
+        deliveryPanelMarkup = (_position, _reviews, actions) => { globalThis.__visibleActions = actions; return ''; };
+    `, context);
+    for (const stageId of [5, 7, 10, 11]) {
+        vm.runInContext(`workspaceView.stageId = ${stageId}; renderDashboard();`, context);
+        assert.equal(vm.runInContext('__visibleActions.length', context), stageId < 8 ? 1 : 0, `Stage ${stageId}`);
+    }
+});
+
 function workspaceFocusHarness() {
     const body = { id: 'body' };
     const document = {

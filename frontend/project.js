@@ -4738,10 +4738,12 @@ function renderDashboard() {
     captureWorkspaceRenderState();
     ensureWorkspaceView();
     const selectedSprintState = workspaceSelectedSprintState();
+    const usesSprintScope = workspaceView?.stageId >= 8;
     const workspaceState = {
         ...lifecycleState,
         sprintStatus: selectedSprintState,
-        actions: workspaceViewIsCurrentScope() || !positiveInteger(workspaceView?.sprintId) ? lifecycleState.actions : [],
+        actions: !usesSprintScope || workspaceViewIsCurrentScope() || !positiveInteger(workspaceView?.sprintId)
+            ? lifecycleState.actions : [],
     };
     const project = lifecycleState.project ?? {};
     setText('project-page-title', project.name || `Project ${selectedProjectId}`);
