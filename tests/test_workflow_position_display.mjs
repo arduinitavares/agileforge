@@ -4555,6 +4555,189 @@ test('Story-close controls expose their exact advertised instance', () => {
     assert.match(markup, /Close Story · story:101/);
 });
 
+function workspaceScopedActionForm(requestKind, values = {}) {
+    return {
+        dataset: { workspaceScopedActionForm: requestKind },
+        elements: Object.fromEntries(Object.entries(values).map(([name, value]) => [
+            name,
+            { value },
+        ])),
+    };
+}
+
+test('workspace Story closure and triage disclosures collect the API-required semantic bodies', () => {
+    const context = loadFrontend();
+    context.storyAction = {
+        request_kind: 'close_story', instance_key: 'retry:101:story:101', node_id: 'execution.story.close', endpoint: 'story/close', transport: 'semantic',
+    };
+    context.triageAction = {
+        request_kind: 'record_post_sprint_triage', instance_key: 'retry:101:sprint:31', node_id: 'execution.sprint.triage', endpoint: 'sprint/triage', transport: 'semantic',
+    };
+    const storyMarkup = vm.runInContext('workspaceScopedActionMarkup(storyAction, "Close Story")', context);
+    const triageMarkup = vm.runInContext('workspaceScopedActionMarkup(triageAction, "Record Sprint triage")', context);
+    assert.match(storyMarkup, /Resolution/);
+    assert.match(storyMarkup, /Known gaps/);
+    assert.match(triageMarkup, /Learning or decision summary/);
+    assert.match(triageMarkup, /value="specification"/);
+    assert.doesNotMatch(triageMarkup, /<option value="none" selected/);
+
+    context.storyForm = workspaceScopedActionForm('close_story', {
+        resolution: 'Completed',
+        delivered: 'The retry-scoped Story is now complete.',
+        evidence: 'artifact://retry/101/story/101',
+        known_gaps: 'No known gaps.',
+    });
+    context.triageForm = workspaceScopedActionForm('record_post_sprint_triage', {
+        impact: 'backlog',
+        summary: 'Capture the later refinement in the backlog.',
+    });
+    assert.deepEqual(
+        JSON.parse(vm.runInContext('JSON.stringify(workspaceScopedActionFields(storyForm))', context)),
+        {
+            resolution: 'Completed',
+            delivered: 'The retry-scoped Story is now complete.',
+            evidence: 'artifact://retry/101/story/101',
+            known_gaps: 'No known gaps.',
+        },
+    );
+    assert.deepEqual(
+        JSON.parse(vm.runInContext('JSON.stringify(workspaceScopedActionFields(triageForm))', context)),
+        {
+            impact: 'backlog',
+            canonical_payload: { summary: 'Capture the later refinement in the backlog.' },
+        },
+    );
+    context.blankStoryForm = workspaceScopedActionForm('close_story', {
+        resolution: 'Completed', delivered: '', evidence: 'artifact://retry/101/story/101', known_gaps: 'No known gaps.',
+    });
+    context.blankTriageForm = workspaceScopedActionForm('record_post_sprint_triage', {
+        impact: '', summary: '   ',
+    });
+    assert.equal(vm.runInContext('workspaceScopedActionFields(blankStoryForm)', context), null);
+    assert.equal(vm.runInContext('workspaceScopedActionFields(blankTriageForm)', context), null);
+});
+
+function workspaceScopedSubmissionForm(action, values) {
+    const submit = { disabled: false };
+    const status = { hidden: true, textContent: '' };
+    return {
+        dataset: {
+            workspaceScopedActionForm: action.request_kind,
+            directAction: action.request_kind,
+            deliveryActionNode: action.node_id,
+            deliveryActionInstance: action.instance_key,
+            deliveryActionHasInstance: 'true',
+            deliveryActionEndpoint: action.endpoint,
+            deliveryActionTransport: action.transport,
+        },
+        elements: Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { value }])),
+        querySelector(selector) {
+            if (selector === 'button[type="submit"]') return submit;
+            if (selector === '[data-workspace-scoped-action-status]') return status;
+            return null;
+        },
+    };
+}
+
+test('workspace semantic disclosures submit only current nonblank Story and triage bodies', async () => {
+    const requests = [];
+    const context = loadFrontend(async (url, options = {}) => {
+        requests.push({ url, options });
+        return { ok: true, status: 200, text: async () => '{}' };
+    });
+    const storyAction = {
+        request_kind: 'close_story', instance_key: 'retry:101:story:101', node_id: 'execution.story.close', endpoint: 'story/close', transport: 'semantic',
+    };
+    const triageAction = {
+        request_kind: 'record_post_sprint_triage', instance_key: 'retry:101:sprint:31', node_id: 'execution.sprint.triage', endpoint: 'sprint/triage', transport: 'semantic',
+    };
+    context.storyForm = workspaceScopedSubmissionForm(storyAction, {
+        resolution: 'Completed', delivered: 'The retry-scoped Story is now complete.', evidence: 'artifact://retry/101/story/101', known_gaps: 'No known gaps.',
+    });
+    context.triageForm = workspaceScopedSubmissionForm(triageAction, {
+        impact: 'specification', summary: 'Update the accepted Specification before the next Sprint.',
+    });
+    context.blankForm = workspaceScopedSubmissionForm(storyAction, {
+        resolution: 'Completed', delivered: '', evidence: 'artifact://retry/101/story/101', known_gaps: 'No known gaps.',
+    });
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 10, sprintId: 31, taskId: null, tab: 'details', scopeKey: 'retry:101:sprint:31' };
+        lifecycleState = {
+            sprintStatus: { data: { sprint: { sprint_id: 31 }, current_retry: { retry_attempt_id: 101 } } },
+            actions: [${JSON.stringify(storyAction)}, ${JSON.stringify(triageAction)}],
+            position: { decisions: [
+                { request_kind: 'close_story', node_id: 'execution.story.close', instance_key: 'retry:101:story:101', category: 'available', decision_fingerprint: 'decision-story' },
+                { request_kind: 'record_post_sprint_triage', node_id: 'execution.sprint.triage', instance_key: 'retry:101:sprint:31', category: 'available', decision_fingerprint: 'decision-triage' },
+            ] },
+        };
+        workspaceSprintStatus = { kind: 'ready', data: lifecycleState.sprintStatus.data };
+        globalThis.__workspaceErrors = [];
+        setProjectError = (message) => __workspaceErrors.push(message);
+        setCockpitActionBusy = () => {};
+        loadDashboard = async () => true;
+        isDashboardReconciled = () => true;
+    `, context);
+    await vm.runInContext('submitWorkspaceScopedAction(storyForm)', context);
+    await vm.runInContext('submitWorkspaceScopedAction(triageForm)', context);
+    await vm.runInContext('submitWorkspaceScopedAction(blankForm)', context);
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(JSON.parse(requests[0].options.body), {
+        idempotency_key: 'dashboard-uuid-1', actor: 'dashboard-ui', instance_key: 'retry:101:story:101',
+        resolution: 'Completed', delivered: 'The retry-scoped Story is now complete.', evidence: 'artifact://retry/101/story/101', known_gaps: 'No known gaps.',
+    });
+    assert.deepEqual(JSON.parse(requests[1].options.body), {
+        idempotency_key: 'dashboard-uuid-1', actor: 'dashboard-ui', instance_key: 'retry:101:sprint:31',
+        impact: 'specification', canonical_payload: { summary: 'Update the accepted Specification before the next Sprint.' },
+    });
+    assert.equal(requests[0].options.headers['X-AgileForge-Expected-Decision'], 'decision-story');
+    assert.equal(requests[0].options.headers['X-AgileForge-Expected-Instance'], 'retry:101:story:101');
+    assert.equal(requests[1].options.headers['X-AgileForge-Expected-Decision'], 'decision-triage');
+    assert.equal(requests[1].options.headers['X-AgileForge-Expected-Instance'], 'retry:101:sprint:31');
+    assert.match(vm.runInContext('__workspaceErrors.at(-1)', context), /Record a resolution/);
+
+    context.staleForm = workspaceScopedSubmissionForm(storyAction, {
+        resolution: 'Completed', delivered: 'The retry-scoped Story is now complete.', evidence: 'artifact://retry/101/story/101', known_gaps: 'No known gaps.',
+    });
+    context.staleForm.dataset.deliveryActionInstance = 'retry:100:story:101';
+    await vm.runInContext('submitWorkspaceScopedAction(staleForm)', context);
+    assert.equal(requests.length, 2);
+    assert.match(vm.runInContext('__workspaceErrors.at(-1)', context), /changed/);
+});
+
+test('workspace semantic disclosure drafts use exact action instances', () => {
+    const context = loadFrontend();
+    context.originalForm = {
+        dataset: { workspaceScopedActionForm: 'close_story', deliveryActionInstance: 'story:101' },
+    };
+    context.retryForm = {
+        dataset: { workspaceScopedActionForm: 'close_story', deliveryActionInstance: 'retry:101:story:101' },
+    };
+    context.originalField = {
+        id: 'workspace-close-story-story-101-resolution',
+        closest(selector) { return selector === '[data-workspace-scoped-action-form]' ? context.originalForm : null; },
+    };
+    context.retryField = {
+        id: 'workspace-close-story-retry-101-story-101-resolution',
+        closest(selector) { return selector === '[data-workspace-scoped-action-form]' ? context.retryForm : null; },
+    };
+    assert.equal(
+        vm.runInContext('workspaceRenderFieldKey(originalField)', context),
+        'close_story:story:101:workspace-close-story-story-101-resolution',
+    );
+    assert.equal(
+        vm.runInContext('workspaceRenderFieldKey(retryField)', context),
+        'close_story:retry:101:story:101:workspace-close-story-retry-101-story-101-resolution',
+    );
+    context.originalDisclosure = { dataset: { workspaceScopedActionDisclosure: 'close_story:story:101' } };
+    context.retryDisclosure = { dataset: { workspaceScopedActionDisclosure: 'close_story:retry:101:story:101' } };
+    assert.notEqual(
+        vm.runInContext('workspaceRenderDisclosureKey(originalDisclosure)', context),
+        vm.runInContext('workspaceRenderDisclosureKey(retryDisclosure)', context),
+    );
+});
+
 function workspaceInteractionHarness() {
     const documentListeners = {};
     const context = loadFrontend();
@@ -4566,8 +4749,10 @@ function workspaceInteractionHarness() {
         workspaceView = { stageId: 9, sprintId: 31, taskId: 3, tab: 'details', scopeKey: 'sprint:31' };
         globalThis.__selectedTasks = [];
         globalThis.__completionSubmissions = 0;
+        globalThis.__scopedActionSubmissions = 0;
         selectWorkspaceTask = (taskId, options) => __selectedTasks.push({ taskId, focusRow: options?.focusRow === true });
         submitWorkspaceTaskCompletion = async () => { __completionSubmissions += 1; };
+        submitWorkspaceScopedAction = async () => { __scopedActionSubmissions += 1; };
         installInteractions();
     `, context);
     return { context, documentListeners };
@@ -4590,6 +4775,7 @@ test('workspace click delegation selects only Task row buttons and leaves comple
         },
     };
     const form = { dataset: { workspaceTaskCompletion: 'true', workspaceTaskId: '3' } };
+    const scopedForm = { dataset: { workspaceScopedActionForm: 'close_story' } };
     const formField = {
         closest(selector) {
             if (selector === '[data-workspace-task-id]') return form;
@@ -4617,6 +4803,11 @@ test('workspace click delegation selects only Task row buttons and leaves comple
     }
     assert.equal(prevented, 1);
     assert.equal(vm.runInContext('__completionSubmissions', context), 1);
+    for (const listener of documentListeners.submit ?? []) {
+        await listener({ target: scopedForm, preventDefault() { prevented += 1; } });
+    }
+    assert.equal(prevented, 2);
+    assert.equal(vm.runInContext('__scopedActionSubmissions', context), 1);
 });
 
 test('workspace selection waits for the first authoritative position and preserves an inspected stage', () => {

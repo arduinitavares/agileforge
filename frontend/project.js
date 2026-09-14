@@ -3537,9 +3537,46 @@ function workspaceScopedActionMarkup(action, label) {
     const locked = action.availability === 'locked';
     const reason = typeof action.reason_code === 'string' && action.reason_code.trim()
         ? `<p class="mt-2 text-xs text-slate-600">${escapeWorkflowText(action.reason_code)}</p>` : '';
+    if (action.request_kind === 'close_story' || action.request_kind === 'record_post_sprint_triage') {
+        return workspaceScopedActionFormMarkup(action, label, locked, reason);
+    }
     return `<div class="mt-3" data-workspace-scoped-action="${escapeWorkflowText(action.request_kind)}">
-        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}" ${deliveryActionBindingAttributes(action)}${locked ? ' disabled aria-disabled="true"' : ''} class="${BUTTON_PRIMARY}">${escapeWorkflowText(label)} (${escapeWorkflowText(action.request_kind)})</button>${reason}
+        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}" ${deliveryActionBindingAttributes(action)}${locked ? ' disabled aria-disabled="true"' : ''} class="${BUTTON_PRIMARY}">${escapeWorkflowText(label)}</button>${reason}
     </div>`;
+}
+
+function workspaceScopedActionFormMarkup(action, label, locked, reason) {
+    const requestKind = action.request_kind;
+    const disclosureKey = `${requestKind}:${action.instance_key ?? ''}`;
+    const fieldId = (name) => `workspace-${requestKind}-${encodeURIComponent(String(action.instance_key ?? ''))}-${name}`;
+    const disabled = locked ? ' disabled aria-disabled="true"' : '';
+    const fields = requestKind === 'close_story'
+        ? `<label>Resolution<textarea required id="${fieldId('resolution')}" name="resolution"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Delivered<textarea required id="${fieldId('delivered')}" name="delivered"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Evidence<textarea required id="${fieldId('evidence')}" name="evidence"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Known gaps<textarea required id="${fieldId('known-gaps')}" name="known_gaps"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label>`
+        : `<label>Impact<select required id="${fieldId('impact')}" name="impact"${disabled} class="mt-1 w-full rounded border-slate-300"><option value="" selected disabled>Select impact</option><option value="none">No downstream impact</option><option value="backlog">Backlog update</option><option value="specification">Specification update</option></select></label><label>Learning or decision summary<textarea required id="${fieldId('summary')}" name="summary"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label>`;
+    const submitLabel = requestKind === 'close_story' ? 'Record Story closure' : 'Record Sprint triage';
+    return `<details class="mt-3 rounded border border-teal-200 bg-teal-50 p-2" data-workspace-scoped-action-disclosure="${escapeWorkflowText(disclosureKey)}"><summary class="cursor-pointer text-xs font-semibold text-teal-900">${escapeWorkflowText(label)}</summary><form class="mt-2 grid gap-2 text-xs" data-workspace-scoped-action-form="${escapeWorkflowText(requestKind)}" data-direct-action="${escapeWorkflowText(requestKind)}" ${deliveryActionBindingAttributes(action)}>${fields}<button type="submit"${disabled} class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">${submitLabel}</button><p data-workspace-scoped-action-status="true" hidden></p></form>${reason}</details>`;
+}
+
+function workspaceScopedActionFields(form) {
+    const requestKind = form?.dataset?.workspaceScopedActionForm;
+    const value = (name) => String(form?.elements?.[name]?.value ?? '').trim();
+    if (requestKind === 'close_story') {
+        const fields = {
+            resolution: value('resolution'),
+            delivered: value('delivered'),
+            evidence: value('evidence'),
+            known_gaps: value('known_gaps'),
+        };
+        return Object.values(fields).every(Boolean) ? fields : null;
+    }
+    if (requestKind === 'record_post_sprint_triage') {
+        const impact = value('impact');
+        const summary = value('summary');
+        return ['none', 'backlog', 'specification'].includes(impact) && summary
+            ? { impact, canonical_payload: { summary } }
+            : null;
+    }
+    return null;
 }
 
 function workspaceCloseStoriesMarkup(sprintState, actions) {
@@ -3785,13 +3822,14 @@ function captureWorkspaceRenderState() {
     if (!workbench || workspaceRenderScope !== workspaceRenderKey()) return;
     const fields = {};
     workbench.querySelectorAll('input, textarea, select').forEach((field) => {
-        const key = field.id || field.name;
+        const key = workspaceRenderFieldKey(field);
         if (!key) return;
         fields[key] = field.type === 'checkbox' ? Boolean(field.checked) : field.value;
     });
     const disclosures = {};
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure]').forEach((detail) => {
-        disclosures[detail.dataset.workspaceTaskCompletionDisclosure] = detail.open;
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure]').forEach((detail) => {
+        const key = workspaceRenderDisclosureKey(detail);
+        if (key) disclosures[key] = detail.open;
     });
     const active = document.activeElement;
     const activeKey = active && workbench.contains(active) && workspaceOwnsFocus(active)
@@ -3804,13 +3842,13 @@ function restoreWorkspaceRenderState() {
     const memory = workspaceRenderMemory.get(workspaceRenderKey());
     if (!workbench || !memory) return;
     workbench.querySelectorAll('input, textarea, select').forEach((field) => {
-        const key = field.id || field.name;
+        const key = workspaceRenderFieldKey(field);
         if (!key || !(key in memory.fields)) return;
         if (field.type === 'checkbox') field.checked = Boolean(memory.fields[key]);
         else field.value = memory.fields[key];
     });
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure]').forEach((detail) => {
-        const key = detail.dataset.workspaceTaskCompletionDisclosure;
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure]').forEach((detail) => {
+        const key = workspaceRenderDisclosureKey(detail);
         if (Object.prototype.hasOwnProperty.call(memory.disclosures ?? {}, key)) detail.open = memory.disclosures[key];
     });
     workbench.scrollTop = memory.scrollTop;
@@ -3820,6 +3858,21 @@ function restoreWorkspaceRenderState() {
         const focused = document.getElementById(memory.activeKey);
         if (focused && workbench.contains(focused) && workspaceOwnsFocus(focused)) focused.focus?.();
     }
+}
+
+function workspaceRenderFieldKey(field) {
+    const key = field?.id || field?.name;
+    if (!key) return null;
+    const form = field.closest?.('[data-workspace-scoped-action-form]');
+    const actionKey = form?.dataset?.workspaceScopedActionForm;
+    const instanceKey = form?.dataset?.deliveryActionInstance;
+    return actionKey && instanceKey !== undefined ? `${actionKey}:${instanceKey}:${key}` : key;
+}
+
+function workspaceRenderDisclosureKey(detail) {
+    return detail?.dataset?.workspaceTaskCompletionDisclosure
+        ?? detail?.dataset?.workspaceScopedActionDisclosure
+        ?? null;
 }
 
 function restoreWorkspaceTaskFocusIntent() {
@@ -4265,6 +4318,54 @@ function reconcileWorkspaceSelection() {
         return;
     }
     workspaceTaskController.refresh().catch((error) => setProjectError(error.message));
+}
+
+async function submitWorkspaceScopedAction(form) {
+    if (activeCockpitAction || activeDeliveryUnreconciled || form.dataset.submitting === 'true') return;
+    const binding = workspaceScopedActionBinding(form);
+    if (!binding) {
+        setProjectError('This displayed Sprint action changed. Refresh and use the current graph action.');
+        return;
+    }
+    const fields = workspaceScopedActionFields(form);
+    if (!fields) {
+        setProjectError(binding.action.request_kind === 'close_story'
+            ? 'Record a resolution, delivered work, evidence, and known gaps for this Story.'
+            : 'Select the Sprint impact and record a learning or decision summary.');
+        return;
+    }
+    const submit = form.querySelector('button[type="submit"]');
+    const status = form.querySelector('[data-workspace-scoped-action-status]');
+    form.dataset.submitting = 'true';
+    if (submit) submit.disabled = true;
+    if (status) { status.hidden = false; status.textContent = 'Recording current Sprint evidence and awaiting authoritative refresh…'; }
+    const token = crypto.randomUUID();
+    const requiredSequence = dashboardLoadSequence + 1;
+    let mutationCompleted = false;
+    setCockpitActionBusy(true, binding.action.request_kind, { token, busyLabel: 'Submitting current Sprint action...' });
+    try {
+        await postAction(binding.action, {
+            instance_key: binding.action.instance_key,
+            ...fields,
+        }, {
+            expectedDecision: binding.decision.decision_fingerprint,
+            expectedInstance: binding.action.instance_key,
+        });
+        mutationCompleted = true;
+        const refreshed = await loadDashboard();
+        if (!refreshed || !isDashboardReconciled(requiredSequence)) {
+            activeDeliveryUnreconciled = true;
+            throw new Error('The Sprint action was accepted, but the dashboard could not confirm the current projection. Controls remain locked.');
+        }
+    } catch (error) {
+        if (mutationCompleted && !isDashboardReconciled(requiredSequence)) activeDeliveryUnreconciled = true;
+        setProjectError(error.message);
+        if (status) { status.hidden = false; status.textContent = error.message; }
+    } finally {
+        delete form.dataset.submitting;
+        if (submit) submit.disabled = activeDeliveryUnreconciled;
+        setCockpitActionBusy(false, binding.action.request_kind, { token });
+    }
 }
 
 function resolveActiveWorkflowStage(position, actions = []) {
@@ -6749,6 +6850,11 @@ function installInteractions() {
     });
     document.addEventListener('submit', async (event) => {
         const form = event.target;
+        if (form?.dataset?.workspaceScopedActionForm) {
+            event.preventDefault();
+            await submitWorkspaceScopedAction(form);
+            return;
+        }
         if (form?.dataset?.workspaceTaskCompletion === 'true') {
             event.preventDefault();
             await submitWorkspaceTaskCompletion(form);

@@ -1712,6 +1712,8 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
     retry_task_completion_requests: list[JsonObject] = field(default_factory=list)
     retry_story_closed: bool = False
     retry_story_close_requests: list[JsonObject] = field(default_factory=list)
+    retry_triage_recorded: bool = False
+    retry_triage_requests: list[JsonObject] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Seed the immutable source Sprint without a pending next-plan review."""
@@ -1970,6 +1972,31 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
                 "endpoint": "story/close",
                 "transport": "semantic",
             }
+        elif self.retry_state == "active" and not self.retry_triage_recorded:
+            decision = {
+                "node_id": "execution.sprint.triage",
+                "child_graph_id": "execution",
+                "request_kind": "record_post_sprint_triage",
+                "category": "available",
+                "recommendation_kind": "required",
+                "instance_key": "retry:101:sprint:31",
+                "reason_code": "POST_SPRINT_TRIAGE_REQUIRED",
+                "decision_fingerprint": _fingerprint("e"),
+                "fact_references": [
+                    {
+                        "fact_type": "sprint",
+                        "fact_id": "31",
+                        "fingerprint": _fingerprint("e"),
+                    }
+                ],
+            }
+            action = {
+                "node_id": "execution.sprint.triage",
+                "instance_key": "retry:101:sprint:31",
+                "request_kind": "record_post_sprint_triage",
+                "endpoint": "sprint/triage",
+                "transport": "semantic",
+            }
         elif self.retry_state == "active":
             return {
                 "graph_version": "agileforge.workflow.hidden",
@@ -2077,7 +2104,21 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
                     ),
                     "review": None,
                     "closure": None,
-                    "triage": [],
+                    "triage": (
+                        [
+                            {
+                                "impact": "specification",
+                                "canonical_payload": {
+                                    "summary": (
+                                        "Update the accepted Specification "
+                                        "before the next Sprint."
+                                    )
+                                },
+                            }
+                        ]
+                        if self.retry_triage_recorded
+                        else []
+                    ),
                 }
             )
         return {"project_id": _PROJECT_ID, "execution_attempts": attempts}
@@ -2119,8 +2160,37 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
                 },
             )
             assert body["instance_key"] == "retry:101:story:101"
+            assert headers.get("x-agileforge-expected-decision") == _fingerprint("f")
+            assert (
+                headers.get("x-agileforge-expected-instance")
+                == "retry:101:story:101"
+            )
             self.retry_story_close_requests.append(dict(body))
             self.retry_story_closed = True
+            return _HTTP_OK, self._mutation_result()
+        if suffix == "/sprint/triage":
+            self._assert_fields(
+                body,
+                {
+                    "actor",
+                    "canonical_payload",
+                    "idempotency_key",
+                    "impact",
+                    "instance_key",
+                },
+            )
+            assert body["instance_key"] == "retry:101:sprint:31"
+            assert body["impact"] == "specification"
+            assert body["canonical_payload"] == {
+                "summary": "Update the accepted Specification before the next Sprint."
+            }
+            assert headers.get("x-agileforge-expected-decision") == _fingerprint("e")
+            assert (
+                headers.get("x-agileforge-expected-instance")
+                == "retry:101:sprint:31"
+            )
+            self.retry_triage_requests.append(dict(body))
+            self.retry_triage_recorded = True
             return _HTTP_OK, self._mutation_result()
         assert suffix == "/sprint/start", f"Unexpected mutation: {suffix}"
         self._assert_fields(body, {"instance_key"})
@@ -4154,45 +4224,38 @@ def _assert_issue_260_retry_survives_reload(
     expect(reloaded.locator('[data-sprint-execution-history="true"]')).to_contain_text(
         "Attempt 1"
     )
-    story_close_status = page.evaluate(
-        """async () => (await fetch('/api/projects/1/story/close', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                instance_key: 'retry:101:story:101',
-                resolution: 'Completed',
-                delivered: 'The retry-scoped Story is now complete.',
-                evidence: 'artifact://retry/101/story/101',
-                known_gaps: 'None.',
-                actor: 'dashboard-ui',
-                idempotency_key: 'dashboard-issue-260-browser-story-close',
-            }),
-        })).status"""
+    _select_workspace_stage(page, 10)
+    story_disclosure = page.locator(
+        'details[data-workspace-scoped-action-disclosure="close_story:retry:101:story:101"]'
     )
-    assert story_close_status == _HTTP_OK
+    story_disclosure.locator("summary").click()
+    story_form = story_disclosure.locator(
+        '[data-workspace-scoped-action-form="close_story"]'
+    )
+    story_form.locator('[name="resolution"]').fill("Completed")
+    story_form.locator('[name="delivered"]').fill(
+        "The retry-scoped Story is now complete."
+    )
+    story_form.locator('[name="evidence"]').fill("artifact://retry/101/story/101")
+    story_form.locator('[name="known_gaps"]').fill("No known gaps.")
+    story_form.get_by_role("button", name="Record Story closure", exact=True).click()
     assert len(fake.retry_story_close_requests) == 1
     assert fake.retry_story_close_requests[0]["instance_key"] == "retry:101:story:101"
-    page.reload(wait_until="networkidle")
-    reloaded_after_story_close = page.locator('[data-sprint-status="active"]')
-    progress_after_story_close = reloaded_after_story_close.locator(
-        '[data-sprint-retry-progress="true"]'
+    _select_workspace_stage(page, 12)
+    triage_disclosure = page.locator(
+        'details[data-workspace-scoped-action-disclosure="record_post_sprint_triage:retry:101:sprint:31"]'
     )
-    expect(
-        progress_after_story_close.locator('[data-sprint-retry-task-id="71"]')
-    ).to_contain_text("Status: Done")
-    expect(
-        progress_after_story_close.locator('[data-sprint-retry-story-id="101"]')
-    ).to_contain_text("Status: Done")
-    fake.retry_state = "completed"
-    page.reload(wait_until="networkidle")
-    completed_retry = page.locator('[data-sprint-status="completed"]')
-    expect(completed_retry).to_contain_text("Attempt 2 is completed")
-    expect(
-        completed_retry.locator('[data-sprint-execution-history="true"]')
-    ).to_contain_text("Attempt 1")
-    expect(
-        completed_retry.locator('[data-sprint-execution-history="true"]')
-    ).to_contain_text("Attempt 2")
+    triage_disclosure.locator("summary").click()
+    triage_form = triage_disclosure.locator(
+        '[data-workspace-scoped-action-form="record_post_sprint_triage"]'
+    )
+    triage_form.locator('[name="impact"]').select_option("specification")
+    triage_form.locator('[name="summary"]').fill(
+        "Update the accepted Specification before the next Sprint."
+    )
+    triage_form.get_by_role("button", name="Record Sprint triage", exact=True).click()
+    assert len(fake.retry_triage_requests) == 1
+    assert fake.retry_triage_requests[0]["instance_key"] == "retry:101:sprint:31"
 
 
 def test_issue_260_retry_sprint_requires_preview_confirmation_and_preserves_history(
