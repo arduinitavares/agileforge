@@ -4389,3 +4389,231 @@ test('Story-close controls expose their exact advertised instance', () => {
     const markup = vm.runInContext('workspaceCloseStoriesMarkup(closeState, closeActions)', context);
     assert.match(markup, /Close Story · story:101/);
 });
+
+function workspaceInteractionHarness() {
+    const documentListeners = {};
+    const context = loadFrontend();
+    context.document.addEventListener = (type, listener) => {
+        (documentListeners[type] ??= []).push(listener);
+    };
+    vm.runInContext(`
+        selectedProjectId = 7;
+        workspaceView = { stageId: 9, sprintId: 31, taskId: 3, tab: 'details', scopeKey: 'sprint:31' };
+        globalThis.__selectedTasks = [];
+        globalThis.__completionSubmissions = 0;
+        selectWorkspaceTask = (taskId, options) => __selectedTasks.push({ taskId, focusRow: options?.focusRow === true });
+        submitWorkspaceTaskCompletion = async () => { __completionSubmissions += 1; };
+        installInteractions();
+    `, context);
+    return { context, documentListeners };
+}
+
+test('workspace click delegation selects only Task row buttons and leaves completion controls to submit', async () => {
+    const { context, documentListeners } = workspaceInteractionHarness();
+    const row = {
+        dataset: { workspaceTaskId: '1', workspaceTaskSelect: 'true' },
+        closest(selector) {
+            if (selector === '[data-workspace-task-select]') return this;
+            if (selector === 'button') return this;
+            return null;
+        },
+    };
+    const nestedRowLabel = {
+        closest(selector) {
+            if (selector === '[data-workspace-task-select]' || selector === 'button') return row;
+            return null;
+        },
+    };
+    const form = { dataset: { workspaceTaskCompletion: 'true', workspaceTaskId: '3' } };
+    const formField = {
+        closest(selector) {
+            if (selector === '[data-workspace-task-id]') return form;
+            return null;
+        },
+    };
+    const submitButton = {
+        dataset: {},
+        closest(selector) {
+            if (selector === '[data-workspace-task-id]') return form;
+            if (selector === 'button') return this;
+            return null;
+        },
+    };
+
+    for (const listener of documentListeners.click ?? []) await listener({ target: nestedRowLabel });
+    for (const listener of documentListeners.click ?? []) await listener({ target: formField });
+    for (const listener of documentListeners.click ?? []) await listener({ target: submitButton });
+    const selected = JSON.parse(vm.runInContext('JSON.stringify(__selectedTasks)', context));
+    assert.deepEqual(selected, [{ taskId: 1, focusRow: true }]);
+
+    let prevented = 0;
+    for (const listener of documentListeners.submit ?? []) {
+        await listener({ target: form, preventDefault() { prevented += 1; } });
+    }
+    assert.equal(prevented, 1);
+    assert.equal(vm.runInContext('__completionSubmissions', context), 1);
+});
+
+function workspaceFocusHarness() {
+    const body = { id: 'body' };
+    const document = {
+        activeElement: body,
+        body,
+        elements: new Map(),
+        createElement() { return { textContent: '', innerHTML: '' }; },
+        querySelector() { return null; },
+        addEventListener() {},
+        getElementById(id) { return this.elements.get(id) ?? null; },
+    };
+    const focusable = (id, taskId) => ({
+        id,
+        dataset: taskId ? { workspaceTaskId: String(taskId) } : {},
+        focus() { document.activeElement = this; },
+        closest(selector) {
+            return selector === '[data-workspace-task-id]' && taskId ? this : null;
+        },
+    });
+    const row1 = focusable('workspace-task-row-1', 1);
+    const row3 = focusable('workspace-task-row-3', 3);
+    const task1Checks = focusable('workspace-task-tab-1-checks', 1);
+    const task3Field = focusable('workspace-task-3-outcome', 3);
+    const detail = { innerHTML: '' };
+    const workbench = {
+        scrollTop: 0,
+        contains(element) { return [row1, row3, task1Checks, task3Field].includes(element); },
+        querySelectorAll(selector) {
+            if (selector === 'input, textarea, select') return [task3Field];
+            return [];
+        },
+    };
+    for (const element of [row1, row3, task1Checks, task3Field]) document.elements.set(element.id, element);
+    document.elements.set('stage-workbench', workbench);
+    document.elements.set('workspace-task-detail', detail);
+    const context = vm.createContext({
+        AbortController,
+        console,
+        crypto: { randomUUID: () => 'focus-uuid', subtle: webcrypto.subtle },
+        document,
+        fetch: async () => ({ ok: true, text: async () => '{}' }),
+        URLSearchParams,
+        TextEncoder,
+        window: { addEventListener() {}, history: {}, location: { href: '' } },
+    });
+    vm.runInContext(source, context, { filename: sourcePath });
+    vm.runInContext(`
+        AgileForgeWorkspace = {};
+        selectedProjectId = 7;
+        lifecycleState.sprintStatus = { kind: 'ready', data: { sprint: { sprint_id: 31 }, current_retry: null } };
+        workspaceView = { stageId: 9, sprintId: 31, taskId: 3, tab: 'details', scopeKey: 'sprint:31' };
+        workspaceRenderScope = workspaceRenderKey();
+        workspaceTaskController = { select: async () => {} };
+        workspaceTaskInspectorMarkup = () => '';
+        renderDashboard = () => {
+            document.activeElement = document.body;
+            restoreWorkspaceRenderState();
+            workspaceRenderScope = workspaceRenderKey();
+            restoreWorkspaceTaskFocusIntent();
+        };
+    `, context);
+    return { context, document, body, row1, row3, task1Checks, task3Field };
+}
+
+test('Task focus memory is subject-owned across A to B to A and keeps the newly clicked row through async detail renders', async () => {
+    const { context, document, body, row1, task1Checks, task3Field } = workspaceFocusHarness();
+
+    document.activeElement = row1;
+    vm.runInContext('captureWorkspaceRenderState()', context);
+    vm.runInContext("workspaceView = { ...workspaceView, taskId: 1, tab: 'checks' }; workspaceRenderScope = workspaceRenderKey();", context);
+    document.activeElement = task1Checks;
+    vm.runInContext('captureWorkspaceRenderState()', context);
+    vm.runInContext("workspaceView = { ...workspaceView, taskId: 3, tab: 'details' };", context);
+    document.activeElement = body;
+    vm.runInContext('restoreWorkspaceRenderState()', context);
+    assert.equal(document.activeElement, body);
+
+    document.activeElement = row1;
+    await vm.runInContext('selectWorkspaceTask(1, { pushHistory: false, focusRow: true })', context);
+    assert.equal(document.activeElement, row1);
+    vm.runInContext("renderWorkspaceTaskDetail({ kind: 'loading', selection: { taskId: 1, sprintId: 31 } })", context);
+    assert.equal(document.activeElement, row1);
+
+    document.activeElement = task3Field;
+    vm.runInContext("renderWorkspaceTaskDetail({ kind: 'ready', selection: { taskId: 1, sprintId: 31 }, data: { task: { task_id: 1 } } })", context);
+    assert.equal(document.activeElement, task3Field);
+});
+
+test('manual Refresh restores focus after browser focus loss but respects a user focus change', async () => {
+    const context = loadFrontend();
+    const body = { id: 'body' };
+    const other = { id: 'other' };
+    let resolveLoad;
+    const refresh = {
+        listeners: {},
+        _disabled: false,
+        set disabled(value) {
+            this._disabled = value;
+            if (value && context.document.activeElement === this) context.document.activeElement = body;
+        },
+        get disabled() { return this._disabled; },
+        addEventListener(type, listener) { this.listeners[type] = listener; },
+        focus() { context.document.activeElement = this; },
+    };
+    context.document.body = body;
+    context.document.activeElement = refresh;
+    context.document.getElementById = (id) => id === 'refresh-project' ? refresh : null;
+    vm.runInContext(`loadDashboard = () => new Promise((resolve) => { globalThis.__resolveLoad = resolve; }); installInteractions();`, context);
+    resolveLoad = () => vm.runInContext('__resolveLoad(true)', context);
+
+    const first = refresh.listeners.click({ currentTarget: refresh });
+    resolveLoad();
+    await first;
+    assert.equal(context.document.activeElement, refresh);
+
+    context.document.activeElement = refresh;
+    const second = refresh.listeners.click({ currentTarget: refresh });
+    context.document.activeElement = other;
+    resolveLoad();
+    await second;
+    assert.equal(context.document.activeElement, other);
+});
+
+test('Task board distinguishes a filtered no-match from a confirmed empty inventory', () => {
+    const context = loadFrontend();
+    context.AgileForgeWorkspace = {
+        taskRows(data) { return (data?.tasks ?? []).map((task) => ({ task, action: null, availability: task.status })); },
+        taskCounts(tasks) {
+            const done = tasks.filter((task) => task.status === 'Done').length;
+            return { total: tasks.length, done, remaining: tasks.length - done };
+        },
+    };
+    vm.runInContext(`
+        workspaceView = { stageId: 9, sprintId: 31, taskId: null, filter: 'open' };
+        lifecycleState.position = { decisions: [] };
+        lifecycleState.actions = [];
+        workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: { sprint_id: 31, tasks: [
+            { task_id: 1, status: 'Done' }, { task_id: 2, status: 'Done' }, { task_id: 3, status: 'Done' }
+        ] } };
+    `, context);
+    const filtered = vm.runInContext('workspaceTaskBoardMarkup(null, lifecycleState.position, lifecycleState.actions)', context);
+    assert.match(filtered, /3\/3 Done/);
+    assert.match(filtered, /No Tasks match this filter/);
+    assert.doesNotMatch(filtered, />0 Tasks</);
+
+    vm.runInContext("workspaceView = { ...workspaceView, filter: 'all' }; workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: { sprint_id: 31, tasks: [] } };", context);
+    const empty = vm.runInContext('workspaceTaskBoardMarkup(null, lifecycleState.position, lifecycleState.actions)', context);
+    assert.match(empty, />0 Tasks</);
+    assert.doesNotMatch(empty, /No Tasks match this filter/);
+
+    vm.runInContext("workspaceView = { ...workspaceView, sprintId: null }; workspaceTaskInventory = null;", context);
+    context.absentSprint = { kind: 'absent' };
+    const absent = vm.runInContext('workspaceTaskBoardMarkup(absentSprint, lifecycleState.position, lifecycleState.actions)', context);
+    assert.match(absent, /No Sprint selected or recorded/);
+    assert.doesNotMatch(absent, /0\/0 Done|>0 Tasks</);
+
+    for (const kind of ['loading', 'error']) {
+        context.unconfirmedSprint = { kind };
+        const unconfirmed = vm.runInContext('workspaceTaskBoardMarkup(unconfirmedSprint, lifecycleState.position, lifecycleState.actions)', context);
+        assert.match(unconfirmed, /Task inventory not confirmed/);
+        assert.doesNotMatch(unconfirmed, /0\/0 Done|>0 Tasks/);
+    }
+});

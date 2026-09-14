@@ -3706,6 +3706,7 @@ let workspaceTaskInventory = null;
 let workspaceReadGeneration = 0;
 let workspaceRenderScope = null;
 let workspaceFocusedStageId = null;
+let workspaceTaskFocusIntent = null;
 let workspaceInventoryConfirmedAt = null;
 const workspaceRenderMemory = new Map();
 
@@ -3740,6 +3741,20 @@ function persistWorkspaceHistory({ replace = false } = {}) {
     else window.history.pushState(state, '', window.location.href);
 }
 
+function workspaceFocusTaskId(element) {
+    const bound = element?.closest?.('[data-workspace-task-id]');
+    const boundTaskId = Number.parseInt(bound?.dataset?.workspaceTaskId ?? '', 10);
+    if (positiveInteger(boundTaskId)) return boundTaskId;
+    const match = String(element?.id ?? '').match(/^workspace-task-(?:row-|tab-)?(\d+)(?:-|$)/);
+    const idTaskId = Number.parseInt(match?.[1] ?? '', 10);
+    return positiveInteger(idTaskId) ? idTaskId : null;
+}
+
+function workspaceOwnsFocus(element) {
+    const taskId = workspaceFocusTaskId(element);
+    return taskId === null || taskId === workspaceView?.taskId;
+}
+
 function captureWorkspaceRenderState() {
     const workbench = document.getElementById('stage-workbench');
     if (!workbench || workspaceRenderScope !== workspaceRenderKey()) return;
@@ -3754,7 +3769,8 @@ function captureWorkspaceRenderState() {
         disclosures[detail.dataset.workspaceTaskCompletionDisclosure] = detail.open;
     });
     const active = document.activeElement;
-    const activeKey = active && workbench.contains(active) ? active.id : null;
+    const activeKey = active && workbench.contains(active) && workspaceOwnsFocus(active)
+        ? active.id : null;
     workspaceRenderMemory.set(workspaceRenderScope, { fields, disclosures, activeKey, scrollTop: workbench.scrollTop });
 }
 
@@ -3773,10 +3789,19 @@ function restoreWorkspaceRenderState() {
         if (Object.prototype.hasOwnProperty.call(memory.disclosures ?? {}, key)) detail.open = memory.disclosures[key];
     });
     workbench.scrollTop = memory.scrollTop;
-    if (memory.activeKey) {
+    const active = document.activeElement;
+    const focusIsAvailable = !active || active === document.body || workbench.contains(active);
+    if (memory.activeKey && focusIsAvailable) {
         const focused = document.getElementById(memory.activeKey);
-        if (focused && workbench.contains(focused)) focused.focus?.();
+        if (focused && workbench.contains(focused) && workspaceOwnsFocus(focused)) focused.focus?.();
     }
+}
+
+function restoreWorkspaceTaskFocusIntent() {
+    const taskId = workspaceTaskFocusIntent;
+    workspaceTaskFocusIntent = null;
+    if (!positiveInteger(taskId) || workspaceView?.taskId !== taskId) return;
+    document.getElementById(`workspace-task-row-${taskId}`)?.focus?.();
 }
 
 function selectWorkspaceStage(stageId, { pushHistory = false, scroll = false } = {}) {
@@ -3908,7 +3933,19 @@ function workspaceTaskBoardMarkup(status, position, actions) {
     const sprintOptions = Array.isArray(lifecycleState.sprintHistory?.sprints) ? lifecycleState.sprintHistory.sprints : [];
     const selector = sprintOptions.length ? `<label class="text-xs text-slate-600">Sprint <select data-workspace-sprint-select="true">${sprintOptions.map((sprint) => `<option value="${sprint.sprint_id}"${sprint.sprint_id === selectedSprint ? ' selected' : ''}>Sprint #${sprint.sprint_id} · ${escapeWorkflowText(sprint.status || 'Unknown')}</option>`).join('')}</select></label>` : '';
     const inventoryMessage = workspaceTaskInventory?.kind === 'error' ? `<p class="text-xs text-amber-800">${escapeWorkflowText(workspaceTaskInventory.message)}</p>` : '';
-    return `<section class="space-y-3" data-workspace-task-board="true"><div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${counts.done}/${counts.total} Done · ${counts.remaining} remaining</p></div><p class="text-xs text-slate-500">Manual refresh required${workspaceInventoryConfirmedAt || lastDashboardConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(workspaceInventoryConfirmedAt || lastDashboardConfirmedAt)}` : ''}</p></div>${selector}${inventoryMessage}<div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div><div class="workspace-task-board"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${filtered.map((row) => `<tr class="workspace-task-row border-b border-slate-100"><td class="px-2 py-2"><button id="workspace-task-row-${row.task.task_id}" type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')}</tbody></table></div><div id="workspace-task-detail">${workspaceTaskInspectorMarkup(detail, rows)}</div></section>`;
+    const confirmedInventory = workspaceTaskInventory?.kind === 'ready' || status?.kind === 'ready';
+    const noSelectedSprint = status?.kind === 'absent' && !positiveInteger(selectedSprint);
+    const inventorySummary = noSelectedSprint
+        ? 'No Sprint selected or recorded'
+        : (confirmedInventory
+            ? `${counts.done}/${counts.total} Done · ${counts.remaining} remaining`
+            : 'Task inventory not confirmed');
+    const taskRows = filtered.length
+        ? filtered.map((row) => `<tr class="workspace-task-row border-b border-slate-100"><td class="px-2 py-2"><button id="workspace-task-row-${row.task.task_id}" type="button" class="text-left text-blue-700 hover:underline" data-workspace-task-select="true" data-workspace-task-id="${row.task.task_id}" aria-pressed="${workspaceView?.taskId === row.task.task_id ? 'true' : 'false'}">Task #${row.task.task_id}: ${escapeWorkflowText(row.task.description || 'No description')}</button></td><td class="px-2 py-2">${escapeWorkflowText(row.task.status || 'Unavailable')}</td><td class="px-2 py-2">${escapeWorkflowText(row.availability)}</td></tr>`).join('')
+        : (rows.length
+            ? '<tr><td class="px-2 py-3 text-slate-600" colspan="3">No Tasks match this filter</td></tr>'
+            : (confirmedInventory ? '<tr><td class="px-2 py-3 text-slate-600" colspan="3">0 Tasks</td></tr>' : ''));
+    return `<section class="space-y-3" data-workspace-task-board="true"><div class="flex flex-wrap items-center justify-between gap-2"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Develop & verify</p><p class="text-sm text-slate-700">${inventorySummary}</p></div><p class="text-xs text-slate-500">Manual refresh required${workspaceInventoryConfirmedAt || lastDashboardConfirmedAt ? ` · Last confirmed ${escapeWorkflowText(workspaceInventoryConfirmedAt || lastDashboardConfirmedAt)}` : ''}</p></div>${selector}${inventoryMessage}<div class="flex gap-2 text-xs"><button type="button" data-workspace-task-filter="all" aria-pressed="${workspaceView?.filter !== 'open'}">All Tasks</button><button type="button" data-workspace-task-filter="open" aria-pressed="${workspaceView?.filter === 'open'}">Open Tasks</button></div><div class="workspace-task-board"><table class="w-full text-left text-sm"><thead><tr class="border-b border-slate-200 text-xs text-slate-500"><th class="px-2 py-2">Task</th><th class="px-2 py-2">Formal status</th><th class="px-2 py-2">Availability</th></tr></thead><tbody>${taskRows}</tbody></table></div><div id="workspace-task-detail">${workspaceTaskInspectorMarkup(detail, rows)}</div></section>`;
 }
 
 function currentWorkspaceSprintId() {
@@ -3992,7 +4029,7 @@ async function selectWorkspaceSprint(sprintId, { pushHistory = true } = {}) {
     renderDashboard();
 }
 
-function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
+function selectWorkspaceTask(taskId, { pushHistory = true, focusRow = false } = {}) {
     const status = workspaceSprintStatus?.kind === 'ready'
         ? workspaceSprintStatus.data
         : lifecycleState.sprintStatus?.data;
@@ -4002,6 +4039,7 @@ function selectWorkspaceTask(taskId, { pushHistory = true } = {}) {
     const scopeKey = retry?.retry_attempt_id
         ? `retry:${retry.retry_attempt_id}:sprint:${sprintId}` : `sprint:${sprintId}`;
     captureWorkspaceRenderState();
+    workspaceTaskFocusIntent = focusRow ? taskId : null;
     workspaceView = { ...(workspaceView ?? AgileForgeWorkspace.createView()), taskId, sprintId, scopeKey, stageId: 9 };
     if (pushHistory) persistWorkspaceHistory();
     renderDashboard();
@@ -4589,6 +4627,7 @@ function renderDashboard() {
     updateStageView();
     restoreWorkspaceRenderState();
     workspaceRenderScope = workspaceRenderKey();
+    restoreWorkspaceTaskFocusIntent();
     updateContextInspector();
     const sprintId = currentWorkspaceSprintId();
     if (workspaceView?.stageId === 9 && positiveInteger(sprintId)
@@ -6891,9 +6930,9 @@ function installInteractions() {
     });
 
     document.addEventListener('click', async (event) => {
-        const workspaceTask = event.target?.closest?.('[data-workspace-task-id]');
+        const workspaceTask = event.target?.closest?.('[data-workspace-task-select]');
         if (workspaceTask) {
-            selectWorkspaceTask(Number.parseInt(workspaceTask.dataset.workspaceTaskId, 10));
+            selectWorkspaceTask(Number.parseInt(workspaceTask.dataset.workspaceTaskId, 10), { focusRow: true });
             return;
         }
         const workspaceTab = event.target?.closest?.('[data-workspace-task-tab]');
@@ -7317,6 +7356,7 @@ function installInteractions() {
     });
     document.getElementById('refresh-project')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
+        const restoreFocus = document.activeElement === button;
         button.disabled = true;
         try {
             await loadDashboard();
@@ -7324,6 +7364,9 @@ function installInteractions() {
             setProjectError(error.message);
         } finally {
             button.disabled = false;
+            if (restoreFocus && (!document.activeElement || document.activeElement === document.body)) {
+                button.focus?.();
+            }
         }
     });
 }
