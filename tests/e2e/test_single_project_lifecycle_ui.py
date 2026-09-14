@@ -4232,7 +4232,7 @@ def _assert_issue_260_retry_survives_reload(
     story_form = story_disclosure.locator(
         '[data-workspace-scoped-action-form="close_story"]'
     )
-    story_form.locator('[name="resolution"]').fill("Completed")
+    story_form.locator('[name="resolution"]').select_option("Completed")
     story_form.locator('[name="delivered"]').fill(
         "The retry-scoped Story is now complete."
     )

@@ -4576,6 +4576,13 @@ test('workspace Story closure and triage disclosures collect the API-required se
     const storyMarkup = vm.runInContext('workspaceScopedActionMarkup(storyAction, "Close Story")', context);
     const triageMarkup = vm.runInContext('workspaceScopedActionMarkup(triageAction, "Record Sprint triage")', context);
     assert.match(storyMarkup, /Resolution/);
+    assert.match(storyMarkup, /<select required[^>]*name="resolution"/);
+    assert.match(storyMarkup, /<option value="" selected disabled>Select resolution<\/option>/);
+    assert.match(storyMarkup, /<option value="Completed">Completed<\/option>/);
+    assert.match(storyMarkup, /<option value="Completed with AC changes">Completed with acceptance criteria changes<\/option>/);
+    assert.match(storyMarkup, /<option value="Partial">Partial<\/option>/);
+    assert.match(storyMarkup, /<option value="Won't Do">Won't Do<\/option>/);
+    assert.doesNotMatch(storyMarkup, /<textarea[^>]*name="resolution"/);
     assert.match(storyMarkup, /Known gaps/);
     assert.match(triageMarkup, /Learning or decision summary/);
     assert.match(triageMarkup, /value="specification"/);
@@ -4613,8 +4620,15 @@ test('workspace Story closure and triage disclosures collect the API-required se
     context.blankTriageForm = workspaceScopedActionForm('record_post_sprint_triage', {
         impact: '', summary: '   ',
     });
+    context.invalidResolutionForm = workspaceScopedActionForm('close_story', {
+        resolution: 'Synthetic Story completed',
+        delivered: 'The retry-scoped Story is now complete.',
+        evidence: 'artifact://retry/101/story/101',
+        known_gaps: 'No known gaps.',
+    });
     assert.equal(vm.runInContext('workspaceScopedActionFields(blankStoryForm)', context), null);
     assert.equal(vm.runInContext('workspaceScopedActionFields(blankTriageForm)', context), null);
+    assert.equal(vm.runInContext('workspaceScopedActionFields(invalidResolutionForm)', context), null);
 });
 
 function workspaceScopedSubmissionForm(action, values) {

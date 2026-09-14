@@ -39,6 +39,13 @@ const REQUEST_STAGE = {
     structure_specification: 'Specification',
 };
 
+const STORY_RESOLUTION_VALUES = new Set([
+    'Completed',
+    'Completed with AC changes',
+    'Partial',
+    "Won't Do",
+]);
+
 const CHILD_STAGE = {
     backlog: 'Backlog',
     execution: 'Execution',
@@ -3551,7 +3558,7 @@ function workspaceScopedActionFormMarkup(action, label, locked, reason) {
     const fieldId = (name) => `workspace-${requestKind}-${encodeURIComponent(String(action.instance_key ?? ''))}-${name}`;
     const disabled = locked ? ' disabled aria-disabled="true"' : '';
     const fields = requestKind === 'close_story'
-        ? `<label>Resolution<textarea required id="${fieldId('resolution')}" name="resolution"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Delivered<textarea required id="${fieldId('delivered')}" name="delivered"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Evidence<textarea required id="${fieldId('evidence')}" name="evidence"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Known gaps<textarea required id="${fieldId('known-gaps')}" name="known_gaps"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label>`
+        ? `<label>Resolution<select required id="${fieldId('resolution')}" name="resolution"${disabled} class="mt-1 w-full rounded border-slate-300"><option value="" selected disabled>Select resolution</option><option value="Completed">Completed</option><option value="Completed with AC changes">Completed with acceptance criteria changes</option><option value="Partial">Partial</option><option value="Won't Do">Won't Do</option></select></label><label>Delivered<textarea required id="${fieldId('delivered')}" name="delivered"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Evidence<textarea required id="${fieldId('evidence')}" name="evidence"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Known gaps<textarea required id="${fieldId('known-gaps')}" name="known_gaps"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label>`
         : `<label>Impact<select required id="${fieldId('impact')}" name="impact"${disabled} class="mt-1 w-full rounded border-slate-300"><option value="" selected disabled>Select impact</option><option value="none">No downstream impact</option><option value="backlog">Backlog update</option><option value="specification">Specification update</option></select></label><label>Learning or decision summary<textarea required id="${fieldId('summary')}" name="summary"${disabled} class="mt-1 w-full rounded border-slate-300"></textarea></label>`;
     const submitLabel = requestKind === 'close_story' ? 'Record Story closure' : 'Record Sprint triage';
     return `<details class="mt-3 rounded border border-teal-200 bg-teal-50 p-2" data-workspace-scoped-action-disclosure="${escapeWorkflowText(disclosureKey)}"><summary class="cursor-pointer text-xs font-semibold text-teal-900">${escapeWorkflowText(label)}</summary><form class="mt-2 grid gap-2 text-xs" data-workspace-scoped-action-form="${escapeWorkflowText(requestKind)}" data-direct-action="${escapeWorkflowText(requestKind)}" ${deliveryActionBindingAttributes(action)}>${fields}<button type="submit"${disabled} class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">${submitLabel}</button><p data-workspace-scoped-action-status="true" hidden></p></form>${reason}</details>`;
@@ -3567,7 +3574,9 @@ function workspaceScopedActionFields(form) {
             evidence: value('evidence'),
             known_gaps: value('known_gaps'),
         };
-        return Object.values(fields).every(Boolean) ? fields : null;
+        return Object.values(fields).every(Boolean) && STORY_RESOLUTION_VALUES.has(fields.resolution)
+            ? fields
+            : null;
     }
     if (requestKind === 'record_post_sprint_triage') {
         const impact = value('impact');
