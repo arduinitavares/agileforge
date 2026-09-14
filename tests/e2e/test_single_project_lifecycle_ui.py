@@ -1575,6 +1575,7 @@ class SprintContinuityLifecycle(FakeLifecycle):
                     "task_id": 71,
                     "sprint_id": 31,
                     "story_id": 101,
+                    "instance_key": "task:71",
                     "description": "Render the accepted Sprint and next Task.",
                     "status": "To Do",
                     "fact_fingerprint": _fingerprint("e"),
@@ -1584,6 +1585,17 @@ class SprintContinuityLifecycle(FakeLifecycle):
             "closure": None,
         }
         return _HTTP_OK, self._success(data)
+
+    def _read(self, suffix: str) -> JsonObject:
+        if suffix != "/sprints/31/tasks":
+            return super()._read(suffix)
+        _status, envelope = self._sprint_status_response()
+        data = cast("JsonObject", envelope["data"])
+        return {
+            "project_id": _PROJECT_ID,
+            "sprint_id": 31,
+            "items": data["tasks"],
+        }
 
     def _mutate(
         self,
@@ -4029,14 +4041,28 @@ def test_issue_227_accepted_sprint_survives_reload_and_starts_exactly_once(
     active = page.locator('[data-sprint-status="active"]')
     expect(active).to_be_visible()
     expect(active).to_contain_text("Sprint #31 is active")
-    expect(active).to_contain_text("1 current execution action")
-    expect(active).to_contain_text("Task #71")
-    expect(active).to_contain_text("Render the accepted Sprint and next Task.")
+    expect(active).to_contain_text("Deliver accepted Sprint continuity.")
+    expect(page.locator("#workspace-stage-8")).to_contain_text("Viewing")
     expect(page.locator('[data-direct-action="start_sprint"]')).to_have_count(0)
+
+    _assert_issue_227_task_board(page)
     assert len(fake.start_requests) == 1
     assert fake.api_errors == []
 
     context.close()
+
+
+def _assert_issue_227_task_board(page: Page) -> None:
+    """Inspect the exact ready Task without leaving execution in the plan panel."""
+    page.get_by_role("button", name="Inspect Sprint board", exact=True).click()
+    board = page.locator('[data-workspace-task-board="true"]')
+    expect(board).to_be_visible()
+    expect(board).to_contain_text("0/1 Done")
+    task = board.locator("tr").filter(has_text="Task #71")
+    expect(task).to_have_count(1)
+    expect(task).to_contain_text("Render the accepted Sprint and next Task.")
+    expect(task).to_contain_text("To Do")
+    expect(task).to_contain_text("Ready")
 
 
 def _issue_260_retry_controls(page: Page) -> tuple[Locator, Locator]:
