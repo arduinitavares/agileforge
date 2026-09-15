@@ -1,6 +1,6 @@
 # Repository Instructions
 
-Use Context7 MCP for library or framework documentation, API reference, setup steps, version-specific behavior, and configuration guidance without waiting for an explicit request.
+Follow the documentation-lookup workflow in the active user-level `AGENTS.md` when dependency behavior, configuration, setup, or versions need verification. Keep its procedure in the `find-docs` skill rather than duplicating it here.
 
 ## Pull Request Reviews
 
@@ -8,15 +8,16 @@ When reviewing a pull request, always fetch and consider the existing PR comment
 
 ## Worktrees
 
-If you create a temporary worktree for investigation, review, or implementation, remove it after you finish using it.
+Remove task-created temporary worktrees after their work has been integrated or deliberately preserved elsewhere, required evidence is retained, and no worker is still using them. Do not force-remove a dirty worktree or discard unique changes merely because the task is ending.
 
 ## Development Branch Runtime
 
 Use only uv. For a development branch or linked worktree, invoke that checkout's
 `./agileforge-dev`; never use a bare or user-level `agileforge` shim. Run
-`info --json` before mutations. Each worktree owns separate profiles, business
-and ADK trace databases, and UI ports. Older branches must merge or rebase the
-launcher change before using it.
+`info --json` before AgileForge runtime or state mutations through its CLI.
+This check is not required for unrelated documentation edits. Each worktree owns
+separate profiles, business and ADK trace databases, and UI ports. Older branches
+must merge or rebase the launcher change before using it.
 
 ## Typing Style
 

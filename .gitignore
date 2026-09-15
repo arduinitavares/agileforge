@@ -52,6 +52,9 @@ agileforge.spec.v1.schema.pretty.json
 entities.json
 mempalace.yaml
 
+# Generated design assessment reports
+/.impeccable/critique/
+
 # Local agent skill caches
 /.diagram-design
 .agents/*
