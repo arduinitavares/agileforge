@@ -191,6 +191,44 @@ The current fixed request kinds map to these prefixes:
 Registration does not imply availability. `workflow next` determines what can
 run for the current facts.
 
+## Task completion checklist input
+
+Use exactly one checklist source when recording Task completion. For ordinary
+entries, repeat `--checklist-item KEY=VALUE`; only the first `=` separates the
+key from its result, so `check=expected=actual` records `check` with result
+`expected=actual`. Values may contain `=` in this legacy form. Use
+`--checklist-file PATH` when a checklist key contains `=`:
+
+```json
+{
+  "Run --ignore=tests/e2e": "exit=0",
+  "Check A=B=C": "observed=A=B=C"
+}
+```
+
+```sh
+./agileforge-dev cli --profile local -- sprint task complete \
+  --project-id 41 \
+  --instance-key task:7 \
+  --outcome-summary "Implemented the requested behavior." \
+  --artifact-ref services/example.py \
+  --acceptance-result fully_met \
+  --checklist-file checklist.json \
+  --idempotency-key complete-task-41-1 \
+  --actor operator
+```
+
+The file must be valid UTF-8 JSON containing a nonempty object of nonblank
+string keys and values. Both keys and values are trimmed for the same semantic
+normalization as `--checklist-item`. Duplicate keys, including escaped and
+whitespace-normalized duplicates, are rejected. Do not mix the file option with
+`--checklist-item` or repeat `--checklist-file`. Include one result for every
+required Task checklist item and verify each item before submitting. Replay the
+identical completion with the same idempotency key and the same checklist
+payload; do not change, omit, or add checklist entries on replay. If a payload
+is rejected, correct it and use a fresh idempotency key because rejected
+receipts are durable.
+
 ## Read Surfaces
 
 Reads never advance the workflow:

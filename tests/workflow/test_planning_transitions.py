@@ -170,6 +170,7 @@ class _SprintDraftOptions(TypedDict):
     team_name: str
     idempotency_key: str
     assert_empty_execution: NotRequired[bool]
+    checklist_items: NotRequired[tuple[str, ...]]
 
 
 def _copy_dependency_edge(item: _DependencyEdgePayload) -> _DependencyEdgePayload:
@@ -242,6 +243,7 @@ def _sprint_plan(
     *,
     story_item_id: str = "US-0001",
     spec_item_ids: tuple[str, ...] = ("REQ.planning-1",),
+    checklist_items: tuple[str, ...] = ("Run focused tests",),
 ) -> JsonObject:
     return {
         "sprint_goal": "Persist planning workflow facts.",
@@ -256,7 +258,7 @@ def _sprint_plan(
                         "task_kind": "implementation",
                         "artifact_targets": ["planning workflow handler"],
                         "workstream_tags": ["workflow"],
-                        "checklist_items": ["Run focused tests"],
+                        "checklist_items": list(checklist_items),
                     }
                 ],
                 "reason_for_selection": "Required for durable routing.",
@@ -514,6 +516,7 @@ def _record_sprint_plan_draft(
         story_id,
         story_item_id=story.source_story_item_id,
         spec_item_ids=story.spec_item_ids,
+        checklist_items=options.get("checklist_items", ("Run focused tests",)),
     )
     specification = accepted_current_spec(snapshot)
     assert specification is not None

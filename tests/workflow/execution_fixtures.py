@@ -85,6 +85,7 @@ def seed_started_execution(
     engine: Engine,
     *,
     task_status: TaskStatus = TaskStatus.IN_PROGRESS,
+    checklist_items: tuple[str, ...] = ("Run focused tests",),
 ) -> tuple[int, int, int, int]:
     """Persist one Sprint through the exact accepted planning/start lineage."""
     project_id = _seed_accepted_backlog(engine)
@@ -98,6 +99,7 @@ def seed_started_execution(
         story_id,
         team_name="Task 12 normalized execution team",
         idempotency_key="task-12-record-sprint-plan",
+        checklist_items=checklist_items,
     )
     sprint_id = _accept_and_start_sprint(
         domain,

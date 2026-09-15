@@ -313,6 +313,13 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise _CliParseError(message)
 
 
+class _ChecklistObjectPairs:
+    """Preserve JSON object pairs until checklist duplicate checks complete."""
+
+    def __init__(self, pairs: list[tuple[str, object]]) -> None:
+        self.pairs = pairs
+
+
 def _read_json_object(path_value: str) -> JsonObject:
     return _JSON_OBJECT.validate_json(Path(path_value).read_text(encoding="utf-8"))
 
@@ -371,6 +378,71 @@ def _parse_checklist_item(value: str) -> tuple[str, str]:
         message = "--checklist-item must be a nonblank KEY=VALUE pair."
         raise argparse.ArgumentTypeError(message)
     return key, result
+
+
+def _read_checklist_json_object(path_value: str) -> _ChecklistObjectPairs:
+    """Read one JSON object while preserving all of its source pairs."""
+    try:
+        contents = Path(path_value).read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        message = "--checklist-file must be valid UTF-8."
+        raise ValueError(message) from error
+    except OSError as error:
+        message = f"--checklist-file could not be read: {path_value}."
+        raise ValueError(message) from error
+    try:
+        decoded = json.loads(contents, object_pairs_hook=_ChecklistObjectPairs)
+    except json.JSONDecodeError as error:
+        message = "--checklist-file must contain valid JSON."
+        raise ValueError(message) from error
+    if not isinstance(decoded, _ChecklistObjectPairs):
+        message = "--checklist-file must contain a JSON object."
+        raise ValueError(message)
+    return decoded
+
+
+def _read_checklist_file(path_value: str) -> dict[str, str]:
+    """Read one nonempty, normalized string-to-string checklist JSON object."""
+    decoded = _read_checklist_json_object(path_value)
+    if not decoded.pairs:
+        message = "--checklist-file must contain a nonempty JSON object."
+        raise ValueError(message)
+
+    checklist_result: dict[str, str] = {}
+    for key, result in decoded.pairs:
+        normalized_key = key.strip()
+        if not normalized_key:
+            message = "--checklist-file must contain nonblank string keys."
+            raise ValueError(message)
+        if not isinstance(result, str):
+            message = "--checklist-file must contain string values."
+            raise ValueError(message)
+        normalized_result = result.strip()
+        if not normalized_result:
+            message = "--checklist-file must contain nonblank string values."
+            raise ValueError(message)
+        if normalized_key in checklist_result:
+            message = "--checklist-file keys must be unique."
+            raise ValueError(message)
+        checklist_result[normalized_key] = normalized_result
+    return checklist_result
+
+
+def _task_checklist_result(args: argparse.Namespace) -> dict[str, str]:
+    """Select exactly one semantic checklist input source."""
+    checklist_files = cast("list[str] | None", args.checklist_files)
+    if checklist_files is not None:
+        if len(checklist_files) != 1:
+            message = "--checklist-file may be provided exactly once."
+            raise ValueError(message)
+        return _read_checklist_file(checklist_files[0])
+
+    checklist_items = cast("list[tuple[str, str]]", args.checklist_items)
+    checklist_result = dict(checklist_items)
+    if len(checklist_result) != len(checklist_items):
+        message = "--checklist-item keys must be unique."
+        raise ValueError(message)
+    return checklist_result
 
 
 def _install_artifact_history_reads(
@@ -634,12 +706,27 @@ def _install_execution_action_mutations(
         choices=("partially_met", "fully_met"),
         required=True,
     )
-    complete.add_argument(
+    checklist_source = complete.add_mutually_exclusive_group(required=True)
+    checklist_source.add_argument(
         "--checklist-item",
         dest="checklist_items",
         action="append",
         type=_parse_checklist_item,
-        required=True,
+        metavar="KEY=VALUE",
+        help=(
+            "Repeat for each result; the first '=' separates the key and values "
+            "may contain '='. Use --checklist-file when a key contains '='."
+        ),
+    )
+    checklist_source.add_argument(
+        "--checklist-file",
+        dest="checklist_files",
+        action="append",
+        metavar="PATH",
+        help=(
+            "Read one UTF-8 JSON object with nonblank string keys and results; "
+            "use exactly one checklist source."
+        ),
     )
     story_close = _semantic_leaf(branches[("story",)], "close", _story_close)
     story_close.add_argument("--instance-key", required=True)
@@ -2160,11 +2247,7 @@ def _sprint_retry(args: argparse.Namespace, application: _Application) -> int:
 
 
 def _task_complete(args: argparse.Namespace, application: _Application) -> int:
-    checklist_items = cast("list[tuple[str, str]]", args.checklist_items)
-    checklist_result = dict(checklist_items)
-    if len(checklist_result) != len(checklist_items):
-        message = "--checklist-item keys must be unique."
-        raise ValueError(message)
+    checklist_result = _task_checklist_result(args)
     acceptance_result = cast(
         "Literal['partially_met', 'fully_met']",
         args.acceptance_result,
