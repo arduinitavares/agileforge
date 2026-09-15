@@ -43,6 +43,7 @@ from workflow.contracts import (
 
 if TYPE_CHECKING:
     from services.application import (
+        CompleteTaskRequest,
         PostSprintTriageRequest,
         SpecificationReviewRequest,
         SpecificationSourceRegistrationRequest,
@@ -1003,6 +1004,30 @@ class _ExecutionActionApplication:
         return capture
 
 
+def _complete_task_arguments(*checklist_source: str) -> list[str]:
+    """Build the fixed semantic completion command around one checklist source."""
+    return [
+        "sprint",
+        "task",
+        "complete",
+        "--project-id",
+        "41",
+        "--instance-key",
+        "task:7",
+        "--outcome-summary",
+        "Done.",
+        "--artifact-ref",
+        "result",
+        "--acceptance-result",
+        "fully_met",
+        *checklist_source,
+        "--idempotency-key",
+        "complete-41",
+        "--actor",
+        "operator",
+    ]
+
+
 @pytest.mark.parametrize(
     ("arguments", "request_type_name"),
     [
@@ -1235,6 +1260,173 @@ def test_complete_task_cli_rejects_invalid_checklist_map(
     assert cli_main.main(arguments, application=application) == ARGUMENT_ERROR_EXIT_CODE
     assert application.requests == []
     assert '"ok": false' in capsys.readouterr().out
+
+
+def test_complete_task_cli_reads_lossless_checklist_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep equals signs in semantic checklist keys and results from a JSON file."""
+    checklist_path = tmp_path / "checklist.json"
+    checklist_path.write_text(
+        '{"Run --ignore=tests/e2e": "exit=0", "Check A=B=C": "observed=A=B=C"}',
+        encoding="utf-8",
+    )
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(
+        _complete_task_arguments("--checklist-file", str(checklist_path)),
+        application=application,
+    )
+
+    assert exit_code == 0
+    request = cast("CompleteTaskRequest", application.requests[0])
+    assert type(request).__name__ == "CompleteTaskRequest"
+    assert request.checklist_result == {
+        "Run --ignore=tests/e2e": "exit=0",
+        "Check A=B=C": "observed=A=B=C",
+    }
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_complete_task_cli_keeps_legacy_first_equals_split(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Continue treating every equals sign after the first as the result value."""
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(
+        _complete_task_arguments("--checklist-item", "check=expected=actual"),
+        application=application,
+    )
+
+    assert exit_code == 0
+    request = cast("CompleteTaskRequest", application.requests[0])
+    assert request.checklist_result == {"check": "expected=actual"}
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_complete_task_help_explains_checklist_input_sources(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Describe the lossless file option and the legacy first-equals shorthand."""
+    with pytest.raises(SystemExit):
+        cli_main.build_parser().parse_args(["sprint", "task", "complete", "--help"])
+
+    output = capsys.readouterr().out
+    normalized_help = " ".join(output.split())
+    assert "--checklist-item KEY=VALUE" in output
+    assert "first '=' separates the key" in normalized_help
+    assert "--checklist-file PATH" in output
+    assert "UTF-8 JSON object" in output
+    assert "exactly one checklist source" in output
+
+
+@pytest.mark.parametrize(
+    ("contents", "error_fragment"),
+    [
+        ("{}", "nonempty JSON object"),
+        ("{", "valid JSON"),
+        ("[]", "JSON object"),
+        ('"result"', "JSON object"),
+        ('{" ": "passed"}', "nonblank string keys"),
+        ('{"check": " "}', "nonblank string values"),
+        ('{"check": 1}', "string values"),
+        ('{"check": "passed", "check": "failed"}', "keys must be unique"),
+        ('{"check": "passed", "\\u0063heck": "failed"}', "keys must be unique"),
+        ('{" check ": "passed", "check": "failed"}', "keys must be unique"),
+    ],
+)
+def test_complete_task_cli_rejects_invalid_checklist_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    contents: str,
+    error_fragment: str,
+) -> None:
+    """Reject malformed or ambiguous checklist files before dispatching a request."""
+    checklist_path = tmp_path / "checklist.json"
+    checklist_path.write_text(contents, encoding="utf-8")
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(
+        _complete_task_arguments("--checklist-file", str(checklist_path)),
+        application=application,
+    )
+
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    assert error_fragment in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "error_fragment"),
+    [
+        ("missing", "could not be read"),
+        ("directory", "could not be read"),
+        ("invalid_utf8", "valid UTF-8"),
+    ],
+)
+def test_complete_task_cli_rejects_unreadable_checklist_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure_kind: str,
+    error_fragment: str,
+) -> None:
+    """Report file access and decoding failures without dispatching a request."""
+    checklist_path = tmp_path / "checklist.json"
+    if failure_kind == "directory":
+        checklist_path.mkdir()
+        assert checklist_path.is_dir()
+    elif failure_kind == "invalid_utf8":
+        checklist_path.write_bytes(b"\xff")
+        assert checklist_path.read_bytes() == b"\xff"
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(
+        _complete_task_arguments("--checklist-file", str(checklist_path)),
+        application=application,
+    )
+
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    output = capsys.readouterr().out
+    assert "--checklist-file" in output
+    assert error_fragment in output
+
+
+def test_complete_task_cli_rejects_multiple_checklist_sources(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Require exactly one checklist source and one checklist file path."""
+    checklist_path = tmp_path / "checklist.json"
+    checklist_path.write_text('{"check": "passed"}', encoding="utf-8")
+    application = _ExecutionActionApplication()
+
+    mixed_exit_code = cli_main.main(
+        _complete_task_arguments(
+            "--checklist-item",
+            "check=passed",
+            "--checklist-file",
+            str(checklist_path),
+        ),
+        application=application,
+    )
+    repeated_file_exit_code = cli_main.main(
+        _complete_task_arguments(
+            "--checklist-file",
+            str(checklist_path),
+            "--checklist-file",
+            str(checklist_path),
+        ),
+        application=application,
+    )
+
+    assert mixed_exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert repeated_file_exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    output = capsys.readouterr().out
+    assert "--checklist-file" in output
 
 
 def test_generic_cli_transition_transport_is_removed() -> None:

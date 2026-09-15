@@ -40,6 +40,7 @@ _PLACEHOLDERS = {
     "<artifact-ref>": "services/application.py",
     "<acceptance-result>": "fully_met",
     "<checklist-item>": "Focused tests=passed",
+    "<checklist-file>": "checklist.json",
     "<resolution>": "Completed",
     "<delivered>": "Semantic execution transport.",
     "<evidence>": "Focused tests pass.",
@@ -623,7 +624,7 @@ def test_planning_actions_with_malformed_decisions_are_not_advertised(
                 "--outcome-summary",
                 "--artifact-ref",
                 "--acceptance-result",
-                "--checklist-item",
+                "--checklist-file",
             ),
             (
                 FactReference(

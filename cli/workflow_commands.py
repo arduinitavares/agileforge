@@ -168,8 +168,8 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "<artifact-ref>",
         "--acceptance-result",
         "<acceptance-result>",
-        "--checklist-item",
-        "<checklist-item>",
+        "--checklist-file",
+        "<checklist-file>",
     ),
     "decide_backlog": (
         "--decision",
