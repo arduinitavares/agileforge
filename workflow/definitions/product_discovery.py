@@ -635,6 +635,32 @@ def _active_specification_structuring_lease(
     )
 
 
+def _missing_source_rule(
+    vision: VisionArtifactFact,
+    goal: ProductGoalArtifactFact,
+    spec: SpecVersionFact | None,
+) -> RuleEvaluation:
+    """Keep accepted requirements current while offering exact source preparation."""
+    lineage = _lineage_references(vision, goal)
+    if spec is None:
+        return RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "SPECIFICATION_SOURCE_REQUIRED",
+            fact_references=lineage,
+        )
+    # Acceptance belongs to the Project, independently of checkout observations.
+    # Authoring a revision still captures source under the exact active binding.
+    return RuleEvaluation(
+        RuleCategory.AVAILABLE,
+        "SPECIFICATION_SOURCE_REPLACEMENT_AVAILABLE",
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        fact_references=(
+            *lineage,
+            _reference("specification", spec.spec_version_id, spec.spec_hash),
+        ),
+    )
+
+
 def _source_registration_rule(
     snapshot: WorkflowFactSnapshot,
     evaluated_at: datetime,
@@ -665,11 +691,7 @@ def _source_registration_rule(
             "SPECIFICATION_SOURCE_NOT_READY",
         )
     elif source is None:
-        evaluation = RuleEvaluation(
-            RuleCategory.AVAILABLE,
-            "SPECIFICATION_SOURCE_REQUIRED",
-            fact_references=_lineage_references(vision, goal),
-        )
+        evaluation = _missing_source_rule(vision, goal, selection.accepted_spec)
     elif candidate is None:
         evaluation = RuleEvaluation(
             RuleCategory.AVAILABLE,

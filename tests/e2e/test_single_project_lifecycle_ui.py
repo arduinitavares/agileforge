@@ -1439,6 +1439,7 @@ class FakeLifecycle:
             else self._position_projection()
         )
         actions = projection.pop("_actions")
+        projection.setdefault("project_id", _PROJECT_ID)
         assert isinstance(actions, list)
         return {
             "status": "success",
@@ -4066,6 +4067,10 @@ def _assert_issue_227_task_board(page: Page) -> None:
 
 
 def _issue_260_retry_controls(page: Page) -> tuple[Locator, Locator]:
+    expect(page.locator("#workspace-stage-12")).to_have_attribute(
+        "aria-current", "step"
+    )
+    _select_workspace_stage(page, 13)
     completed = page.locator('[data-sprint-status="completed"]')
     retry = page.locator('[data-direct-action="retry_sprint"]')
     expect(completed).to_contain_text("Sprint #31 is complete")
@@ -4474,6 +4479,7 @@ def _delivery_position(actions: list[JsonObject]) -> JsonObject:
             "child_graph_id": "planning",
             "request_kind": action["request_kind"],
             "category": "available",
+            "recommendation_kind": "required",
             "instance_key": action["instance_key"],
             "reason_code": "DELIVERY_GENERATION_AVAILABLE",
             "decision_fingerprint": f"decision-{index}",
@@ -4940,6 +4946,11 @@ def test_unbuildable_pbi_000002_correction_is_locked_in_real_browser(
 
     context, page = _open_project_page(dashboard_harness, fake)
 
+    expect(page.locator("#workbench-stage-title")).to_have_text("Select a stage")
+    expect(page.locator("#workspace-stage-7")).not_to_have_attribute(
+        "aria-current", "step"
+    )
+    _select_workspace_stage(page, 7)
     locked = page.locator('[data-story-correction-input-unavailable="true"]')
     expect(locked).to_be_visible()
     expect(locked).to_contain_text("Correction unavailable")
@@ -5445,6 +5456,7 @@ def test_corrected_story_set_dashboard_omits_superseded_history(
     fake.stories = [_corrected_story_projection(story_id) for story_id in range(1, 16)]
 
     context, page = _open_project_page(dashboard_harness, fake)
+    _select_workspace_stage(page, 7)
 
     readiness = page.locator('[data-story-readiness-section="true"]')
     expect(readiness).to_be_visible()
@@ -5478,6 +5490,7 @@ def test_story_dashboard_locks_row_without_supersession_identity(
     fake.stories = [malformed]
 
     context, page = _open_project_page(dashboard_harness, fake)
+    _select_workspace_stage(page, 7)
 
     row = page.locator(
         f'[data-story-readiness-row="{_CORRECTED_REPLACEMENT_FIRST_STORY_ID}"]'
@@ -5609,6 +5622,8 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     )
     page.locator("#refresh-project").click()
     page.wait_for_timeout(_UI_SETTLE_MS)
+    expect(page.locator("#workspace-stage-7")).to_contain_text("Viewing")
+    _select_workspace_stage(page, 8)
     expect(
         page.locator('[data-sprint-candidate-projection-error="true"]')
     ).to_be_visible()
@@ -5619,6 +5634,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
         body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
+    _select_workspace_stage(page, 7)
     dep_section = page.locator('[data-dependency-review-section="true"]')
     expect(dep_section).to_be_visible()
     expect(dep_section).to_contain_text("US-001")
@@ -5649,9 +5665,11 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     expect(candidate_pool).to_contain_text("US-001")
     expect(candidate_pool).not_to_contain_text("US-002")
 
+    _select_workspace_stage(page, 8)
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     expect(sprint_form).to_be_visible()
 
+    _select_workspace_stage(page, 7)
     remove_story1 = page.locator(
         f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="remove"]'
     )
@@ -5742,6 +5760,7 @@ def test_story_selection_stays_locked_through_409_until_current_projection_recov
     fake.story_reload_conflict = "Story authority projection conflicted."
 
     context, page = _open_project_page(dashboard_harness, fake)
+    _select_workspace_stage(page, 7)
     page.locator(
         '[data-story-selection-id="101"][data-story-selection-intent="select"]'
     ).click()
@@ -6297,6 +6316,7 @@ def _assert_issue_213_active_duplicate(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
         wait_until="networkidle",
     )
+    _select_workspace_stage(second, 5)
     _assert_issue_213_feedback(second, status=_ISSUE_213_ACTIVE_STATUS)
     duplicate = second.evaluate(
         f"""async () => {{
@@ -6572,6 +6592,7 @@ def test_story_readiness_renders_distinct_sibling_story_content(
 
     context, page = _open_project_page(dashboard_harness, fake)
     page.set_viewport_size({"width": viewport_width, "height": 900})
+    _select_workspace_stage(page, 7)
 
     readiness = page.locator('[data-story-readiness-section="true"]')
     expect(readiness).to_be_visible()
@@ -6685,6 +6706,7 @@ def test_story_readiness_explicitly_reports_missing_content(
     fake.stories = [missing_story]
 
     context, page = _open_project_page(dashboard_harness, fake)
+    _select_workspace_stage(page, 7)
 
     row = page.locator('[data-story-readiness-row="105"]')
     expect(row).to_be_visible()

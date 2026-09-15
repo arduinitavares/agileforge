@@ -36,7 +36,7 @@ const AgileForgeWorkspace = (() => {
         return STAGE_BY_REQUEST[decision.request_kind] ?? null;
     }
 
-    function currentStageIds(position) {
+    function actionStageIds(position) {
         const ids = new Set();
         for (const decision of Array.isArray(position?.decisions) ? position.decisions : []) {
             const stageId = stageForDecision(decision);
@@ -49,6 +49,71 @@ const AgileForgeWorkspace = (() => {
             }
         }
         return [...ids].sort((left, right) => left - right);
+    }
+
+    function deliveryWork(position, context) {
+        const status = context?.sprintStatus;
+        if (!status || status.kind === 'absent') return null;
+        const data = status.data;
+        if (status.kind !== 'ready' || !positive(data?.sprint?.sprint_id)
+            || data?.project_id !== position?.project_id) return { stages: [], primary: null };
+        const effective = data.effective_status ?? data.sprint.status;
+        if (effective === 'planned') return { stages: [8], primary: 8 };
+        if (effective === 'active') {
+            const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+            const stories = Array.isArray(data.stories) ? data.stories : [];
+            const completions = Array.isArray(data.story_completions) ? data.story_completions : [];
+            const completed = new Set(completions.filter((item) => item.sprint_id === data.sprint.sprint_id).map((item) => item.story_id));
+            const developing = !tasks.length || tasks.some((task) => task.status !== 'Done');
+            const closing = stories.some((story) => {
+                const owned = tasks.filter((task) => task.story_id === story.story_id);
+                return !completed.has(story.story_id) && owned.length && owned.every((task) => task.status === 'Done');
+            });
+            const stages = [...(developing ? [9] : []), ...(closing ? [10] : [])];
+            return stages.length ? { stages, primary: developing ? 9 : 10 } : { stages: [11], primary: 11 };
+        }
+        if (effective === 'completed') {
+            const pendingPlan = context.planningReviews?.sprintPlan?.review;
+            if (pendingPlan?.project_id === data.project_id && pendingPlan.review?.state === 'pending') {
+                return { stages: [8], primary: 8 };
+            }
+            const retryId = data.current_retry?.retry_attempt_id ?? null;
+            const history = context.sprintHistory;
+            const attempts = history?.project_id === data.project_id && Array.isArray(history.execution_attempts)
+                ? history.execution_attempts.filter((item) => item.sprint_id === data.sprint.sprint_id
+                    && (item.retry_attempt_id ?? null) === retryId) : [];
+            const triage = attempts.length === 1 ? attempts[0].triage
+                : retryId === null ? data.original_triage : null;
+            if (!Array.isArray(triage)) return { stages: [], primary: null };
+            if (!triage.length) return { stages: [12], primary: 12 };
+            return { stages: [13], primary: 13 };
+        }
+        return { stages: [], primary: null };
+    }
+
+    function currentStageIds(position, context = {}) {
+        const delivery = deliveryWork(position, context);
+        if (delivery === null) return actionStageIds(position);
+        if (!delivery.stages.length) return [];
+        const current = new Set(delivery.stages);
+        for (const decision of Array.isArray(position?.decisions) ? position.decisions : []) {
+            // A pending review or explicit Specification authoring is real concurrent work.
+            // Other available actions remain discoverable without redefining delivery progress.
+            const reviewing = decision.category === 'waiting' && WAITING_REVIEW_KINDS.has(decision.request_kind);
+            const authoring = ['register_specification_source', 'structure_specification'].includes(decision.request_kind)
+                && decision.category === 'available';
+            const stage = stageForDecision(decision);
+            if (stage !== null && (reviewing || authoring)
+                && decision.recommendation_kind !== 'optional_reentry') current.add(stage);
+        }
+        return [...current].sort((left, right) => left - right);
+    }
+
+    function initialStageId(position, context = {}) {
+        const delivery = deliveryWork(position, context);
+        if (delivery !== null) return delivery.primary;
+        const current = currentStageIds(position, context);
+        return current.length === 1 ? current[0] : null;
     }
 
     function exactAction(task, position, actions) {
@@ -222,8 +287,9 @@ const AgileForgeWorkspace = (() => {
         };
     }
 
-    function mapMarkup({ position = {}, view = createView(), lastConfirmedAt = null } = {}) {
-        const current = new Set(currentStageIds(position));
+    function mapMarkup({ position = {}, context = {}, view = createView(), lastConfirmedAt = null } = {}) {
+        const current = new Set(currentStageIds(position, context));
+        const primary = initialStageId(position, context);
         const descriptions = [
             'Identity & repository', 'Direction & purpose', 'Outcome & success',
             'Requirements & sources', 'Scope & work items', 'Order & priorities',
@@ -234,9 +300,13 @@ const AgileForgeWorkspace = (() => {
         const cards = stages().map((stage) => {
             const viewing = view.stageId === stage.id;
             const here = current.has(stage.id);
-            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" id="workspace-stage-${stage.id}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span><span class="workspace-stage-description">${escapeText(descriptions[stage.id - 1])}</span>${here ? '<span class="workspace-here">You are here</span>' : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
+            const available = (Array.isArray(position.decisions) ? position.decisions : [])
+                .filter((decision) => stageForDecision(decision) === stage.id && decision.category === 'available');
+            const actionLabel = available.some((decision) => decision.recommendation_kind !== 'optional_reentry')
+                ? 'Action available' : available.length ? 'Optional action' : '';
+            return `<button type="button" class="workspace-stage${viewing ? ' is-viewing' : ''}${here ? ' is-current' : ''}" id="workspace-stage-${stage.id}" data-workspace-stage="${stage.id}"${here ? ' aria-current="step"' : ''} aria-label="Stage ${String(stage.id).padStart(2, '0')}: ${escapeText(stage.label)}${here ? ', You are here' : ''}${viewing ? ', Viewing' : ''}"><span class="workspace-stage-number">${String(stage.id).padStart(2, '0')}</span><span class="workspace-stage-label">${escapeText(stage.label)}</span><span class="workspace-stage-description">${escapeText(descriptions[stage.id - 1])}</span>${here ? '<span class="workspace-here">You are here</span>' : actionLabel ? `<span class="workspace-stage-action">${actionLabel}</span>` : ''}${viewing ? '<span class="workspace-viewing">Viewing</span>' : ''}</button>`;
         });
-        const returnMarkup = current.size && !current.has(view.stageId)
+        const returnMarkup = primary !== null && view.stageId !== primary
             ? '<button type="button" class="workspace-return-current" data-workspace-return-current="true">Return to current work</button>'
             : '';
         const routeNote = !lastConfirmedAt ? 'Loading workflow position…'
@@ -258,7 +328,7 @@ const AgileForgeWorkspace = (() => {
     function mount(host, bridge = {}) {
         if (!host || typeof host.innerHTML !== 'string') return;
         const view = bridge.view || createView();
-        host.innerHTML = mapMarkup({ position: bridge.position, view, lastConfirmedAt: bridge.lastConfirmedAt });
+        host.innerHTML = mapMarkup({ position: bridge.position, context: bridge.context, view, lastConfirmedAt: bridge.lastConfirmedAt });
         const buttons = Array.from(host.querySelectorAll('[data-workspace-stage]'));
         buttons.forEach((button, index) => {
             button.addEventListener('click', () => {
@@ -278,8 +348,8 @@ const AgileForgeWorkspace = (() => {
             });
         });
         host.querySelector('[data-workspace-return-current]')?.addEventListener('click', () => {
-            const current = currentStageIds(bridge.position);
-            if (current.length) bridge.onReturnToCurrent?.(current[0]);
+            const current = initialStageId(bridge.position, bridge.context);
+            if (current !== null) bridge.onReturnToCurrent?.(current);
         });
     }
 
@@ -287,5 +357,5 @@ const AgileForgeWorkspace = (() => {
         return String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
     }
 
-    return Object.freeze({ stages, stageForDecision, currentStageIds, taskRows, taskCounts, createView, reconcileView, createController, mapMarkup, mount });
+    return Object.freeze({ stages, stageForDecision, currentStageIds, initialStageId, taskRows, taskCounts, createView, reconcileView, createController, mapMarkup, mount });
 })();

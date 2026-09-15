@@ -26,6 +26,99 @@ test('current work excludes optional retry and retains concurrent required work'
     assert.deepEqual(Array.from(api().currentStageIds(position)), [9, 10]);
 });
 
+function deliveryContext(status = 'active') {
+    return { sprintStatus: { kind: 'ready', data: {
+        project_id: 7, sprint: { sprint_id: 31, status }, effective_status: status,
+        current_retry: null, original_triage: [],
+        tasks: [{ task_id: 1, story_id: 101, sprint_id: 31, status: 'To Do' }],
+        stories: [{ story_id: 101 }], story_completions: [],
+    } } };
+}
+
+test('accepted Specification source preparation does not displace confirmed Sprint work', () => {
+    const position = { project_id: 7, decisions: [
+        { request_kind: 'register_specification_source', category: 'available', recommendation_kind: 'optional_reentry' },
+        { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'required' },
+    ] };
+    const workspace = api();
+    const context = deliveryContext();
+    assert.deepEqual(Array.from(workspace.currentStageIds(position, context)), [9]);
+    assert.equal(workspace.initialStageId(position, context), 9);
+    const markup = workspace.mapMarkup({ position, context, view: { stageId: 7 }, lastConfirmedAt: '2026-09-15T10:00:00Z' });
+    assert.match(markup, /data-workspace-stage="9"[^>]*aria-current="step"/);
+    assert.doesNotMatch(markup, /data-workspace-stage="[47]"[^>]*aria-current/);
+    assert.match(markup, /Optional action/);
+    assert.match(markup, /Action available/);
+});
+
+test('delivery context follows recorded planning completion closure and triage', () => {
+    const workspace = api();
+    const position = { project_id: 7, decisions: [] };
+    const context = deliveryContext('planned');
+    assert.equal(workspace.initialStageId(position, context), 8);
+    context.sprintStatus.data.effective_status = 'active';
+    context.sprintStatus.data.sprint.status = 'active';
+    assert.equal(workspace.initialStageId(position, context), 9);
+    context.sprintStatus.data.tasks[0].status = 'Done';
+    assert.equal(workspace.initialStageId(position, context), 10);
+    context.sprintStatus.data.story_completions.push({ story_id: 101, sprint_id: 31 });
+    assert.equal(workspace.initialStageId(position, context), 11);
+    context.sprintStatus.data.effective_status = 'completed';
+    context.sprintStatus.data.sprint.status = 'completed';
+    assert.equal(workspace.initialStageId(position, context), 12);
+    context.sprintStatus.data.original_triage.push({ sprint_id: 31 });
+    assert.equal(workspace.initialStageId(position, context), 13);
+    context.planningReviews = { sprintPlan: { review: { project_id: 7, review: { state: 'pending' } } } };
+    delete context.sprintStatus.data.original_triage;
+    assert.equal(workspace.initialStageId(position, context), 8);
+});
+
+test('concurrent Story closure and real Specification review remain visible during execution', () => {
+    const context = deliveryContext();
+    context.sprintStatus.data.tasks.push({ task_id: 2, story_id: 102, sprint_id: 31, status: 'Done' });
+    context.sprintStatus.data.stories.push({ story_id: 102 });
+    const position = { project_id: 7, decisions: [
+        { request_kind: 'decide_specification', category: 'waiting', recommendation_kind: 'required' },
+    ] };
+    assert.deepEqual(Array.from(api().currentStageIds(position, context)), [4, 9, 10]);
+    assert.equal(api().initialStageId(position, context), 9);
+    assert.match(api().mapMarkup({ position, context, view: { stageId: 4 } }), /Return to current work/);
+    position.decisions = [{ request_kind: 'register_specification_source', category: 'available', recommendation_kind: 'required' }];
+    assert.deepEqual(Array.from(api().currentStageIds(position, context)), [4, 9, 10]);
+});
+
+test('retry context uses its effective status and exact triage history', () => {
+    const context = deliveryContext('completed');
+    context.sprintStatus.data.current_retry = { retry_attempt_id: 5, status: 'active' };
+    context.sprintStatus.data.effective_status = 'active';
+    context.sprintStatus.data.original_triage = [{ sprint_id: 31 }];
+    const position = { project_id: 7, decisions: [] };
+    assert.equal(api().initialStageId(position, context), 9);
+    context.sprintStatus.data.effective_status = 'completed';
+    context.sprintStatus.data.current_retry.status = 'completed';
+    context.sprintHistory = { project_id: 7, execution_attempts: [
+        { sprint_id: 31, retry_attempt_id: null, triage: [{}] },
+        { sprint_id: 31, retry_attempt_id: 5, triage: [] },
+    ] };
+    assert.equal(api().initialStageId(position, context), 12);
+    context.sprintHistory.execution_attempts[1].triage.push({});
+    assert.equal(api().initialStageId(position, context), 13);
+});
+
+test('initial focus does not rank competing actions or use another project Sprint', () => {
+    const position = { project_id: 7, decisions: [
+        { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'required' },
+        { request_kind: 'structure_specification', category: 'available', recommendation_kind: 'required' },
+    ] };
+    assert.equal(api().initialStageId(position), null);
+    position.decisions.reverse();
+    assert.equal(api().initialStageId(position), null);
+    const context = deliveryContext();
+    context.sprintStatus.data.project_id = 8;
+    assert.equal(api().initialStageId(position, context), null);
+    assert.deepEqual(Array.from(api().currentStageIds(position, { sprintStatus: { kind: 'error' } })), []);
+});
+
 test('full inventory counts completion independently of task availability', () => {
     const result = api().taskCounts([
         { task_id: 14, status: 'Done' },

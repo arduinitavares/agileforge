@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+import pytest
+
 from workflow.contracts import RecommendationKind
 from workflow.definitions.product_discovery import (
     SPECIFICATION_NODES,
@@ -725,6 +727,58 @@ def test_pending_candidate_remains_review_target_after_binding_drift() -> None:
     } == {("specification_candidate", "6", "candidate")}
     assert source.reason_code == "SPECIFICATION_REVIEW_PENDING"
     assert source.category.value == "satisfied"
+
+
+@pytest.mark.parametrize("sprint_status", ["active", "completed"])
+def test_accepted_specification_rebinding_only_offers_optional_source_preparation(
+    sprint_status: Literal["active", "completed"],
+) -> None:
+    """New checkout observations cannot make accepted requirements unfinished."""
+    baseline = _snapshot(candidate_decision="accepted", approved_spec=True)
+    snapshot = baseline.model_copy(
+        update={
+            "project": baseline.project.model_copy(
+                update={"active_repository_binding_id": 21}
+            ),
+            "sprints": (
+                SprintFact(
+                    sprint_id=10,
+                    status=sprint_status,
+                    completed_at=NOW if sprint_status == "completed" else None,
+                ),
+            ),
+        }
+    )
+
+    source = _source_registration_rule(snapshot, NOW)[0]
+
+    assert source.category.value == "available"
+    assert source.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    assert source.reason_code == "SPECIFICATION_SOURCE_REPLACEMENT_AVAILABLE"
+    assert accepted_current_spec(snapshot) == baseline.spec_versions[0]
+    assert current_specification_source(snapshot) is None
+    assert snapshot.specification_sources == baseline.specification_sources
+    assert _specification_rule(snapshot, NOW)[0].category.value == "satisfied"
+    assert ("specification", "8", "payload") in {
+        (item.fact_type, item.fact_id, item.fingerprint)
+        for item in source.fact_references
+    }
+
+
+def test_changed_product_lineage_still_requires_a_new_specification_source() -> None:
+    """A historical approval cannot satisfy a newly accepted Vision and Goal."""
+    baseline = _snapshot(candidate_decision="accepted", approved_spec=True)
+    changed = _with_replacement_product_lineage(baseline, repository_binding_id=21)
+    changed = changed.model_copy(
+        update={"specification_sources": baseline.specification_sources}
+    )
+
+    source = _source_registration_rule(changed, NOW)[0]
+
+    assert accepted_current_spec(changed) is None
+    assert source.category.value == "available"
+    assert source.reason_code == "SPECIFICATION_SOURCE_REQUIRED"
+    assert source.recommendation_kind is not RecommendationKind.OPTIONAL_REENTRY
 
 
 def test_pending_candidate_remains_review_target_after_product_lineage_drift() -> None:

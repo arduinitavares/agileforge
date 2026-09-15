@@ -4287,6 +4287,37 @@ test('workspace delivery subviews keep Story closure, Sprint review, and triage 
     assert.match(triage, /Retained retry triage/);
 });
 
+test('workspace initial entry follows confirmed Sprint work and retains inspection after rebinding', () => {
+    const context = loadFrontend();
+    vm.runInContext(fs.readFileSync(path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js'), 'utf8'), context);
+    vm.runInContext(`
+        lifecycleState = {
+            position: { project_id: 7, decisions: [
+                { request_kind: 'register_specification_source', category: 'available', recommendation_kind: 'optional_reentry' },
+                { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'required' }
+            ] },
+            sprintStatus: { kind: 'ready', data: {
+                project_id: 7, sprint: { sprint_id: 31, status: 'active' },
+                effective_status: 'active', current_retry: null,
+                tasks: [{ task_id: 3, story_id: 101, sprint_id: 31, status: 'To Do' }],
+                stories: [{ story_id: 101 }], story_completions: []
+            } }
+        };
+        workspaceView = null;
+        ensureWorkspaceView();
+    `, context);
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 9);
+    vm.runInContext(`
+        workspaceView = { ...workspaceView, stageId: 7, sprintId: 31, taskId: 3, tab: 'checks' };
+        lifecycleState.position.decisions.reverse();
+        lifecycleState.sprintStatus.data.tasks[0].status = 'Done';
+        ensureWorkspaceView();
+    `, context);
+    assert.equal(vm.runInContext('workspaceView.stageId', context), 7);
+    assert.equal(vm.runInContext('workspaceView.taskId', context), 3);
+    assert.equal(vm.runInContext('workspaceView.tab', context), 'checks');
+});
+
 test('workspace Sprint planning and assessment keep review transitions in the review stage', () => {
     const context = loadFrontend();
     const active = acceptedSprintStatus();
@@ -4850,27 +4881,39 @@ test('workspace click delegation selects only Task row buttons and leaves comple
 
 test('workspace selection waits for the first authoritative position and preserves an inspected stage', () => {
     const context = loadFrontend();
-    context.workspaceApi = {
-        createView() {
-            return { stageId: null, sprintId: null, taskId: null, tab: 'details', filter: 'all', scopeKey: null };
-        },
-        currentStageIds(position) {
-            return Array.isArray(position?.decisions) ? [4] : [];
-        },
-    };
+    vm.runInContext(fs.readFileSync(path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js'), 'utf8'), context);
     vm.runInContext(`
-        AgileForgeWorkspace = workspaceApi;
         lifecycleState = { position: {} };
         workspaceView = null;
         ensureWorkspaceView();
     `, context);
     assert.equal(vm.runInContext('workspaceView', context), null);
 
-    vm.runInContext('lifecycleState.position = { decisions: [{ request_kind: "structure_specification" }] }; ensureWorkspaceView();', context);
+    vm.runInContext('lifecycleState.position = { decisions: [{ request_kind: "structure_specification", category: "available", recommendation_kind: "required" }] }; ensureWorkspaceView();', context);
     assert.equal(vm.runInContext('workspaceView.stageId', context), 4);
 
     vm.runInContext('workspaceView = { ...workspaceView, stageId: 7 }; lifecycleState.position = { decisions: [{ request_kind: "record_sprint_plan" }] }; ensureWorkspaceView();', context);
     assert.equal(vm.runInContext('workspaceView.stageId', context), 7);
+});
+
+test('ambiguous initial work asks for a stage instead of opening the first action', () => {
+    const context = loadFrontend();
+    vm.runInContext(fs.readFileSync(path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js'), 'utf8'), context);
+    const elements = new Map(['workbench-stage-title', 'workbench-stage-kicker', 'delivery-panel', 'specification-panel']
+        .map((id) => [id, { textContent: '', innerHTML: '', hidden: false }]));
+    context.document.getElementById = (id) => elements.get(id) ?? null;
+    vm.runInContext(`
+        lifecycleState.position = { decisions: [
+            { request_kind: 'structure_specification', category: 'available', recommendation_kind: 'required' },
+            { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'required' }
+        ] };
+        workspaceView = null;
+        ensureWorkspaceView();
+        updateStageView();
+    `, context);
+    assert.equal(elements.get('workbench-stage-title').textContent, 'Select a stage');
+    assert.equal(elements.get('specification-panel').hidden, true);
+    assert.match(elements.get('delivery-panel').innerHTML, /Select a stage above/);
 });
 
 test('repository stage jump selects the workspace map stage and records browser history', async () => {

@@ -3703,8 +3703,8 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
     );
     const stageId = workspaceView?.stageId ?? null;
-    const actionFor = (requestKind) => actionMarkup.filter((markup) => (
-        markup.includes(`data-delivery-generation-action="${requestKind}"`)
+    const actionFor = (requestKind) => actionMarkup.filter((_markup, index) => (
+        availableDeliveryActions[index].request_kind === requestKind
     ));
     const stageSections = {
         5: [backlogCard, ...actionFor('record_backlog_draft')],
@@ -3908,9 +3908,8 @@ function ensureWorkspaceView() {
     if (workspaceView !== null) return;
     const position = lifecycleState?.position;
     if (!Array.isArray(position?.decisions)) return;
-    const current = AgileForgeWorkspace.currentStageIds(position);
-    if (!current.length) return;
-    workspaceView = { ...AgileForgeWorkspace.createView(), stageId: current[0] };
+    const stageId = AgileForgeWorkspace.initialStageId(position, lifecycleState);
+    workspaceView = { ...AgileForgeWorkspace.createView(), stageId };
 }
 
 function renderWorkspaceMap() {
@@ -3920,6 +3919,7 @@ function renderWorkspaceMap() {
     ensureWorkspaceView();
     AgileForgeWorkspace.mount(host, {
         position: lifecycleState.position,
+        context: lifecycleState,
         view: workspaceView,
         lastConfirmedAt: lastDashboardConfirmedAt,
         onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
@@ -4683,6 +4683,20 @@ function renderMasterStageNav() {
 }
 
 function updateStageView(shouldScroll = false) {
+    if (typeof AgileForgeWorkspace !== 'undefined' && workspaceView?.stageId === null) {
+        setText('workbench-stage-title', 'Select a stage');
+        setText('workbench-stage-kicker', 'Project lifecycle');
+        for (const id of ['vision-panel', 'goal-panel', 'specification-panel', 'repository-panel']) {
+            const panel = document.getElementById(id);
+            if (panel) panel.hidden = true;
+        }
+        const delivery = document.getElementById('delivery-panel');
+        if (delivery) {
+            delivery.hidden = false;
+            delivery.innerHTML = '<p class="text-sm text-slate-600">Select a stage above to inspect its work. Current stages and available actions are shown separately on the map.</p>';
+        }
+        return;
+    }
     const activeWorkflowStage = resolveActiveWorkflowStage(lifecycleState.position, lifecycleState.actions);
     const workspaceStage = workspaceView?.stageId;
     const currentStage = workspaceStageLabel(workspaceStage)
