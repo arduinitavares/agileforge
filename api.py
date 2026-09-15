@@ -1131,6 +1131,14 @@ def get_roadmap_review(project_id: int) -> dict[str, object]:
     return _read_payload(_application().roadmap_review(project_id))
 
 
+@app.get("/api/projects/{project_id}/roadmap")
+def get_accepted_roadmap(project_id: int) -> dict[str, object]:
+    """Return the accepted Roadmap projection independently of pending review."""
+    return _read_payload(
+        _application().reads.accepted_roadmap(project_id=project_id)
+    )
+
+
 @app.get("/api/projects/{project_id}/story/reviews")
 def get_story_reviews(project_id: int) -> dict[str, object]:
     """Return every exact pending Story review in stable display order."""

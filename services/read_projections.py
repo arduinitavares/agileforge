@@ -102,6 +102,7 @@ from workflow.execution_scope import (
     ExecutionScope,
     ExecutionScopeError,
     current_execution_scope,
+    resolve_execution_scope,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import current_task_content_fingerprint
@@ -1627,6 +1628,396 @@ def _roadmap_review_projection(record: _RoadmapReviewRecord) -> JsonObject:
     }
 
 
+def _accepted_roadmap_projection(
+    record: _RoadmapReviewRecord,
+    *,
+    progress: JsonObject,
+) -> JsonObject:
+    """Render accepted Roadmap content without borrowing pending-review routing."""
+    review = _roadmap_review_projection(record)
+    candidate = cast("JsonObject", review["candidate"])
+    decision = record.decision
+    if decision is None or decision.decision != "accepted":
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Current Roadmap selection is not bound to an accepted decision.",
+        )
+    return {
+        "state": "accepted",
+        "phase": "roadmap",
+        "project_id": record.artifact.project_id,
+        "lineage": review["lineage"],
+        "roadmap": candidate,
+        "acceptance": _planning_review_data(decision),
+        "milestone_completion": "not_established",
+        "progress": progress,
+    }
+
+
+@dataclass(frozen=True)
+class _AcceptedRoadmapExecutionScopes:
+    """Execution scopes plus durable evidence that one could not be resolved."""
+
+    scopes: tuple[ExecutionScope, ...]
+    unavailable: tuple[JsonObject, ...]
+
+
+@dataclass(frozen=True)
+class _AcceptedRoadmapStoryContext:
+    """Canonical immutable Story sources usable by one accepted Roadmap read."""
+
+    artifacts_by_id: dict[int, StoryArtifact]
+    decisions_by_artifact_id: dict[int, StoryArtifactDecision]
+    readiness: _StoryReadinessContext
+
+
+def _accepted_roadmap_execution_scopes(
+    snapshot: WorkflowFactSnapshot,
+) -> _AcceptedRoadmapExecutionScopes:
+    """Return every scope while retaining failed immutable-scope evidence."""
+    references = [(item.sprint_id, None) for item in snapshot.sprints] + [
+        (item.sprint_id, item.retry_attempt_id) for item in snapshot.sprint_retries
+    ]
+    scopes: list[ExecutionScope] = []
+    unavailable: list[JsonObject] = []
+    for sprint_id, retry_attempt_id in references:
+        try:
+            scopes.append(
+                resolve_execution_scope(
+                    snapshot,
+                    sprint_id=sprint_id,
+                    retry_attempt_id=retry_attempt_id,
+                )
+            )
+        except ExecutionScopeError:
+            unavailable.append(
+                {
+                    "sprint_id": sprint_id,
+                    "retry_attempt_id": retry_attempt_id,
+                    "state": "unavailable",
+                }
+            )
+    return _AcceptedRoadmapExecutionScopes(
+        scopes=tuple(scopes),
+        unavailable=tuple(unavailable),
+    )
+
+
+def _accepted_roadmap_story_context(
+    session: Session,
+    *,
+    project_id: int,
+) -> _AcceptedRoadmapStoryContext:
+    """Load canonical Story artifacts once for accepted Roadmap provenance reads."""
+    artifacts = tuple(
+        session.exec(
+            select(StoryArtifact)
+            .where(col(StoryArtifact.project_id) == project_id)
+            .order_by(col(StoryArtifact.story_artifact_id))
+        ).all()
+    )
+    artifacts_by_id = {
+        artifact_id: artifact
+        for artifact in artifacts
+        if (artifact_id := artifact.story_artifact_id) is not None
+    }
+    decisions = tuple(
+        session.exec(
+            select(StoryArtifactDecision)
+            .where(col(StoryArtifactDecision.project_id) == project_id)
+            .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
+        ).all()
+    )
+    decisions_by_artifact_id = {
+        decision.story_artifact_id: decision for decision in decisions
+    }
+    context = DurableReadProjectionService._load_story_readiness_artifact_context(
+        artifacts_by_id=artifacts_by_id,
+        decisions=decisions,
+    )
+    return _AcceptedRoadmapStoryContext(
+        artifacts_by_id=artifacts_by_id,
+        decisions_by_artifact_id=decisions_by_artifact_id,
+        readiness=context,
+    )
+
+
+def _accepted_roadmap_story_source_error(
+    story: StoryFact,
+    record: _RoadmapReviewRecord,
+    *,
+    backlog_item_id: str,
+    source: _AcceptedRoadmapStoryContext,
+) -> str | None:
+    """Prove a Story fact's source item against immutable accepted bytes."""
+    artifact = source.artifacts_by_id.get(story.source_story_artifact_id)
+    if (
+        artifact is None
+        or artifact.project_id != record.artifact.project_id
+        or artifact.story_artifact_id != story.source_story_artifact_id
+        or artifact.content_fingerprint != story.source_story_artifact_fingerprint
+        or artifact.roadmap_artifact_id != record.artifact.roadmap_artifact_id
+        or artifact.roadmap_artifact_fingerprint != record.artifact.content_fingerprint
+        or artifact.source_backlog_artifact_id
+        != record.backlog.artifact.backlog_artifact_id
+        or artifact.source_backlog_artifact_fingerprint
+        != record.backlog.artifact.content_fingerprint
+        or artifact.backlog_item_id != backlog_item_id
+    ):
+        return "SOURCE_STORY_ARTIFACT_UNAVAILABLE"
+    decision = source.decisions_by_artifact_id.get(story.source_story_artifact_id)
+    if (
+        decision is None
+        or decision.project_id != record.artifact.project_id
+        or decision.story_artifact_id != artifact.story_artifact_id
+        or decision.artifact_fingerprint != artifact.content_fingerprint
+        or decision.decision != "accepted"
+    ):
+        return "SOURCE_STORY_ARTIFACT_UNACCEPTED"
+    canonical_item = DurableReadProjectionService._accepted_story_item(
+        item=story,
+        artifact=artifact,
+        context=source.readiness,
+    )
+    if canonical_item is None:
+        return "SOURCE_STORY_ITEM_UNAVAILABLE"
+    return None
+
+
+def _story_scope_attempts(
+    story: StoryFact,
+    scopes: tuple[ExecutionScope, ...],
+) -> list[JsonValue]:
+    """Return attempts only where immutable Story source identity is selected."""
+    attempts: list[JsonValue] = []
+    identity = (
+        story.story_id,
+        story.source_story_artifact_id,
+        story.source_story_artifact_fingerprint,
+        story.source_story_item_id,
+        story.source_story_item_fingerprint,
+    )
+    for scope in scopes:
+        if not any(
+            (
+                item.story_id,
+                item.source_story_artifact_id,
+                item.source_story_artifact_fingerprint,
+                item.source_story_item_id,
+                item.source_story_item_fingerprint,
+            )
+            == identity
+            for item in scope.stories
+        ):
+            continue
+        attempts.append(
+            {
+                "sprint_id": scope.sprint_id,
+                "retry_attempt_id": scope.retry_attempt_id,
+                "status": scope.status,
+            }
+        )
+    return attempts
+
+
+def _accepted_roadmap_progress(
+    record: _RoadmapReviewRecord,
+    snapshot: WorkflowFactSnapshot,
+    session: Session,
+) -> JsonObject:
+    """Attach only exact Story-to-Roadmap evidence; never infer completion."""
+    execution = _accepted_roadmap_execution_scopes(snapshot)
+    source = _accepted_roadmap_story_context(
+        session,
+        project_id=record.artifact.project_id,
+    )
+
+    milestones: list[JsonValue] = []
+    for release in record.content.roadmap_releases:
+        story_rows: list[JsonValue] = []
+        milestone_qualified = bool(execution.unavailable)
+        for story in snapshot.stories:
+            artifact = source.artifacts_by_id.get(story.source_story_artifact_id)
+            artifact_matches_current_roadmap = (
+                artifact is not None
+                and artifact.roadmap_artifact_id == record.artifact.roadmap_artifact_id
+                and artifact.roadmap_artifact_fingerprint
+                == record.artifact.content_fingerprint
+            )
+            artifact_matches_current_backlog = (
+                artifact is not None
+                and artifact.source_backlog_artifact_id
+                == record.backlog.artifact.backlog_artifact_id
+                and artifact.source_backlog_artifact_fingerprint
+                == record.backlog.artifact.content_fingerprint
+            )
+            linked_backlog_item_id = (
+                story.backlog_item_id
+                if story.backlog_item_id is not None
+                else (artifact.backlog_item_id if artifact is not None else None)
+            )
+            story_matches_current_lineage = (
+                story.roadmap_artifact_id == record.artifact.roadmap_artifact_id
+                and story.roadmap_artifact_fingerprint
+                == record.artifact.content_fingerprint
+                and story.backlog_artifact_id
+                == record.backlog.artifact.backlog_artifact_id
+                and story.backlog_artifact_fingerprint
+                == record.backlog.artifact.content_fingerprint
+            )
+            artifact_matches_current_lineage = (
+                artifact_matches_current_roadmap and artifact_matches_current_backlog
+            )
+            if (
+                not (
+                    story_matches_current_lineage
+                    or artifact_matches_current_lineage
+                )
+                or linked_backlog_item_id not in release.backlog_item_ids
+            ):
+                continue
+            source_error = _accepted_roadmap_story_source_error(
+                story,
+                record,
+                backlog_item_id=linked_backlog_item_id,
+                source=source,
+            )
+            attempts = (
+                _story_scope_attempts(story, execution.scopes)
+                if source_error is None
+                else []
+            )
+            milestone_qualified = milestone_qualified or source_error is not None
+            story_rows.append(
+                {
+                    "story_id": story.story_id,
+                    "source_story_artifact_id": story.source_story_artifact_id,
+                    "source_story_artifact_fingerprint": (
+                        story.source_story_artifact_fingerprint
+                    ),
+                    "source_story_item_id": story.source_story_item_id,
+                    "source_story_item_fingerprint": (
+                        story.source_story_item_fingerprint
+                    ),
+                    "is_superseded": story.is_superseded,
+                    "backlog_item_id": linked_backlog_item_id,
+                    "sprints": attempts,
+                    "evidence_state": (
+                        "available" if source_error is None else "qualified"
+                    ),
+                    "evidence_code": source_error,
+                }
+            )
+        milestones.append(
+            {
+                "release_name": release.release_name,
+                "backlog_item_ids": list(release.backlog_item_ids),
+                "stories": story_rows,
+                "completion": "not_established",
+                "evidence_state": (
+                    "qualified" if milestone_qualified else "available"
+                ),
+            }
+        )
+    active: JsonValue = None
+    try:
+        scope = current_execution_scope(snapshot)
+        if scope is not None and scope.status == "active":
+            active = {
+                "sprint_id": scope.sprint_id,
+                "retry_attempt_id": scope.retry_attempt_id,
+                "status": scope.status,
+            }
+    except ExecutionScopeError:
+        active = {"state": "unavailable"}
+    return {
+        "state": "qualified" if execution.unavailable else "available",
+        "active_sprint": active,
+        "scope_evidence": list(execution.unavailable),
+        "milestones": milestones,
+    }
+
+
+def _load_current_accepted_roadmap_record(
+    session: Session,
+    *,
+    project_id: int,
+) -> _RoadmapReviewRecord | None:
+    """Resolve the accepted Specification, Backlog, and Roadmap chain exactly."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        _backlog_lineage_nodes,
+    )
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        _roadmap_lineage_nodes,
+    )
+
+    specification = load_current_accepted_specification(session, project_id=project_id)
+    if specification is None:
+        return None
+    registry = session.exec(
+        select(SpecRegistry).where(
+            col(SpecRegistry.project_id) == project_id,
+            col(SpecRegistry.spec_version_id) == specification.spec_version_id,
+            col(SpecRegistry.spec_hash) == specification.spec_hash,
+        )
+    ).one_or_none()
+    if registry is None:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Current accepted Specification registry is unavailable.",
+        )
+    try:
+        backlog_node = select_current_accepted_artifact(
+            _backlog_lineage_nodes(session, project_id=project_id),
+            chain_key=(
+                project_id,
+                registry.source_product_goal_artifact_id,
+                registry.source_product_goal_fingerprint,
+                specification.spec_version_id,
+                specification.spec_hash,
+            ),
+        )
+    except (PlanningLineageError, ValueError) as error:
+        if isinstance(error, PlanningLineageError) and (
+            error.code == PlanningLineageCode.ACCEPTED_LEAF_MISSING
+        ):
+            return None
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Accepted Backlog lineage is invalid.",
+            cause=error,
+        )
+    backlog = _load_backlog_review_record(
+        session,
+        project_id=project_id,
+        backlog_artifact_id=backlog_node.artifact_id,
+    )
+    try:
+        roadmap_node = select_current_accepted_artifact(
+            _roadmap_lineage_nodes(session, project_id=project_id),
+            chain_key=(
+                project_id,
+                backlog.artifact.backlog_artifact_id,
+                backlog.artifact.content_fingerprint,
+            ),
+        )
+    except (PlanningLineageError, ValueError) as error:
+        if isinstance(error, PlanningLineageError) and (
+            error.code == PlanningLineageCode.ACCEPTED_LEAF_MISSING
+        ):
+            return None
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Accepted Roadmap lineage is invalid.",
+            cause=error,
+        )
+    return _load_roadmap_review_record(
+        session,
+        project_id=project_id,
+        roadmap_artifact_id=roadmap_node.artifact_id,
+    )
+
+
 def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
     artifact = record.artifact
     backlog = record.roadmap.backlog
@@ -1899,6 +2290,34 @@ class DurableReadProjectionService:
                 project_id=project_id,
                 roadmap_artifact_id=roadmap_artifact_id,
             )
+
+    def accepted_roadmap(self, *, project_id: int) -> JsonObject:
+        """Read the current accepted Roadmap independently of pending review state."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        try:
+            with Session(self._engine) as session:
+                record = _load_current_accepted_roadmap_record(
+                    session,
+                    project_id=project_id,
+                )
+                if record is None:
+                    return _success({"state": "absent", "project_id": project_id})
+                try:
+                    snapshot = WorkflowFactRepository(session).load(project_id)
+                    progress: JsonObject = _accepted_roadmap_progress(
+                        record,
+                        snapshot,
+                        session,
+                    )
+                except WorkflowFactLoadError:
+                    progress = {"state": "unavailable"}
+                return _success(_accepted_roadmap_projection(record, progress=progress))
+        except AcceptedSpecificationIntegrityError as error:
+            return _error(error.code, str(error), project_id=project_id)
+        except _PlanningArtifactProjectionError as error:
+            return _error(error.code, str(error), project_id=project_id)
 
     def story_review(
         self,

@@ -168,6 +168,7 @@ let lifecycleState = {
         stories: {},
         sprintPlan: {},
     },
+    acceptedRoadmap: { kind: 'unavailable' },
     repository: {},
     sprintStatus: { kind: 'absent' },
     sprintHistory: {},
@@ -1875,7 +1876,7 @@ function backlogItemMarkup(value) {
     const item = reviewObject(value);
     if (!item) return '';
     return `<section class="space-y-3 rounded-md border border-slate-200 p-3">
-        <div><p class="text-xs font-semibold uppercase text-slate-500">Requirement</p><p class="mt-1 text-sm leading-6">${escapeWorkflowText(reviewValue(item.requirement))}</p></div>
+        <div><p class="text-xs font-semibold uppercase text-slate-500">Requirement${item.backlog_item_id ? ` · ${escapeWorkflowText(reviewValue(item.backlog_item_id))}` : ''}</p><p class="mt-1 text-sm leading-6">${escapeWorkflowText(reviewValue(item.requirement))}</p></div>
         <dl class="grid gap-2 text-sm sm:grid-cols-2">
             <div><dt class="font-semibold">Priority</dt><dd>${escapeWorkflowText(reviewValue(item.priority))}</dd></div>
             <div><dt class="font-semibold">Value driver</dt><dd>${escapeWorkflowText(reviewValue(item.value_driver))}</dd></div>
@@ -2175,7 +2176,7 @@ function backlogReviewMarkup(candidate) {
     </div>`;
 }
 
-function roadmapReviewMarkup(candidate) {
+function roadmapReviewMarkup(candidate, contentCompleteLabel = 'Complete') {
     const releases = reviewItems(candidate.roadmap_releases);
     if (!releases) return '';
     return `<div class="space-y-4">
@@ -2192,9 +2193,74 @@ function roadmapReviewMarkup(candidate) {
                 <div class="space-y-3">${items.map(backlogItemMarkup).join('')}</div>
             </section>`;
         }).join('')}
-        <p class="text-sm"><strong>Complete:</strong> ${escapeWorkflowText(reviewValue(candidate.is_complete))}</p>
+        <p class="text-sm"><strong>${escapeWorkflowText(contentCompleteLabel)}:</strong> ${escapeWorkflowText(reviewValue(candidate.is_complete))}</p>
         ${reviewListMarkup('Clarifying questions', candidate.clarifying_questions)}
     </div>`;
+}
+
+function acceptedRoadmapProgressMarkup(progress) {
+    const value = reviewObject(progress);
+    if (!value || value.state === 'unavailable') {
+        return '<p class="text-sm text-slate-700">Linked Story and Sprint progress is unavailable. Accepted Roadmap content remains readable.</p>';
+    }
+    const milestones = reviewItems(value.milestones);
+    if (!milestones) return '<p class="text-sm text-slate-700">Linked Story and Sprint progress is unavailable.</p>';
+    const activeSprint = reviewObject(value.active_sprint);
+    const activeIdentity = activeSprint?.status === 'active'
+        ? `${reviewValue(activeSprint.sprint_id)}${activeSprint.retry_attempt_id === null || activeSprint.retry_attempt_id === undefined ? '' : ` · retry attempt #${reviewValue(activeSprint.retry_attempt_id)}`}`
+        : null;
+    const activeMarkup = activeSprint?.state === 'unavailable'
+        ? '<p class="text-sm text-amber-800">Current Sprint context is unavailable.</p>'
+        : (activeIdentity
+            ? `<p class="text-sm text-emerald-800" data-roadmap-active-sprint>Current active Sprint #${escapeWorkflowText(activeIdentity)}.</p>`
+            : '<p class="text-sm text-slate-700">No current active Sprint is linked.</p>');
+    const scopeEvidence = reviewItems(value.scope_evidence) || [];
+    const scopeMarkup = value.state === 'qualified' || scopeEvidence.length
+        ? '<p class="text-sm text-amber-800">Some linked Sprint evidence is unavailable; accepted Roadmap content remains readable.</p>'
+        : '';
+    return `<section class="space-y-3"><h4 class="font-semibold">Linked delivery evidence</h4>${activeMarkup}${scopeMarkup}${milestones.map((rawMilestone, index) => {
+        const milestone = reviewObject(rawMilestone);
+        if (!milestone) return '';
+        const stories = reviewItems(milestone.stories) || [];
+        const milestoneCurrent = activeSprint?.status === 'active' && stories.some((rawStory) => {
+            const story = reviewObject(rawStory);
+            return (reviewItems(story?.sprints) || []).some((rawSprint) => {
+                const sprint = reviewObject(rawSprint);
+                return sprint?.sprint_id === activeSprint.sprint_id
+                    && sprint?.retry_attempt_id === activeSprint.retry_attempt_id;
+            });
+        });
+        const qualification = milestone.evidence_state === 'qualified'
+            ? '<p class="mt-1 text-sm text-amber-800">Linked Story evidence is qualified; it does not establish delivery progress.</p>'
+            : '';
+        const currentMarker = milestoneCurrent
+            ? `<p class="mt-1 text-sm font-medium text-emerald-800" data-roadmap-active-milestone="${index + 1}">Current active Sprint touches this milestone.</p>`
+            : '';
+        return `<div class="rounded border border-emerald-200 bg-white p-3"><p class="font-medium">${escapeWorkflowText(reviewValue(milestone.release_name))}</p>${currentMarker}${qualification}<p class="mt-1 text-sm text-slate-700">Aggregate milestone completion not established by these links.</p><ul class="mt-2 space-y-1 text-sm text-slate-700">${stories.length ? stories.map((rawStory) => { const story = reviewObject(rawStory); if (!story) return ''; const sprints = reviewItems(story.sprints) || []; const history = story.is_superseded ? ' · superseded history' : ''; const evidence = story.evidence_state === 'qualified' ? ` · evidence qualified (${escapeWorkflowText(reviewValue(story.evidence_code))})` : ''; return `<li>Story #${escapeWorkflowText(reviewValue(story.story_id))}${history} · source artifact ${escapeWorkflowText(reviewValue(story.source_story_artifact_id))}/${escapeWorkflowText(reviewValue(story.source_story_item_id))}${evidence} · Sprints: ${sprints.length ? sprints.map((rawSprint) => { const sprint = reviewObject(rawSprint); if (!sprint) return ''; const retry = sprint.retry_attempt_id === null || sprint.retry_attempt_id === undefined ? 'original attempt' : `retry attempt #${escapeWorkflowText(reviewValue(sprint.retry_attempt_id))}`; return `#${escapeWorkflowText(reviewValue(sprint.sprint_id))} (${escapeWorkflowText(reviewValue(sprint.status || sprint.state))}, ${retry})`; }).join(', ') : 'none'}</li>`; }).join('') : '<li>No exact linked Story evidence.</li>'}</ul></div>`;
+    }).join('')}</section>`;
+}
+
+function acceptedRoadmapCardMarkup(acceptedRoadmap) {
+    if (acceptedRoadmap?.kind === 'error'
+        && acceptedRoadmap.code === 'PLANNING_ARTIFACT_LINEAGE_INVALID') {
+        return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-accepted-roadmap="invalid"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-700">Accepted Roadmap lineage is unavailable.</p></section>`;
+    }
+    if (acceptedRoadmap?.kind === 'error') {
+        return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-accepted-roadmap="error"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-700">Accepted Roadmap data is unavailable: ${escapeWorkflowText(acceptedRoadmap.message || 'read failed')}</p></section>`;
+    }
+    if (acceptedRoadmap?.kind === 'unavailable') {
+        return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-accepted-roadmap="unavailable"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-700">Accepted Roadmap data has not been loaded.</p></section>`;
+    }
+    const data = acceptedRoadmap?.data;
+    if (!data || data.state === 'absent') {
+        return `<section class="rounded-lg border border-slate-200 bg-white p-4" data-accepted-roadmap="absent"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-600">No accepted Roadmap is available.</p></section>`;
+    }
+    const roadmap = reviewObject(data.roadmap);
+    if (data.state !== 'accepted' || !roadmap) {
+        return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-accepted-roadmap="invalid"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-700">Accepted Roadmap lineage is unavailable.</p></section>`;
+    }
+    const acceptance = reviewObject(data.acceptance);
+    return `<section class="rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-3" data-accepted-roadmap="accepted"><div><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">Accepted content</p><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-1 text-sm text-slate-700">Roadmap #${escapeWorkflowText(reviewValue(roadmap.roadmap_artifact_id))} · ${escapeWorkflowText(reviewValue(roadmap.artifact_fingerprint))}</p></div>${roadmapReviewMarkup(roadmap, 'Roadmap content complete')}${acceptedRoadmapProgressMarkup(data.progress)}${acceptance ? `<p class="text-sm text-slate-700">Accepted by ${escapeWorkflowText(reviewValue(acceptance.reviewer))}</p>` : ''}</section>`;
 }
 
 function storyReviewMarkup(review, candidate) {
@@ -3645,6 +3711,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
             ? backlogFeedbackContinuationMarkup(backlogContinuation, backlogCorrection)
             : planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'));
     const roadmapCard = planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap');
+    const acceptedRoadmapCard = acceptedRoadmapCardMarkup(context?.acceptedRoadmap);
     const storyReviewCards = storyItems.map((item, index) => {
         const pbiId = item?.binding?.instance_key?.startsWith('backlog_item:')
             ? item.binding.instance_key.slice('backlog_item:'.length)
@@ -3708,7 +3775,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     ));
     const stageSections = {
         5: [backlogCard, ...actionFor('record_backlog_draft')],
-        6: [roadmapCard, ...actionFor('record_roadmap_draft')],
+        6: [acceptedRoadmapCard, roadmapCard, ...actionFor('record_roadmap_draft')],
         7: [...storyReviewCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
         8: [sprintPlanCard, candidateSection, workspaceSprintSection, sprintBoardNavigation, ...actionFor('record_sprint_plan')],
         9: [taskBoard, workspaceSprintContextMarkup(context?.sprintStatus)],
@@ -3721,7 +3788,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         ? stageSections[stageId]
         : [
             sprintSection,
-            allReviewCards.length ? `<div class="grid gap-4">${allReviewCards.join('')}</div>` : '',
+            `<div class="grid gap-4">${[acceptedRoadmapCard, ...allReviewCards].filter(Boolean).join('')}</div>`,
             readinessSection,
             dependencySection,
             candidateSection,
@@ -4905,6 +4972,15 @@ async function requestPlanningReview(url, options) {
     }
 }
 
+async function requestAcceptedRoadmap(url, options) {
+    try {
+        return { kind: 'ready', data: (await requestJson(url, options))?.data ?? {} };
+    } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        return { kind: 'error', code: error.code, message: error.message };
+    }
+}
+
 async function requestSprintStatus(url, options) {
     try {
         const response = await requestJson(url, options);
@@ -4953,6 +5029,7 @@ async function loadDashboard() {
             repository,
             backlogReview,
             roadmapReview,
+            acceptedRoadmap,
             storyReviews,
             sprintPlanReview,
             storyPending,
@@ -4969,6 +5046,7 @@ async function loadDashboard() {
             requestJson(`${base}/repository`, options),
             requestPlanningReview(`${base}/backlog/review`, options),
             requestPlanningReview(`${base}/roadmap/review`, options),
+            requestAcceptedRoadmap(`${base}/roadmap`, options),
             requestPlanningReview(`${base}/story/reviews`, options),
             requestPlanningReview(`${base}/sprint/plan/review`, options),
             requestJson(`${base}/story/pending`, options),
@@ -5022,6 +5100,7 @@ async function loadDashboard() {
                 stories: storyReviews.data ?? { items: [] },
                 sprintPlan: sprintPlanReviewData,
             },
+            acceptedRoadmap,
             storyPending: storyPending.data ?? {},
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidatesData,

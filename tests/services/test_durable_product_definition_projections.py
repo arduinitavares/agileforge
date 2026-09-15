@@ -6,7 +6,7 @@ import base64
 import hashlib
 import importlib.util
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -35,6 +35,8 @@ from models.specs import SpecRegistry
 from models.workflow import (
     BacklogArtifact,
     RoadmapArtifact,
+    StoryArtifact,
+    StoryArtifactDecision,
     StoryDependencyReview,
     WorkflowNodeAttempt,
 )
@@ -64,7 +66,10 @@ from services.contracts.specification_source import (
     source_bundle_fingerprint,
     specification_source_adr_id,
 )
-from services.read_projections import DurableReadProjectionService
+from services.read_projections import (
+    DurableReadProjectionService,
+    _story_scope_attempts,
+)
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -3816,7 +3821,12 @@ def test_malformed_durable_projection_data_returns_typed_error(engine: Engine) -
     assert _error_code(result) == "PROJECT_FACTS_UNAVAILABLE"
 
 
-def _seed_task_7_backlog(engine: Engine) -> tuple[int, int, str, int]:
+def _seed_task_7_backlog(
+    engine: Engine,
+    *,
+    project_name: str = "Backlog lineage",
+    artifact_id: int = 101,
+) -> tuple[int, int, str, int]:
     from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
         record_backlog_draft_in_session,
     )
@@ -3827,7 +3837,7 @@ def _seed_task_7_backlog(engine: Engine) -> tuple[int, int, str, int]:
     )
 
     with Session(engine) as session:
-        lineage = _seed_project_specification(session)
+        lineage = _seed_project_specification(session, project_name=project_name)
         project_id = lineage.spec.project_id
         spec_version_id = lineage.spec.spec_version_id
         assert spec_version_id is not None
@@ -3842,7 +3852,7 @@ def _seed_task_7_backlog(engine: Engine) -> tuple[int, int, str, int]:
             canonical_content=content,
             content_fingerprint=canonical_hash(content),
             supersedes_backlog_artifact_id=None,
-            artifact_id=101,
+            artifact_id=artifact_id,
             actor="operator@example.com",
             recorded_at=EVALUATED_AT,
         )
@@ -3855,7 +3865,12 @@ def _seed_task_7_backlog(engine: Engine) -> tuple[int, int, str, int]:
         )
 
 
-def _seed_task_7_roadmap(engine: Engine) -> tuple[int, int]:
+def _seed_task_7_roadmap(
+    engine: Engine,
+    *,
+    project_name: str = "Backlog lineage",
+    backlog_artifact_id: int = 101,
+) -> tuple[int, int]:
     from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
         record_backlog_decision_in_session,
     )
@@ -3871,7 +3886,11 @@ def _seed_task_7_roadmap(engine: Engine) -> tuple[int, int]:
     )
 
     project_id, backlog_id, backlog_fingerprint, _spec_version_id = (
-        _seed_task_7_backlog(engine)
+        _seed_task_7_backlog(
+            engine,
+            project_name=project_name,
+            artifact_id=backlog_artifact_id,
+        )
     )
     with Session(engine) as session:
         backlog = session.get(BacklogArtifact, backlog_id)
@@ -4072,6 +4091,337 @@ def test_backlog_and_roadmap_reviews_render_exact_pinned_specification_evidence(
         },
         "review": {"state": "pending"},
     }
+
+
+def test_accepted_roadmap_is_independent_of_pending_review(
+    engine: Engine,
+) -> None:
+    """Accepted content remains available without changing pending review reads."""
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        record_roadmap_decision_in_session,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    reads = DurableReadProjectionService(engine=engine)
+    assert _data(reads.accepted_roadmap(project_id=project_id)) == {
+        "state": "absent",
+        "project_id": project_id,
+    }
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        fingerprint = roadmap.content_fingerprint
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=roadmap,
+                decision="accepted",
+                rationale="Accept Roadmap for accepted-content projection.",
+                reviewer="operator@example.com",
+                idempotency_key="accepted-roadmap-projection",
+                decided_at=EVALUATED_AT + timedelta(seconds=4),
+            ),
+        )
+        session.commit()
+
+    accepted = _data(reads.accepted_roadmap(project_id=project_id))
+    roadmap_data = _json_object(accepted["roadmap"])
+    assert accepted["state"] == "accepted"
+    assert accepted["milestone_completion"] == "not_established"
+    assert roadmap_data["roadmap_artifact_id"] == roadmap_id
+    assert roadmap_data["artifact_fingerprint"] == fingerprint
+    assert _data(
+        reads.roadmap_review(project_id=project_id, roadmap_artifact_id=roadmap_id)
+    )["review"] == {
+        "state": "accepted",
+        "rationale": "Accept Roadmap for accepted-content projection.",
+        "reviewer": "operator@example.com",
+        "decided_at": (
+            EVALUATED_AT.replace(tzinfo=None) + timedelta(seconds=4)
+        ).isoformat(),
+    }
+
+
+def test_accepted_roadmap_qualifies_tampered_story_item_without_mutating_artifacts(
+    engine: Engine,
+) -> None:
+    """Keep accepted Roadmap bytes readable when a Story item source is stale."""
+    story_id = _accepted_story_for_show(engine)
+    reads = DurableReadProjectionService(engine=engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        artifact = session.get(StoryArtifact, story.source_story_artifact_id)
+        assert artifact is not None
+        artifact_id = artifact.story_artifact_id
+        roadmap_id = artifact.roadmap_artifact_id
+        project_id = story.project_id
+        decisions_before = tuple(
+            session.exec(
+                    select(StoryArtifactDecision)
+                    .where(StoryArtifactDecision.project_id == project_id)
+                    .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
+            ).all()
+        )
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        immutable_before = (
+            artifact.canonical_content_json,
+            artifact.content_fingerprint,
+            roadmap.canonical_content_json,
+            roadmap.content_fingerprint,
+            tuple(item.model_dump(mode="json") for item in decisions_before),
+        )
+        story.source_story_item_fingerprint = "sha256:" + "0" * 64
+        session.add(story)
+        session.commit()
+
+    data = _data(reads.accepted_roadmap(project_id=1))
+    progress = _json_object(data["progress"])
+    milestones = progress["milestones"]
+    assert isinstance(milestones, list)
+    milestone = _json_object(milestones[0])
+    projected_stories = milestone["stories"]
+    assert isinstance(projected_stories, list)
+    projected_story = _json_object(projected_stories[0])
+    assert projected_story["story_id"] == story_id
+    assert projected_story["evidence_state"] == "qualified"
+    assert projected_story["evidence_code"] == "SOURCE_STORY_ITEM_UNAVAILABLE"
+    assert projected_story["sprints"] == []
+    assert milestone["evidence_state"] == "qualified"
+
+    with Session(engine) as session:
+        artifact_after = session.get(StoryArtifact, artifact_id)
+        roadmap_after = session.get(RoadmapArtifact, roadmap_id)
+        assert artifact_after is not None
+        assert roadmap_after is not None
+        decisions_after = tuple(
+            session.exec(
+                select(StoryArtifactDecision)
+                    .where(StoryArtifactDecision.project_id == project_id)
+                    .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
+            ).all()
+        )
+    assert immutable_before == (
+        artifact_after.canonical_content_json,
+        artifact_after.content_fingerprint,
+        roadmap_after.canonical_content_json,
+        roadmap_after.content_fingerprint,
+        tuple(item.model_dump(mode="json") for item in decisions_after),
+    )
+
+
+def test_accepted_roadmap_retains_superseded_story_history(
+    engine: Engine,
+) -> None:
+    """Project accepted ancestor Story items as history, never erased progress."""
+    project_id, source_story_ids, replacement_story_ids = (
+        _accepted_replacement_story_project(engine)
+    )
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).accepted_roadmap(
+            project_id=project_id
+        )
+    )
+
+    milestones = _json_object(data["progress"])["milestones"]
+    assert isinstance(milestones, list)
+    stories = _json_object(milestones[0])["stories"]
+    assert isinstance(stories, list)
+    stories_by_id: dict[int, JsonObject] = {}
+    for raw_story in stories:
+        projected_story = _json_object(raw_story)
+        story_id = projected_story["story_id"]
+        assert isinstance(story_id, int)
+        stories_by_id[story_id] = projected_story
+    assert set(source_story_ids).issubset(stories_by_id)
+    assert set(replacement_story_ids).issubset(stories_by_id)
+    assert all(
+        stories_by_id[story_id]["is_superseded"] is True
+        for story_id in source_story_ids
+    )
+    assert all(
+        stories_by_id[story_id]["is_superseded"] is False
+        for story_id in replacement_story_ids
+    )
+
+
+def test_roadmap_story_attempts_require_scope_membership_and_retain_retry_history(
+    engine: Engine,
+) -> None:
+    """Use immutable scope membership, not mutable SprintStory associations."""
+    from tests.workflow.execution_fixtures import (  # noqa: PLC0415
+        seed_started_execution,
+    )
+    from workflow.execution_scope import resolve_execution_scope  # noqa: PLC0415
+
+    project_id, sprint_id, story_id, _task_id = seed_started_execution(engine)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    story = next(item for item in snapshot.stories if item.story_id == story_id)
+    original = resolve_execution_scope(snapshot, sprint_id=sprint_id)
+    terminal = replace(original, status="completed")
+    retry = replace(original, retry_attempt_id=17, status="active")
+    extraneous = replace(
+        original,
+        sprint_id=sprint_id + 1,
+        retry_attempt_id=None,
+        status="active",
+        stories=(),
+    )
+
+    assert _story_scope_attempts(story, (terminal, retry, extraneous)) == [
+        {"sprint_id": sprint_id, "retry_attempt_id": None, "status": "completed"},
+        {"sprint_id": sprint_id, "retry_attempt_id": 17, "status": "active"},
+    ]
+
+
+def test_accepted_roadmap_qualifies_an_unresolvable_execution_scope(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose a missing immutable Sprint scope without hiding Roadmap content."""
+    from tests.workflow.execution_fixtures import (  # noqa: PLC0415
+        seed_started_execution,
+    )
+
+    project_id, sprint_id, _story_id, _task_id = seed_started_execution(engine)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    planned = snapshot.sprints[0].model_copy(update={"status": "planned"})
+    invalid_scope_snapshot = snapshot.model_copy(update={"sprints": (planned,)})
+    monkeypatch.setattr(
+        WorkflowFactRepository,
+        "load",
+        lambda _repository, _project_id: invalid_scope_snapshot,
+    )
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).accepted_roadmap(
+            project_id=project_id
+        )
+    )
+
+    progress = _json_object(data["progress"])
+    assert progress["state"] == "qualified"
+    assert progress["scope_evidence"] == [
+        {"sprint_id": sprint_id, "retry_attempt_id": None, "state": "unavailable"}
+    ]
+    milestones = progress["milestones"]
+    assert isinstance(milestones, list)
+    assert _json_object(milestones[0])["evidence_state"] == "qualified"
+
+
+def test_accepted_roadmap_selector_keeps_accepted_ancestor_until_successor_acceptance(
+    engine: Engine,
+) -> None:
+    """A pending successor cannot displace the exact accepted Roadmap leaf."""
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        RecordRoadmapDraftInput,
+        record_roadmap_decision_in_session,
+        record_roadmap_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _roadmap_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, _initial_roadmap_id = _seed_task_7_roadmap(engine)
+    reads = DurableReadProjectionService(engine=engine)
+    with Session(engine) as session:
+        initial = session.exec(
+            select(RoadmapArtifact).where(
+                RoadmapArtifact.project_id == project_id
+            )
+        ).one()
+        initial_id = initial.roadmap_artifact_id
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=initial,
+                decision="accepted",
+                rationale="Accept initial Roadmap.",
+                reviewer="operator@example.com",
+                idempotency_key="accepted-roadmap-selector-initial",
+                decided_at=EVALUATED_AT + timedelta(seconds=3),
+            ),
+        )
+        successor_content = _roadmap_content()
+        successor_content["roadmap_summary"] = "Pending successor Roadmap."
+        successor = record_roadmap_draft_in_session(
+            session,
+            inputs=RecordRoadmapDraftInput(
+                project_id=project_id,
+                backlog_artifact_id=initial.backlog_artifact_id,
+                backlog_artifact_fingerprint=initial.backlog_artifact_fingerprint,
+                canonical_content=successor_content,
+                content_fingerprint=canonical_hash(successor_content),
+                supersedes_roadmap_artifact_id=initial.roadmap_artifact_id,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=4),
+            ),
+        )
+        successor_id = successor.roadmap_artifact_id
+        session.commit()
+
+    pending_data = _data(reads.accepted_roadmap(project_id=project_id))
+    assert _json_object(pending_data["roadmap"])["roadmap_artifact_id"] == initial_id
+
+    with Session(engine) as session:
+        persisted_successor = session.get(RoadmapArtifact, successor_id)
+        assert persisted_successor is not None
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=persisted_successor,
+                decision="accepted",
+                rationale="Accept successor Roadmap.",
+                reviewer="operator@example.com",
+                idempotency_key="accepted-roadmap-selector-successor",
+                decided_at=EVALUATED_AT + timedelta(seconds=5),
+            ),
+        )
+        session.commit()
+
+    accepted_data = _data(reads.accepted_roadmap(project_id=project_id))
+    assert _json_object(accepted_data["roadmap"])["roadmap_artifact_id"] == successor_id
+
+    other_project_id, other_roadmap_id = _seed_task_7_roadmap(
+        engine,
+        project_name="Other Backlog lineage",
+        backlog_artifact_id=102,
+    )
+    assert other_project_id != project_id
+    with Session(engine) as session:
+        other_roadmap = session.get(RoadmapArtifact, other_roadmap_id)
+        assert other_roadmap is not None
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=other_roadmap,
+                decision="accepted",
+                rationale="Accept unrelated Project Roadmap.",
+                reviewer="operator@example.com",
+                idempotency_key="accepted-roadmap-selector-other-project",
+                decided_at=EVALUATED_AT + timedelta(seconds=6),
+            ),
+        )
+        session.commit()
+
+    assert _json_object(
+        _data(reads.accepted_roadmap(project_id=project_id))["roadmap"]
+    )["roadmap_artifact_id"] == successor_id
+    assert _json_object(
+        _data(reads.accepted_roadmap(project_id=other_project_id))["roadmap"]
+    )["roadmap_artifact_id"] == other_roadmap_id
 
 
 def test_backlog_review_uses_historical_superseded_specification(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -204,6 +205,9 @@ class FakeLifecycle:
     roadmap_candidate: JsonObject | None = None
     roadmap_accepted: bool = False
     roadmap_decision_fingerprint: str = "sha256:hidden-roadmap-decision"
+    accepted_roadmap_override: JsonObject | None = None
+    accepted_roadmap_error: str | None = None
+    accepted_roadmap_error_code: str = "PLANNING_ARTIFACT_LINEAGE_INVALID"
     story_candidate: JsonObject | None = None
     story_accepted: bool = False
     story_decision_fingerprint: str = "sha256:hidden-story-decision"
@@ -422,6 +426,20 @@ class FakeLifecycle:
                         }
                     },
                 )
+            elif suffix == "/roadmap" and self.accepted_roadmap_error:
+                response = (
+                    _HTTP_CONFLICT,
+                    {
+                        "detail": {
+                            "errors": [
+                                {
+                                    "code": self.accepted_roadmap_error_code,
+                                    "message": self.accepted_roadmap_error,
+                                }
+                            ]
+                        }
+                    },
+                )
             elif suffix == "/position":
                 response = (_HTTP_OK, self.position_envelope())
             elif suffix == "/sprint/status":
@@ -474,6 +492,10 @@ class FakeLifecycle:
             "": self._project_projection,
             "/goals/status": self._goal_projection,
             "/repository": self._repository_projection,
+            "/roadmap": lambda: (
+                self.accepted_roadmap_override
+                or {"state": "absent", "project_id": _PROJECT_ID}
+            ),
             "/specifications/review": self._specification_projection,
             "/story/pending": self._story_pending_projection,
             "/story/dependencies": self._story_dependencies_projection,
@@ -6716,3 +6738,266 @@ def test_story_readiness_explicitly_reports_missing_content(
     expect(row.locator('button[data-story-selection-intent="select"]')).to_be_enabled()
 
     context.close()
+
+
+def _issue_271_accepted_roadmap() -> JsonObject:
+    """Keep five ordered milestones and exact Backlog membership in a UI fixture."""
+    releases: list[JsonValue] = [
+        {
+            "release_name": f"Milestone {number}",
+            "theme": f"Stored theme {number}",
+            "focus_area": "User Value",
+            "reasoning": f"Stored delivery reason {number}",
+            "backlog_items": [
+                {
+                    "backlog_item_id": f"PBI-{number:06d}",
+                    "requirement": f"Deliverable {number}",
+                    "priority": number,
+                    "specification_evidence": [],
+                }
+            ],
+        }
+        for number in range(1, 6)
+    ]
+    return {
+        "state": "accepted",
+        "project_id": _PROJECT_ID,
+        "phase": "roadmap",
+        "lineage": {
+            "backlog": {
+                "backlog_artifact_id": 41,
+                "backlog_artifact_fingerprint": _fingerprint("b"),
+            }
+        },
+        "roadmap": {
+            "roadmap_artifact_id": 51,
+            "artifact_fingerprint": _fingerprint("a"),
+            "version_number": 1,
+            "roadmap_summary": "Five accepted milestones in their stored order.",
+            "roadmap_releases": releases,
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        "acceptance": {"state": "accepted", "reviewer": "Fixture reviewer"},
+        "progress": {"state": "unavailable"},
+        "milestone_completion": "not_established",
+    }
+
+
+def _issue_271_fake(*, accepted: bool, pending: bool) -> FakeLifecycle:
+    """Offer accepted content independently from a pending revision or action."""
+    fake = _delivery_ready_fake([])
+    fake.backlog_accepted = True
+    fake.position_override = _delivery_position([])
+    fake.position_override["decisions"] = [
+        {
+            "node_id": "planning.backlog.generate",
+            "category": "blocked",
+            "reason_code": "BACKLOG_CORRECTION_UNAVAILABLE",
+            "reason": "Guided Backlog correction is unavailable during Sprint work.",
+            "fact_references": [],
+        }
+    ]
+    if accepted:
+        fake.accepted_roadmap_override = _issue_271_accepted_roadmap()
+    if pending:
+        candidate = cast("JsonObject", _issue_271_accepted_roadmap()["roadmap"])
+        candidate["roadmap_artifact_id"] = 52
+        candidate["artifact_fingerprint"] = _fingerprint("c")
+        candidate["roadmap_summary"] = "Pending revision needs a separate review."
+        fake.roadmap_candidate = candidate
+    return fake
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_issue_271_accepted_milestones_survive_review_absence_and_refresh(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+    pending: bool,
+) -> None:
+    """Show stored content without actions, keeping a pending revision separate."""
+    fake = _issue_271_fake(accepted=True, pending=pending)
+    before = json.dumps(fake.accepted_roadmap_override, sort_keys=True)
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        _select_workspace_stage(page, 6)
+        accepted = page.locator('[data-accepted-roadmap="accepted"]')
+        expect(accepted).to_be_visible()
+        releases = accepted.get_by_role("heading", name=re.compile("^Release: "))
+        expect(releases).to_have_text(
+            [f"Release: Milestone {number}" for number in range(1, 6)]
+        )
+        expect(accepted).to_contain_text("Five accepted milestones")
+        expect(accepted).to_contain_text("Roadmap #51")
+        for number in range(1, 6):
+            expect(accepted).to_contain_text(f"Deliverable {number}")
+            expect(accepted).to_contain_text(f"PBI-{number:06d}")
+        expect(accepted).not_to_contain_text("Pending revision")
+        pending_card = page.locator('[data-planning-review-card="roadmap"]')
+        expect(pending_card).to_have_count(1 if pending else 0)
+        if pending:
+            expect(pending_card).to_contain_text("Pending revision")
+            expect(
+                pending_card.get_by_role("button", name="Accept", exact=True)
+            ).to_be_visible()
+            expect(
+                pending_card.get_by_role("button", name="Request changes")
+            ).to_be_visible()
+            expect(
+                pending_card.get_by_role("button", name="Reject", exact=True)
+            ).to_be_visible()
+        page.locator("#refresh-project").click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        expect(page.locator("#workspace-stage-6")).to_contain_text("Viewing")
+        expect(accepted).to_be_visible()
+        expect(page.locator("#delivery-panel")).not_to_contain_text(
+            "Guided Backlog correction"
+        )
+        page.screenshot(
+            path=str(tmp_path / "issue-271-accepted-roadmap.png"), full_page=True
+        )
+        assert json.dumps(fake.accepted_roadmap_override, sort_keys=True) == before
+        assert fake.delivery_requests == []
+        assert fake.specification_source_registrations == []
+        assert fake.api_errors == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("state", ["absent", "pending", "invalid", "error"])
+def test_issue_271_roadmap_empty_and_failure_states_stay_in_selected_stage(
+    dashboard_harness: DashboardHarness,
+    state: str,
+) -> None:
+    """A missing accepted read must neither hide review nor borrow Backlog status."""
+    fake = _issue_271_fake(accepted=False, pending=state == "pending")
+    if state == "invalid":
+        fake.accepted_roadmap_error = "Accepted Roadmap lineage is invalid."
+    elif state == "error":
+        fake.accepted_roadmap_error = "Accepted Roadmap read failed."
+        fake.accepted_roadmap_error_code = "ROADMAP_READ_FAILED"
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        _select_workspace_stage(page, 6)
+        expected = state if state in {"invalid", "error"} else "absent"
+        expect(page.locator(f'[data-accepted-roadmap="{expected}"]')).to_be_visible()
+        expect(page.locator('[data-planning-review-card="roadmap"]')).to_have_count(
+            1 if state == "pending" else 0
+        )
+        expect(page.locator("#delivery-panel")).not_to_contain_text(
+            "Guided Backlog correction"
+        )
+        assert fake.delivery_requests == []
+        assert fake.api_errors == []
+    finally:
+        context.close()
+
+
+def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspection(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Refresh historical Sprint 30 while Roadmap progress stays on live Sprint 31."""
+    historical_sprint_id = 30
+    fake = SprintContinuityLifecycle(repositories={}, sprint_active=True)
+    accepted = _issue_271_accepted_roadmap()
+    milestones: list[JsonValue] = []
+    for ordinal in range(1, 6):
+        stories: list[JsonValue] = []
+        if ordinal in {1, 2}:  # The live Sprint spans the first two milestones.
+            stories.append(
+                {
+                    "story_id": 100 + ordinal,
+                    "source_story_artifact_id": 60 + ordinal,
+                    "source_story_artifact_fingerprint": _fingerprint("d"),
+                    "source_story_item_id": f"US-{ordinal:04d}",
+                    "source_story_item_fingerprint": _fingerprint("e"),
+                    "backlog_item_id": f"PBI-{ordinal:06d}",
+                    "is_superseded": False,
+                    "sprints": [
+                        {
+                            "sprint_id": 30,
+                            "retry_attempt_id": None,
+                            "status": "completed",
+                        },
+                        {"sprint_id": 31, "retry_attempt_id": None, "status": "active"},
+                    ],
+                }
+            )
+        milestones.append(
+            {
+                "ordinal": ordinal,
+                "release_name": f"Milestone {ordinal}",
+                "backlog_item_ids": [f"PBI-{ordinal:06d}"],
+                "stories": stories,
+                "completion": "not_established",
+                "evidence_state": "available",
+            }
+        )
+    accepted["progress"] = {
+        "state": "available",
+        "active_sprint": {
+            "sprint_id": 31,
+            "retry_attempt_id": None,
+            "status": "active",
+        },
+        "milestones": milestones,
+        "evidence": [],
+    }
+    fake.accepted_roadmap_override = accepted
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    history_reads: list[str] = []
+
+    def historical_sprint(route: Route) -> None:
+        history_reads.append(route.request.method)
+        _status, current_envelope = fake._sprint_status_response()
+        historical = cast(
+            "JsonObject", json.loads(json.dumps(current_envelope["data"]))
+        )
+        historical["sprint"] = {"sprint_id": 30, "status": "completed"}
+        historical["start"] = None
+        historical["tasks"] = []
+        route.fulfill(
+            status=200,
+            json={
+                "status": "success",
+                "data": historical,
+            },
+        )
+
+    context.route("**/api/projects/1/sprints/30", historical_sprint)
+    context.add_init_script("""window.history.replaceState({
+        agileForgeWorkspace: {stageId: 6, sprintId: 30, taskId: null,
+            tab: 'details', filter: 'all', scopeKey: null}
+    }, '', window.location.href);""")
+    page = context.new_page()
+    try:
+        page.goto(
+            f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+            wait_until="networkidle",
+        )
+        current = page.locator("[data-roadmap-active-sprint]")
+        assert fake.api_errors == []
+        expect(page.locator("#project-error")).to_be_empty()
+        page.screenshot(path=str(tmp_path / "issue-271-historical-before.png"))
+        expect(current).to_contain_text("Sprint #31")
+        expect(page.locator("[data-roadmap-active-milestone]")).to_have_count(2)
+        page.locator("#refresh-project").click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        expect(page.locator("#workspace-stage-6")).to_contain_text("Viewing")
+        expect(current).to_contain_text("Sprint #31")
+        expect(page.locator("[data-roadmap-active-milestone]")).to_have_count(2)
+        assert (
+            page.evaluate("window.history.state.agileForgeWorkspace.sprintId")
+            == historical_sprint_id
+        )
+        assert history_reads == ["GET", "GET"]
+        assert fake.delivery_requests == []
+        assert fake.api_errors == []
+        page.screenshot(
+            path=str(tmp_path / "issue-271-current-roadmap-progress.png"),
+            full_page=True,
+        )
+    finally:
+        context.close()

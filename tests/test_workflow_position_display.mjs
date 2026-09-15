@@ -965,7 +965,7 @@ test('Backlog correction token survives an aborted and superseded dashboard load
     let fetchCount = 0;
     const context = loadFrontend(async (_url, options = {}) => {
         fetchCount += 1;
-        if (fetchCount <= 15) {
+        if (fetchCount <= 16) {
             return new Promise((_resolve, reject) => {
                 options.signal.addEventListener('abort', () => reject(new Error('aborted')));
             });
@@ -5206,4 +5206,88 @@ test('Task board distinguishes a filtered no-match from a confirmed empty invent
         assert.match(unconfirmed, /Task inventory not confirmed/);
         assert.doesNotMatch(unconfirmed, /0\/0 Done|>0 Tasks/);
     }
+});
+
+test('accepted Roadmap renders immutable identity and qualified linked progress', () => {
+    const context = loadFrontend();
+    const markup = vm.runInContext(`acceptedRoadmapCardMarkup(${JSON.stringify({
+        kind: 'ready',
+        data: {
+            state: 'accepted',
+            roadmap: {
+                roadmap_artifact_id: 31,
+                artifact_fingerprint: 'sha256:roadmap',
+                roadmap_summary: 'Ship durable evidence.',
+                roadmap_releases: [{
+                    release_name: 'Release one', theme: 'Evidence', focus_area: 'Traceability', reasoning: 'Keep links.',
+                    backlog_items: [{ backlog_item_id: 'PBI-000001', requirement: 'Retain exact lineage.', priority: 1, value_driver: 'Integrity', estimated_effort: 'S', justification: 'Required.' }],
+                }],
+                is_complete: true,
+                clarifying_questions: [],
+            },
+            progress: {
+                state: 'available',
+                active_sprint: { sprint_id: 3, retry_attempt_id: 4, status: 'active' },
+                milestones: [{
+                    release_name: 'Release one',
+                    stories: [{
+                        story_id: 7,
+                        source_story_artifact_id: 11,
+                        source_story_item_id: 'US-0007',
+                        sprints: [{ sprint_id: 3, retry_attempt_id: 4, status: 'active' }],
+                    }],
+                }],
+            },
+            acceptance: { reviewer: 'operator@example.com' },
+        },
+    })})`, context);
+    assert.match(markup, /Roadmap #31/);
+    assert.match(markup, /Roadmap content complete/);
+    assert.match(markup, /PBI-000001/);
+    assert.match(markup, /Aggregate milestone completion not established/);
+    assert.match(markup, /source artifact 11\/US-0007/);
+    assert.match(markup, /Current active Sprint #3 · retry attempt #4/);
+    assert.match(markup, /data-roadmap-active-sprint/);
+    assert.match(markup, /data-roadmap-active-milestone="1"/);
+    assert.match(markup, /#3 \(active, retry attempt #4\)/);
+});
+
+test('accepted Roadmap preserves invalid lineage and transport read states separately', async () => {
+    const invalid = loadFrontend(async () => ({
+        ok: false,
+        status: 409,
+        text: async () => JSON.stringify({
+            detail: { error: { code: 'PLANNING_ARTIFACT_LINEAGE_INVALID', message: 'Invalid lineage.' } },
+        }),
+    }));
+    const invalidResult = JSON.parse(await vm.runInContext(
+        "requestAcceptedRoadmap('/api/projects/7/roadmap').then(JSON.stringify)", invalid,
+    ));
+    assert.equal(invalidResult.code, 'PLANNING_ARTIFACT_LINEAGE_INVALID');
+    assert.match(
+        vm.runInContext(
+            `acceptedRoadmapCardMarkup(${JSON.stringify(invalidResult)})`,
+            invalid,
+        ),
+        /data-accepted-roadmap="invalid"/,
+    );
+
+    const transport = loadFrontend(async () => ({
+        ok: false,
+        status: 500,
+        text: async () => JSON.stringify({
+            detail: { error: { code: 'ROADMAP_READ_FAILED', message: 'Read failed.' } },
+        }),
+    }));
+    const transportResult = JSON.parse(await vm.runInContext(
+        "requestAcceptedRoadmap('/api/projects/7/roadmap').then(JSON.stringify)", transport,
+    ));
+    assert.equal(transportResult.code, 'ROADMAP_READ_FAILED');
+    assert.match(
+        vm.runInContext(
+            `acceptedRoadmapCardMarkup(${JSON.stringify(transportResult)})`,
+            transport,
+        ),
+        /data-accepted-roadmap="error"/,
+    );
 });

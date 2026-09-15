@@ -99,16 +99,25 @@ function harness(actions = []) {
 const bootstrap = { request_kind: 'generate_vision_bootstrap', endpoint: 'vision/bootstrap', availability: 'available' };
 const failed = { ok: false, status: 500, text: async () => JSON.stringify({ message: 'Controlled test stop.' }) };
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+const dashboardReadCount = 16;
+
+function assertDashboardGets(requests) {
+    assert.equal(requests.length, dashboardReadCount);
+    assert.equal(requests.filter((request) => request.url === '/api/projects/7/roadmap').length, 1);
+    assert.ok(requests.every((request) => (request.options.method ?? 'GET') === 'GET'));
+}
 
 function completeDashboardGets(requests, actions, fail = false) {
-    assert.equal(requests.length, 15);
+    assertDashboardGets(requests);
     for (const request of requests) {
         if (fail && request.url === '/api/projects/7') {
             request.reject(new Error('Controlled recovery GET failure.'));
         } else if (request.url.endsWith('/sprint/status')) {
             request.resolve({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'SPRINT_NOT_FOUND' }) });
         } else {
-            const data = request.url === '/api/projects/7' ? { id: 7, name: 'Initialized dashboard' } : {};
+            const data = request.url === '/api/projects/7'
+                ? { id: 7, name: 'Initialized dashboard' }
+                : (request.url.endsWith('/roadmap') ? { state: 'absent', project_id: 7 } : {});
             request.resolve({ ok: true, text: async () => JSON.stringify({ data, ...(request.url.endsWith('/position') ? { actions } : {}) }) });
         }
     }
@@ -119,6 +128,7 @@ async function successfulDashboardLoad(h, actions) {
     const pending = h.context.loadDashboard();
     completeDashboardGets(h.requests.slice(start), actions);
     assert.equal(await pending, true);
+    assert.equal(h.state('lifecycleState.acceptedRoadmap.data.state'), 'absent');
 }
 
 test('cancelling the Story confirmation leaves cockpit unlocked', async () => {
@@ -386,7 +396,7 @@ test('accepted interview and failed refresh leave local controls disabled', asyn
     assert.equal(submit.disabled, true);
     assert.equal(textarea.disabled, true);
     await h.submit(form);
-    assert.equal(h.requests.length, postIndex + 16);
+    assert.equal(h.requests.length, postIndex + 1 + dashboardReadCount);
 });
 
 test('initialized Vision action cannot be dispatched again after failed reload', async () => {
@@ -426,7 +436,7 @@ test('failed delivery POST and failed recovery GET leave cockpit Locked', async 
     assert.equal(h.elements['cockpit-action-stage-chip'].textContent, 'Locked');
     assert.equal(h.elements['cockpit-primary-action-label'].textContent, 'Action Unavailable');
     h.context.handlePrimaryCockpitAction({ request_kind: action.request_kind });
-    assert.equal(h.requests.length, postIndex + 16);
+    assert.equal(h.requests.length, postIndex + 1 + dashboardReadCount);
 });
 
 test('pre-POST refresh cannot reconcile the mutation', async () => {
@@ -481,7 +491,7 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
         },
     };
     function finishGets(requests, marker) {
-        assert.equal(requests.length, 15);
+        assertDashboardGets(requests);
         for (const request of requests) {
             if (request.url.endsWith('/sprint/status')) {
                 request.resolve({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'SPRINT_NOT_FOUND' }) });
@@ -489,6 +499,7 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
             }
             let data = {};
             if (request.url === '/api/projects/7') data = { id: 7, name: marker };
+            if (request.url.endsWith('/roadmap')) data = { state: 'absent', project_id: 7 };
             if (request.url.endsWith('/sprint/candidates')) data = { project_id: 7, items: [], sprint_owner: owner };
             request.resolve({ ok: true, text: async () => JSON.stringify({ data, ...(request.url.endsWith('/position') ? { actions: [action] } : {}) }) });
         }
@@ -501,8 +512,9 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
     await firstDigestStarted;
     assert.equal(h.state('dashboardLoadSequence'), 1);
 
+    const newerRefreshStart = h.requests.length;
     const newerRefresh = h.context.loadDashboard();
-    finishGets(h.requests.slice(16), 'newer successful projection');
+    finishGets(h.requests.slice(newerRefreshStart), 'newer successful projection');
     assert.equal(await newerRefresh, true);
     assert.equal(h.state('dashboardLoadSequence'), 2);
     assert.equal(h.state('lifecycleState.project.name'), 'newer successful projection');
@@ -539,8 +551,9 @@ test('repeated successful GETs with unconfirmed projection keep cockpit locked u
 
     // Run a manual loadDashboard(): all GET requests succeed (HTTP 200),
     // but the backlog projection does NOT confirm the correction (qualifyingBacklogState is false).
+    const refresh1Start = h.requests.length;
     const refresh1 = h.context.loadDashboard();
-    completeDashboardGets(h.requests.slice(15), [action]);
+    completeDashboardGets(h.requests.slice(refresh1Start), [action]);
     assert.equal(await refresh1, true);
 
     // Assert: repeated successful GETs must NOT clear activeDeliveryUnreconciled
@@ -551,8 +564,9 @@ test('repeated successful GETs with unconfirmed projection keep cockpit locked u
     // Now simulate a confirming projection arriving on the next reload
     // Clearing the mutation simulates successful authority confirmation.
     h.state('activeBacklogCorrectionMutation = null;');
+    const refresh2Start = h.requests.length;
     const refresh2 = h.context.loadDashboard();
-    completeDashboardGets(h.requests.slice(30), [action]);
+    completeDashboardGets(h.requests.slice(refresh2Start), [action]);
     assert.equal(await refresh2, true);
 
     // Assert: confirming projection unlocks the controls and cockpit
@@ -619,7 +633,7 @@ test('backend reload errors remain visible in Story selection and Dependency rev
 
     // The reload fails with an authoritative backend error message
     const reloadRequests = h.requests.slice(postIndex + 1);
-    assert.equal(reloadRequests.length, 15);
+    assertDashboardGets(reloadRequests);
     for (const request of reloadRequests) {
         if (request.url.endsWith('/story/dependencies')) {
             request.reject(new Error('Story authority projection conflicted.'));
