@@ -5208,6 +5208,40 @@ test('Task board distinguishes a filtered no-match from a confirmed empty invent
     }
 });
 
+test('Task board keeps long instructions out of compact rows while preserving the complete instruction in Details', () => {
+    const context = loadFrontend();
+    const description = 'Inspect every retained evidence reference before recording the formal completion result for this Task. '.repeat(8).trim();
+    context.AgileForgeWorkspace = {
+        taskRows(data) {
+            return (data?.tasks ?? []).map((task) => ({ task, action: null, availability: task.status === 'Done' ? 'Completed' : 'Ready' }));
+        },
+        taskCounts(tasks) {
+            const done = tasks.filter((task) => task.status === 'Done').length;
+            return { total: tasks.length, done, remaining: tasks.length - done };
+        },
+    };
+    vm.runInContext(`
+        workspaceView = { stageId: 9, sprintId: 31, taskId: null, filter: 'all', tab: 'details' };
+        lifecycleState.position = { decisions: [] };
+        lifecycleState.actions = [];
+        workspaceInventoryConfirmedAt = '2026-09-15T14:37:00Z';
+        workspaceTaskInventory = { kind: 'ready', sprintId: 31, data: { sprint_id: 31, tasks: [{ task_id: 71, status: 'Done', description: ${JSON.stringify(description)} }] } };
+    `, context);
+
+    const board = vm.runInContext('workspaceTaskBoardMarkup(null, lifecycleState.position, lifecycleState.actions)', context);
+    const compactRow = board.match(/<li[^>]*class="workspace-task-row[^>]*>[\s\S]*?<\/li>/)?.[0] ?? '';
+    assert.match(compactRow, /<button id="workspace-task-row-71"[^>]*data-workspace-task-select="true"[^>]*aria-pressed="false"/);
+    assert.match(compactRow, /Task #71/);
+    assert.doesNotMatch(compactRow, new RegExp(description));
+    assert.match(compactRow, /class="workspace-task-status-badge" aria-label="Formal status: Done">Done/);
+    assert.doesNotMatch(compactRow, /Availability:/);
+    assert.match(board, /<time datetime="2026-09-15T14:37:00Z" title="2026-09-15T14:37:00Z">/);
+
+    const details = vm.runInContext(`workspaceTaskDetailMarkup({ kind: 'ready', selection: { taskId: 71, sprintId: 31 }, data: { task: { task_id: 71, sprint_id: 31, status: 'Done', description: ${JSON.stringify(description)} } } })`, context);
+    assert.match(details, new RegExp(description));
+    assert.match(details, /workspace-task-description/);
+});
+
 test('accepted Roadmap renders immutable identity and qualified linked progress', () => {
     const context = loadFrontend();
     const markup = vm.runInContext(`acceptedRoadmapCardMarkup(${JSON.stringify({

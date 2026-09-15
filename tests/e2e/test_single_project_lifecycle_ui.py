@@ -4081,11 +4081,179 @@ def _assert_issue_227_task_board(page: Page) -> None:
     board = page.locator('[data-workspace-task-board="true"]')
     expect(board).to_be_visible()
     expect(board).to_contain_text("0/1 Done")
-    task = board.locator("tr").filter(has_text="Task #71")
+    task = board.locator(".workspace-task-row").filter(has_text="Task #71")
     expect(task).to_have_count(1)
     expect(task).to_contain_text("Render the accepted Sprint and next Task.")
     expect(task).to_contain_text("To Do")
     expect(task).to_contain_text("Ready")
+
+
+class CompactTaskLifecycle(SprintContinuityLifecycle):
+    """Read three long Task tickets through the real board and detail controller."""
+
+    @staticmethod
+    def task_rows() -> list[JsonObject]:
+        """Keep long instructions for two completed Tasks and one ready Task."""
+        ready_task_id = 71
+        descriptions = [
+            "Implement an authorized protected-resource delivery boundary.",
+            "Migrate supported job and review payloads and export delivery.",
+            "Verify the assembled application and produce operator guidance.",
+        ]
+        return [
+            {
+                "task_id": task_id,
+                "sprint_id": 31,
+                "story_id": 101,
+                "instance_key": f"task:{task_id}",
+                "description": " ".join(
+                    [description]
+                    + [
+                        "Authorize the current principal before opening protected "
+                        "bytes, validate integrity, and record durable access evidence."
+                    ]
+                    * 8
+                    + [f"Retain the complete final requirement for Task {task_id}."]
+                ),
+                "status": "To Do" if task_id == ready_task_id else "Done",
+                "dependencies_satisfied": True,
+                "fact_fingerprint": _fingerprint("e"),
+                "metadata_json": json.dumps(
+                    {"checklist_items": ["Verify protected access and audit evidence."]}
+                ),
+            }
+            for task_id, description in zip(range(69, 72), descriptions, strict=True)
+        ]
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        status, envelope = super()._sprint_status_response()
+        data = cast("JsonObject", envelope["data"])
+        data["tasks"] = cast("list[JsonValue]", self.task_rows())
+        plan = cast("JsonObject", data["accepted_plan"])
+        plan["task_count"] = 3
+        story = cast("JsonObject", cast("list[JsonValue]", plan["selected_stories"])[0])
+        story["task_count"] = 3
+        return status, envelope
+
+    def _read(self, suffix: str) -> JsonObject:
+        if suffix == "/sprints":
+            return {
+                "project_id": _PROJECT_ID,
+                "sprints": [
+                    {"sprint_id": 31, "status": "active"},
+                    {"sprint_id": 30, "status": "completed"},
+                ],
+                "execution_attempts": [],
+            }
+        match = re.fullmatch(r"/sprints/31/tasks/(69|70|71)(/execution)?", suffix)
+        if not match:
+            return super()._read(suffix)
+        task = self.task_rows()[int(match[1]) - 69]
+        data: JsonObject = {
+            "project_id": _PROJECT_ID,
+            "task": task,
+            "completion": None,
+            "current_retry": None,
+            "effective_status": "active",
+            "original_task": dict(task),
+            "original_completion": None,
+        }
+        if match[2]:
+            data.update({"items": [], "count": 0})
+        return data
+
+
+@pytest.mark.parametrize("viewport", [_DESKTOP_VIEWPORT, _MOBILE_VIEWPORT])
+def test_long_task_queue_stays_compact_and_readable(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+    viewport: ViewportSize,
+) -> None:
+    """Long instructions must not consume the queue or introduce nested scrolling."""
+    max_row_height = 120
+    max_row_characters = 280
+    fake = CompactTaskLifecycle(repositories={}, sprint_active=True)
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        page.set_viewport_size(viewport)
+        _select_workspace_stage(page, 9)
+        board = page.locator('[data-workspace-task-board="true"]')
+        expect(board).to_contain_text("2/3 Done")
+        rows = board.locator(".workspace-task-row")
+        expect(rows).to_have_count(3)
+        for row in rows.all():
+            box = row.bounding_box()
+            assert box is not None
+            assert box["height"] <= max_row_height
+            assert len(row.inner_text()) < max_row_characters
+        for task_id in (69, 70):
+            row = rows.filter(has=page.locator(f"#workspace-task-row-{task_id}"))
+            expect(row.get_by_text("Done", exact=True)).to_have_count(1)
+        expect(board.get_by_text("Develop & verify", exact=True)).to_have_count(0)
+        confirmed = board.locator("time")
+        timestamp = confirmed.get_attribute("datetime")
+        assert timestamp is not None
+        expect(confirmed).to_have_attribute("title", timestamp)
+        expect(confirmed).not_to_contain_text(timestamp)
+        assert (
+            board.evaluate("""element => [...element.querySelectorAll('*')]
+            .filter(node => ['auto', 'scroll'].includes(
+                getComputedStyle(node).overflowY)
+                && node.scrollHeight > node.clientHeight).length""")
+            == 0
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        board.scroll_into_view_if_needed()
+        expect(rows.first).to_be_in_viewport(ratio=1)
+        expect(rows.last).to_be_in_viewport(ratio=1)
+        page.screenshot(path=str(tmp_path / "compact-task-queue.png"), full_page=True)
+        assert fake.delivery_requests == []
+        assert fake.api_errors == []
+    finally:
+        context.close()
+
+
+def test_compact_task_selection_preserves_full_details_tabs_and_refresh(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Compact previews still open exact instructions and retain the selected work."""
+    fake = CompactTaskLifecycle(repositories={}, sprint_active=True)
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        _select_workspace_stage(page, 9)
+        selected = page.locator("#workspace-task-row-71")
+        selected.focus()
+        expect(selected).to_be_focused()
+        selected.press("Enter")
+        expect(selected).to_have_attribute("aria-pressed", "true")
+        detail = page.locator('[data-workspace-task-detail="71"]')
+        description = cast("str", fake.task_rows()[2]["description"])
+        expect(detail.get_by_text(description, exact=True)).to_be_visible()
+        detail.get_by_role("tab", name="Checks", exact=True).click()
+        expect(detail).to_contain_text("Verify protected access and audit evidence.")
+        page.locator("#refresh-project").click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        expect(selected).to_have_attribute("aria-pressed", "true")
+        expect(detail.get_by_role("tab", name="Checks", exact=True)).to_have_attribute(
+            "aria-selected", "true"
+        )
+        detail.get_by_role("tab", name="Activity", exact=True).click()
+        expect(detail).to_contain_text("no retained execution records")
+        page.get_by_role("button", name="Open Tasks", exact=True).click()
+        expect(page.locator("[data-workspace-task-select]")).to_have_count(1)
+        expect(selected).to_have_attribute("aria-pressed", "true")
+        page.get_by_role("button", name="All Tasks", exact=True).click()
+        page.locator("#workspace-task-row-69").press("Space")
+        done_detail = page.locator('[data-workspace-task-detail="69"]')
+        done_detail.get_by_role("tab", name="Details", exact=True).click()
+        expect(done_detail).to_contain_text("complete final requirement for Task 69")
+        expect(page.locator("[data-workspace-task-completion]")).to_have_count(0)
+        page.screenshot(path=str(tmp_path / "compact-task-details.png"), full_page=True)
+        assert fake.delivery_requests == []
+        assert fake.api_errors == []
+    finally:
+        context.close()
 
 
 def _issue_260_retry_controls(page: Page) -> tuple[Locator, Locator]:
