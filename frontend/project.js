@@ -2198,13 +2198,92 @@ function roadmapReviewMarkup(candidate, contentCompleteLabel = 'Complete') {
     </div>`;
 }
 
+function acceptedRoadmapBacklogItemIds(value) {
+    const release = reviewObject(value);
+    if (!release) return null;
+    const directIds = reviewItems(release.backlog_item_ids);
+    const ids = directIds ?? reviewItems(release.backlog_items)?.map((rawItem) => reviewObject(rawItem)?.backlog_item_id);
+    if (!ids || !ids.every((id) => typeof id === 'string' && id.trim())) return null;
+    return ids;
+}
+
+function acceptedRoadmapMatchingMilestone(progress, index, backlogItemIds) {
+    const milestones = reviewItems(reviewObject(progress)?.milestones);
+    if (!milestones || !backlogItemIds) return null;
+    const milestone = reviewObject(milestones[index]);
+    const milestoneIds = acceptedRoadmapBacklogItemIds(milestone);
+    return milestoneIds?.length === backlogItemIds.length
+        && milestoneIds.every((id, itemIndex) => id === backlogItemIds[itemIndex])
+        ? milestone
+        : null;
+}
+
+function acceptedRoadmapStoryEvidenceMarkup(milestone) {
+    if (!milestone) return '<p class="mt-2 text-sm text-slate-700">Linked Story and Sprint progress is unavailable for this milestone.</p>';
+    const stories = reviewItems(milestone.stories) || [];
+    const qualification = milestone.evidence_state === 'qualified'
+        ? '<p class="mt-2 text-sm text-amber-800">Linked Story evidence is qualified; it does not establish delivery progress.</p>'
+        : '';
+    const storyMarkup = stories.length
+        ? stories.map((rawStory) => {
+            const story = reviewObject(rawStory);
+            if (!story) return '';
+            const sprints = reviewItems(story.sprints) || [];
+            const history = story.is_superseded ? ' · superseded history' : '';
+            const evidence = story.evidence_state === 'qualified'
+                ? ` · evidence qualified (${escapeWorkflowText(reviewValue(story.evidence_code))})`
+                : '';
+            const sprintMarkup = sprints.length
+                ? sprints.map((rawSprint) => {
+                    const sprint = reviewObject(rawSprint);
+                    if (!sprint) return '';
+                    const retry = sprint.retry_attempt_id === null || sprint.retry_attempt_id === undefined
+                        ? 'original attempt'
+                        : `retry attempt #${escapeWorkflowText(reviewValue(sprint.retry_attempt_id))}`;
+                    return `#${escapeWorkflowText(reviewValue(sprint.sprint_id))} (${escapeWorkflowText(reviewValue(sprint.status || sprint.state))}, ${retry})`;
+                }).join(', ')
+                : 'none';
+            return `<li>Story #${escapeWorkflowText(reviewValue(story.story_id))}${history} · source artifact ${escapeWorkflowText(reviewValue(story.source_story_artifact_id))}/${escapeWorkflowText(reviewValue(story.source_story_item_id))}${evidence} · Sprints: ${sprintMarkup}</li>`;
+        }).join('')
+        : '<li>No exact linked Story evidence.</li>';
+    return `${qualification}<p class="mt-2 text-sm text-slate-700">Aggregate milestone completion not established by these links.</p><ul class="mt-2 space-y-1 text-sm text-slate-700">${storyMarkup}</ul>`;
+}
+
+function acceptedRoadmapMilestoneMarkup(roadmap, progress) {
+    const releases = reviewItems(roadmap.roadmap_releases) || [];
+    const activeSprint = reviewObject(reviewObject(progress)?.active_sprint);
+    return releases.map((rawRelease, index) => {
+        const release = reviewObject(rawRelease);
+        if (!release) return '';
+        const ordinal = index + 1;
+        const items = reviewItems(release.backlog_items) || [];
+        const backlogItemIds = acceptedRoadmapBacklogItemIds(release);
+        const milestone = acceptedRoadmapMatchingMilestone(progress, index, backlogItemIds);
+        const milestoneCurrent = activeSprint?.status === 'active'
+            && (reviewItems(milestone?.stories) || []).some((rawStory) => {
+                const story = reviewObject(rawStory);
+                return (reviewItems(story?.sprints) || []).some((rawSprint) => {
+                    const sprint = reviewObject(rawSprint);
+                    return sprint?.sprint_id === activeSprint.sprint_id
+                        && sprint?.retry_attempt_id === activeSprint.retry_attempt_id;
+                });
+            });
+        const pbiLabel = backlogItemIds?.length
+            ? ` · ${backlogItemIds.length} ${backlogItemIds.length === 1 ? 'PBI' : 'PBIs'}`
+            : '';
+        const currentMarker = milestoneCurrent
+            ? `<span class="ml-2 text-sm font-medium text-emerald-800" data-roadmap-active-milestone="${ordinal}">Current active Sprint touches this milestone.</span>`
+            : '';
+        const disclosureKey = `roadmap:${reviewValue(roadmap.roadmap_artifact_id)}:${reviewValue(roadmap.artifact_fingerprint)}:${ordinal}:${(backlogItemIds || []).join(',')}`;
+        return `<details class="rounded border border-emerald-200 bg-white p-3" data-roadmap-milestone="${ordinal}" data-workspace-roadmap-milestone-disclosure="${escapeWorkflowText(disclosureKey)}"><summary class="cursor-pointer font-medium text-slate-900">${escapeWorkflowText(reviewValue(release.release_name))}${pbiLabel}${currentMarker}</summary><div class="mt-3 space-y-3"><p class="text-sm"><strong>Theme:</strong> ${escapeWorkflowText(reviewValue(release.theme))}</p><p class="text-sm"><strong>Focus:</strong> ${escapeWorkflowText(reviewValue(release.focus_area))}</p><p class="text-sm leading-6"><strong>Reasoning:</strong> ${escapeWorkflowText(reviewValue(release.reasoning))}</p><div class="space-y-3">${items.map(backlogItemMarkup).join('')}</div><section><h4 class="font-semibold">Linked delivery evidence</h4>${acceptedRoadmapStoryEvidenceMarkup(milestone)}</section></div></details>`;
+    }).join('');
+}
+
 function acceptedRoadmapProgressMarkup(progress) {
     const value = reviewObject(progress);
     if (!value || value.state === 'unavailable') {
         return '<p class="text-sm text-slate-700">Linked Story and Sprint progress is unavailable. Accepted Roadmap content remains readable.</p>';
     }
-    const milestones = reviewItems(value.milestones);
-    if (!milestones) return '<p class="text-sm text-slate-700">Linked Story and Sprint progress is unavailable.</p>';
     const activeSprint = reviewObject(value.active_sprint);
     const activeIdentity = activeSprint?.status === 'active'
         ? `${reviewValue(activeSprint.sprint_id)}${activeSprint.retry_attempt_id === null || activeSprint.retry_attempt_id === undefined ? '' : ` · retry attempt #${reviewValue(activeSprint.retry_attempt_id)}`}`
@@ -2218,26 +2297,7 @@ function acceptedRoadmapProgressMarkup(progress) {
     const scopeMarkup = value.state === 'qualified' || scopeEvidence.length
         ? '<p class="text-sm text-amber-800">Some linked Sprint evidence is unavailable; accepted Roadmap content remains readable.</p>'
         : '';
-    return `<section class="space-y-3"><h4 class="font-semibold">Linked delivery evidence</h4>${activeMarkup}${scopeMarkup}${milestones.map((rawMilestone, index) => {
-        const milestone = reviewObject(rawMilestone);
-        if (!milestone) return '';
-        const stories = reviewItems(milestone.stories) || [];
-        const milestoneCurrent = activeSprint?.status === 'active' && stories.some((rawStory) => {
-            const story = reviewObject(rawStory);
-            return (reviewItems(story?.sprints) || []).some((rawSprint) => {
-                const sprint = reviewObject(rawSprint);
-                return sprint?.sprint_id === activeSprint.sprint_id
-                    && sprint?.retry_attempt_id === activeSprint.retry_attempt_id;
-            });
-        });
-        const qualification = milestone.evidence_state === 'qualified'
-            ? '<p class="mt-1 text-sm text-amber-800">Linked Story evidence is qualified; it does not establish delivery progress.</p>'
-            : '';
-        const currentMarker = milestoneCurrent
-            ? `<p class="mt-1 text-sm font-medium text-emerald-800" data-roadmap-active-milestone="${index + 1}">Current active Sprint touches this milestone.</p>`
-            : '';
-        return `<div class="rounded border border-emerald-200 bg-white p-3"><p class="font-medium">${escapeWorkflowText(reviewValue(milestone.release_name))}</p>${currentMarker}${qualification}<p class="mt-1 text-sm text-slate-700">Aggregate milestone completion not established by these links.</p><ul class="mt-2 space-y-1 text-sm text-slate-700">${stories.length ? stories.map((rawStory) => { const story = reviewObject(rawStory); if (!story) return ''; const sprints = reviewItems(story.sprints) || []; const history = story.is_superseded ? ' · superseded history' : ''; const evidence = story.evidence_state === 'qualified' ? ` · evidence qualified (${escapeWorkflowText(reviewValue(story.evidence_code))})` : ''; return `<li>Story #${escapeWorkflowText(reviewValue(story.story_id))}${history} · source artifact ${escapeWorkflowText(reviewValue(story.source_story_artifact_id))}/${escapeWorkflowText(reviewValue(story.source_story_item_id))}${evidence} · Sprints: ${sprints.length ? sprints.map((rawSprint) => { const sprint = reviewObject(rawSprint); if (!sprint) return ''; const retry = sprint.retry_attempt_id === null || sprint.retry_attempt_id === undefined ? 'original attempt' : `retry attempt #${escapeWorkflowText(reviewValue(sprint.retry_attempt_id))}`; return `#${escapeWorkflowText(reviewValue(sprint.sprint_id))} (${escapeWorkflowText(reviewValue(sprint.status || sprint.state))}, ${retry})`; }).join(', ') : 'none'}</li>`; }).join('') : '<li>No exact linked Story evidence.</li>'}</ul></div>`;
-    }).join('')}</section>`;
+    return `<section class="space-y-3"><h4 class="font-semibold">Linked delivery evidence</h4>${activeMarkup}${scopeMarkup}</section>`;
 }
 
 function acceptedRoadmapCardMarkup(acceptedRoadmap) {
@@ -2260,7 +2320,7 @@ function acceptedRoadmapCardMarkup(acceptedRoadmap) {
         return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-accepted-roadmap="invalid"><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-2 text-sm text-slate-700">Accepted Roadmap lineage is unavailable.</p></section>`;
     }
     const acceptance = reviewObject(data.acceptance);
-    return `<section class="rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-3" data-accepted-roadmap="accepted"><div><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">Accepted content</p><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-1 text-sm text-slate-700">Roadmap #${escapeWorkflowText(reviewValue(roadmap.roadmap_artifact_id))} · ${escapeWorkflowText(reviewValue(roadmap.artifact_fingerprint))}</p></div>${roadmapReviewMarkup(roadmap, 'Roadmap content complete')}${acceptedRoadmapProgressMarkup(data.progress)}${acceptance ? `<p class="text-sm text-slate-700">Accepted by ${escapeWorkflowText(reviewValue(acceptance.reviewer))}</p>` : ''}</section>`;
+    return `<section class="rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-3" data-accepted-roadmap="accepted"><div><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700">Accepted content</p><h3 class="text-base font-semibold text-slate-900">Accepted Roadmap</h3><p class="mt-1 text-sm text-slate-700">Roadmap #${escapeWorkflowText(reviewValue(roadmap.roadmap_artifact_id))} · ${escapeWorkflowText(reviewValue(roadmap.artifact_fingerprint))}</p><p class="mt-1 text-sm leading-6"><strong>Summary:</strong> ${escapeWorkflowText(reviewValue(roadmap.roadmap_summary))}</p></div>${acceptedRoadmapProgressMarkup(data.progress)}<section class="space-y-3">${acceptedRoadmapMilestoneMarkup(roadmap, data.progress)}</section><p class="text-sm"><strong>Roadmap content complete:</strong> ${escapeWorkflowText(reviewValue(roadmap.is_complete))}</p>${reviewListMarkup('Clarifying questions', roadmap.clarifying_questions)}${acceptance ? `<p class="text-sm text-slate-700">Accepted by ${escapeWorkflowText(reviewValue(acceptance.reviewer))}</p>` : ''}</section>`;
 }
 
 function storyReviewMarkup(review, candidate) {
@@ -3903,7 +3963,7 @@ function captureWorkspaceRenderState() {
         fields[key] = field.type === 'checkbox' ? Boolean(field.checked) : field.value;
     });
     const disclosures = {};
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure]').forEach((detail) => {
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure]').forEach((detail) => {
         const key = workspaceRenderDisclosureKey(detail);
         if (key) disclosures[key] = detail.open;
     });
@@ -3923,7 +3983,7 @@ function restoreWorkspaceRenderState() {
         if (field.type === 'checkbox') field.checked = Boolean(memory.fields[key]);
         else field.value = memory.fields[key];
     });
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure]').forEach((detail) => {
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure]').forEach((detail) => {
         const key = workspaceRenderDisclosureKey(detail);
         if (Object.prototype.hasOwnProperty.call(memory.disclosures ?? {}, key)) detail.open = memory.disclosures[key];
     });
@@ -3948,6 +4008,7 @@ function workspaceRenderFieldKey(field) {
 function workspaceRenderDisclosureKey(detail) {
     return detail?.dataset?.workspaceTaskCompletionDisclosure
         ?? detail?.dataset?.workspaceScopedActionDisclosure
+        ?? detail?.dataset?.workspaceRoadmapMilestoneDisclosure
         ?? null;
 }
 

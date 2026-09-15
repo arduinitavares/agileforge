@@ -6815,7 +6815,7 @@ def test_issue_271_accepted_milestones_survive_review_absence_and_refresh(
     tmp_path: Path,
     pending: bool,
 ) -> None:
-    """Show stored content without actions, keeping a pending revision separate."""
+    """Keep milestone details collapsed until opened and preserve that choice."""
     fake = _issue_271_fake(accepted=True, pending=pending)
     before = json.dumps(fake.accepted_roadmap_override, sort_keys=True)
     context, page = _open_project_page(dashboard_harness, fake)
@@ -6823,15 +6823,24 @@ def test_issue_271_accepted_milestones_survive_review_absence_and_refresh(
         _select_workspace_stage(page, 6)
         accepted = page.locator('[data-accepted-roadmap="accepted"]')
         expect(accepted).to_be_visible()
-        releases = accepted.get_by_role("heading", name=re.compile("^Release: "))
-        expect(releases).to_have_text(
-            [f"Release: Milestone {number}" for number in range(1, 6)]
-        )
+        milestones = accepted.locator("details[data-roadmap-milestone]")
+        expect(milestones).to_have_count(5)
+        expect(accepted.locator("details[open]")).to_have_count(0)
         expect(accepted).to_contain_text("Five accepted milestones")
         expect(accepted).to_contain_text("Roadmap #51")
         for number in range(1, 6):
-            expect(accepted).to_contain_text(f"Deliverable {number}")
-            expect(accepted).to_contain_text(f"PBI-{number:06d}")
+            milestone = milestones.nth(number - 1)
+            expect(milestone.locator("summary")).to_contain_text(f"Milestone {number}")
+            expect(
+                milestone.get_by_text(f"Deliverable {number}", exact=True)
+            ).to_be_hidden()
+            expect(milestone).to_contain_text(f"PBI-{number:06d}")
+        page.screenshot(path=str(tmp_path / "roadmap-milestones-collapsed.png"))
+        second = milestones.nth(1)
+        second.locator("summary").click()
+        expect(accepted.locator("details[open]")).to_have_count(1)
+        expect(second.get_by_text("Deliverable 2", exact=True)).to_be_visible()
+        expect(second).to_contain_text("Stored delivery reason 2")
         expect(accepted).not_to_contain_text("Pending revision")
         pending_card = page.locator('[data-planning-review-card="roadmap"]')
         expect(pending_card).to_have_count(1 if pending else 0)
@@ -6850,6 +6859,8 @@ def test_issue_271_accepted_milestones_survive_review_absence_and_refresh(
         expect(page.locator("#refresh-project")).to_be_enabled()
         expect(page.locator("#workspace-stage-6")).to_contain_text("Viewing")
         expect(accepted).to_be_visible()
+        expect(accepted.locator("details[open]")).to_have_count(1)
+        expect(second.get_by_text("Deliverable 2", exact=True)).to_be_visible()
         expect(page.locator("#delivery-panel")).not_to_contain_text(
             "Guided Backlog correction"
         )
@@ -6859,6 +6870,46 @@ def test_issue_271_accepted_milestones_survive_review_absence_and_refresh(
         assert json.dumps(fake.accepted_roadmap_override, sort_keys=True) == before
         assert fake.delivery_requests == []
         assert fake.specification_source_registrations == []
+        assert fake.api_errors == []
+    finally:
+        context.close()
+
+
+def test_accepted_roadmap_revision_starts_with_collapsed_milestones(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """An opened milestone must not leak into a newly accepted Roadmap revision."""
+    fake = _issue_271_fake(accepted=True, pending=False)
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        _select_workspace_stage(page, 6)
+        accepted = page.locator('[data-accepted-roadmap="accepted"]')
+        first = accepted.locator("details[data-roadmap-milestone]").first
+        first.locator("summary").click()
+        expect(first.get_by_text("Deliverable 1", exact=True)).to_be_visible()
+        _select_workspace_stage(page, 5)
+        _select_workspace_stage(page, 6)
+        expect(first.get_by_text("Deliverable 1", exact=True)).to_be_visible()
+        first.locator("summary").focus()
+        first.locator("summary").press("Enter")
+        expect(accepted.locator("details[open]")).to_have_count(0)
+        page.locator("#refresh-project").click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        expect(accepted.locator("details[open]")).to_have_count(0)
+        first.locator("summary").press("Space")
+        expect(first.get_by_text("Deliverable 1", exact=True)).to_be_visible()
+        revision = _issue_271_accepted_roadmap()
+        roadmap = cast("JsonObject", revision["roadmap"])
+        roadmap["roadmap_artifact_id"] = 52
+        roadmap["artifact_fingerprint"] = _fingerprint("c")
+        fake.accepted_roadmap_override = revision
+        page.locator("#refresh-project").click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        expect(accepted).to_contain_text("Roadmap #52")
+        expect(accepted.locator("details[data-roadmap-milestone]")).to_have_count(5)
+        expect(accepted.locator("details[open]")).to_have_count(0)
+        expect(first.get_by_text("Deliverable 1", exact=True)).to_be_hidden()
+        assert fake.delivery_requests == []
         assert fake.api_errors == []
     finally:
         context.close()
@@ -6893,13 +6944,8 @@ def test_issue_271_roadmap_empty_and_failure_states_stay_in_selected_stage(
         context.close()
 
 
-def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspection(
-    dashboard_harness: DashboardHarness,
-    tmp_path: Path,
-) -> None:
-    """Refresh historical Sprint 30 while Roadmap progress stays on live Sprint 31."""
-    historical_sprint_id = 30
-    fake = SprintContinuityLifecycle(repositories={}, sprint_active=True)
+def _accepted_roadmap_with_sprint_history() -> JsonObject:
+    """Link two milestones to the current Sprint and a completed original Sprint."""
     accepted = _issue_271_accepted_roadmap()
     milestones: list[JsonValue] = []
     for ordinal in range(1, 6):
@@ -6926,7 +6972,6 @@ def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspectio
             )
         milestones.append(
             {
-                "ordinal": ordinal,
                 "release_name": f"Milestone {ordinal}",
                 "backlog_item_ids": [f"PBI-{ordinal:06d}"],
                 "stories": stories,
@@ -6944,7 +6989,17 @@ def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspectio
         "milestones": milestones,
         "evidence": [],
     }
-    fake.accepted_roadmap_override = accepted
+    return accepted
+
+
+def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspection(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Refresh historical Sprint 30 while Roadmap progress stays on live Sprint 31."""
+    historical_sprint_id = 30
+    fake = SprintContinuityLifecycle(repositories={}, sprint_active=True)
+    fake.accepted_roadmap_override = _accepted_roadmap_with_sprint_history()
     context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
     context.route("**/api/**", fake.handle)
     history_reads: list[str] = []
@@ -6983,11 +7038,20 @@ def test_issue_271_current_roadmap_progress_survives_historical_sprint_inspectio
         page.screenshot(path=str(tmp_path / "issue-271-historical-before.png"))
         expect(current).to_contain_text("Sprint #31")
         expect(page.locator("[data-roadmap-active-milestone]")).to_have_count(2)
+        expect(page.locator("[data-roadmap-active-milestone]").first).to_be_visible()
+        milestones = page.locator("details[data-roadmap-milestone]")
+        expect(page.locator("details[data-roadmap-milestone][open]")).to_have_count(0)
+        expect(milestones.first.get_by_text(re.compile("Story #101"))).to_be_hidden()
+        milestones.first.locator("summary").click()
+        expect(milestones.first.get_by_text(re.compile("Story #101"))).to_be_visible()
+        expect(milestones.first).to_contain_text("#30 (completed, original attempt)")
+        expect(milestones.first).to_contain_text("#31 (active, original attempt)")
         page.locator("#refresh-project").click()
         expect(page.locator("#refresh-project")).to_be_enabled()
         expect(page.locator("#workspace-stage-6")).to_contain_text("Viewing")
         expect(current).to_contain_text("Sprint #31")
         expect(page.locator("[data-roadmap-active-milestone]")).to_have_count(2)
+        expect(milestones.first.get_by_text(re.compile("Story #101"))).to_be_visible()
         assert (
             page.evaluate("window.history.state.agileForgeWorkspace.sprintId")
             == historical_sprint_id
