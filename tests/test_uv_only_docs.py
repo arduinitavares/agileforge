@@ -205,10 +205,11 @@ def test_agents_registers_development_branch_runtime_rule() -> None:
             "## Development Branch Runtime",
             "Use only uv. For a development branch or linked worktree, invoke",
             "that checkout's `./agileforge-dev`; never use a bare or user-level",
-            "`agileforge` shim. Run `info --json` before mutations. Each worktree",
-            "owns separate profiles, business and ADK trace databases, and UI",
-            "ports. Older branches must merge or rebase the launcher change",
-            "before using it.",
+            "`agileforge` shim. Run `info --json` before AgileForge runtime or state",
+            "mutations through its CLI. This check is not required for unrelated",
+            "documentation edits. Each worktree owns separate profiles, business and",
+            "ADK trace databases, and UI ports. Older branches must merge or rebase",
+            "the launcher change before using it.",
         )
     )
 
