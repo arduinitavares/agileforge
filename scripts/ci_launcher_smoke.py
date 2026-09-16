@@ -1,4 +1,4 @@
-"""Exercise the checkout-local developer launcher for macOS CI."""
+"""Exercise the checkout-local developer launcher in Linux container CI."""
 
 from __future__ import annotations
 

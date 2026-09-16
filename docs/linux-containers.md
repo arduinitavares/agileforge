@@ -299,9 +299,14 @@ controller --project-name "$project_name" production-maintenance \
 
 ## Live cutover gates
 
-Synthetic implementation work does not grant any of these approvals. Keep
-native macOS and Windows jobs/adapters active and keep #263 open until all three
-gates have been explicitly approved and the final acceptance succeeds.
+Native macOS and Windows CI jobs have been retired with maintainer approval.
+The real launcher smoke now runs in the Linux container gate; shared security,
+profile, secret, and lifecycle tests remain. Native adapters and platform-specific
+tests are retained pending the separate cutover and removal inventory.
+
+Synthetic implementation work and CI retirement do not grant any of the
+following approvals. Keep #263 open until all three gates have been explicitly
+approved and the final acceptance succeeds.
 
 1. **Read-only inventory approval.** Present the exact real profiles,
    repositories, linked worktrees, owner IDs, dirty/untracked observations,

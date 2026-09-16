@@ -1,4 +1,4 @@
-"""Tests for the repository-owned macOS launcher smoke command."""
+"""Tests for the repository-owned launcher smoke command."""
 
 from __future__ import annotations
 

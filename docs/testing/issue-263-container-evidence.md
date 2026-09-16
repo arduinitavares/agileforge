@@ -139,13 +139,16 @@ copy/cutover, and final-switch approvals and the rollback boundary.
 
 ## Post-cutover removal checklist
 
-After approved live cutover and native amd64 acceptance, inventory and retire the
-macOS smoke plus Windows evidence, UI-runtime, and full-gate CI jobs. Review
+The maintainer approved retiring the macOS smoke plus Windows evidence,
+UI-runtime, and full-gate CI jobs separately from live cutover. The launcher
+smoke now runs through the host transport inside the Linux container gate.
+Shared security, profile, secret, and lifecycle tests remain in the full suite.
+
+After approved live cutover, review
 `tests/windows/`, Windows branches in the evidence/source adapters and secret
 loader, and interpreter/process ownership branches in the development launcher.
 Keep the POSIX evidence/security guarantees, profile/secret/lifecycle regressions,
-the isolated distribution verifier, and the unchanged coverage threshold. Move
-the launcher smoke to the container workflow before removing its native jobs.
+the isolated distribution verifier, and the unchanged coverage threshold.
 Only then add early unsupported-platform rejection and remove native setup docs.
 
 ## Compose startup follow-up
@@ -186,3 +189,32 @@ runs the Compose rehearsal after building and checking the production image.
 The full canonical gate was not repeated locally for this packaging-only change.
 The separate existing PR review findings and macOS CI failure remain unresolved;
 this startup verification does not establish complete PR or cutover acceptance.
+
+## Native CI retirement follow-up
+
+[Master CI run 35119800233](https://github.com/arduinitavares/agileforge/actions/runs/35119800233)
+tested `e912ddb4443aa2545b49d89c9b5441bfb4ec3900`. The Linux container canonical
+gate, installed-image rehearsal, and Compose startup rehearsal passed. The
+native Linux full gate, frontend suites, and all three Windows jobs also passed.
+Only the macOS launcher smoke failed, reporting `cleanup failed` during shutdown.
+The log did not identify the failing cleanup predicate.
+
+The maintainer then approved retiring the four native Windows/macOS jobs and
+moving the unchanged launcher lifecycle checks into the Linux container gate.
+The new step runs before the full gate so a lifecycle regression fails early.
+The native Linux and Node jobs remain. No test assertions, coverage threshold,
+Windows adapters, or platform-specific test files were removed.
+
+The real launcher smoke passed through the host transport at the baseline
+revision above, using the existing Linux/amd64 test image and fresh disposable
+workspace/cache volumes. All 13 launcher smoke regression tests passed in
+24.04 seconds. YAML validation confirmed that the four native jobs were removed,
+the smoke step was inserted before the container full gate, and all retained
+steps and workflow triggers were unchanged. These local checks used amd64
+emulation on the ARM64 host; native execution of the new step remains a CI check.
+Logs are retained as `native-ci-launcher-smoke.log` and
+`native-ci-smoke-tests.log` under the local evidence directory above.
+
+This supersedes the original design's sequencing for CI-job retirement only.
+It does not resolve the native macOS defect, authorize live-data migration, or
+establish complete acceptance of #263.
