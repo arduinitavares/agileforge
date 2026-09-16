@@ -1,0 +1,819 @@
+"""Explicit lifecycle entrypoint for installed Linux production runtimes."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets as secure_random
+import shutil
+import signal
+import stat
+import subprocess  # nosec B404
+import sys
+import threading
+from contextlib import ExitStack, contextmanager
+from importlib.resources import files
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
+
+from dotenv import dotenv_values
+from pydantic import ValidationError
+
+from cli.dev_secrets import SecretsFileError, open_secrets_file
+from cli.dev_server import (
+    CONTAINER_HOST,
+    ExpectedUIRuntime,
+    PosixProcessGroup,
+    UIChild,
+    start_ui,
+    stop_ui,
+    wait_for_readiness,
+)
+from cli.production_state import (
+    ProductionStateError,
+    ProductionStateManifest,
+    database_schema_sha256,
+    finalize_restored_production_state,
+    initialize_production_state,
+    load_production_state,
+    production_state_paths,
+)
+from cli.repository_transfer import (
+    RepositoryRelocation,
+    RepositoryTransferError,
+    finalize_restored_repositories,
+    pending_relocations,
+    write_relocation_record,
+)
+from cli.state_transfer import (
+    StateLayout,
+    TransferError,
+    backup_state,
+    restore_payload,
+    verify_backup,
+    verify_current_business_schema,
+    verify_current_trace_schema,
+)
+from utils.build_identity import (
+    BUILD_IDENTITY_PATH,
+    BuildIdentity,
+    BuildIdentityError,
+    load_build_identity,
+)
+from utils.runtime_controls import (
+    LAUNCHER_CHILD_ENV,
+    LAUNCHER_CHILD_VALUE,
+    UI_LAUNCH_NONCE_ENV,
+)
+from utils.runtime_fence import FenceError, runtime_fence
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from typing import BinaryIO, Never
+
+DEFAULT_SECRET_PATH = Path("/run/secrets/agileforge")
+INSTALLED_ROOT = Path("/opt/agileforge")
+PRODUCTION_DEPLOYMENT_ROOT = Path("/var/lib/agileforge")
+PRODUCTION_WORKSPACE_ROOT = Path("/workspace")
+_SUPPORTED_CREDENTIALS = frozenset({"OPEN_ROUTER_API_KEY"})
+_MAX_PORT = 65_535
+_MAX_CHILD_OUTPUT_BYTES = 8 * 1024 * 1024
+
+
+class ContainerRuntimeError(RuntimeError):
+    """An installed-runtime command failed its production safety contract."""
+
+
+class _StartUI(Protocol):
+    def __call__(  # noqa: PLR0913
+        self,
+        *,
+        checkout_root: Path,
+        environment: Mapping[str, str],
+        port: int,
+        reload: bool,
+        host: str,
+        owned_process_group: bool,
+        redact_values: tuple[str, ...],
+    ) -> UIChild: ...
+
+
+class _WaitForReadiness(Protocol):
+    def __call__(
+        self,
+        child: UIChild,
+        *,
+        expected: ExpectedUIRuntime,
+        timeout: float,
+    ) -> object: ...
+
+
+class _StopUI(Protocol):
+    def __call__(self, child: UIChild) -> None: ...
+
+
+def _effective_uid() -> int:
+    getter = cast("Callable[[], int] | None", getattr(os, "geteuid", None))
+    if getter is None:
+        message = "installed runtime requires POSIX user ownership"
+        raise ContainerRuntimeError(message)
+    return getter()
+
+
+def _add_profile_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profile", required=True)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the explicit installed-runtime command surface."""
+    parser = argparse.ArgumentParser(prog="agileforge-container")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser("init", help="Initialize new durable state")
+    _add_profile_argument(init_parser)
+    init_parser.add_argument("--model-config", type=Path)
+    init_parser.add_argument("--json", action="store_true")
+
+    info_parser = commands.add_parser("info", help="Validate and show runtime state")
+    _add_profile_argument(info_parser)
+    info_parser.add_argument("--json", action="store_true")
+
+    serve_parser = commands.add_parser(
+        "serve",
+        help="Serve the dashboard in foreground",
+    )
+    _add_profile_argument(serve_parser)
+    serve_parser.add_argument("--port", type=int, default=8765)
+    serve_parser.add_argument("--ready-timeout", type=float, default=15.0)
+    serve_parser.add_argument("--secrets-file", type=Path)
+    serve_parser.add_argument("--json", action="store_true")
+
+    cli_parser = commands.add_parser("cli", help="Run one product CLI command")
+    _add_profile_argument(cli_parser)
+    cli_parser.add_argument("--secrets-file", type=Path)
+    cli_parser.add_argument("--json", action="store_true")
+    cli_parser.add_argument("agileforge_arguments", nargs=argparse.REMAINDER)
+
+    backup_parser = commands.add_parser("backup", help="Export verified durable state")
+    _add_profile_argument(backup_parser)
+    backup_parser.add_argument("--destination", type=Path, required=True)
+    backup_parser.add_argument("--repository", type=Path, action="append")
+    backup_parser.add_argument("--json", action="store_true")
+
+    restore_parser = commands.add_parser(
+        "restore",
+        help="Restore verified durable state",
+    )
+    _add_profile_argument(restore_parser)
+    restore_parser.add_argument("--bundle", type=Path, required=True)
+    restore_parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def load_runtime_secrets(
+    path: Path,
+    *,
+    expected_owner_uid: int | None = None,
+) -> dict[str, str]:
+    """Load only supported credentials from one private retained descriptor."""
+    owner_uid = _effective_uid() if expected_owner_uid is None else expected_owner_uid
+    absolute_path = path.absolute()
+    try:
+        metadata = absolute_path.lstat()
+    except OSError as error:
+        message = "runtime secrets file is unavailable"
+        raise ContainerRuntimeError(message) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        message = "runtime secrets file must be a private regular file"
+        raise ContainerRuntimeError(message)
+    if metadata.st_uid != owner_uid or metadata.st_mode & 0o077:
+        message = "runtime secrets file must have private runtime-user ownership"
+        raise ContainerRuntimeError(message)
+    if absolute_path.resolve(strict=True) != absolute_path:
+        message = "runtime secrets file must be a private regular file"
+        raise ContainerRuntimeError(message)
+    try:
+        with open_secrets_file(absolute_path) as stream:
+            raw_values = dotenv_values(
+                stream=stream,
+                verbose=False,
+                interpolate=False,
+            )
+    except (OSError, UnicodeError, SecretsFileError) as error:
+        message = "runtime secrets file could not be read safely"
+        raise ContainerRuntimeError(message) from error
+    unsupported = sorted(
+        key
+        for key, value in raw_values.items()
+        if key not in _SUPPORTED_CREDENTIALS and value is not None
+    )
+    if unsupported:
+        message = "runtime secrets file contains an unsupported credential"
+        raise ContainerRuntimeError(message)
+    return {
+        key: value
+        for key, value in raw_values.items()
+        if key in _SUPPORTED_CREDENTIALS and isinstance(value, str) and value
+    }
+
+
+def production_environment(
+    state: ProductionStateManifest,
+    build: BuildIdentity,
+    *,
+    secrets: Mapping[str, str],
+) -> dict[str, str]:
+    """Return a sanitized child environment containing no caller identity claims."""
+    if build.schema_version != "agileforge.build.v1":
+        message = "unsupported build identity"
+        raise ContainerRuntimeError(message)
+    unsupported = set(secrets) - _SUPPORTED_CREDENTIALS
+    if unsupported:
+        message = "unsupported runtime credential"
+        raise ContainerRuntimeError(message)
+    git_executable = shutil.which("git", path=os.defpath)
+    if git_executable is None:
+        message = "installed runtime could not resolve Git"
+        raise ContainerRuntimeError(message)
+    git_path = Path(git_executable).resolve(strict=True)
+    if (
+        not git_path.is_absolute()
+        or not git_path.is_file()
+        or not os.access(git_path, os.X_OK)
+    ):
+        message = "installed runtime resolved an unsafe Git executable"
+        raise ContainerRuntimeError(message)
+    environment = {
+        "AGILEFORGE_DB_URL": f"sqlite:///{state.business_database.as_posix()}",
+        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
+            f"sqlite:///{state.trace_database.as_posix()}"
+        ),
+        "AGILEFORGE_PRODUCTION_PROFILE": state.profile_name,
+        LAUNCHER_CHILD_ENV: LAUNCHER_CHILD_VALUE,
+        "GIT_PYTHON_GIT_EXECUTABLE": str(git_path),
+        "HOME": str(state.profile_root),
+        "LANG": "C.UTF-8",
+        "MODEL_CONFIG_PATH": str(state.model_config_path),
+        "PATH": os.defpath,
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+    environment.update(secrets)
+    return environment
+
+
+def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
+    redacted = value
+    for secret_value in sorted(
+        secret_values,
+        key=str.__len__,
+        reverse=True,
+    ):
+        if secret_value:
+            redacted = redacted.replace(secret_value, "[REDACTED]")
+    return redacted
+
+
+def _capture_child_output(
+    stream: BinaryIO,
+    sink: bytearray,
+    *,
+    overflow: threading.Event,
+    child: UIChild,
+) -> None:
+    try:
+        while chunk := stream.read(64 * 1024):
+            if len(sink) + len(chunk) > _MAX_CHILD_OUTPUT_BYTES:
+                overflow.set()
+                child.process.kill()
+                return
+            sink.extend(chunk)
+    finally:
+        stream.close()
+
+
+def _run_owned_cli_child(
+    arguments: tuple[str, ...],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    secret_values: tuple[str, ...],
+) -> int:
+    process = subprocess.Popen(  # noqa: S603  # nosec B603
+        arguments,
+        cwd=cwd,
+        env=dict(environment),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    child = UIChild(process=PosixProcessGroup(process), port=0)
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        message = "product CLI output pipes were not acquired"
+        raise ContainerRuntimeError(message)
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+    readers = (
+        threading.Thread(
+            target=_capture_child_output,
+            args=(process.stdout, stdout),
+            kwargs={"overflow": overflow, "child": child},
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_capture_child_output,
+            args=(process.stderr, stderr),
+            kwargs={"overflow": overflow, "child": child},
+            daemon=True,
+        ),
+    )
+    for reader in readers:
+        reader.start()
+    try:
+        exit_code = process.wait()
+    finally:
+        stop_ui(child)
+        for reader in readers:
+            reader.join(timeout=5.0)
+    if any(reader.is_alive() for reader in readers):
+        message = "product CLI output reader did not terminate"
+        raise ContainerRuntimeError(message)
+    if overflow.is_set():
+        message = "product CLI output exceeded the safe limit"
+        raise ContainerRuntimeError(message)
+    sys.stdout.write(
+        _redact_text(stdout.decode("utf-8", errors="replace"), secret_values)
+    )
+    sys.stderr.write(
+        _redact_text(stderr.decode("utf-8", errors="replace"), secret_values)
+    )
+    return exit_code
+
+
+def run_product_cli(
+    state: ProductionStateManifest,
+    build: BuildIdentity,
+    *,
+    forwarded: tuple[str, ...],
+    secrets: Mapping[str, str],
+    child_arguments: tuple[str, ...] | None = None,
+) -> int:
+    """Run one product CLI command with bounded credential-safe output."""
+    if not forwarded or forwarded[0] != "--" or len(forwarded) == 1:
+        message = "product CLI arguments must follow --"
+        raise ContainerRuntimeError(message)
+    pending = _pending_relocations(state)
+    if pending and not _is_allowed_relocation_attach(forwarded, pending):
+        message = (
+            "pending repository relocation permits only its guarded attach command"
+        )
+        raise ContainerRuntimeError(message)
+    arguments = child_arguments or (
+        sys.executable,
+        "-m",
+        "cli.main",
+        *forwarded[1:],
+    )
+    exit_code = _run_owned_cli_child(
+        arguments,
+        cwd=state.profile_root,
+        environment=production_environment(state, build, secrets=secrets),
+        secret_values=tuple(secrets.values()),
+    )
+    if exit_code == 0 and pending:
+        remaining = _pending_relocations(state)
+        if any(item in remaining for item in pending):
+            message = "guarded repository attachment did not clear its relocation"
+            raise ContainerRuntimeError(message)
+    return exit_code
+
+
+def _is_allowed_relocation_attach(
+    forwarded: tuple[str, ...],
+    pending: tuple[RepositoryRelocation, ...],
+) -> bool:
+    if forwarded[1:3] != ("repository", "attach"):
+        return False
+    values: dict[str, str] = {}
+    arguments = forwarded[3:]
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        matched = False
+        for option in ("--project-id", "--path"):
+            if argument == option and index + 1 < len(arguments):
+                if option in values:
+                    return False
+                values[option] = arguments[index + 1]
+                index += 2
+                matched = True
+                break
+            prefix = f"{option}="
+            if argument.startswith(prefix):
+                if option in values:
+                    return False
+                values[option] = argument.removeprefix(prefix)
+                index += 1
+                matched = True
+                break
+        if not matched:
+            index += 1
+    try:
+        project_id = int(values["--project-id"])
+        restored_path = Path(values["--path"])
+    except (KeyError, ValueError):
+        return False
+    return restored_path.is_absolute() and any(
+        relocation.project_id == project_id
+        and Path(relocation.restored_path) == restored_path
+        for relocation in pending
+    )
+
+
+def _pending_relocations(
+    state: ProductionStateManifest,
+) -> tuple[RepositoryRelocation, ...]:
+    if state.repository_relocations_sha256 is None:
+        return ()
+    return pending_relocations(state.business_database, state.profile_root)
+
+
+def serve_production(  # noqa: PLR0913
+    state: ProductionStateManifest,
+    build: BuildIdentity,
+    *,
+    secrets: Mapping[str, str],
+    port: int,
+    ready_timeout: float,
+    start: _StartUI = start_ui,
+    wait_ready: _WaitForReadiness = wait_for_readiness,
+    stop: _StopUI = stop_ui,
+) -> int:
+    """Own one foreground dashboard group until exit or interrupted startup."""
+    if not 1 <= port <= _MAX_PORT:
+        message = "port must be from 1 through 65535"
+        raise ContainerRuntimeError(message)
+    if ready_timeout <= 0:
+        message = "readiness timeout must be greater than zero"
+        raise ContainerRuntimeError(message)
+    if _pending_relocations(state):
+        message = "dashboard start is blocked by pending repository relocation"
+        raise ContainerRuntimeError(message)
+    if not callable(start) or not callable(wait_ready) or not callable(stop):
+        message = "dashboard lifecycle dependency is not callable"
+        raise TypeError(message)
+    launch_nonce = secure_random.token_hex(16)
+    environment = production_environment(state, build, secrets=secrets)
+    environment[UI_LAUNCH_NONCE_ENV] = launch_nonce
+    child: UIChild = start(
+        checkout_root=INSTALLED_ROOT,
+        environment=environment,
+        port=port,
+        reload=False,
+        host=CONTAINER_HOST,
+        owned_process_group=True,
+        redact_values=tuple(secrets.values()),
+    )
+    try:
+        expected = ExpectedUIRuntime(
+            checkout_root=INSTALLED_ROOT,
+            commit=build.revision,
+            business_database=state.business_database,
+            trace_database=state.trace_database,
+            process_id=child.process.pid,
+            launch_nonce=launch_nonce,
+            state_id=str(state.state_id),
+        )
+        wait_ready(child, expected=expected, timeout=ready_timeout)
+        return child.process.wait()
+    finally:
+        stop(child)
+
+
+def _production_profile_root(deployment_root: Path, profile_name: str) -> Path:
+    root = deployment_root.absolute() / "profiles" / profile_name
+    paths = production_state_paths(root)
+    if paths.root.parent != deployment_root.absolute() / "profiles":
+        message = "production profile escapes the deployment root"
+        raise ContainerRuntimeError(message)
+    return paths.root
+
+
+def _maintenance_roots(deployment_root: Path) -> tuple[Path, ...]:
+    roots = [deployment_root.absolute()]
+    if (
+        deployment_root.absolute() == PRODUCTION_DEPLOYMENT_ROOT
+        and PRODUCTION_WORKSPACE_ROOT.is_dir()
+    ):
+        roots.append(PRODUCTION_WORKSPACE_ROOT)
+    return tuple(sorted(roots, key=lambda item: str(item.resolve(strict=True))))
+
+
+@contextmanager
+def _runtime_fences(
+    deployment_root: Path,
+    *,
+    exclusive: bool = False,
+) -> Iterator[None]:
+    with ExitStack() as stack:
+        for root in _maintenance_roots(deployment_root):
+            stack.enter_context(runtime_fence(root, exclusive=exclusive))
+        yield
+
+
+def _secrets_for_arguments(arguments: argparse.Namespace) -> dict[str, str]:
+    secret_path = getattr(arguments, "secrets_file", None)
+    if secret_path is None:
+        return {}
+    return load_runtime_secrets(secret_path)
+
+
+def _runtime_payload(
+    state: ProductionStateManifest,
+    build: BuildIdentity,
+) -> dict[str, object]:
+    pending = _pending_relocations(state)
+    return {
+        "ok": True,
+        "build": build.model_dump(mode="json"),
+        "state": state.model_dump(mode="json"),
+        "pending_repository_relocations": [item.to_dict() for item in pending],
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def backup_production_state(
+    state: ProductionStateManifest,
+    destination: Path,
+    *,
+    deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
+    repositories: tuple[Path, ...] | None = None,
+    maintenance_fences_held: bool = False,
+) -> Path:
+    """Capture complete state and every registered repository under one fence."""
+    paths = production_state_paths(state.profile_root)
+    layout = StateLayout(
+        root=paths.root,
+        business_database=paths.business_database,
+        trace_database=paths.trace_database,
+        artifacts=paths.artifacts,
+        model_config=paths.model_config,
+        repositories=repositories,
+        include_registered_repositories=True,
+        maintenance_roots=_maintenance_roots(deployment_root),
+        provenance_files=(paths.manifest,),
+    )
+    return backup_state(
+        layout,
+        destination,
+        maintenance_fences_held=maintenance_fences_held,
+    )
+
+
+def _load_restored_provenance(bundle: Path) -> ProductionStateManifest:
+    provenance_manifest = bundle / "provenance" / "runtime.json"
+    try:
+        source_state = ProductionStateManifest.model_validate_json(
+            provenance_manifest.read_bytes()
+        )
+    except (OSError, ValidationError) as error:
+        message = "restored production provenance is invalid"
+        raise ContainerRuntimeError(message) from error
+    source_paths = production_state_paths(source_state.profile_root)
+    expected = {
+        "profile_root": source_paths.root,
+        "business_database": source_paths.business_database,
+        "trace_database": source_paths.trace_database,
+        "artifacts": source_paths.artifacts,
+        "model_config_path": source_paths.model_config,
+    }
+    if source_state.profile_name != source_paths.root.name or any(
+        getattr(source_state, field_name) != expected_path
+        for field_name, expected_path in expected.items()
+    ):
+        message = "restored production provenance has invalid reserved paths"
+        raise ContainerRuntimeError(message)
+    if _sha256_file(bundle / "model-config") != source_state.model_config_sha256:
+        message = "restored model configuration hash does not match provenance"
+        raise ContainerRuntimeError(message)
+    if (
+        database_schema_sha256(bundle / "business.sqlite3")
+        != source_state.business_schema_sha256
+    ):
+        message = "restored business schema hash does not match provenance"
+        raise ContainerRuntimeError(message)
+    if source_state.trace_database_present and not (bundle / "trace.sqlite3").is_file():
+        message = "restored trace database is missing from its provenance"
+        raise ContainerRuntimeError(message)
+    return source_state
+
+
+def _install_restored_payload(profile_root: Path) -> None:
+    paths = production_state_paths(profile_root)
+    generic_model_config = paths.root / "model-config"
+    generic_trace = paths.root / "trace.sqlite3"
+    provenance_root = paths.root / "provenance"
+    provenance_manifest = provenance_root / "runtime.json"
+    paths.config_directory.mkdir(mode=0o700)
+    generic_model_config.replace(paths.model_config)
+    if generic_trace.exists():
+        generic_trace.replace(paths.trace_database)
+    provenance_manifest.unlink()
+    provenance_root.rmdir()
+
+
+def restore_production_state(
+    bundle: Path,
+    profile_root: Path,
+    *,
+    build: BuildIdentity,
+    deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
+    expected_owner_uid: int | None = None,
+) -> ProductionStateManifest:
+    """Restore, validate, rebase, and publish one production profile."""
+    with _runtime_fences(deployment_root, exclusive=True):
+        transfer_manifest = verify_backup(bundle)
+        verify_current_business_schema(bundle / "business.sqlite3")
+        if (bundle / "trace.sqlite3").is_file():
+            verify_current_trace_schema(bundle / "trace.sqlite3")
+        source_state = _load_restored_provenance(bundle)
+        restored_manifest = restore_payload(bundle, profile_root)
+        if restored_manifest != transfer_manifest:
+            message = "restored transfer manifest changed during publication"
+            raise ContainerRuntimeError(message)
+        finalize_restored_repositories(transfer_manifest, profile_root)
+        relocation_record = write_relocation_record(
+            transfer_manifest,
+            profile_root,
+            profile_root,
+        )
+        relocation_sha256 = _sha256_file(relocation_record)
+        _install_restored_payload(profile_root)
+        return finalize_restored_production_state(
+            profile_root,
+            source_state=source_state,
+            build=build,
+            source_backup_sha256=_sha256_file(bundle / "manifest.json"),
+            repository_relocations_sha256=relocation_sha256,
+            expected_owner_uid=expected_owner_uid,
+        )
+
+
+def _emit_payload(payload: Mapping[str, object]) -> None:
+    sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True))
+    sys.stdout.write("\n")
+
+
+def _sigterm_interrupt(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+@contextmanager
+def _termination_as_interrupt() -> Iterator[None]:
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _sigterm_interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _unsupported_command() -> Never:
+    message = "unsupported production command"
+    raise ContainerRuntimeError(message)
+
+
+def main(  # noqa: C901, PLR0911
+    argv: Sequence[str] | None = None,
+    *,
+    deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
+    build_path: Path = BUILD_IDENTITY_PATH,
+    expected_build_owner_uid: int = 0,
+    expected_state_owner_uid: int | None = None,
+) -> int:
+    """Run one explicit installed-runtime lifecycle command."""
+    arguments = build_parser().parse_args(argv)
+    json_output = bool(getattr(arguments, "json", False))
+    try:
+        build = load_build_identity(
+            build_path,
+            expected_owner_uid=expected_build_owner_uid,
+        )
+        profile_root = _production_profile_root(deployment_root, arguments.profile)
+        if arguments.command == "init":
+            model_source = arguments.model_config or Path(
+                str(files("config").joinpath("models.yaml"))
+            )
+            with _runtime_fences(deployment_root, exclusive=True):
+                state = initialize_production_state(
+                    profile_root,
+                    build=build,
+                    model_config_source=model_source,
+                    expected_owner_uid=expected_state_owner_uid,
+                )
+            _emit_payload(_runtime_payload(state, build))
+            return 0
+        if arguments.command == "backup":
+            with _runtime_fences(deployment_root, exclusive=True):
+                state = load_production_state(
+                    profile_root,
+                    build=build,
+                    expected_owner_uid=expected_state_owner_uid,
+                )
+                explicit_repositories = (
+                    None
+                    if arguments.repository is None
+                    else tuple(arguments.repository)
+                )
+                bundle = backup_production_state(
+                    state,
+                    arguments.destination,
+                    deployment_root=deployment_root,
+                    repositories=explicit_repositories,
+                    maintenance_fences_held=True,
+                )
+            _emit_payload({"ok": True, "backup": str(bundle)})
+            return 0
+        if arguments.command in {"info", "serve", "cli"}:
+            with _runtime_fences(deployment_root):
+                state = load_production_state(
+                    profile_root,
+                    build=build,
+                    expected_owner_uid=expected_state_owner_uid,
+                )
+                if arguments.command == "info":
+                    _emit_payload(_runtime_payload(state, build))
+                    return 0
+                secrets = _secrets_for_arguments(arguments)
+                if arguments.command == "cli":
+                    with _termination_as_interrupt():
+                        try:
+                            return run_product_cli(
+                                state,
+                                build,
+                                forwarded=tuple(arguments.agileforge_arguments),
+                                secrets=secrets,
+                            )
+                        except KeyboardInterrupt:
+                            return 0
+                with _termination_as_interrupt():
+                    try:
+                        return serve_production(
+                            state,
+                            build,
+                            secrets=secrets,
+                            port=arguments.port,
+                            ready_timeout=arguments.ready_timeout,
+                        )
+                    except KeyboardInterrupt:
+                        return 0
+        if arguments.command == "restore":
+            state = restore_production_state(
+                arguments.bundle,
+                profile_root,
+                build=build,
+                deployment_root=deployment_root,
+                expected_owner_uid=expected_state_owner_uid,
+            )
+            _emit_payload(_runtime_payload(state, build))
+            return 0
+        _unsupported_command()
+    except (
+        BuildIdentityError,
+        ContainerRuntimeError,
+        FenceError,
+        OSError,
+        ProductionStateError,
+        RepositoryTransferError,
+        TransferError,
+        ValueError,
+    ) as error:
+        payload = {"ok": False, "error": str(error)}
+        if json_output:
+            _emit_payload(payload)
+        else:
+            sys.stderr.write(f"Error: {error}\n")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "ContainerRuntimeError",
+    "build_parser",
+    "load_runtime_secrets",
+    "main",
+    "production_environment",
+]

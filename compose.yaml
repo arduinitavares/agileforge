@@ -1,0 +1,35 @@
+name: ${AGILEFORGE_CONTAINER_PROJECT:-agileforge}
+services:
+  development:
+    container_name: ${AGILEFORGE_CONTAINER_PROJECT:-agileforge}-dev
+    image: ${AGILEFORGE_DEVELOPMENT_IMAGE:-agileforge-development:local}
+    platform: linux/amd64
+    init: true
+    working_dir: /workspace
+    volumes:
+      - workspace:/workspace
+      - cache:/cache
+    ports:
+      - "127.0.0.1:8765:8765"
+    stop_grace_period: 15s
+  production:
+    image: ${AGILEFORGE_PRODUCTION_IMAGE:-agileforge-production:local}
+    platform: linux/amd64
+    profiles: [production]
+    init: true
+    volumes:
+      - production-state:/var/lib/agileforge
+      - workspace:/workspace
+    ports:
+      - "127.0.0.1:8766:8765"
+    stop_grace_period: 15s
+volumes:
+  workspace:
+    external: true
+    name: ${AGILEFORGE_CONTAINER_PROJECT:-agileforge}-workspace
+  cache:
+    external: true
+    name: ${AGILEFORGE_CONTAINER_PROJECT:-agileforge}-cache
+  production-state:
+    external: true
+    name: ${AGILEFORGE_CONTAINER_PROJECT:-agileforge}-production-state

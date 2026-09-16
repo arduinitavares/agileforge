@@ -35,7 +35,7 @@
 
 ## Task 1: Pinned container workflow
 
-**Interfaces:** `scripts/container.py` is a stdlib-only host transport invoked through uv. It owns build-context export, `build`, `up`, `exec`, `stop`, and metadata output. Development/test commands execute in `/workspace/repos/agileforge`; Compose uses an external named workspace volume and non-root UID/GID 1000. The production image invokes `python -m cli.container_runtime` from its installed environment.
+**Interfaces:** `scripts/container.py` is a stdlib-only host transport invoked through uv. It owns build-context export, `build`, `up`, `exec`, `stop`, and metadata output. Development/test commands execute in `/workspace/repos/agileforge`; Compose uses an external named workspace volume and non-root UID/GID 10001. The production image invokes `python -m cli.container_runtime` from its installed environment.
 
 - [ ] Add tests for source export rejecting dirty production builds and excluding runtime databases, environment files, Git configuration, caches, and synthetic secret canaries.
 

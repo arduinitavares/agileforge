@@ -1,21 +1,28 @@
-"""Managed loopback-only dashboard child processes."""
+"""Managed dashboard listeners with local identity probes and owned processes."""
 
 from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess  # nosec B404
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from threading import Thread
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 from urllib.request import urlopen
+
+from utils.secret_redaction import forward_redacted_output
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 LOOPBACK_HOST = "127.0.0.1"
+# The container listener is reachable only through explicit loopback publication.
+CONTAINER_HOST = "0.0.0.0"  # noqa: S104  # nosec B104
 READINESS_PATH = "/api/dashboard/config"
 _DEFAULT_PORT_ATTEMPTS = 5
 _DEFAULT_STOP_TIMEOUT = 5.0
@@ -46,12 +53,84 @@ class ManagedProcess(Protocol):
         ...
 
 
+class _SpawnOptions(TypedDict, total=False):
+    start_new_session: bool
+    stderr: int
+
+
+def _signal_group(group_id: int, number: int) -> None:
+    if not hasattr(os, "killpg"):
+        message = "owned process groups require POSIX signals"
+        raise RuntimeError(message)
+    os.killpg(group_id, number)
+
+
+@dataclass(frozen=True, slots=True)
+class PosixProcessGroup:
+    """Retain ownership of a new session after its original leader exits."""
+
+    process: ManagedProcess
+
+    @property
+    def pid(self) -> int:
+        """Return the acquired process-group identifier."""
+        return self.process.pid
+
+    @property
+    def returncode(self) -> int | None:
+        """Return the leader's exit status."""
+        return self.process.returncode
+
+    def _exists(self) -> bool:
+        try:
+            _signal_group(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def poll(self) -> int | None:
+        """Remain live while a member of the acquired group still exists."""
+        result = self.process.poll()
+        return None if self._exists() else result
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for the leader normally, or for complete shutdown when bounded."""
+        if timeout is None:
+            return self.process.wait()
+        deadline = time.monotonic() + timeout
+        while self._exists():
+            self.process.poll()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    cmd="dashboard process group", timeout=timeout
+                )
+            time.sleep(min(_DEFAULT_POLL_INTERVAL, remaining))
+        return self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+    def _signal(self, number: int) -> None:
+        with suppress(ProcessLookupError):
+            _signal_group(self.pid, number)
+
+    def terminate(self) -> None:
+        """Request shutdown of every owned process."""
+        self._signal(signal.SIGTERM)
+
+    def kill(self) -> None:
+        """Escalate only for the acquired process group."""
+        if not hasattr(signal, "SIGKILL"):
+            message = "owned process groups require POSIX signals"
+            raise RuntimeError(message)
+        self._signal(signal.SIGKILL)
+
+
 @dataclass(frozen=True, slots=True)
 class UIChild:
     """One tracked uvicorn child and its selected loopback port."""
 
     process: ManagedProcess
     port: int
+    output_thread: Thread | None = None
 
     @property
     def url(self) -> str:
@@ -69,6 +148,7 @@ class ExpectedUIRuntime:
     trace_database: Path
     process_id: int | None
     launch_nonce: str
+    state_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +162,7 @@ class DashboardConfig:
     business_database: Path
     trace_database: Path
     launch_nonce: str | None
+    state_id: str | None = None
 
 
 class UIReadinessError(RuntimeError):
@@ -145,14 +226,23 @@ def _ui_python(
     return base_executable, child_environment
 
 
-def start_ui(
+def start_ui(  # noqa: PLR0913
     *,
     checkout_root: Path,
     environment: Mapping[str, str],
     port: int,
     reload: bool,
+    host: str = LOOPBACK_HOST,
+    owned_process_group: bool = False,
+    redact_values: tuple[str, ...] = (),
 ) -> UIChild:
     """Start one fixed-argv uvicorn child in its validated checkout."""
+    if host not in {LOOPBACK_HOST, CONTAINER_HOST}:
+        message = "host must be 127.0.0.1 or the explicit container host 0.0.0.0"
+        raise ValueError(message)
+    if owned_process_group and os.name != "posix":
+        message = "owned process groups require a POSIX runtime"
+        raise ValueError(message)
     executable, child_environment = _ui_python(environment, reload=reload)
     arguments = (
         executable,
@@ -160,19 +250,43 @@ def start_ui(
         "uvicorn",
         "api:app",
         "--host",
-        LOOPBACK_HOST,
+        host,
         "--port",
         str(port),
     )
     if reload:
         arguments = (*arguments, "--reload")
+    options: _SpawnOptions = {"start_new_session": True} if owned_process_group else {}
+    if redact_values:
+        options["stderr"] = subprocess.STDOUT
     process = subprocess.Popen(  # noqa: S603  # nosec B603
         arguments,
         cwd=checkout_root,
         env=child_environment,
-        stdout=sys.stderr,
+        stdout=subprocess.PIPE if redact_values else sys.stderr,
+        **options,
     )
-    return UIChild(process=process, port=port)
+    managed: ManagedProcess = (
+        PosixProcessGroup(process) if owned_process_group else process
+    )
+    child = UIChild(process=managed, port=port)
+    if redact_values:
+        try:
+            if process.stdout is None:
+                message = "supervised output pipe is unavailable"
+                raise RuntimeError(message)  # noqa: TRY301 - cleanup owns the child
+            output_thread = Thread(
+                target=forward_redacted_output,
+                args=(process.stdout, sys.stderr, redact_values),
+                daemon=True,
+                name="agileforge-redacted-output",
+            )
+            output_thread.start()
+            child = UIChild(process=managed, port=port, output_thread=output_thread)
+        except BaseException:
+            stop_ui(child)
+            raise
+    return child
 
 
 def _required_path(payload: dict[str, object], key: str) -> Path:
@@ -198,6 +312,7 @@ def _parse_dashboard_config(payload: object) -> DashboardConfig:
     process_id = config_payload.get("process_id")
     commit = config_payload.get("commit")
     launch_nonce = config_payload.get("launch_nonce")
+    state_id = config_payload.get("state_id")
     if (
         not isinstance(process_id, int)
         or isinstance(process_id, bool)
@@ -207,6 +322,7 @@ def _parse_dashboard_config(payload: object) -> DashboardConfig:
             launch_nonce is not None
             and (not isinstance(launch_nonce, str) or not launch_nonce)
         )
+        or (state_id is not None and (not isinstance(state_id, str) or not state_id))
     ):
         message = "dashboard readiness returned an invalid payload"
         raise UIReadinessError(message)
@@ -218,6 +334,7 @@ def _parse_dashboard_config(payload: object) -> DashboardConfig:
         business_database=_required_path(config_payload, "business_database"),
         trace_database=_required_path(config_payload, "trace_database"),
         launch_nonce=launch_nonce,
+        state_id=state_id,
     )
 
 
@@ -238,6 +355,7 @@ def _validate_runtime_identity(
         and config.trace_database == expected.trace_database
         and (expected.process_id is None or config.process_id == expected.process_id)
         and config.launch_nonce == expected.launch_nonce
+        and config.state_id == expected.state_id
     )
     if not matches:
         message = "dashboard readiness identity mismatch"
@@ -310,11 +428,15 @@ def stop_ui(child: UIChild, *, timeout: float = _DEFAULT_STOP_TIMEOUT) -> None:
     if timeout <= 0:
         message = "stop timeout must be greater than zero"
         raise ValueError(message)
-    if child.process.poll() is not None:
-        return
-    child.process.terminate()
     try:
-        child.process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        child.process.kill()
-        child.process.wait(timeout=timeout)
+        if child.process.poll() is None:
+            child.process.terminate()
+            try:
+                child.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                child.process.kill()
+                child.process.wait(timeout=timeout)
+    finally:
+        output_thread = getattr(child, "output_thread", None)
+        if output_thread is not None:
+            output_thread.join(timeout=timeout)

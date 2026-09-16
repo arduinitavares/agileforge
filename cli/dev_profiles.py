@@ -75,6 +75,7 @@ class RuntimeProfile(BaseModel):
     model_config_path: Path
     model_config_sha256: str
     schema_source_sha256: str
+    repository_relocations_sha256: str | None = None
     created_at: datetime
     last_used_at: datetime
 
@@ -119,6 +120,12 @@ class RuntimeProfile(BaseModel):
             raise ValueError(message)
         if _HASH_PATTERN.fullmatch(self.schema_source_sha256) is None:
             message = "schema_source_sha256 must be a lowercase SHA-256 value"
+            raise ValueError(message)
+        if (
+            self.repository_relocations_sha256 is not None
+            and _HASH_PATTERN.fullmatch(self.repository_relocations_sha256) is None
+        ):
+            message = "repository_relocations_sha256 must be a lowercase SHA-256 value"
             raise ValueError(message)
         if self.created_at.tzinfo is None or self.last_used_at.tzinfo is None:
             message = "profile timestamps must be timezone-aware"
@@ -583,6 +590,15 @@ def load_profile(checkout_root: Path, profile_name: str) -> RuntimeProfile:
         raise ValueError(message)
     if profile.schema_source_sha256 != _schema_source_sha256(checkout.root):
         message = "schema source drift detected"
+        raise ValueError(message)
+    relocation_record = paths.root / "repository-relocations.json"
+    expected_relocations = profile.repository_relocations_sha256
+    if expected_relocations is not None:
+        if expected_relocations != _file_sha256(checkout.root, relocation_record):
+            message = "repository relocation record drift detected"
+            raise ValueError(message)
+    elif relocation_record.exists() or relocation_record.is_symlink():
+        message = "unexpected repository relocation record"
         raise ValueError(message)
     return profile
 

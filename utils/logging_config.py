@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from utils.failure_artifacts import LOGS_DIR
 from utils.runtime_config import get_database_echo
+from utils.secret_redaction import redact_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -72,6 +74,15 @@ def _ensure_handler(
     logger.addHandler(handler)
 
 
+class _CredentialSafeFormatter(logging.Formatter):
+    """Redact the final rendered message, including formatted tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_text(
+            super().format(record), (os.environ.get("OPEN_ROUTER_API_KEY", ""),)
+        )
+
+
 def _build_handler(path: Path, *, level: int) -> RotatingFileHandler:
     handler = RotatingFileHandler(
         path,
@@ -81,7 +92,7 @@ def _build_handler(path: Path, *, level: int) -> RotatingFileHandler:
     )
     handler.setLevel(level)
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        _CredentialSafeFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
     return handler
 
@@ -94,7 +105,7 @@ def _build_console_handler(
 ) -> logging.StreamHandler:
     handler = logging.StreamHandler()
     handler.setLevel(level)
-    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.setFormatter(_CredentialSafeFormatter("%(message)s"))
     handler.addFilter(
         _ConsoleVisibilityFilter(
             console_logger_names=tuple(console_logger_names),

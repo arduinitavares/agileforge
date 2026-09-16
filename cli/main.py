@@ -13,6 +13,8 @@ from typing import Literal, NoReturn, Protocol, cast
 
 from pydantic import TypeAdapter, ValidationError
 
+from cli.production_state import ProductionStateError
+from cli.repository_transfer import RepositoryTransferError
 from cli.workflow_commands import (
     workflow_next,
     workflow_position,
@@ -58,7 +60,10 @@ from services.application import (
 )
 from services.contracts.story import is_story_sentinel_text
 from services.sprint_ownership import SprintOwnerEvidence, sprint_owner_projection
+from utils.build_identity import BuildIdentityError
 from utils.logging_config import configure_logging
+from utils.runtime_fence import FenceError
+from utils.runtime_ownership import runtime_access
 from workflow.contracts import (
     JsonObject,
     TransitionResult,
@@ -2355,14 +2360,24 @@ def _emit_result(result: TransitionResult) -> int:
 
 def main(argv: list[str] | None = None, *, application: object | None = None) -> int:
     """Run one graph-backed CLI command."""
-    configure_logging(console=False)
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-        selected = cast("_Application", application or production_application())
         handler = cast("CommandHandler", args.command_handler)
-        return handler(args, selected)
-    except (OSError, TypeError, ValueError, ValidationError) as error:
+        with runtime_access(allow_repository_attach=handler is _repository_attach):
+            configure_logging(console=False)
+            selected = cast("_Application", application or production_application())
+            return handler(args, selected)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        ValidationError,
+        FenceError,
+        BuildIdentityError,
+        ProductionStateError,
+        RepositoryTransferError,
+    ) as error:
         _write_json({"ok": False, "error": str(error)})
         return 2
 

@@ -42,6 +42,7 @@ from cli.dev_profiles import (
 )
 from cli.dev_secrets import SecretsFileError, open_secrets_file
 from cli.dev_server import (
+    CONTAINER_HOST,
     LOOPBACK_HOST,
     ExpectedUIRuntime,
     UIChild,
@@ -57,6 +58,8 @@ from utils.runtime_controls import (
     LAUNCHER_CHILD_VALUE,
     UI_LAUNCH_NONCE_ENV,
 )
+from utils.runtime_fence import FenceError
+from utils.runtime_ownership import development_access
 from workflow.contracts import JsonObject, JsonValue
 
 if TYPE_CHECKING:
@@ -343,6 +346,12 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument("--ephemeral", action="store_true")
     ui_parser.add_argument("--port", type=_port, default="auto")
     ui_parser.add_argument("--reload", action="store_true")
+    ui_parser.add_argument(
+        "--host",
+        choices=(LOOPBACK_HOST, CONTAINER_HOST),
+        default=LOOPBACK_HOST,
+        help="Use 0.0.0.0 inside a container with host-loopback port publication",
+    )
     ui_parser.add_argument("--json", action="store_true")
     ui_parser.add_argument("--ready-timeout", type=_positive_float, default=15.0)
 
@@ -352,6 +361,21 @@ def build_parser() -> argparse.ArgumentParser:
     reset_parser = commands.add_parser("reset", help="Remove owned runtime state")
     _add_profile_argument(reset_parser)
     reset_parser.add_argument("--confirm", dest="confirmation", required=True)
+
+    backup_parser = commands.add_parser("backup", help="Export verified profile state")
+    _add_profile_argument(backup_parser)
+    backup_parser.add_argument("--destination", type=Path, required=True)
+    backup_parser.add_argument("--repository", type=Path, action="append")
+    backup_parser.add_argument("--json", action="store_true")
+    verify_parser = commands.add_parser(
+        "verify-backup", help="Verify a transfer bundle"
+    )
+    verify_parser.add_argument("--bundle", type=Path, required=True)
+    verify_parser.add_argument("--json", action="store_true")
+    restore_parser = commands.add_parser("restore", help="Restore into a new profile")
+    _add_profile_argument(restore_parser)
+    restore_parser.add_argument("--bundle", type=Path, required=True)
+    restore_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -461,6 +485,7 @@ class UiRequest:
     reload: bool
     json_output: bool
     ready_timeout: float
+    host: str = LOOPBACK_HOST
 
 
 @dataclass(frozen=True, slots=True)
@@ -1062,15 +1087,26 @@ def _managed_ui_child(
     environment: Mapping[str, str],
     port: int,
     reload: bool,
+    host: str = LOOPBACK_HOST,
 ) -> Iterator[UIChild]:
     child: UIChild | None = None
     try:
-        child = start_ui(
-            checkout_root=checkout_root,
-            environment=environment,
-            port=port,
-            reload=reload,
-        )
+        if os.name != "posix" and host == LOOPBACK_HOST:
+            child = start_ui(
+                checkout_root=checkout_root,
+                environment=environment,
+                port=port,
+                reload=reload,
+            )
+        else:
+            child = start_ui(
+                checkout_root=checkout_root,
+                environment=environment,
+                port=port,
+                reload=reload,
+                host=host,
+                owned_process_group=True,
+            )
         _ui_child_handoff(child)
         yield child
     finally:
@@ -1099,6 +1135,7 @@ def _ready_ui_lifecycle(
             environment=child_environment,
             port=selected_port,
             reload=request.reload,
+            host=request.host,
         ) as child:
             expected = ExpectedUIRuntime(
                 checkout_root=profile.checkout.root,
@@ -1240,7 +1277,45 @@ def _run_check_or_reset(
     return ExitCode.SUCCESS
 
 
-def main(
+def _run_transfer(arguments: argparse.Namespace, *, checkout_root: Path) -> int:
+    # Import only for explicit transfer; the normal launcher stays lightweight.
+    from cli.dev_transfer import (  # noqa: PLC0415
+        backup_development_profile,
+        restore_development_profile,
+    )
+    from cli.repository_transfer import RepositoryTransferError  # noqa: PLC0415
+    from cli.state_transfer import TransferError, verify_backup  # noqa: PLC0415
+
+    try:
+        if arguments.command == "backup":
+            destination = backup_development_profile(
+                checkout_root,
+                arguments.profile,
+                arguments.destination,
+                repositories=(
+                    tuple(arguments.repository)
+                    if arguments.repository is not None
+                    else None
+                ),
+            )
+            payload = {"status": "backed_up", "destination": str(destination)}
+        elif arguments.command == "restore":
+            profile = restore_development_profile(
+                checkout_root, arguments.profile, arguments.bundle
+            )
+            payload = {"status": "restored", "profile": profile.model_dump(mode="json")}
+        else:
+            manifest = verify_backup(arguments.bundle)
+            payload = {"status": "verified", "manifest": manifest.to_dict()}
+    except (TransferError, RepositoryTransferError) as error:
+        _emit_error(error, json_output=arguments.json)
+        return ExitCode.ERROR
+    else:
+        emit(json.dumps(payload, indent=2))
+        return ExitCode.SUCCESS
+
+
+def main(  # noqa: PLR0911 - one explicit return per launcher command
     argv: Sequence[str] | None = None,
     *,
     checkout_root: Path | None = None,
@@ -1256,66 +1331,71 @@ def main(
     try:
         _validate_ui_option_combination(arguments)
         root = resolve_checkout_root(checkout_root or Path(__file__).parent)
-        if arguments.command == "init":
-            result = _initialize_profile(
-                checkout_root=root,
-                request=InitRequest(
-                    profile_name=arguments.profile,
-                    mode=ProfileMode(arguments.mode),
-                    expected_commit=arguments.expect_sha,
-                ),
-                runner=command_runner,
-                clock=command_clock,
-            )
-            _emit_init(result, json_output=json_output)
-            return ExitCode.SUCCESS
-        if arguments.command == "info":
-            result = _profile_info(
-                checkout_root=root,
-                profile_name=arguments.profile,
-                secrets_file=arguments.secrets_file,
-                runner=command_runner,
-                clock=command_clock,
-            )
-            _emit_info(result, json_output=json_output)
-            return ExitCode.SUCCESS
-        if arguments.command == "cli":
-            return _run_cli(
-                checkout_root=root,
-                request=CliRequest(
-                    profile_name=arguments.profile,
-                    raw_arguments=tuple(arguments.agileforge_arguments),
-                    secrets_file=arguments.secrets_file,
-                    json_output=json_output,
-                ),
-                runner=command_runner,
-                clock=command_clock,
-            )
-        if arguments.command == "ui":
-            return _run_ui(
-                checkout_root=root,
-                request=UiRequest(
+        if arguments.command in {"backup", "verify-backup", "restore"}:
+            return _run_transfer(arguments, checkout_root=root)
+        with development_access(root):
+            if arguments.command == "init":
+                result = _initialize_profile(
+                    checkout_root=root,
+                    request=InitRequest(
+                        profile_name=arguments.profile,
+                        mode=ProfileMode(arguments.mode),
+                        expected_commit=arguments.expect_sha,
+                    ),
+                    runner=command_runner,
+                    clock=command_clock,
+                )
+                _emit_init(result, json_output=json_output)
+                return ExitCode.SUCCESS
+            if arguments.command == "info":
+                result = _profile_info(
+                    checkout_root=root,
                     profile_name=arguments.profile,
                     secrets_file=arguments.secrets_file,
-                    ephemeral=arguments.ephemeral,
-                    port=arguments.port,
-                    reload=arguments.reload,
+                    runner=command_runner,
+                    clock=command_clock,
+                )
+                _emit_info(result, json_output=json_output)
+                return ExitCode.SUCCESS
+            if arguments.command == "cli":
+                return _run_cli(
+                    checkout_root=root,
+                    request=CliRequest(
+                        profile_name=arguments.profile,
+                        raw_arguments=tuple(arguments.agileforge_arguments),
+                        secrets_file=arguments.secrets_file,
+                        json_output=json_output,
+                    ),
+                    runner=command_runner,
+                    clock=command_clock,
+                )
+            if arguments.command == "ui":
+                return _run_ui(
+                    checkout_root=root,
+                    request=UiRequest(
+                        profile_name=arguments.profile,
+                        secrets_file=arguments.secrets_file,
+                        ephemeral=arguments.ephemeral,
+                        port=arguments.port,
+                        reload=arguments.reload,
+                        json_output=json_output,
+                        ready_timeout=arguments.ready_timeout,
+                        host=arguments.host,
+                    ),
+                    runner=command_runner,
+                    clock=command_clock,
+                )
+            if arguments.command in {"check", "reset"}:
+                return _run_check_or_reset(
+                    arguments,
+                    checkout_root=root,
+                    check_runner=check_runner,
                     json_output=json_output,
-                    ready_timeout=arguments.ready_timeout,
-                ),
-                runner=command_runner,
-                clock=command_clock,
-            )
-        if arguments.command in {"check", "reset"}:
-            return _run_check_or_reset(
-                arguments,
-                checkout_root=root,
-                check_runner=check_runner,
-                json_output=json_output,
-            )
-        _unsupported_command(arguments.command)
+                )
+            _unsupported_command(arguments.command)
     except (
         GitCommandError,
+        FenceError,
         OSError,
         ValueError,
         DeveloperCommandError,

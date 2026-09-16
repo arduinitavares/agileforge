@@ -11,9 +11,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict, Unpack
 
+from utils.runtime_ownership import runtime_output_root
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOGS_DIR = REPO_ROOT / "logs"
-FAILURES_DIR = LOGS_DIR / "failures"
+_OUTPUT_ROOT = runtime_output_root()
+LOGS_DIR = (_OUTPUT_ROOT or REPO_ROOT) / "logs"
+FAILURES_DIR = (
+    _OUTPUT_ROOT / "artifacts" / "failures"
+    if _OUTPUT_ROOT is not None
+    else LOGS_DIR / "failures"
+)
 RAW_OUTPUT_PREVIEW_LIMIT = 500
 
 type JsonPrimitive = None | bool | int | float | str

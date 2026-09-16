@@ -78,6 +78,11 @@ from services.specification_source_registration import (
 )
 from services.vision_evidence import VisionEvidenceCollectionError
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
+from utils.runtime_ownership import (
+    INSTALLED_ROOT,
+    production_runtime_identity,
+    runtime_access,
+)
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -96,8 +101,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Initialize the business schema without creating routing sessions."""
     from models.db import ensure_business_db_ready  # noqa: PLC0415
 
-    ensure_business_db_ready()
-    yield
+    with runtime_access():
+        ensure_business_db_ready()
+        yield
 
 
 app = FastAPI(title="AgileForge API", lifespan=lifespan)
@@ -437,6 +443,7 @@ class DashboardConfig(BaseModel):
     business_database: Path
     trace_database: Path
     launch_nonce: str | None = None
+    state_id: str | None = None
 
 
 DELIVERY_API_PATHS: dict[str, str] = {
@@ -829,6 +836,18 @@ def root() -> RedirectResponse:
 @app.get("/api/dashboard/config")
 def get_dashboard_config() -> DashboardConfig:
     """Return deterministic local readiness and checkout provenance."""
+    production = production_runtime_identity()
+    if production is not None:
+        build, state = production
+        return DashboardConfig(
+            process_id=os.getpid(),
+            checkout_root=INSTALLED_ROOT,
+            commit=build.revision,
+            business_database=state.business_database,
+            trace_database=state.trace_database,
+            launch_nonce=os.environ.get(UI_LAUNCH_NONCE_ENV) or None,
+            state_id=str(state.state_id),
+        )
     checkout_root = Path(__file__).resolve().parent
     return DashboardConfig(
         process_id=os.getpid(),
@@ -1134,9 +1153,7 @@ def get_roadmap_review(project_id: int) -> dict[str, object]:
 @app.get("/api/projects/{project_id}/roadmap")
 def get_accepted_roadmap(project_id: int) -> dict[str, object]:
     """Return the accepted Roadmap projection independently of pending review."""
-    return _read_payload(
-        _application().reads.accepted_roadmap(project_id=project_id)
-    )
+    return _read_payload(_application().reads.accepted_roadmap(project_id=project_id))
 
 
 @app.get("/api/projects/{project_id}/story/reviews")
