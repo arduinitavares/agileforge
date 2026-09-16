@@ -3556,6 +3556,9 @@ def test_issue_211_fails_closed_for_malformed_and_hostile_source_projections(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
         wait_until="networkidle",
     )
+    page.wait_for_function(
+        "typeof globalThis.specificationPanelMarkup === 'function'"
+    )
     registration_action: JsonObject = {
         "request_kind": "register_specification_source",
         "endpoint": "specifications/source",

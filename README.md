@@ -144,6 +144,11 @@ credential values.
 
 ## Development
 
+For the Linux/amd64 container workflow, use the
+[container runbook](docs/linux-containers.md). It covers named-volume setup,
+agent commands, installed production runtime, and verified backup/restore.
+Native support remains available until the separately approved data cutover.
+
 Use the checkout's locked Python 3.13.15 environment and the same `pyrepo-check`
 controller pinned in `.github/workflows/ci.yml`. Run from that checkout's root.
 
