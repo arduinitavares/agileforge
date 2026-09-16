@@ -9,9 +9,10 @@ and final acceptance are complete.
 
 - Branch: `dev/issue-263-linux-containers`.
 - Original baseline: `7e193694c1da0746f257e3b48ce63b326e709cca`.
-- Reviewed application/production revision: `a76a74f63d220d548ad90e10055e19d87b590b96`.
-  A subsequent test-only correction waits for the renderer used by the browser
-  test; the final gate revision and result remain to be recorded.
+- Reviewed implementation: `a76a74f63d220d548ad90e10055e19d87b590b96`.
+- Final acceptance candidate: `3edd7bb051ddd5468af65239f5da657725e33757`.
+  This adds the reviewed browser-readiness test correction and documentation;
+  application code is unchanged from the reviewed implementation.
 - Docker 29.8.0 on a Linux ARM64 VM: 24 visible CPUs, 8,316,473,344 bytes RAM.
   These `linux/amd64` runs use emulation; they are not native amd64 benchmarks.
 - Runtime UID/GID: `10001:10001`; Python `3.13.15`; uv `0.12.8`; Node `24.21.0`.
@@ -19,20 +20,39 @@ and final acceptance are complete.
 - Exact OS, binary, and image pins: [containers/pins.json](../../containers/pins.json).
 
 The production image is
-`sha256:d5daca169918f6ad0671f763fe70cdc558a05046b10ff6725a8908cb6ed3c076`.
+`sha256:ba206f442639e1f68443b1ac7794d17a634764fd32926af33fddd8467c029502`.
 Its source archive hash is
-`60d14667640434463c964ef07de6672d10e28dc118c4cc96f9e5d28e413e1cab`;
+`1a6d30274f83f6412a3c11e62708ec512eab4a4f798b079772a0a43fb55836e2`;
 lock hash is `79499c43279fdc745431e428edfeab6d3a17c15a466f9585d35e66dafe12c987`.
 The test toolchain image is
 `sha256:4b8631ebbff399fac468b752d8622ee00a499d5f7f227f1cfe8a13763d917d81`.
 The application checkout is imported separately by a clean committed Git bundle.
 
 Docker's recorded build elapsed times were 2m17s for the development image,
-4m54s for the final test toolchain, and 28.7s for the reviewed production image.
-Those builds reused 2, 5, and 7 cached steps respectively; they are not cold-build
+4m54s for the final test toolchain, and 38.6s for the final production image.
+Those builds reused 2, 5, and 6 cached steps respectively; they are not cold-build
 benchmarks and are separate from test and service startup timings.
 
 ## Verification
+
+The final canonical `./agileforge-dev check --json` passed at
+`3edd7bb051ddd5468af65239f5da657725e33757` in a fresh Linux checkout, which
+remained clean after the run. Total elapsed time was 57m25.6s.
+
+| Stage | Result | Elapsed |
+| --- | --- | --- |
+| Locked dependency check | Passed | 0.33s |
+| Pinned Python quality and tests | Passed | 56m54.9s |
+| Seven Node test suites | Passed | 1.45s |
+| Whitespace | Passed | 0.03s |
+| Installed wheel and sdist verification | Passed | 28.87s |
+
+Python results: 3,408 passed, including all 58 browser cases; 87 skipped and one
+integration case deselected under the existing selection. There were no failed
+reports, collection errors, or early termination. Node results: 248 passed.
+Ruff, annotations, Ty, and Bandit passed. Coverage.py measured 82.66% combined
+line/branch coverage against the unchanged 80% threshold (85.77% statements and
+71.52% branches). Detailed test and coverage JSON were retained before cleanup.
 
 The first canonical gate ran at the reviewed revision in a fresh named Linux
 workspace for 60m40s. It recorded 3,406 passing tests, two failing browser cases,
@@ -46,10 +66,12 @@ and the renderer undefined, although both local scripts returned HTTP 200.
 The test now waits for the exact function it invokes, preserving its assertions
 and timeouts. Independent review approved that correction. The other failure,
 a second-tab navigation timeout, did not reproduce in focused runs; its cause
-is unconfirmed. A fresh browser suite and canonical gate are required before
-this validation is complete. The original failed evidence is retained.
+is unconfirmed. All 58 browser tests passed after the correction in 187.21s;
+focused pinned quality checks and separate distribution verification passed.
+Both previously failing cases also passed in the final canonical run. The
+original failed evidence is retained alongside the successful run.
 
-The installed-production rehearsal passed at the reviewed revision:
+The installed-production rehearsal passed at the final acceptance candidate:
 
 - Missing profiles fail before initialization; explicit initialization succeeds.
 - Product CLI runs with provider access disabled. A synthetic credential loads
@@ -60,7 +82,7 @@ The installed-production rehearsal passed at the reviewed revision:
 - The second service actually starts the restored profile and reports its
   restored database paths. A new container has a fresh launch nonce.
 - Both services shut down cleanly and their loopback endpoints disappear.
-- Observed startup: 6.799 and 6.781 seconds; shutdown: 0.846 and 0.785 seconds.
+- Observed startup: 6.799 and 6.926 seconds; shutdown: 0.860 and 0.822 seconds.
   These measurements include local Docker overhead and amd64 emulation.
 
 Production imports resolve inside the installed wheel's `site-packages`, with
@@ -106,6 +128,9 @@ credential was inventoried or copied, and no provider was called.
 
 Full local logs and reports are retained under
 `.superpowers/sdd/2026-09-16-issue-263-linux-containers/` in the task worktree.
+The final handoff updates only documentation after the tested candidate; no
+application or test source changes follow that gate. The original `master`
+checkout remains clean at the baseline revision.
 The [operator runbook](../linux-containers.md) states the separate inventory,
 copy/cutover, and final-switch approvals and the rollback boundary.
 

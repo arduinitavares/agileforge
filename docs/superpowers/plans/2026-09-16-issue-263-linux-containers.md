@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-16-issue-263-linux-containers-design.md`
 
+**Delivery status:** Implementation, independent review, synthetic rehearsals,
+and the complete Linux gate passed at `3edd7bb051ddd5468af65239f5da657725e33757`.
+See [validation evidence](../../testing/issue-263-container-evidence.md).
+Native amd64 CI has not run for this unpushed candidate; only the pre-change
+baseline is available. Live cutover, native retirement, and issue closure remain
+outside this approved delivery phase.
+
 ## Global constraints
 
 - Base revision `7e193694c1da0746f257e3b48ce63b326e709cca`; task branch `dev/issue-263-linux-containers`.
@@ -31,13 +38,13 @@
 | Installed state and runtime | `cli/production_state.py`, `cli/container_runtime.py`, `utils/build_identity.py`, `tests/container_runtime/test_production_state.py`, `tests/container_runtime/test_container_runtime.py` | Task 3 |
 | Runtime integration | `cli/dev_main.py`, `cli/dev_server.py`, `cli/main.py`, `api.py`, `utils/runtime_controls.py`, related existing tests | Task 4 |
 | Rehearsal and gate | `scripts/verify_container.py`, `tests/container_runtime/test_relocation.py`, `.github/workflows/ci.yml` | Task 5 |
-| Operator documentation/evidence | `docs/container-runtime.md`, `README.md`, `docs/testing/issue-263-container-evidence.md` | Task 6 |
+| Operator documentation/evidence | `docs/linux-containers.md`, `README.md`, `docs/testing/issue-263-container-evidence.md` | Task 6 |
 
 ## Task 1: Pinned container workflow
 
 **Interfaces:** `scripts/container.py` is a stdlib-only host transport invoked through uv. It owns build-context export, `build`, `up`, `exec`, `stop`, and metadata output. Development/test commands execute in `/workspace/repos/agileforge`; Compose uses an external named workspace volume and non-root UID/GID 10001. The production image invokes `python -m cli.container_runtime` from its installed environment.
 
-- [ ] Add tests for source export rejecting dirty production builds and excluding runtime databases, environment files, Git configuration, caches, and synthetic secret canaries.
+- [x] Add tests for source export rejecting dirty production builds and excluding runtime databases, environment files, Git configuration, caches, and synthetic secret canaries.
 
 ```python
 def test_export_omits_untracked_runtime_state(tmp_path):
@@ -47,9 +54,9 @@ def test_export_omits_untracked_runtime_state(tmp_path):
     assert not (archive / '.env').exists()
 ```
 
-- [ ] Run the focused test and record the missing-export failure. Implement explicit tracked-source export plus a build identity file, never an unrestricted `COPY` of the user's working directory.
-- [ ] Resolve official immutable image/tool pins. Use an Ubuntu package snapshot, exact Node binary/checksum, Python 3.13.15, uv 0.12.8, and the existing controller SHA.
-- [ ] Add shared dependencies, development, test, wheel builder, and production Docker targets. Use locked uv resolution and an installed wheel. Production carries Git and required runtime libraries, not checkout source or development credentials.
+- [x] Run the focused test and record the missing-export failure. Implement explicit tracked-source export plus a build identity file, never an unrestricted `COPY` of the user's working directory.
+- [x] Resolve official immutable image/tool pins. Use an Ubuntu package snapshot, exact Node binary/checksum, Python 3.13.15, uv 0.12.8, and the existing controller SHA.
+- [x] Add shared dependencies, development, test, wheel builder, and production Docker targets. Use locked uv resolution and an installed wheel. Production carries Git and required runtime libraries, not checkout source or development credentials.
 
 ```dockerfile
 ARG SOURCE_REVISION
@@ -57,9 +64,9 @@ LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 WORKDIR /workspace/repos/agileforge
 ```
 
-- [ ] Build the development image, bootstrap a clean Git clone into a named Linux volume, and prove a file edit, Git diff, linked worktree, uv Python, Node, and checkout launcher command. Recreate the service and verify the workspace survives.
-- [ ] Verify Compose publishes only `127.0.0.1`, uses init, and mounts stable Linux volume paths. Record resources, architecture/emulation, pins, build time, and startup time.
-- [ ] Run the focused source-export tests in the container; review the build diff and commit this slice locally.
+- [x] Build the development image, bootstrap a clean Git clone into a named Linux volume, and prove a file edit, Git diff, linked worktree, uv Python, Node, and checkout launcher command. Recreate the service and verify the workspace survives.
+- [x] Verify Compose publishes only `127.0.0.1`, uses init, and mounts stable Linux volume paths. Record resources, architecture/emulation, pins, build time, and startup time.
+- [x] Run the focused source-export tests in the container; review the build diff and commit this slice locally.
 
 ## Task 2: Maintenance fencing and portable transfer
 
@@ -83,9 +90,9 @@ def restore_payload(bundle: Path, destination: Path) -> TransferManifest: ...
 
 `runtime_fence` fails immediately on contention and rejects unsafe lock paths. Use POSIX `flock` for the supported environment, with a pre-cutover native implementation or explicit unsupported-source error where safe locking cannot be established. Shared locks live as long as services/commands; backup and restore require exclusive ownership. `StateLayout` accepts only validated regular owned paths; transfer never initializes application stores. Task 4 connects supported entrypoints to the fence. Task 5 checks other Docker writable mounts before maintenance.
 
-- [ ] Write a real multiprocessing contention test before the lock. A process holding shared access prevents exclusive access; an exclusive holder prevents a new shared process. A dead process releases the lock. Symlinked lock paths fail.
-- [ ] Implement the fence and run those tests inside Linux.
-- [ ] Write backup/verify tests using two real temporary SQLite stores with tables, blobs, duplicate values, sequences, foreign keys, and a synthetic artifact. Corrupt one byte, delete a manifest entry, and add an unlisted payload: all must fail verification.
+- [x] Write a real multiprocessing contention test before the lock. A process holding shared access prevents exclusive access; an exclusive holder prevents a new shared process. A dead process releases the lock. Symlinked lock paths fail.
+- [x] Implement the fence and run those tests inside Linux.
+- [x] Write backup/verify tests using two real temporary SQLite stores with tables, blobs, duplicate values, sequences, foreign keys, and a synthetic artifact. Corrupt one byte, delete a manifest entry, and add an unlisted payload: all must fail verification.
 
 ```python
 def test_corrupt_artifact_prevents_restore(layout, tmp_path):
@@ -96,16 +103,16 @@ def test_corrupt_artifact_prevents_restore(layout, tmp_path):
     assert not (tmp_path / 'restored').exists()
 ```
 
-- [ ] Implement quiescent paired SQLite backups, integrity/foreign-key checks, canonical typed row/schema inventory, complete artifact byte inventory, and atomic manifest publication using `agileforge.transfer.v1`. Preserve all tables and unlinked trace sessions; compare observed attempt/session links without requiring a trace for every attempt.
-- [ ] Reject special files, traversal, aliases, nonempty destinations, unknown formats, corrupt/partial bundles, unsupported application schemas, and interrupted publication. Use staging and atomic publication; never silently create empty state.
-- [ ] Keep repositories as an explicit inventoried transfer component. Capture dirty/untracked bytes, modes, safe symlinks, common-directory data, and excluded secret paths. Do not dereference external symlinks or print repository contents/remotes with credentials.
-- [ ] Run the red/green tests and focused security checks; record exact API details for Tasks 3–5, review, and commit locally.
+- [x] Implement quiescent paired SQLite backups, integrity/foreign-key checks, canonical typed row/schema inventory, complete artifact byte inventory, and atomic manifest publication using `agileforge.transfer.v1`. Preserve all tables and unlinked trace sessions; compare observed attempt/session links without requiring a trace for every attempt.
+- [x] Reject special files, traversal, aliases, nonempty destinations, unknown formats, corrupt/partial bundles, unsupported application schemas, and interrupted publication. Use staging and atomic publication; never silently create empty state.
+- [x] Keep repositories as an explicit inventoried transfer component. Capture dirty/untracked bytes, modes, safe symlinks, common-directory data, and excluded secret paths. Do not dereference external symlinks or print repository contents/remotes with credentials.
+- [x] Run the red/green tests and focused security checks; record exact API details for Tasks 3–5, review, and commit locally.
 
 ## Task 3: Installed build and durable production state
 
 **Interfaces:** `utils/build_identity.py` validates versioned `BuildIdentity` from `/opt/agileforge/build.json`. `cli/production_state.py` validates `ProductionStateManifest` from `/var/lib/agileforge/profiles/<name>/runtime.json`; the manifest owns state ID, separate databases, model config, and artifacts. `cli/container_runtime.py` exposes explicit `init`, `info`, `serve`, `cli`, `backup`, and `restore`. It consumes Task 2's fence and transfer primitives. The default service refuses missing state; initialization is explicit.
 
-- [ ] Add tests for full-SHA build identity, root-owned immutable metadata, known versions, state ID persistence, model-config mismatch, symlink/alias rejection, and missing/partial profile refusal.
+- [x] Add tests for full-SHA build identity, root-owned immutable metadata, known versions, state ID persistence, model-config mismatch, symlink/alias rejection, and missing/partial profile refusal.
 
 ```python
 def test_image_replacement_keeps_state_identity(production_profile, build_a, build_b):
@@ -114,22 +121,22 @@ def test_image_replacement_keeps_state_identity(production_profile, build_a, bui
     assert second.state_id == first.state_id
 ```
 
-- [ ] Implement authoritative loaders with injected paths only for unit tests. Runtime/API identity comes from validated records, never identity environment overrides. Preserve current development `RuntimeProfile` ownership.
-- [ ] Add explicit production initialization using existing current-schema bootstrap and model config. Publish `runtime.json` last; reject an existing unfinalized destination. The trace store may legitimately be absent before the first trace; define and preserve that state rather than fabricate a session.
-- [ ] Implement foreground service supervision with fresh nonce, identity-aware readiness, explicit `0.0.0.0` container listener, non-root secrets validation, sanitized environment, finite TERM/KILL cleanup of the complete owned process group, and log redaction.
-- [ ] Add real subprocess tests for descendant cleanup, early failure, foreign readiness, and signals, plus runtime-only synthetic secret canaries. Keep provider calls disabled.
-- [ ] Wire backup/restore to reserved production paths and manifest publication. Restore never overwrites tracked source files or silently initializes empty state.
-- [ ] Run focused tests and review/commit the installed-runtime slice locally.
+- [x] Implement authoritative loaders with injected paths only for unit tests. Runtime/API identity comes from validated records, never identity environment overrides. Preserve current development `RuntimeProfile` ownership.
+- [x] Add explicit production initialization using existing current-schema bootstrap and model config. Publish `runtime.json` last; reject an existing unfinalized destination. The trace store may legitimately be absent before the first trace; define and preserve that state rather than fabricate a session.
+- [x] Implement foreground service supervision with fresh nonce, identity-aware readiness, explicit `0.0.0.0` container listener, non-root secrets validation, sanitized environment, finite TERM/KILL cleanup of the complete owned process group, and log redaction.
+- [x] Add real subprocess tests for descendant cleanup, early failure, foreign readiness, and signals, plus runtime-only synthetic secret canaries. Keep provider calls disabled.
+- [x] Wire backup/restore to reserved production paths and manifest publication. Restore never overwrites tracked source files or silently initializes empty state.
+- [x] Run focused tests and review/commit the installed-runtime slice locally.
 
 ## Task 4: Existing launcher and application integration
 
 **Consumes:** Task 2 `runtime_fence`; Task 3 build/state loaders and service lifecycle. **Produces:** checkout launcher container listener, guarded dev backup/restore, API production identity, and fenced supported state entrypoints.
 
-- [ ] Add failing launcher tests for `--host 0.0.0.0` while default remains loopback; readiness probes continue using loopback. Add process-group tests that catch a surviving descendant after parent exit.
-- [ ] Extend `UiRequest` and `start_ui` with a defaulted host field, preserve old callers, and use finite POSIX process-group cleanup. Preserve Windows behavior until cutover.
-- [ ] Add production state ID/build identity to dashboard readiness using Task 3's authoritative loader, while retaining checkout provenance and existing response compatibility.
-- [ ] Fence application lifetimes before state initialization: dev init/reset/CLI/UI, product CLI, production entrypoint, and API lifespan. Avoid nested-lock deadlock by using shared locks for normal parent/child command trees; exclusive transfer enters before normal runtime setup. Raw imports must not initialize durable state before the fence.
-- [ ] Add checkout backup/verify/restore commands with explicit destinations. Stage and verify first; require destination `config/models.yaml` hash equality, then reserve with `prepare_profile_record`, install databases/artifacts, and `finalize_profile_record` last. Preserve absence of an unused trace store.
+- [x] Add failing launcher tests for `--host 0.0.0.0` while default remains loopback; readiness probes continue using loopback. Add process-group tests that catch a surviving descendant after parent exit.
+- [x] Extend `UiRequest` and `start_ui` with a defaulted host field, preserve old callers, and use finite POSIX process-group cleanup. Preserve Windows behavior until cutover.
+- [x] Add production state ID/build identity to dashboard readiness using Task 3's authoritative loader, while retaining checkout provenance and existing response compatibility.
+- [x] Fence application lifetimes before state initialization: dev init/reset/CLI/UI, product CLI, production entrypoint, and API lifespan. Avoid nested-lock deadlock by using shared locks for normal parent/child command trees; exclusive transfer enters before normal runtime setup. Raw imports must not initialize durable state before the fence.
+- [x] Add checkout backup/verify/restore commands with explicit destinations. Stage and verify first; require destination `config/models.yaml` hash equality, then reserve with `prepare_profile_record`, install databases/artifacts, and `finalize_profile_record` last. Preserve absence of an unused trace store.
 
 ```python
 def test_restore_does_not_overwrite_checkout_configuration(checkout, bundle):
@@ -139,27 +146,27 @@ def test_restore_does_not_overwrite_checkout_configuration(checkout, bundle):
     assert (checkout / 'config/models.yaml').read_bytes() == before
 ```
 
-- [ ] Run existing dev-runtime, API readiness, distribution, secret-file, and profile ownership regressions alongside new cases. Review and commit integration locally.
+- [x] Run existing dev-runtime, API readiness, distribution, secret-file, and profile ownership regressions alongside new cases. Review and commit integration locally.
 
 ## Task 5: Synthetic transfer and container acceptance
 
 **Files:** `scripts/verify_container.py`, `tests/container_runtime/test_relocation.py`, CI container jobs.
 
-- [ ] Build current-schema synthetic accepted Specifications, binding history, active/completed Sprint history, idempotency/audit rows, and a real disposable ADK trace session using existing fixtures. Assert exact inventory after transfer, including all trace sessions and observed cross-store links.
-- [ ] Restore repositories at different Linux paths and run supported Git worktree repair. Check HEAD, branch, common directory, dirty/untracked hashes, modes, and approved remotes before guarded `attach_repository`. Preserve old rows and accepted bytes; permit only the supported attach command's explicit binding/pointer/audit delta.
-- [ ] Recreate containers and verify same-name worktree profile isolation, separate databases, stable state IDs, build revision, fresh nonce/PID, and retained artifacts. Verify complete process-tree/endpoint shutdown.
-- [ ] Test source registration on documented paths using existing POSIX race/symlink/canonical-hash/stale-action suites. Run browser E2E and seven Node suites through the image.
-- [ ] Run `./agileforge-dev check --json` in a clean committed container checkout, with the existing controller. Record all stage outputs and packaged-production verification separately. Inspect existing native CI for a same-SHA baseline; label emulated local results honestly.
-- [ ] Add required Linux container validation to CI, retaining native jobs until approved cutover. Keep action pins, timeouts, coverage, and provider exclusions. Do not push to obtain CI without authorization.
-- [ ] Independently review the full branch for correctness/security and fix material findings. Retain logs and test evidence; no completion claim from configuration alone.
+- [x] Build current-schema synthetic accepted Specifications, binding history, active/completed Sprint history, idempotency/audit rows, and a real disposable ADK trace session using existing fixtures. Assert exact inventory after transfer, including all trace sessions and observed cross-store links.
+- [x] Restore repositories at different Linux paths and run supported Git worktree repair. Check HEAD, branch, common directory, dirty/untracked hashes, modes, and approved remotes before guarded `attach_repository`. Preserve old rows and accepted bytes; permit only the supported attach command's explicit binding/pointer/audit delta.
+- [x] Recreate containers and verify same-name worktree profile isolation, separate databases, stable state IDs, build revision, fresh nonce/PID, and retained artifacts. Verify complete process-tree/endpoint shutdown.
+- [x] Test source registration on documented paths using existing POSIX race/symlink/canonical-hash/stale-action suites. Run browser E2E and seven Node suites through the image.
+- [x] Run `./agileforge-dev check --json` in a clean committed container checkout, with the existing controller. Record all stage outputs and packaged-production verification separately. Inspect existing native CI for a same-SHA baseline; label emulated local results honestly.
+- [x] Add required Linux container validation to CI, retaining native jobs until approved cutover. Keep action pins, timeouts, coverage, and provider exclusions. Do not push to obtain CI without authorization.
+- [x] Independently review the full branch for correctness/security and fix material findings. Retain logs and test evidence; no completion claim from configuration alone.
 
 ## Task 6: Runbook and operator handoff
 
-- [ ] Document fresh setup, exact pins/architecture, named volumes, UID/GID, host controller editing/exec transport, worktrees, target registration, runtime secrets, ports, backup, restore, and rollback.
-- [ ] Write exact synthetic evidence and remaining native validation limitations. Separate test time, image build/startup costs, and platform runner savings; no speedup assumption.
-- [ ] Document approvals in order: real-profile read-only inventory, exact copy/cutover set, final switch. List source fencing, final backup, staged restore/Git repair, guarded binding replacement, offline validation, switch, then live writes. Rollback expires at first live destination write.
-- [ ] Keep the native-removal inventory as the post-cutover checklist. Do not remove adapters/jobs or add rejection gates before the issue's prerequisite cutover.
-- [ ] Verify links/commands against implemented CLI help, commit docs and evidence, and report readiness plus exact outstanding operator work. Keep #263 open.
+- [x] Document fresh setup, exact pins/architecture, named volumes, UID/GID, host controller editing/exec transport, worktrees, target registration, runtime secrets, ports, backup, restore, and rollback.
+- [x] Write exact synthetic evidence and remaining native validation limitations. Separate test time, image build/startup costs, and platform runner savings; no speedup assumption.
+- [x] Document approvals in order: real-profile read-only inventory, exact copy/cutover set, final switch. List source fencing, final backup, staged restore/Git repair, guarded binding replacement, offline validation, switch, then live writes. Rollback expires at first live destination write.
+- [x] Keep the native-removal inventory as the post-cutover checklist. Do not remove adapters/jobs or add rejection gates before the issue's prerequisite cutover.
+- [x] Verify links/commands against implemented CLI help, commit docs and evidence, and report readiness plus exact outstanding operator work. Keep #263 open.
 
 ## Plan self-review
 
