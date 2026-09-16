@@ -146,7 +146,9 @@ def development_access(checkout_root: Path) -> Iterator[None]:
         yield
 
 
-def _require_relocated_repositories() -> None:
+def _require_relocated_repositories(
+    repository_attachment: tuple[int, Path] | None,
+) -> None:
     from cli.repository_transfer import pending_relocations  # noqa: PLC0415
     from utils.runtime_config import get_business_db_target  # noqa: PLC0415
 
@@ -159,7 +161,16 @@ def _require_relocated_repositories() -> None:
     else:
         database = root / "business.sqlite3"
     record = root / "repository-relocations.json"
-    if (record.exists() or record.is_symlink()) and pending_relocations(database, root):
+    pending = (
+        pending_relocations(database, root)
+        if record.exists() or record.is_symlink()
+        else ()
+    )
+    permitted = repository_attachment is not None and any(
+        repository_attachment == (item.project_id, Path(item.restored_path))
+        for item in pending
+    )
+    if pending and not permitted:
         message = (
             "repository relocation requires guarded repository attach "
             "before runtime use"
@@ -168,12 +179,14 @@ def _require_relocated_repositories() -> None:
 
 
 @contextmanager
-def runtime_access(*, allow_repository_attach: bool = False) -> Iterator[None]:
+def runtime_access(
+    *,
+    repository_attachment: tuple[int, Path] | None = None,
+) -> Iterator[None]:
     """Acquire ownership and validate identity before any state initialization."""
     with ExitStack() as stack:
         for root in runtime_roots():
             stack.enter_context(runtime_fence(root))
         production_runtime_identity()
-        if not allow_repository_attach:
-            _require_relocated_repositories()
+        _require_relocated_repositories(repository_attachment)
         yield

@@ -1565,6 +1565,11 @@ def backup_state(
             repositories,
             provenance,
         ) = _validate_layout(layout, maintenance_roots)
+        captured_trees = [artifacts, *repositories]
+        for repository in repositories:
+            captured_trees.extend(path for _, path in _git_external_roots(repository))
+        if any(target.is_relative_to(source) for source in captured_trees):
+            raise TransferError("backup destination overlaps a captured source tree")
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent)
         )

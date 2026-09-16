@@ -2364,7 +2364,12 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
     try:
         args = parser.parse_args(argv)
         handler = cast("CommandHandler", args.command_handler)
-        with runtime_access(allow_repository_attach=handler is _repository_attach):
+        attachment = (
+            (args.project_id, Path(args.path))
+            if handler is _repository_attach
+            else None
+        )
+        with runtime_access(repository_attachment=attachment):
             configure_logging(console=False)
             selected = cast("_Application", application or production_application())
             return handler(args, selected)

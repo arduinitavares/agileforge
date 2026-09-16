@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,26 @@ if TYPE_CHECKING:
 
 
 def _ordered_values(values: tuple[str, ...]) -> list[str]:
-    ordered = [value for value in set(values) if value]
+    """Return raw and serialized credential forms, longest first."""
+    variants: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+        newline_variants = (value, normalized, normalized.replace("\n", "\r\n"))
+        for newline_variant in newline_variants:
+            serialized_variants = (
+                newline_variant,
+                json.dumps(newline_variant, ensure_ascii=True)[1:-1],
+                json.dumps(newline_variant, ensure_ascii=False)[1:-1],
+                repr(newline_variant)[1:-1],
+            )
+            for variant in serialized_variants:
+                if variant and variant not in seen:
+                    seen.add(variant)
+                    variants.append(variant)
+    ordered: list[str] = variants
     ordered.sort(key=len, reverse=True)
     return ordered
 

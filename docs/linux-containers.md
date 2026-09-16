@@ -179,18 +179,20 @@ container's exact image. It is the supported path for maintenance work.
 controller --project-name "$project_name" stop
 controller --project-name "$project_name" exec --maintenance -- \
   /workspace/repos/agileforge/agileforge-dev backup --profile dev \
-  --destination /workspace/backups/dev-transfer --json
+  --destination /workspace/dev-transfer --json
 controller --project-name "$project_name" exec --maintenance -- \
   /workspace/repos/agileforge/agileforge-dev verify-backup \
-  --bundle /workspace/backups/dev-transfer --json
+  --bundle /workspace/dev-transfer --json
 controller --project-name "$project_name" exec --maintenance -- \
   /workspace/repos/agileforge/agileforge-dev restore --profile restored-dev \
-  --bundle /workspace/backups/dev-transfer --json
+  --bundle /workspace/dev-transfer --json
 ```
 
 A development backup discovers all registered repositories and captures their
-Git common directories and linked worktree groups. Extra `--repository` paths
-are only for an explicit reviewed addition. On native POSIX source systems,
+Git common directories and linked worktree groups. With `--repository`, supply
+the complete reviewed set, including all registered main and linked worktrees.
+The destination parent must exist and be outside every captured repository,
+Git-admin directory, and artifact tree. On native POSIX source systems,
 supported writers may use the owned-home fence only when every included path is
 inside that home. A repository, Git directory, common directory, or linked
 worktree outside the owned domain must be rejected.
@@ -218,10 +220,10 @@ inspects it and runs the resulting immutable image ID.
 ```sh
 controller --project-name "$project_name" production-maintenance \
   --image agileforge-production:local -- backup --profile demo \
-  --destination /workspace/backups/demo-transfer --json
+  --destination /workspace/demo-transfer --json
 controller --project-name "$project_name" production-maintenance \
   --image agileforge-production:local -- restore --profile restored-demo \
-  --bundle /workspace/backups/demo-transfer --json
+  --bundle /workspace/demo-transfer --json
 ```
 
 ## Live cutover gates

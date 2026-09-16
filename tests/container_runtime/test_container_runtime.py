@@ -35,7 +35,7 @@ from cli.production_state import (
     initialize_production_state,
     load_production_state,
 )
-from cli.repository_transfer import pending_relocations
+from cli.repository_transfer import RepositoryRelocation, pending_relocations
 from cli.state_transfer import TransferError, verify_backup
 from utils.build_identity import BuildIdentity
 from utils.runtime_fence import runtime_fence
@@ -94,6 +94,43 @@ def _state(root: Path) -> ProductionStateManifest:
         provenance="initialized",
         source_backup_sha256=None,
         repository_relocations_sha256=None,
+    )
+
+
+def test_each_guarded_attach_can_clear_one_of_multiple_relocations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful first attachment stays successful while another is pending."""
+    first = RepositoryRelocation(1, "/old/first", "/restored/first")
+    second = RepositoryRelocation(2, "/old/second", "/restored/second")
+    observations = iter(((first, second), (second,)))
+    monkeypatch.setattr(
+        container_runtime, "_pending_relocations", lambda _: next(observations)
+    )
+    monkeypatch.setattr(
+        container_runtime, "_run_owned_cli_child", lambda *_args, **_kwargs: 0
+    )
+    assert (
+        run_product_cli(
+            _state(tmp_path),
+            _build(),
+            secrets={},
+            forwarded=(
+                "--",
+                "repository",
+                "attach",
+                "--project-id",
+                "1",
+                "--path",
+                first.restored_path,
+                "--actor",
+                "synthetic",
+                "--idempotency-key",
+                "synthetic-first",
+            ),
+        )
+        == 0
     )
 
 
@@ -368,18 +405,27 @@ def test_foreign_readiness_cleans_owned_process(tmp_path: Path) -> None:
     assert stopped == [child]
 
 
+@pytest.mark.parametrize(
+    "credential_canary",
+    [
+        "runtime-secret-canary",
+        'runtime-"quote"\\slash\ncafé',
+    ],
+)
 def test_cli_redacts_runtime_secret_from_child_output(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    credential_canary: str,
 ) -> None:
     """A product error must not echo the runtime-only credential canary."""
-    credential_canary = "runtime-secret-canary"
     root = tmp_path / "default"
     root.mkdir()
     script = (
-        "import os, sys; "
+        "import json, os, sys; "
         "value = os.environ['OPEN_ROUTER_API_KEY']; "
         "print('failure ' + value); "
+        "print(json.dumps({'error': value})); "
+        "print(repr(value)); "
         "sys.stderr.write('detail ' + value + '\\n'); "
         "raise SystemExit(2)"
     )
@@ -396,6 +442,8 @@ def test_cli_redacts_runtime_secret_from_child_output(
     assert exit_code == _ERROR_EXIT
     assert credential_canary not in captured.out
     assert credential_canary not in captured.err
+    assert json.dumps(credential_canary)[1:-1] not in captured.out
+    assert repr(credential_canary)[1:-1] not in captured.out
     assert "[REDACTED]" in captured.out
     assert "[REDACTED]" in captured.err
 

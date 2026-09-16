@@ -68,6 +68,7 @@ from utils.runtime_controls import (
     UI_LAUNCH_NONCE_ENV,
 )
 from utils.runtime_fence import FenceError, runtime_fence
+from utils.secret_redaction import redact_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -265,15 +266,7 @@ def production_environment(
 
 
 def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
-    redacted = value
-    for secret_value in sorted(
-        secret_values,
-        key=str.__len__,
-        reverse=True,
-    ):
-        if secret_value:
-            redacted = redacted.replace(secret_value, "[REDACTED]")
-    return redacted
+    return redact_text(value, secret_values)
 
 
 def _capture_child_output(
@@ -385,7 +378,10 @@ def run_product_cli(
     )
     if exit_code == 0 and pending:
         remaining = _pending_relocations(state)
-        if any(item in remaining for item in pending):
+        if any(
+            item in remaining and _is_allowed_relocation_attach(forwarded, (item,))
+            for item in pending
+        ):
             message = "guarded repository attachment did not clear its relocation"
             raise ContainerRuntimeError(message)
     return exit_code

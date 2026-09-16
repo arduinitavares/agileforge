@@ -179,7 +179,12 @@ with runtime_fence(root):
             script,
         )
 
-    def start(self, suffix: str) -> tuple[str, str, dict[str, object], float]:
+    def start(
+        self,
+        suffix: str,
+        *,
+        profile: str = "source",
+    ) -> tuple[str, str, dict[str, object], float]:
         """Start one service and bind its readiness to the image and profile."""
         name = f"{self.prefix}-{suffix}"
         self.containers.append(name)
@@ -198,7 +203,7 @@ with runtime_fence(root):
             self.image,
             "serve",
             "--profile",
-            "source",
+            profile,
             "--ready-timeout",
             "45",
         ).stdout.strip()
@@ -222,6 +227,14 @@ with runtime_fence(root):
                 )
                 _require(
                     bool(config.get("state_id")), "readiness has no state identity"
+                )
+                expected_root = f"/var/lib/agileforge/profiles/{profile}"
+                _require(
+                    config.get("business_database")
+                    == f"{expected_root}/business.sqlite3"
+                    and config.get("trace_database")
+                    == f"{expected_root}/adk-trace.sqlite3",
+                    "readiness used another profile's databases",
                 )
             except (URLError, TimeoutError, ConnectionError):
                 time.sleep(0.2)
@@ -312,7 +325,9 @@ with runtime_fence(root):
                 "restore lost state identity",
             )
             self.verify_restored_payload()
-            second_id, second_url, second, second_start = self.start("second")
+            second_id, second_url, second, second_start = self.start(
+                "second", profile="restored"
+            )
             _require(first_id != second_id, "container was not recreated")
             _require(
                 first.get("state_id") == second.get("state_id"),

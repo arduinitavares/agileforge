@@ -189,5 +189,43 @@ def test_runtime_blocks_pending_relocation_before_application_writes(
         runtime_ownership.runtime_access(),
     ):
         pytest.fail("runtime accepted pending relocation")  # ty: ignore[invalid-argument-type]
-    with runtime_ownership.runtime_access(allow_repository_attach=True):
+    with runtime_ownership.runtime_access(repository_attachment=(1, Path("/restored"))):
         pass
+
+
+def test_cli_pending_relocation_cannot_attach_a_different_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair exception authorizes the recorded mapping, not any attach."""
+    monkeypatch.setattr(runtime_ownership, "runtime_roots", lambda: (tmp_path,))
+    monkeypatch.setattr(runtime_ownership, "runtime_output_root", lambda: tmp_path)
+    monkeypatch.setattr(runtime_ownership, "production_runtime_identity", lambda: None)
+    (tmp_path / "repository-relocations.json").write_text("{}")
+    pending = repository_transfer.RepositoryRelocation(1, "/old", "/restored")
+    monkeypatch.setattr(
+        repository_transfer, "pending_relocations", lambda *_: (pending,)
+    )
+
+    def forbidden_write(_request: object) -> None:
+        message = "wrong repository reached the write handler"
+        raise AssertionError(message)
+
+    assert (
+        product_cli.main(
+            [
+                "repository",
+                "attach",
+                "--project-id",
+                "1",
+                "--path",
+                "/wrong",
+                "--actor",
+                "synthetic-operator",
+                "--idempotency-key",
+                "synthetic-attach",
+            ],
+            application=SimpleNamespace(attach_repository=forbidden_write),
+        )
+        == CLI_ERROR
+    )

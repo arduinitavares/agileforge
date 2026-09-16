@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import subprocess  # nosec B404
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,31 @@ pytestmark = pytest.mark.skipif(
 )
 
 _EXPECTED_PAYLOAD_FSYNC_COUNT = 7
+
+
+@pytest.mark.parametrize("component", ["artifacts", "repository"])
+def test_backup_refuses_a_destination_inside_a_captured_tree_before_staging(
+    layout: StateLayout,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    """A nested destination must not recursively copy its own staging tree."""
+    from cli import state_transfer  # noqa: PLC0415
+
+    repository = layout.root / "repository"
+    _init_repository(repository)
+    layout = replace(layout, repositories=(repository,))
+    source = layout.artifacts if component == "artifacts" else repository
+    destination = source / "backup"
+
+    def forbidden_staging(**_kwargs: object) -> str:
+        message = "unsafe backup began staging inside its source"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(state_transfer.tempfile, "mkdtemp", forbidden_staging)
+    with pytest.raises(TransferError, match="overlaps"):
+        backup_state(layout, destination)
+    assert not destination.exists()
 
 
 def _write_database(database: Path, *, trace: bool = False) -> None:
@@ -646,7 +672,7 @@ def test_schema_gate_works_without_ambient_database_environment(
         "verify_current_business_schema(Path(sys.argv[1]))"
     )
 
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # noqa: S603 # nosec B603
         [sys.executable, "-c", script, str(database)],
         cwd=Path.cwd(),
         env=environment,
