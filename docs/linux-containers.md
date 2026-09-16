@@ -8,6 +8,55 @@ describe the operator workflow and do not authorize a live-data cutover.
 An amd64 image run on an ARM64 Docker VM is functional emulation only; it is
 not a native amd64 performance baseline.
 
+## Run the packaged app
+
+Everyday startup needs Docker Engine with Compose. Python, `uv`, a source import,
+and the development controller are not required on the host. The `production`
+service is the default; the development toolbox is opt-in.
+
+Use a reviewed image available locally as `agileforge-production:local`, or set
+`AGILEFORGE_PRODUCTION_IMAGE` to the reviewed image tag or digest you have loaded
+or pulled. This repository does not yet publish an image to a registry. Building
+an image from source is a separate maintainer workflow described below.
+
+From the directory containing `compose.yaml`, initialize an empty installation
+once:
+
+```sh
+docker compose run --rm production init --profile default
+```
+
+Compose creates the workspace and production-state volumes. Initialization takes
+the exclusive runtime fence and refuses an existing profile. It does not migrate
+existing data; use the verified backup/restore workflow for that.
+
+Start and manage the app using normal Compose commands:
+
+```sh
+docker compose up -d
+docker compose logs -f
+docker compose stop
+```
+
+Open <http://localhost:8766/dashboard> after the readiness message appears in the
+logs. `Ctrl+C` exits log following; use `stop` to stop the background service.
+Run `up -d` again to start it. `docker compose down` removes the service and
+network but retains data; `docker compose down --volumes` deletes the named
+volumes and their data. Do not use `--volumes` for an installation you want to keep.
+
+The default UI port is host-loopback only. Set `AGILEFORGE_PORT` to another host
+port when needed. For independent installations, use `docker compose -p NAME`
+consistently for init, up, logs, and stop; each project gets separate named
+volumes. The existing `AGILEFORGE_CONTAINER_PROJECT` setting remains supported,
+and the standard Compose project selection controls resource names.
+
+Previously created volumes retain their existing names. Compose may warn that
+older volumes were not created by Compose; it reuses their contents. Do not
+delete them to silence the warning. Use a fresh project name for a trial run.
+
+Provider-backed actions require an explicit runtime secret mount as described
+below. Startup itself does not load the host's credentials.
+
 ## Paths, ownership, and scope
 
 The image pins are in `containers/pins.json`. The application user is
@@ -41,8 +90,9 @@ Git worktree. Never use a profile-bearing active checkout as a source of files.
 
 ## Development bootstrap
 
-Build the development image from an explicit tracked Git export, create the
-named Linux volumes, then perform the one-time bundle import. `import-source`
+Build the development image from an explicit tracked Git export, start the
+opt-in development service, then perform the one-time bundle import. Compose
+creates its named Linux volumes. `import-source`
 refuses an existing Linux checkout; it does not overwrite it.
 
 ```sh
@@ -51,6 +101,10 @@ controller --checkout "$PWD" --project-name "$project_name" \
 controller --project-name "$project_name" up
 controller --checkout "$PWD" --project-name "$project_name" import-source
 ```
+The controller selects only `development`. The equivalent service selection is
+`docker compose --profile development up -d development`; it does not start the
+packaged app. The remaining controller commands are for contributor work inside
+the Linux source workspace.
 The stable checkout path is always `/workspace/repos/agileforge`. Normal work
 must go through `exec`, which holds the shared workspace fence for the child
 command's whole lifetime:
@@ -120,35 +174,30 @@ to `/opt/agileforge/build.json`; it is distinct from mutable durable state.
 ```sh
 controller --checkout "$PWD" --project-name "$project_name" \
   build --target production --tag agileforge-production:local
-docker volume create "$project_name-production-state"
 ```
 For a fresh Compose rehearsal with a different reviewed tag, set
 `AGILEFORGE_DEVELOPMENT_IMAGE` or `AGILEFORGE_PRODUCTION_IMAGE` to that tag
 before invoking Compose. This avoids replacing another local rehearsal's image
 tag.
-Use the installed runtime through the production Compose service. `init` creates
-a new profile; `info` validates the build and state manifests; `serve` remains
-in the foreground; `cli` requires `--` before the product arguments. Use the
-controller maintenance transport for `init`, `backup`, and `restore`: it
+Use the installed runtime through the default production Compose service.
+The first-launch commands above initialize and serve the `default` profile.
+`info` validates the build and state manifests; `cli` requires `--` before the
+product arguments. Explicit initialization holds an exclusive runtime fence and
+never replaces existing state. Use the controller maintenance transport for
+`backup` and `restore`: it
 resolves the supplied image reference to an exact local image ID and refuses
 any running container that can write either durable volume.
 
 ```sh
-controller --project-name "$project_name" production-maintenance \
-  --image agileforge-production:local -- init --profile demo --json
 AGILEFORGE_CONTAINER_PROJECT="$project_name" docker compose \
-  --project-name "$project_name" --profile production run --rm production \
-  info --profile demo --json
+  --project-name "$project_name" run --rm production \
+  info --profile default --json
 AGILEFORGE_CONTAINER_PROJECT="$project_name" docker compose \
-  --project-name "$project_name" --profile production run --rm production \
-  cli --profile demo -- --help
-AGILEFORGE_CONTAINER_PROJECT="$project_name" docker compose \
-  --project-name "$project_name" --profile production run --rm --service-ports \
-  production serve --profile demo --port 8765
+  --project-name "$project_name" run --rm production \
+  cli --profile default -- --help
 ```
-The last command is available at `http://127.0.0.1:8766` while it runs. The
-packaged production default is `serve --profile default`; use an explicit
-command when the selected profile differs.
+The packaged production default is `serve --profile default`; use an explicit
+command when running a different profile for a maintenance rehearsal.
 
 Credentials are runtime-only. Never put them in a Dockerfile, build argument,
 image layer, Git bundle, backup, checkout `.env`, or ambient host environment.
@@ -160,12 +209,34 @@ permissions, using a read-only runtime mount:
 
 ```sh
 AGILEFORGE_CONTAINER_PROJECT="$project_name" docker compose \
-  --project-name "$project_name" --profile production run --rm \
+  --project-name "$project_name" run --rm \
   --volume "$secret_file:/run/secrets/agileforge:ro" production \
-  cli --profile demo --secrets-file /run/secrets/agileforge -- project list
+  cli --profile default --secrets-file /run/secrets/agileforge -- project list
 ```
 The synthetic rehearsal tests the same file contract in a private tmpfs mount;
 it does not access host credentials.
+
+For the background dashboard, put the following in a local
+`compose.override.yaml`, set `AGILEFORGE_SECRETS_FILE` to the absolute path of
+the prepared secret file, and use the same `docker compose up -d` command:
+
+```yaml
+services:
+  production:
+    command: [serve, --profile, default, --secrets-file, /run/secrets/agileforge]
+    volumes:
+      - type: bind
+        source: ${AGILEFORGE_SECRETS_FILE:?Set the prepared secret file path}
+        target: /run/secrets/agileforge
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+The container-visible owner and mode requirements above still apply. Keep the
+secret file outside the repository and pass its path, never its contents, in
+Compose configuration. This optional override is not needed to start without
+provider credentials.
 
 ## Backup, restore, and repository relocation
 
@@ -219,11 +290,11 @@ inspects it and runs the resulting immutable image ID.
 
 ```sh
 controller --project-name "$project_name" production-maintenance \
-  --image agileforge-production:local -- backup --profile demo \
-  --destination /workspace/demo-transfer --json
+  --image agileforge-production:local -- backup --profile default \
+  --destination /workspace/default-transfer --json
 controller --project-name "$project_name" production-maintenance \
   --image agileforge-production:local -- restore --profile restored-demo \
-  --bundle /workspace/demo-transfer --json
+  --bundle /workspace/default-transfer --json
 ```
 
 ## Live cutover gates

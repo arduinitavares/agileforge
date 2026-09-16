@@ -16,6 +16,10 @@ wheels/
 .env.*
 !.env.example
 
+# Local Docker settings and runtime secret mounts
+compose.override.yaml
+compose.override.yml
+
 # Add .DS_Store files
 .DS_Store
 

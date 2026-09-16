@@ -118,8 +118,10 @@ Ruff, annotations, Ty, Bandit, 58 runtime/transfer cases, and five credential ca
 passed at `7e193694`, before this branch. Its Linux full-gate job took 61m09s;
 Windows full-gate job took 119m29s; macOS launcher smoke took 27s. These are job
 elapsed times, not isolated test durations or same-revision container comparisons.
-The candidate has not been pushed, so its new native amd64 container CI job has
-not run. No speedup or runner-cost reduction is established.
+At the initial handoff, the candidate had not been pushed and its new native
+amd64 container CI job had not run. Subsequent publication is recorded in
+[PR #273](https://github.com/arduinitavares/agileforge/pull/273).
+No speedup or runner-cost reduction is established.
 
 Some early delegated focused checks ran on the host. Those are supplementary,
 not the acceptance gate. The final gate and both workflow rehearsals run in
@@ -128,9 +130,10 @@ credential was inventoried or copied, and no provider was called.
 
 Full local logs and reports are retained under
 `.superpowers/sdd/2026-09-16-issue-263-linux-containers/` in the task worktree.
-The final handoff updates only documentation after the tested candidate; no
-application or test source changes follow that gate. The original `master`
-checkout remains clean at the baseline revision.
+The initial handoff at `869dbbbe88fcac93239c85785568f02940a83bca` updated only
+documentation after the tested candidate. The user subsequently approved a
+local fast-forward of `master` and publication of the feature branch as PR #273.
+The later Compose startup changes are validated separately below.
 The [operator runbook](../linux-containers.md) states the separate inventory,
 copy/cutover, and final-switch approvals and the rollback boundary.
 
@@ -144,3 +147,42 @@ Keep the POSIX evidence/security guarantees, profile/secret/lifecycle regression
 the isolated distribution verifier, and the unchanged coverage threshold. Move
 the launcher smoke to the container workflow before removing its native jobs.
 Only then add early unsupported-platform rejection and remove native setup docs.
+
+## Compose startup follow-up
+
+The user requested ordinary Docker startup for the packaged app. Against the
+published `869dbbb` configuration, a fresh `docker compose run --rm production
+init --profile default` failed because the external production-state volume did
+not exist. The corrected configuration makes production the default service,
+puts development behind an opt-in profile, and lets Compose create named volumes.
+Standard `-p` project selection controls volume names and keeps installations
+separate. The image already contains Tini, so the redundant Compose init wrapper
+was removed.
+
+The real `scripts/verify_compose.py` rehearsal passed against the production
+image recorded above (application revision `3edd7bb`) on Docker Compose 5.5.1:
+
+- Missing state remained an error until explicit initialization.
+- Fresh volumes and the default profile were created through Compose alone.
+- Plain `up -d` started only the packaged production service.
+- Init was refused with a running service and with an existing stopped profile.
+- Shutdown was graceful and the endpoint disappeared.
+- `down` followed by `up -d` retained the state ID and exact synthetic artifact
+  bytes, while the launch nonce changed.
+- The final rehearsal left no containers or volumes in its disposable namespace.
+
+An altered configuration with an unexpected volume name was rejected before
+runtime mutation. The development controller also started only the requested
+development service and let Compose create correctly labeled volumes.
+Ten focused container-build and transport tests passed in Linux. Ruff,
+formatting, annotations, Ty, and Bandit passed for the changed Python paths.
+An independent review approved this startup delta with no findings.
+
+All state was synthetic and no provider was called. No live data was migrated.
+Logs are retained as `compose-startup-red.log`, `compose-startup-green.log`,
+`compose-rehearsal-final.log`, `compose-volume-refusal.log`, and
+`compose-focused-tests.log` under the local evidence directory above. CI now
+runs the Compose rehearsal after building and checking the production image.
+The full canonical gate was not repeated locally for this packaging-only change.
+The separate existing PR review findings and macOS CI failure remain unresolved;
+this startup verification does not establish complete PR or cutover acceptance.

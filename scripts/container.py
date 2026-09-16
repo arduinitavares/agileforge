@@ -232,10 +232,8 @@ def build(checkout: Path, *, target: str, tag: str) -> None:
 
 
 def up(project_name: str) -> None:
-    """Start the development service after provisioning its fixed Linux volumes."""
-    resources = project_resources(project_name)
-    for volume in (resources["workspace_volume"], resources["cache_volume"]):
-        _run(("docker", "volume", "create", volume))
+    """Start the opt-in development service and let Compose own its volumes."""
+    project_resources(project_name)
     _run(
         (
             "docker",

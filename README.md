@@ -142,10 +142,29 @@ runtime environment. The redacted preflight reports `configured_models`,
 `provider_credentials`, and `child_runtime_environment`; it never reports
 credential values.
 
+## Run with Docker
+
+With a reviewed production image available locally as `agileforge-production:local`,
+initialize an empty installation once, then start the app:
+
+```sh
+docker compose run --rm production init --profile default
+docker compose up -d
+```
+
+Open <http://localhost:8766/dashboard>. Use `docker compose logs -f` for logs and
+`docker compose stop` to stop the app. Both `stop` and `down` retain its named
+volumes; `down --volumes` deletes the stored data. Initialization refuses an
+existing profile. Existing installations use the backup/restore workflow.
+
+Only Docker with Compose is needed to run the packaged app. See the
+[container runbook](docs/linux-containers.md#run-the-packaged-app) for image
+selection, separate installations, credentials, and building from source.
+
 ## Development
 
 For the Linux/amd64 container workflow, use the
-[container runbook](docs/linux-containers.md). It covers named-volume setup,
+[container runbook](docs/linux-containers.md). It covers Compose startup,
 agent commands, installed production runtime, and verified backup/restore.
 Native support remains available until the separately approved data cutover.
 
