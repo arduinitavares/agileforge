@@ -218,3 +218,20 @@ Logs are retained as `native-ci-launcher-smoke.log` and
 This supersedes the original design's sequencing for CI-job retirement only.
 It does not resolve the native macOS defect, authorize live-data migration, or
 establish complete acceptance of #263.
+
+## CI contract correction
+
+[Run 35132294349](https://github.com/arduinitavares/agileforge/actions/runs/35132294349)
+at `e66869f` passed the Linux launcher smoke, but both full gates failed because
+eight structural tests in `tests/test_ci_contract.py` still required the retired
+jobs and their artifact action. The container run reported 3,400 other Python
+tests passing. The original focused validation omitted this contract suite.
+
+The correction updates the contract to the three retained jobs, preserves action
+and runtime pins, and checks the container source import, exact launcher command,
+canonical gate, installed-image rehearsal, and Compose rehearsal in order.
+The obsolete expectations reproduced as eight failures in an isolated Linux
+container. The corrected suite passed all 14 tests with the repository-pinned
+pytest and PyYAML versions; seven deliberately broken workflow variants were
+also rejected. Ruff and formatting passed, and independent review found no
+issues. Full CI must pass on the correction before reporting CI as green.

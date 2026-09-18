@@ -19,7 +19,7 @@ PYREPO_CHECK_SOURCE = (
 CANONICAL_PYTHON = "3.13.15"
 CI_UV_VERSION = "0.12.8"
 LINUX_FULL_GATE_TIMEOUT_MINUTES: int = 90
-WINDOWS_FULL_GATE_TIMEOUT_MINUTES: int = 180
+CONTAINER_FULL_GATE_TIMEOUT_MINUTES: int = 120
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -111,11 +111,9 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
     """Pin every Python CI job to the canonical repository runtime."""
     expected = {
         "python-313": ("ubuntu-latest", CANONICAL_PYTHON),
-        "macos-smoke": ("macos-latest", CANONICAL_PYTHON),
-        "windows-vision-evidence": ("windows-latest", CANONICAL_PYTHON),
-        "windows-ui-runtime": ("windows-latest", CANONICAL_PYTHON),
-        "windows-full-gate": ("windows-latest", CANONICAL_PYTHON),
+        "linux-container": ("ubuntu-latest", CANONICAL_PYTHON),
     }
+    assert set(_mapping(workflow["jobs"])) == {*expected, "frontend"}
     for name, (runner, python_version) in expected.items():
         job = _job(workflow, name)
         assert job["runs-on"] == runner
@@ -135,10 +133,7 @@ def test_python_jobs_install_canonical_python_before_use(
     """Provision the exact Python before controller or repository execution."""
     first_consumers = {
         "python-313": "Install pyrepo-check controller",
-        "macos-smoke": "Exercise launcher lifecycle",
-        "windows-vision-evidence": "Run secure Windows evidence suites",
-        "windows-ui-runtime": "Verify real Windows venv and run ownership regressions",
-        "windows-full-gate": "Install pyrepo-check controller",
+        "linux-container": "Build pinned Linux test image",
     }
     install_command = f"uv python install {CANONICAL_PYTHON}"
 
@@ -160,8 +155,14 @@ def test_python_jobs_install_canonical_python_before_use(
             if step.get("name") == consumer_name
         )
 
-        assert len(install_indices) == 1
-        assert setup_index < install_indices[0] < consumer_index
+        assert setup_index < consumer_index
+        if job_name == "python-313":
+            assert len(install_indices) == 1
+            assert setup_index < install_indices[0] < consumer_index
+        else:
+            assert str(steps[consumer_index]["run"]).startswith(
+                f"uv run --no-project --python {CANONICAL_PYTHON} python "
+            )
 
 
 def test_python_jobs_install_playwright_chromium_before_gate(
@@ -217,7 +218,6 @@ def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
         "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
         "astral-sh/setup-uv": "11f9893b081a58869d3b5fccaea48c9e9e46f990",
         "actions/setup-node": "249970729cb0ef3589644e2896645e5dc5ba9c38",
-        "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     }
     observed_actions: dict[str, set[str]] = {}
     for raw_job in _mapping(workflow["jobs"]).values():
@@ -258,19 +258,21 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
     ) in " ".join(frontend.split())
 
 
-def test_macos_smoke_delegates_to_exact_repository_command(
+def test_linux_container_smoke_delegates_to_exact_repository_command(
     workflow: dict[str, object],
 ) -> None:
     """Keep lifecycle policy in one tested repository command."""
     commands = [
         " ".join(run.split())
-        for step in _steps(_job(workflow, "macos-smoke"))
+        for step in _steps(_job(workflow, "linux-container"))
         if isinstance((run := step.get("run")), str)
         and "scripts/ci_launcher_smoke.py" in run
     ]
     expected = (
+        f"uv run --no-project --python {CANONICAL_PYTHON} python "
+        "scripts/container.py --project-name agileforge-ci exec -- "
         "uv run --locked python scripts/ci_launcher_smoke.py "
-        "--profile ci-macos-${{ github.run_id }}-${{ github.run_attempt }} "
+        "--profile ci-linux-${{ github.run_id }}-${{ github.run_attempt }} "
         "--expect-sha ${{ github.sha }}"
     )
 
@@ -291,174 +293,70 @@ def test_macos_smoke_delegates_to_exact_repository_command(
         assert policy_token not in smoke
 
 
-def test_windows_job_runs_only_provider_free_evidence_contracts(
+def test_linux_container_prepares_workspace_before_smoke_and_full_gate(
     workflow: dict[str, object],
 ) -> None:
-    """Exercise real Windows handle semantics without profiles or providers."""
-    job = _job(workflow, "windows-vision-evidence")
+    """Run the real smoke and unchanged full gate on the imported Linux source."""
+    job = _job(workflow, "linux-container")
+    assert job["timeout-minutes"] == CONTAINER_FULL_GATE_TIMEOUT_MINUTES
     steps = _steps(job)
-    commands = [
-        " ".join(run.split())
-        for step in steps
-        if isinstance((run := step.get("run")), str) and "pytest" in run
+    names = [step.get("name") for step in steps]
+    required_order = [
+        "Build pinned Linux test image",
+        "Copy the exact committed source into a named Linux workspace",
+        "Exercise launcher lifecycle in the Linux container",
+        "Run the canonical gate through the host transport",
     ]
-    expected = (
-        "uv run --locked pytest "
-        "tests/services/test_vision_evidence_reader.py "
-        "tests/windows/test_vision_evidence_windows.py "
-        "tests/services/test_vision_evidence.py "
-        "tests/test_socket_marker_contract.py "
-        "tests/windows/test_specification_source_windows.py "
-        "tests/services/test_specification_source_registration.py "
-        "tests/services/test_specification_source_application.py "
-        "tests/adapters/test_vision_bootstrap_api.py "
-        "tests/adapters/test_cli_workflow_domain.py -q "
-        "--junitxml=windows-vision-evidence.xml"
+    indices = [names.index(name) for name in required_order]
+    assert indices == sorted(indices)
+    controller = (
+        f"uv run --no-project --python {CANONICAL_PYTHON} python scripts/container.py"
     )
-
-    assert commands == [expected]
-    test_step = next(
-        step
-        for step in steps
-        if step.get("name") == "Run secure Windows evidence suites"
+    assert steps[indices[0]]["run"] == (
+        f"{controller} build --target test --tag agileforge-test:ci"
     )
-    assert (
-        _mapping(test_step.get("env", {})).get(
-            "AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS"
-        )
-        == "1"
-    )
-
-    source = _runs(job).lower()
-    for forbidden in (
-        "secrets.",
-        "openrouter",
-        "open_router",
-        "agileforge-dev init",
-        "--profile",
-        "--live",
+    source = " ".join(str(steps[indices[1]]["run"]).split())
+    for required in (
+        "docker volume create agileforge-ci-workspace",
+        "docker volume create agileforge-ci-cache",
+        "--name agileforge-ci-dev --platform linux/amd64",
+        "--mount type=volume,src=agileforge-ci-workspace,dst=/workspace",
+        "--mount type=volume,src=agileforge-ci-cache,dst=/cache",
+        "agileforge-test:ci",
+        f"{controller} --project-name agileforge-ci import-source",
+        "docker exec -w /workspace/repos/agileforge agileforge-ci-dev uv sync --locked",
     ):
-        assert forbidden not in source
-
-    guard = _runs(job)
-    required_cases = (
-        "test_reader_factory_selects_posix_without_loading_windows",
-        "test_reader_factory_selects_windows_lazily",
-        "test_windows_reader_rejects_leaf_replacement_after_resolution",
-        "test_windows_reader_retains_parent_or_blocks_intermediate_replacement",
-        "test_windows_reader_detects_change_during_bounded_read",
-        "test_windows_reader_detects_leaf_deletion_after_read",
-        "test_windows_reader_bounds_materially_large_source",
-        "test_windows_reader_omits_source_after_native_read_failure",
-        "test_unreadable_and_escape_paths_warn_without_becoming_evidence",
-        "test_stable_in_worktree_symlink_uses_the_approved_source_identity",
-        "test_json_spec_symlink_rejects_approved_markdown_target",
-        "test_lone_enable_socket_marker_fails_during_collection",
-        "test_enable_socket_with_integration_marker_is_valid",
+        assert required in source
+    assert "type=bind" not in source
+    assert steps[indices[3]]["run"] == (
+        f"{controller} --project-name agileforge-ci exec -- ./agileforge-dev check"
     )
-    for case in required_cases:
-        assert guard.count(f"'{case}'") == 1
-    assert "$cases.Count -ne 1" in guard
-    assert "$cases[0].SelectSingleNode('skipped')" in guard
-    assert "$cases[0].SelectSingleNode('failure')" in guard
-    assert "$cases[0].SelectSingleNode('error')" in guard
-    assert (
-        "test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets[" in guard
-    )
-    assert "$paramCases.Count -ne 4" in guard
-    assert "$case.SelectSingleNode('skipped')" in guard
-    assert "$case.SelectSingleNode('failure')" in guard
-    assert "$case.SelectSingleNode('error')" in guard
 
 
-def test_windows_ui_job_runs_real_distribution_ownership_regression(
+def test_linux_container_rehearses_production_and_compose_after_full_gate(
     workflow: dict[str, object],
 ) -> None:
-    """Keep the native installed-venv PID regression in the Windows job."""
-    job = _job(workflow, "windows-ui-runtime")
-    commands = [
-        " ".join(run.split())
-        for step in _steps(job)
-        if isinstance((run := step.get("run")), str) and "pytest" in run
+    """Keep installed-image and persistent-state checks behind the canonical gate."""
+    steps = _steps(_job(workflow, "linux-container"))
+    names = [step.get("name") for step in steps]
+    gate_index = names.index("Run the canonical gate through the host transport")
+    production_index = names.index("Build and rehearse the installed production image")
+    compose_index = names.index("Verify normal Compose startup and persistent state")
+    assert gate_index < production_index < compose_index
+    runner = f"uv run --no-project --python {CANONICAL_PYTHON} python"
+    assert str(steps[production_index]["run"]).splitlines() == [
+        f"{runner} scripts/container.py build --target production "
+        "--tag agileforge-production:ci",
+        f"{runner} scripts/verify_container.py --image agileforge-production:ci "
+        '--expect-sha "$GITHUB_SHA"',
     ]
-    expected = (
-        "uv run --locked pytest "
-        "tests/windows/test_dev_ui_runtime_windows.py "
-        "tests/windows/test_distribution_runtime_windows.py "
-        "tests/dev_runtime/test_dev_server.py "
-        "tests/dev_runtime/test_dev_main.py "
-        "tests/dev_runtime/test_cli_forwarding.py "
-        "tests/dev_runtime/test_dev_secrets_file.py "
-        "tests/windows/test_dev_secrets_windows.py "
-        "tests/dev_runtime/test_profiles.py -q "
-        "--junitxml=windows-ui-runtime.xml"
+    assert steps[compose_index]["run"] == (
+        f"{runner} scripts/verify_compose.py --image agileforge-production:ci "
+        '--expect-sha "$GITHUB_SHA"'
     )
-
-    assert job["runs-on"] == "windows-latest"
-    assert commands == [expected]
-    guard = _runs(job)
-    required_cases = (
-        "test_real_windows_ui_owns_the_serving_interpreter",
-        "test_real_windows_distribution_owns_the_installed_serving_interpreter",
-        "test_real_windows_pre_identity_failure_cleans_acquired_child",
-        "test_windows_secrets_regular_file_uses_native_handle",
-    )
-    for case in required_cases:
-        assert guard.count(f"'{case}'") == 1
-    assert "$cases.Count -ne 1 -or $cases[0].SelectSingleNode('skipped')" in guard
-    assert (
-        "$secretsCases.Count -ne 1 -or $secretsCases[0].SelectSingleNode('skipped')"
-    ) in guard
-
-
-def test_windows_full_gate_executes_canonical_check(
-    workflow: dict[str, object],
-) -> None:
-    """Exercise complete checkout quality through the native Windows launcher."""
-    job = _job(workflow, "windows-full-gate")
-    assert job["runs-on"] == "windows-latest"
-    assert job["timeout-minutes"] == WINDOWS_FULL_GATE_TIMEOUT_MINUTES
-
-    steps = _steps(job)
-    setup_node = next(
-        step
-        for step in steps
-        if str(step.get("uses", "")).startswith("actions/setup-node@")
-    )
-    assert _mapping(setup_node["with"])["node-version"] == "24"
-
-    controller = next(
-        step for step in steps if step.get("name") == "Install pyrepo-check controller"
-    )
-    assert controller.get("shell") == "pwsh"
-    controller_run = str(controller.get("run", ""))
-    assert f'uv tool install --python 3.13.15 "{PYREPO_CHECK_SOURCE}"' in controller_run
-    assert "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in controller_run
-    assert (
-        "uv tool dir --bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append"
-        in controller_run
-    )
-
-    commands = [run for step in steps if isinstance((run := step.get("run")), str)]
-    gate_step = next(
-        step for step in steps if step.get("name") == "Run canonical full gate"
-    )
-    assert steps.index(controller) < steps.index(gate_step)
-    assert commands.index("uv lock --check") < commands.index(str(gate_step.get("run")))
-    assert commands.index(
-        "uv run --locked python -m playwright install chromium"
-    ) < commands.index(str(gate_step.get("run")))
-
-    assert gate_step.get("shell") == "pwsh"
-    gate_env = _mapping(gate_step.get("env", {}))
-    assert gate_env.get("AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS") == "1"
-    gate_run = str(gate_step.get("run", ""))
-    assert (
-        "sh ./agileforge-dev check 2>&1 | Tee-Object -FilePath windows-canonical.log"
-        in gate_run
-    )
-    assert "$gateExit = $LASTEXITCODE" in gate_run
-    assert "exit $gateExit" in gate_run
+    for index in (gate_index, production_index, compose_index):
+        assert "if" not in steps[index]
+        assert not steps[index].get("continue-on-error", False)
 
 
 def test_linux_full_gate_has_room_for_the_canonical_validation_budget(
@@ -469,35 +367,6 @@ def test_linux_full_gate_has_room_for_the_canonical_validation_budget(
 
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == LINUX_FULL_GATE_TIMEOUT_MINUTES
-
-
-def test_windows_jobs_upload_exact_narrow_artifacts(
-    workflow: dict[str, object],
-) -> None:
-    """Retain only narrow test logs and structured results as artifacts."""
-    expected_artifacts = {
-        "windows-full-gate": ("windows-canonical-output", "windows-canonical.log"),
-        "windows-vision-evidence": (
-            "windows-vision-evidence-results",
-            "windows-vision-evidence.xml",
-        ),
-        "windows-ui-runtime": (
-            "windows-ui-runtime-results",
-            "windows-ui-runtime.xml",
-        ),
-    }
-    for job_name, (artifact_name, path) in expected_artifacts.items():
-        job = _job(workflow, job_name)
-        upload_step = next(
-            step
-            for step in _steps(job)
-            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
-        )
-        assert upload_step.get("if") == "always()"
-        with_config = _mapping(upload_step["with"])
-        assert with_config["name"] == artifact_name
-        assert with_config["path"] == path
-        assert with_config["if-no-files-found"] == "warn"
 
 
 def test_workflow_has_no_provider_secrets_or_live_markers() -> None:
