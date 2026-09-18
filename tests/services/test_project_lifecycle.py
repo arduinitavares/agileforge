@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, create_engine, select
 
+import workflow.domain as domain_module
 from models.core import Project
 from models.db import set_sqlite_pragma
 from models.repository import RepositoryBinding
@@ -52,6 +54,7 @@ REPOSITORY_PATH = "repository"
 INJECTED_FAILURE = "injected failure"
 EXPECTED_BINDING_COUNT = 2
 _CONCURRENT_REQUEST_COUNT = 2
+_LOCK_CONFLICT_MESSAGE = "Another workflow transition holds the Project fact lock."
 
 
 class _Probe:
@@ -244,6 +247,81 @@ def test_failure_after_binding_rolls_back_project_binding_and_receipt(
         assert session.exec(select(WorkflowTransitionReceipt)).all() == []
 
 
+def test_create_under_writer_lock_returns_conflict_and_can_retry(
+    sqlite_file_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real exhausted writer lock leaves no state and permits an explicit retry."""
+    monkeypatch.setattr(domain_module, "_SQLITE_BUSY_TIMEOUT_MS", 0)
+    service, _domain = _service(sqlite_file_engine, _Probe(_probe_result()))
+    command = _create_command(repository_path=REPOSITORY_PATH)
+
+    with sqlite_file_engine.connect() as writer:
+        writer.exec_driver_sql("BEGIN IMMEDIATE")
+        conflict = service.create_project(command)
+        assert conflict.ok is False
+        assert conflict.error is not None
+        assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert conflict.error.message == _LOCK_CONFLICT_MESSAGE
+        writer.rollback()
+
+    with Session(sqlite_file_engine) as session:
+        assert session.exec(select(Project)).all() == []
+        assert session.exec(select(RepositoryBinding)).all() == []
+        assert session.exec(select(WorkflowTransitionReceipt)).all() == []
+
+    applied = service.create_project(command)
+    replay = service.create_project(command)
+    assert applied.ok is True
+    assert applied.replayed is False
+    assert replay == applied.model_copy(update={"replayed": True})
+
+
+@pytest.mark.parametrize(
+    "message", ["database is locked", "database table is locked", INJECTED_FAILURE]
+)
+def test_sql_error_after_binding_rolls_back_creation(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    """Roll back partial creation before mapping locks or re-raising other errors."""
+    service, domain = _service(engine, _Probe(_probe_result()))
+    original = domain._complete_receipt
+    error = OperationalError("UPDATE", None, RuntimeError(message))
+
+    def fail_after_binding(
+        session: Session,
+        receipt: WorkflowTransitionReceipt,
+        result: TransitionResult,
+        evaluated_at: datetime,
+    ) -> None:
+        original(session, receipt, result, evaluated_at)
+        raise error
+
+    monkeypatch.setattr(domain, "_complete_receipt", fail_after_binding)
+    command = _create_command(repository_path=REPOSITORY_PATH)
+    if message == INJECTED_FAILURE:
+        with pytest.raises(OperationalError, match=INJECTED_FAILURE):
+            service.create_project(command)
+    else:
+        conflict = service.create_project(command)
+        assert conflict.ok is False
+        assert conflict.error is not None
+        assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert conflict.error.message == _LOCK_CONFLICT_MESSAGE
+
+    with Session(engine) as session:
+        assert session.exec(select(Project)).all() == []
+        assert session.exec(select(RepositoryBinding)).all() == []
+        assert session.exec(select(WorkflowTransitionReceipt)).all() == []
+
+    monkeypatch.setattr(domain, "_complete_receipt", original)
+    applied = service.create_project(command)
+    assert applied.ok is True
+    assert applied.replayed is False
+
+
 def test_create_replays_same_idempotency_and_conflicts_on_changed_input(
     engine: Engine,
 ) -> None:
@@ -299,11 +377,49 @@ def test_repository_backed_create_conflicts_on_changed_semantic_input(
     assert probe.paths == [REPOSITORY_PATH]
 
 
+def _hold_writer_until_peer_returns(
+    domain: WorkflowDomain,
+    monkeypatch: pytest.MonkeyPatch,
+    caller_finished: Event,
+) -> None:
+    """Keep a real write transaction open until its competing caller finishes."""
+    complete_receipt = domain._complete_receipt
+
+    def complete_and_wait(
+        session: Session,
+        receipt: WorkflowTransitionReceipt,
+        result: TransitionResult,
+        evaluated_at: datetime,
+    ) -> None:
+        complete_receipt(session, receipt, result, evaluated_at)
+        assert caller_finished.wait(timeout=5)
+
+    monkeypatch.setattr(domain, "_complete_receipt", complete_and_wait)
+
+
+def _retry_lock_conflict(
+    service: ProjectLifecycleService,
+    command: CreateProjectCommand,
+    result: TransitionResult,
+) -> TransitionResult:
+    """Retry only an identified lock conflict after the competing call has ended."""
+    if result.ok:
+        return result
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert result.error.message == _LOCK_CONFLICT_MESSAGE
+    return service.create_project(command)
+
+
+@pytest.mark.parametrize("force_lock_expiry", [False, True])
 def test_concurrent_repository_backed_create_applies_once_and_replays_once(
     sqlite_file_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    force_lock_expiry: bool,
 ) -> None:
-    """Serialize first-attempt Project creation across independent sessions."""
+    """Converge concurrent first attempts with explicit retry after lock expiry."""
+    if force_lock_expiry:
+        monkeypatch.setattr(domain_module, "_SQLITE_BUSY_TIMEOUT_MS", 0)
     probe = _ConcurrentProbe()
     service, domain = _service(sqlite_file_engine, probe)
     command = _create_command(repository_path=REPOSITORY_PATH)
@@ -312,6 +428,10 @@ def test_concurrent_repository_backed_create_applies_once_and_replays_once(
     identity_lock = Lock()
     session_ids: set[int] = set()
     connection_ids: set[int] = set()
+    caller_finished = Event()
+
+    if force_lock_expiry:
+        _hold_writer_until_peer_returns(domain, monkeypatch, caller_finished)
 
     def observed_begin_write(session: Session) -> None:
         connection = session.connection()
@@ -325,17 +445,25 @@ def test_concurrent_repository_backed_create_applies_once_and_replays_once(
 
     monkeypatch.setattr(domain, "_begin_write", observed_begin_write)
 
+    def create(_index: int) -> TransitionResult:
+        try:
+            return service.create_project(command)
+        finally:
+            caller_finished.set()
+
     with ThreadPoolExecutor(max_workers=_CONCURRENT_REQUEST_COUNT) as executor:
-        results = list(
-            executor.map(
-                lambda _index: service.create_project(command),
-                range(_CONCURRENT_REQUEST_COUNT),
-            )
-        )
+        results = list(executor.map(create, range(_CONCURRENT_REQUEST_COUNT)))
 
     assert len(session_ids) == _CONCURRENT_REQUEST_COUNT
     assert len(connection_ids) == _CONCURRENT_REQUEST_COUNT
     assert probe.paths == [REPOSITORY_PATH, REPOSITORY_PATH]
+    assert sum(result.ok and not result.replayed for result in results) == 1
+    if force_lock_expiry:
+        assert sum(not result.ok for result in results) == 1
+    # A finite lock wait may expire before the other caller commits. Once both
+    # calls have returned, an explicit same-key retry must replay that commit.
+    monkeypatch.setattr(domain, "_begin_write", begin_write)
+    results = [_retry_lock_conflict(service, command, result) for result in results]
     assert all(result.ok for result in results)
     assert results[0].output == results[1].output
     assert results[0].position == results[1].position

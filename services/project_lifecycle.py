@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import Field, field_validator
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session
 
 from models.core import Project
@@ -80,6 +81,10 @@ class RepositoryBindingReplayCommand(FrozenModel):
 
 class _WorkflowDomainPort(Protocol):
     def position(self, project_id: int) -> WorkflowPosition: ...
+
+    def lock_timeout_result(
+        self, error: OperationalError
+    ) -> TransitionResult | None: ...
 
     def transition_in_session(
         self,
@@ -277,6 +282,12 @@ class ProjectLifecycleService:
             try:
                 result = self._workflow_domain.transition_in_session(session, request)
                 session.commit()
+            except OperationalError as error:
+                session.rollback()
+                conflict = self._workflow_domain.lock_timeout_result(error)
+                if conflict is not None:
+                    return conflict
+                raise
             except Exception:
                 session.rollback()
                 raise

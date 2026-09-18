@@ -299,10 +299,9 @@ class WorkflowDomain:
                 session.commit()
             except OperationalError as error:
                 session.rollback()
-                if self._is_sqlite_lock_timeout(error):
-                    return self._fact_conflict(
-                        "Another workflow transition holds the Project fact lock."
-                    )
+                conflict = self.lock_timeout_result(error)
+                if conflict is not None:
+                    return conflict
                 raise
             except WorkflowFactLoadError as error:
                 session.rollback()
@@ -321,6 +320,14 @@ class WorkflowDomain:
                 raise
             else:
                 return result
+
+    def lock_timeout_result(self, error: OperationalError) -> TransitionResult | None:
+        """Map SQLite lock exhaustion after the transaction owner has rolled back."""
+        if self._is_sqlite_lock_timeout(error):
+            return self._fact_conflict(
+                "Another workflow transition holds the Project fact lock."
+            )
+        return None
 
     def transition_in_session(
         self,
