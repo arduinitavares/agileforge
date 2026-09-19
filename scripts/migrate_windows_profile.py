@@ -431,6 +431,7 @@ def export_windows_profile(
     destination: Path,
     repositories: Sequence[Path] | None = None,
     model_config: Path | None = None,
+    state_only: bool = False,
 ) -> Path:
     """Capture and publication pipeline for Windows development profiles."""
     profile_root = profile_root.expanduser().absolute()
@@ -511,13 +512,20 @@ def export_windows_profile(
 
         fence = win32_database_exclusion_fence(source_databases)
         with fence as _initial_snapshots:
-            if repositories is not None and len(repositories) > 0:
+            if state_only:
+                if repositories is not None and len(repositories) > 0:
+                    raise TransferError(
+                        "state-only backup must not include repositories"
+                    )
+                expanded_repositories: tuple[Path, ...] = ()
+            elif repositories is not None and len(repositories) > 0:
                 repo_candidates = tuple(
                     Path(r).expanduser().absolute() for r in repositories
                 )
+                expanded_repositories = _expand_repository_groups(repo_candidates)
             else:
                 repo_candidates = discover_registered_repositories(business_db)
-            expanded_repositories = _expand_repository_groups(repo_candidates)
+                expanded_repositories = _expand_repository_groups(repo_candidates)
 
             staging: Path | None = Path(
                 tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=parent)
@@ -613,6 +621,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to models.yaml",
     )
     parser.add_argument(
+        "--state-only",
+        action="store_true",
+        help="Export profile state only, omitting registered and explicit repositories",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output JSON result",
@@ -631,6 +644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             destination=args.destination,
             repositories=args.repository,
             model_config=args.model_config,
+            state_only=bool(args.state_only),
         )
     except (FenceError, TransferError, OSError, ValueError) as error:
         if json_output:

@@ -42,6 +42,7 @@ def backup_development_profile(
     destination: Path,
     *,
     repositories: tuple[Path, ...] | None = None,
+    state_only: bool = False,
 ) -> Path:
     """Capture explicit owned state and repositories under exclusive ownership."""
     roots = _maintenance_roots(checkout_root)
@@ -61,6 +62,7 @@ def backup_development_profile(
                 artifacts=paths.artifacts,
                 model_config=profile.model_config_path,
                 repositories=repositories,
+                include_registered_repositories=not state_only,
                 maintenance_roots=roots,
                 provenance_files=(paths.manifest,),
             ),
