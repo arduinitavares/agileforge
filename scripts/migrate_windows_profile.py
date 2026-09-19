@@ -217,12 +217,27 @@ class _DatabaseSnapshot:
     size: int
     header: bytes
     change_counter: int
+    data_version: int
 
 
 def _read_sqlite_header(path: Path) -> bytes:
     """Read the first 100 bytes containing SQLite database header."""
     with path.open("rb") as handle:
         return handle.read(100)
+
+
+def _read_sqlite_data_version(path: Path) -> int:
+    """Read PRAGMA data_version from SQLite database."""
+    connection = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+    )
+    try:
+        row = connection.execute("PRAGMA data_version").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
 
 
 def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
@@ -238,6 +253,7 @@ def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
         size=path.stat().st_size,
         header=header,
         change_counter=change_counter,
+        data_version=_read_sqlite_data_version(path),
     )
 
 
@@ -259,6 +275,7 @@ def _verify_source_database_unchanged(path: Path, expected: _DatabaseSnapshot) -
     if (
         current.sha256 != expected.sha256
         or current.change_counter != expected.change_counter
+        or current.data_version != expected.data_version
         or current.header != expected.header
         or current.size != expected.size
     ):
