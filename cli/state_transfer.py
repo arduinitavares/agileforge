@@ -53,6 +53,7 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 _BUSINESS_DATABASE_ENV = "AGILEFORGE_DB_URL"
 _LAUNCHER_CHILD_ENV = "AGILEFORGE_LAUNCHER_CHILD"
+_ERROR_CANT_ACCESS_FILE = 1920
 _APPROVED_CORE_KEYS = frozenset(
     {"repositoryformatversion", "filemode", "bare", "logallrefupdates"}
 )
@@ -820,7 +821,17 @@ def _safe_link(source_root: Path, link: Path, relative: PurePosixPath) -> str:
     return target
 
 
-def _copy_tree(
+def _is_tree_excluded(relative: PurePosixPath, *, admin: bool) -> bool:
+    if not admin and relative.parts and relative.parts[0] == ".worktrees":
+        return True
+    return _is_secret_path(relative, admin=admin)
+
+
+def _is_inaccessible_error(exc: OSError) -> bool:
+    return os.name == "nt" and getattr(exc, "winerror", None) == _ERROR_CANT_ACCESS_FILE
+
+
+def _copy_tree(  # noqa: C901
     source: Path,
     destination: Path,
     *,
@@ -836,22 +847,33 @@ def _copy_tree(
     destination.chmod(stat.S_IMODE(metadata.st_mode))
     excluded: list[str] = []
 
-    def visit(
+    def visit(  # noqa: C901
         source_directory: Path,
         destination_directory: Path,
         prefix: Path,
     ) -> None:
-        with os.scandir(source_directory) as iterator:
-            entries = sorted(iterator, key=lambda item: item.name)
+        try:
+            with os.scandir(source_directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+        except OSError as exc:
+            if _is_inaccessible_error(exc):
+                return
+            raise
         for entry in entries:
             relative_path = prefix / entry.name
             relative = PurePosixPath(relative_path.as_posix())
-            if _is_secret_path(relative, admin=admin):
+            if _is_tree_excluded(relative, admin=admin):
                 excluded.append(relative.as_posix())
                 continue
             source_path = Path(entry.path)
             destination_path = destination_directory / entry.name
-            entry_metadata = entry.stat(follow_symlinks=False)
+            try:
+                entry_metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                if _is_inaccessible_error(exc):
+                    excluded.append(relative.as_posix())
+                    continue
+                raise
             _owned(entry_metadata, label="transfer tree entry")
             _reject_privileged_mode(entry_metadata, label="transfer tree entry")
             if stat.S_ISDIR(entry_metadata.st_mode):
