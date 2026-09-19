@@ -402,7 +402,7 @@ def _write_private_file(path: Path, payload: bytes) -> None:
             os.close(descriptor)
 
 
-def _prepare_profile_parent(parent: Path, *, expected_owner_uid: int) -> None:
+def prepare_profile_parent(parent: Path, *, expected_owner_uid: int) -> None:
     try:
         parent.lstat()
     except FileNotFoundError:
@@ -523,7 +523,7 @@ def initialize_production_state(  # noqa: PLR0913
     else:
         message = f"production profile root already exists: {paths.root}"
         raise ProductionStateError(message)
-    _prepare_profile_parent(paths.root.parent, expected_owner_uid=owner_uid)
+    prepare_profile_parent(paths.root.parent, expected_owner_uid=owner_uid)
     paths.root.mkdir(mode=_PRIVATE_DIRECTORY_MODE, exist_ok=False)
     paths.artifacts.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
     paths.config_directory.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
