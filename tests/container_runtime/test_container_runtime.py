@@ -36,7 +36,14 @@ from cli.production_state import (
     load_production_state,
 )
 from cli.repository_transfer import RepositoryRelocation, pending_relocations
-from cli.state_transfer import TransferError, verify_backup
+from cli.state_transfer import (
+    _FORMAT,
+    TransferError,
+    TransferManifest,
+    _file_inventory,
+    _write_manifest,
+    verify_backup,
+)
 from utils.build_identity import BuildIdentity
 from utils.runtime_fence import runtime_fence
 
@@ -831,3 +838,72 @@ def test_registered_repository_restore_requires_exact_guarded_reattachment(
             build=build,
             expected_owner_uid=_current_uid(),
         )
+
+
+def test_restore_production_state_from_windows_migration_bundle(
+    tmp_path: Path,
+) -> None:
+    """Restoring a migration bundle with profile.json synthesizes state."""
+    build = _build()
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("models:\n  default: test/model\n", encoding="utf-8")
+    model_config.chmod(0o600)
+    source = initialize_production_state(
+        tmp_path / "profiles" / "default",
+        build=build,
+        model_config_source=model_config,
+        expected_owner_uid=_current_uid(),
+    )
+    bundle = backup_production_state(
+        source,
+        tmp_path / "backup",
+        deployment_root=tmp_path,
+    )
+    provenance_dir = bundle / "provenance"
+    (provenance_dir / "runtime.json").unlink()
+    profile_metadata = {
+        "name": "win-profile",
+        "created_at": "2026-09-19T10:00:00Z",
+        "checkout": {
+            "root": r"C:\Users\atavares\Projects\agileforge",
+            "branch": "master",
+            "commit": build.revision,
+        },
+        "model_config_path": (
+            r"C:\Users\atavares\Projects\agileforge\config\models.yaml"
+        ),
+        "model_config_sha256": source.model_config_sha256,
+        "business_schema_sha256": source.business_schema_sha256,
+        "trace_database_present": False,
+    }
+    profile_file = provenance_dir / "profile.json"
+    profile_file.write_text(json.dumps(profile_metadata, indent=2), encoding="utf-8")
+    profile_file.chmod(0o600)
+
+    manifest = verify_backup(bundle)
+    updated_manifest = TransferManifest(
+        format=_FORMAT,
+        created_at=manifest.created_at,
+        files=_file_inventory(bundle),
+        databases=manifest.databases,
+        repositories=manifest.repositories,
+        model_config_sha256=manifest.model_config_sha256,
+        observed_links=manifest.observed_links,
+    )
+    _write_manifest(bundle, updated_manifest)
+
+    restored = restore_production_state(
+        bundle,
+        tmp_path / "profiles" / "restored",
+        build=build,
+        deployment_root=tmp_path,
+        expected_owner_uid=_current_uid(),
+    )
+    assert restored.profile_name == "restored"
+    assert restored.provenance == "restored"
+    source_profile = restored.profile_root / "config" / "source-profile.json"
+    assert source_profile.is_file()
+    saved_metadata = json.loads(source_profile.read_text(encoding="utf-8"))
+    assert saved_metadata["name"] == "win-profile"
+    assert not (restored.profile_root / "provenance").exists()
+

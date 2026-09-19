@@ -13,7 +13,9 @@ import stat
 import subprocess  # nosec B404
 import sys
 import threading
+import uuid
 from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -32,6 +34,7 @@ from cli.dev_server import (
     wait_for_readiness,
 )
 from cli.production_state import (
+    PRODUCTION_STATE_BASE,
     ProductionStateError,
     ProductionStateManifest,
     database_schema_sha256,
@@ -81,6 +84,8 @@ PRODUCTION_WORKSPACE_ROOT = Path("/workspace")
 _SUPPORTED_CREDENTIALS = frozenset({"OPEN_ROUTER_API_KEY"})
 _MAX_PORT = 65_535
 _MAX_CHILD_OUTPUT_BYTES = 8 * 1024 * 1024
+_COMMIT_LENGTH = 40
+_HASH_LENGTH = 64
 
 
 class ContainerRuntimeError(RuntimeError):
@@ -576,42 +581,154 @@ def backup_production_state(
     )
 
 
-def _load_restored_provenance(bundle: Path) -> ProductionStateManifest:
-    provenance_manifest = bundle / "provenance" / "runtime.json"
-    try:
-        source_state = ProductionStateManifest.model_validate_json(
-            provenance_manifest.read_bytes()
+def _load_restored_provenance(  # noqa: C901
+    bundle: Path,
+) -> ProductionStateManifest:
+    runtime_provenance = bundle / "provenance" / "runtime.json"
+    profile_provenance = bundle / "provenance" / "profile.json"
+    if runtime_provenance.is_file():
+        try:
+            source_state = ProductionStateManifest.model_validate_json(
+                runtime_provenance.read_bytes()
+            )
+        except (OSError, ValidationError) as error:
+            message = "restored production provenance is invalid"
+            raise ContainerRuntimeError(message) from error
+        source_paths = production_state_paths(source_state.profile_root)
+        expected = {
+            "profile_root": source_paths.root,
+            "business_database": source_paths.business_database,
+            "trace_database": source_paths.trace_database,
+            "artifacts": source_paths.artifacts,
+            "model_config_path": source_paths.model_config,
+        }
+        if source_state.profile_name != source_paths.root.name or any(
+            getattr(source_state, field_name) != expected_path
+            for field_name, expected_path in expected.items()
+        ):
+            message = "restored production provenance has invalid reserved paths"
+            raise ContainerRuntimeError(message)
+        if _sha256_file(bundle / "model-config") != source_state.model_config_sha256:
+            message = "restored model configuration hash does not match provenance"
+            raise ContainerRuntimeError(message)
+        if (
+            database_schema_sha256(bundle / "business.sqlite3")
+            != source_state.business_schema_sha256
+        ):
+            message = "restored business schema hash does not match provenance"
+            raise ContainerRuntimeError(message)
+        if (
+            source_state.trace_database_present
+            and not (bundle / "trace.sqlite3").is_file()
+        ):
+            message = "restored trace database is missing from its provenance"
+            raise ContainerRuntimeError(message)
+        return source_state
+
+    if profile_provenance.is_file():
+        (
+            profile_name,
+            created_at,
+            commit,
+            model_config_sha256,
+            expected_schema_hash,
+            expected_trace_present,
+        ) = _parse_migration_profile(profile_provenance)
+
+        if _sha256_file(bundle / "model-config") != model_config_sha256:
+            message = "restored model configuration hash does not match provenance"
+            raise ContainerRuntimeError(message)
+
+        business_schema_hash = database_schema_sha256(bundle / "business.sqlite3")
+        if (
+            expected_schema_hash is not None
+            and expected_schema_hash != business_schema_hash
+        ):
+            message = "restored business schema hash does not match provenance"
+            raise ContainerRuntimeError(message)
+
+        trace_present = (bundle / "trace.sqlite3").is_file()
+        if expected_trace_present is True and not trace_present:
+            message = "restored trace database is missing from its provenance"
+            raise ContainerRuntimeError(message)
+
+        state_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"urn:agileforge:migration:{profile_name}:{created_at.isoformat()}",
         )
-    except (OSError, ValidationError) as error:
-        message = "restored production provenance is invalid"
-        raise ContainerRuntimeError(message) from error
-    source_paths = production_state_paths(source_state.profile_root)
-    expected = {
-        "profile_root": source_paths.root,
-        "business_database": source_paths.business_database,
-        "trace_database": source_paths.trace_database,
-        "artifacts": source_paths.artifacts,
-        "model_config_path": source_paths.model_config,
-    }
-    if source_state.profile_name != source_paths.root.name or any(
-        getattr(source_state, field_name) != expected_path
-        for field_name, expected_path in expected.items()
-    ):
-        message = "restored production provenance has invalid reserved paths"
-        raise ContainerRuntimeError(message)
-    if _sha256_file(bundle / "model-config") != source_state.model_config_sha256:
-        message = "restored model configuration hash does not match provenance"
-        raise ContainerRuntimeError(message)
-    if (
-        database_schema_sha256(bundle / "business.sqlite3")
-        != source_state.business_schema_sha256
-    ):
-        message = "restored business schema hash does not match provenance"
-        raise ContainerRuntimeError(message)
-    if source_state.trace_database_present and not (bundle / "trace.sqlite3").is_file():
-        message = "restored trace database is missing from its provenance"
-        raise ContainerRuntimeError(message)
-    return source_state
+        source_paths = production_state_paths(PRODUCTION_STATE_BASE / profile_name)
+        try:
+            return ProductionStateManifest(
+                schema_version="agileforge.production-state.v1",
+                state_id=state_id,
+                profile_name=profile_name,
+                profile_root=source_paths.root,
+                business_database=source_paths.business_database,
+                trace_database=source_paths.trace_database,
+                trace_database_present=trace_present,
+                artifacts=source_paths.artifacts,
+                model_config_path=source_paths.model_config,
+                model_config_sha256=model_config_sha256,
+                business_schema_sha256=business_schema_hash,
+                created_at=created_at,
+                created_by_build_revision=commit,
+                provenance="initialized",
+                source_backup_sha256=None,
+                repository_relocations_sha256=None,
+            )
+        except ValidationError as error:
+            message = "restored production provenance is invalid"
+            raise ContainerRuntimeError(message) from error
+
+    message = "restored production provenance is invalid"
+    raise ContainerRuntimeError(message)
+
+
+def _parse_migration_profile(
+    profile_provenance: Path,
+) -> tuple[str, datetime, str, str, str | None, bool | None]:
+    invalid_message = "restored production provenance is invalid"
+    try:
+        data = json.loads(profile_provenance.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ContainerRuntimeError(invalid_message)
+        name = data.get("name")
+        if not isinstance(name, str) or not name:
+            raise ContainerRuntimeError(invalid_message)
+        created_at_raw = data.get("created_at")
+        if not isinstance(created_at_raw, str):
+            raise ContainerRuntimeError(invalid_message)
+        created_at = datetime.fromisoformat(created_at_raw)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        checkout = data.get("checkout")
+        if not isinstance(checkout, dict):
+            raise ContainerRuntimeError(invalid_message)
+        commit = checkout.get("commit")
+        if (
+            not isinstance(commit, str)
+            or len(commit) != _COMMIT_LENGTH
+            or any(c not in "0123456789abcdef" for c in commit)
+        ):
+            raise ContainerRuntimeError(invalid_message)
+        model_config_sha256 = data.get("model_config_sha256")
+        if (
+            not isinstance(model_config_sha256, str)
+            or len(model_config_sha256) != _HASH_LENGTH
+        ):
+            raise ContainerRuntimeError(invalid_message)
+        expected_schema = data.get("business_schema_sha256")
+        trace_present = data.get("trace_database_present")
+        return (
+            name,
+            created_at,
+            commit,
+            model_config_sha256,
+            expected_schema if isinstance(expected_schema, str) else None,
+            trace_present if isinstance(trace_present, bool) else None,
+        )
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise ContainerRuntimeError(invalid_message) from error
 
 
 def _install_restored_payload(profile_root: Path) -> None:
@@ -619,13 +736,18 @@ def _install_restored_payload(profile_root: Path) -> None:
     generic_model_config = paths.root / "model-config"
     generic_trace = paths.root / "trace.sqlite3"
     provenance_root = paths.root / "provenance"
-    provenance_manifest = provenance_root / "runtime.json"
-    paths.config_directory.mkdir(mode=0o700)
+    paths.config_directory.mkdir(mode=0o700, exist_ok=True)
     generic_model_config.replace(paths.model_config)
     if generic_trace.exists():
         generic_trace.replace(paths.trace_database)
-    provenance_manifest.unlink()
-    provenance_root.rmdir()
+    if provenance_root.is_dir():
+        for item in sorted(provenance_root.iterdir()):
+            if item.is_file():
+                destination_path = paths.config_directory / f"source-{item.name}"
+                shutil.copy2(item, destination_path)
+                destination_path.chmod(0o600)
+                item.unlink()
+        provenance_root.rmdir()
 
 
 def restore_production_state(

@@ -12,7 +12,7 @@ import stat
 import subprocess  # nosec B404
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 
 from cli.state_transfer import (
@@ -264,7 +264,10 @@ def _active_bindings(database: Path) -> dict[int, str]:
         if (
             not isinstance(project_id, int)
             or not isinstance(source_path, str)
-            or not Path(source_path).is_absolute()
+            or not (
+                Path(source_path).is_absolute()
+                or PureWindowsPath(source_path).is_absolute()
+            )
         ):
             raise RepositoryTransferError("active repository binding is invalid")
         bindings[project_id] = source_path
@@ -370,7 +373,10 @@ def _read_relocation_record(profile_root: Path) -> tuple[RepositoryRelocation, .
             or isinstance(project_id, bool)
             or project_id <= 0
             or not isinstance(source_path, str)
-            or not Path(source_path).is_absolute()
+            or not (
+                Path(source_path).is_absolute()
+                or PureWindowsPath(source_path).is_absolute()
+            )
             or not isinstance(restored_path, str)
             or not Path(restored_path).is_absolute()
         ):

@@ -17,6 +17,10 @@ from sqlmodel import Session, col, create_engine, select
 
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from cli.repository_transfer import (
+    _RELOCATION_FORMAT,
+    _RELOCATION_NAME,
+    _read_relocation_record,
+    _write_atomic,
     finalize_restored_repositories,
     pending_relocations,
     write_relocation_record,
@@ -387,3 +391,27 @@ def test_relocation_preserves_state_then_guarded_attach_has_exact_delta(  # noqa
         assert len(receipts) == prior_receipt_count + 1
         assert receipts[-1].request_kind == "record_repository_binding"
     verification_engine.dispose()
+
+
+def test_relocation_record_accepts_windows_source_path(tmp_path: Path) -> None:
+    """Relocation records accept Windows absolute source paths without failing."""
+    doc = {
+        "format": _RELOCATION_FORMAT,
+        "repositories": [
+            {
+                "project_id": 1,
+                "source_path": r"C:\Users\atavares\Projects\backend",
+                "restored_path": str((tmp_path / "restored").resolve()),
+            }
+        ],
+    }
+    content = json.dumps(doc).encode("utf-8") + b"\n"
+    target = tmp_path / _RELOCATION_NAME
+    _write_atomic(target, content)
+
+    relocations = _read_relocation_record(tmp_path)
+    assert len(relocations) == 1
+    assert relocations[0].project_id == 1
+    assert relocations[0].source_path == r"C:\Users\atavares\Projects\backend"
+    assert relocations[0].restored_path == str((tmp_path / "restored").resolve())
+
