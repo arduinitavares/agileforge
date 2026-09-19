@@ -498,6 +498,7 @@ def test_write_relocation_record_unmapped_with_repositories(
                 "index": 0,
                 "source_path": "/path/to/other",
                 "components": [{"kind": "worktree", "payload": "repositories/0000"}],
+                "identity": {"common_git_dir": "/path/to/other/.git"},
             }
         ],
         model_config_sha256="",
