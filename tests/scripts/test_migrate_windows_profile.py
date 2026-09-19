@@ -378,4 +378,3 @@ def test_paired_backup_consistency_refuses_when_trace_db_created_during_capture(
         )
 
     assert not dest.exists()
-
