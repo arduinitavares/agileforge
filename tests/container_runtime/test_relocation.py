@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sqlite3
 import stat
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, cast
@@ -19,6 +20,7 @@ from adapters.git.repository_probe import GitPythonRepositoryProbe
 from cli.repository_transfer import (
     _RELOCATION_FORMAT,
     _RELOCATION_NAME,
+    RepositoryTransferError,
     _read_relocation_record,
     _write_atomic,
     finalize_restored_repositories,
@@ -415,3 +417,95 @@ def test_relocation_record_accepts_windows_source_path(tmp_path: Path) -> None:
     assert relocations[0].source_path == r"C:\Users\atavares\Projects\backend"
     assert relocations[0].restored_path == str((tmp_path / "restored").resolve())
 
+
+def test_write_relocation_record_empty_manifest_repositories(tmp_path: Path) -> None:
+    """Empty manifest repositories leaves relocations empty without raising error."""
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir()
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+
+    conn = sqlite3.connect(payload_root / "business.sqlite3")
+    conn.execute(
+        "CREATE TABLE projects ("
+        "project_id INTEGER PRIMARY KEY, "
+        "active_repository_binding_id INTEGER"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE repository_bindings ("
+        "repository_binding_id INTEGER PRIMARY KEY, "
+        "worktree_path TEXT"
+        ")"
+    )
+    conn.execute("INSERT INTO projects VALUES (1, 10)")
+    conn.execute("INSERT INTO repository_bindings VALUES (10, '/path/to/source')")
+    conn.commit()
+    conn.close()
+
+    manifest = TransferManifest(
+        format="agileforge.transfer-manifest.v1",
+        created_at=datetime.now(tz=UTC).isoformat(),
+        files=(),
+        databases={},
+        repositories=[],
+        model_config_sha256="",
+        observed_links=(),
+    )
+
+    record_path = write_relocation_record(manifest, payload_root, profile_root)
+    assert record_path.is_file()
+    relocations = _read_relocation_record(profile_root)
+    assert relocations == ()
+
+
+def test_write_relocation_record_unmapped_with_repositories(
+    tmp_path: Path,
+) -> None:
+    """Non-empty manifest repositories raises error when active binding is unmapped."""
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir()
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+
+    conn = sqlite3.connect(payload_root / "business.sqlite3")
+    conn.execute(
+        "CREATE TABLE projects ("
+        "project_id INTEGER PRIMARY KEY, "
+        "active_repository_binding_id INTEGER"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE repository_bindings ("
+        "repository_binding_id INTEGER PRIMARY KEY, "
+        "worktree_path TEXT"
+        ")"
+    )
+    conn.execute("INSERT INTO projects VALUES (1, 10)")
+    conn.execute("INSERT INTO repository_bindings VALUES (10, '/path/to/unmapped')")
+    conn.commit()
+    conn.close()
+
+    repo_dir = payload_root / "repositories" / "0000"
+    repo_dir.mkdir(parents=True)
+    manifest = TransferManifest(
+        format="agileforge.transfer-manifest.v1",
+        created_at=datetime.now(tz=UTC).isoformat(),
+        files=(),
+        databases={},
+        repositories=[
+            {
+                "index": 0,
+                "source_path": "/path/to/other",
+                "components": [{"kind": "worktree", "payload": "repositories/0000"}],
+            }
+        ],
+        model_config_sha256="",
+        observed_links=(),
+    )
+
+    with pytest.raises(
+        RepositoryTransferError,
+        match="active repository has no restored payload mapping",
+    ):
+        write_relocation_record(manifest, payload_root, profile_root)

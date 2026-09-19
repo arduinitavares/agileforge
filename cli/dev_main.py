@@ -1302,7 +1302,7 @@ def _run_transfer(arguments: argparse.Namespace, *, checkout_root: Path) -> int:
                     if arguments.repository is not None
                     else None
                 ),
-                state_only=bool(arguments.state_only),
+                state_only=arguments.state_only,
             )
             payload = {"status": "backed_up", "destination": str(destination)}
         elif arguments.command == "restore":
