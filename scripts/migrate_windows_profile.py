@@ -89,6 +89,8 @@ def win32_runtime_fence(profile_root: Path) -> Iterator[None]:
     )
     if handle == -1 or handle == ctypes.c_void_p(-1).value:
         error_code = ctypes.GetLastError()
+        if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
+            raise FenceError(f"runtime fence is busy for maintenance: {profile_root}")
         raise FenceError(
             f"runtime fence lock file could not be opened: WinError {error_code}"
         )
@@ -105,7 +107,7 @@ def win32_runtime_fence(profile_root: Path) -> Iterator[None]:
     if not locked:
         error_code = ctypes.GetLastError()
         kernel32.CloseHandle(handle)
-        if error_code == _ERROR_LOCK_VIOLATION:
+        if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
             raise FenceError(f"runtime fence is busy for maintenance: {profile_root}")
         raise FenceError(
             f"runtime fence acquisition failed with error {error_code}: {profile_root}"
@@ -273,6 +275,15 @@ def export_windows_profile(
                 f"model configuration file is missing: {resolved_model_config}"
             )
 
+        expected_model_hash = profile_data.get("model_config_sha256")
+        if (
+            isinstance(expected_model_hash, str)
+            and _sha256_file(resolved_model_config) != expected_model_hash
+        ):
+            raise TransferError(
+                "model configuration hash does not match profile metadata"
+            )
+
         verify_database_quiescence(business_db)
         if trace_db.is_file():
             verify_database_quiescence(trace_db)
@@ -300,9 +311,7 @@ def export_windows_profile(
             provenance_root.mkdir(mode=0o700)
             _copy_regular(profile_json, provenance_root / "profile.json")
 
-            repository_manifest = _capture_repositories(
-                expanded_repositories, staging
-            )
+            repository_manifest = _capture_repositories(expanded_repositories, staging)
             databases, observed_links = _database_manifest(staging)
             manifest = TransferManifest(
                 format=_FORMAT,
@@ -321,9 +330,7 @@ def export_windows_profile(
             win32_fsync_directory(parent)
             marker = target / _UNPUBLISHED_NAME
             if marker.read_text(encoding="utf-8") != target.name:
-                raise TransferError(
-                    "transfer publication marker does not match target"
-                )
+                raise TransferError("transfer publication marker does not match target")
             marker.unlink()
             win32_fsync_directory(target)
             win32_fsync_directory(parent)
