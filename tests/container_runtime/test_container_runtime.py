@@ -859,6 +859,7 @@ def test_restore_production_state_from_windows_migration_bundle(
         tmp_path / "backup",
         deployment_root=tmp_path,
     )
+    manifest = verify_backup(bundle)
     provenance_dir = bundle / "provenance"
     (provenance_dir / "runtime.json").unlink()
     profile_metadata = {
@@ -880,7 +881,6 @@ def test_restore_production_state_from_windows_migration_bundle(
     profile_file.write_text(json.dumps(profile_metadata, indent=2), encoding="utf-8")
     profile_file.chmod(0o600)
 
-    manifest = verify_backup(bundle)
     updated_manifest = TransferManifest(
         format=_FORMAT,
         created_at=manifest.created_at,
@@ -891,6 +891,7 @@ def test_restore_production_state_from_windows_migration_bundle(
         observed_links=manifest.observed_links,
     )
     _write_manifest(bundle, updated_manifest)
+    verify_backup(bundle)
 
     restored = restore_production_state(
         bundle,
@@ -906,4 +907,3 @@ def test_restore_production_state_from_windows_migration_bundle(
     saved_metadata = json.loads(source_profile.read_text(encoding="utf-8"))
     assert saved_metadata["name"] == "win-profile"
     assert not (restored.profile_root / "provenance").exists()
-

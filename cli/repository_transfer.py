@@ -316,6 +316,12 @@ def write_relocation_record(
     for project_id, source_path in active.items():
         restored_path = by_source.get(source_path)
         if restored_path is None:
+            normalized_source = str(PureWindowsPath(source_path))
+            for candidate_source, candidate_worktree in by_source.items():
+                if str(PureWindowsPath(candidate_source)) == normalized_source:
+                    restored_path = candidate_worktree
+                    break
+        if restored_path is None:
             raise RepositoryTransferError(
                 "active repository has no restored payload mapping"
             )

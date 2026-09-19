@@ -1283,9 +1283,7 @@ def _repository_identity(
         for entry in entries:
             entry_path = entry.path.replace("\\", "/")
             prev_path = (
-                entry.previous_path.replace("\\", "/")
-                if entry.previous_path
-                else None
+                entry.previous_path.replace("\\", "/") if entry.previous_path else None
             )
             if any(
                 entry_path == excl or entry_path.startswith(f"{excl}/")
