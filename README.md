@@ -254,6 +254,12 @@ the previous dispatch path. Key-collision rejection, datetime conversion,
 canonical bytes and SHA-256 inputs are unchanged. There is no cache of mutable
 workflow facts or validation outcomes and no parallel pytest execution.
 
+The dashboard's `GET /api/projects` and CLI `project list` share a count-only
+projection. Story and Sprint counts are grouped in SQL rather than loading child
+records or scanning them once per Project. Counts exclude superseded Stories,
+include every Sprint status, and remain zero for Projects without matching rows.
+Each call reads current database state; no count cache or schema change is used.
+
 ### Reproducing measurements
 
 Retain the complete output in a new file for each run. Pytest reports every
