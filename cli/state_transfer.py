@@ -29,8 +29,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from adapters.git.repository_probe import GitPythonRepositoryProbe
-from services.repository_probe import RepositoryProbeError
+from services.repository_probe import RepositoryProbeError, RepositoryStatusEntry
 from utils.runtime_fence import runtime_fence
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -1262,21 +1263,71 @@ def _approved_git_config(common_git_dir: Path) -> dict[str, dict[str, str]]:
     return approved
 
 
-def _repository_identity(repository: Path) -> dict[str, object]:
+def _repository_identity(
+    repository: Path,
+    *,
+    excluded: Sequence[str] = (),
+) -> dict[str, object]:
     try:
         observed = GitPythonRepositoryProbe().inspect(repository)
     except RepositoryProbeError as error:
         raise TransferError("repository semantic identity is unavailable") from error
+    entries = observed.status_entries
+    if excluded:
+        excluded_patterns = {
+            item.replace("\\", "/").rstrip("/")
+            for item in excluded
+            if not item.startswith(("gitdir:", "commondir:"))
+        }
+        filtered: list[RepositoryStatusEntry] = []
+        for entry in entries:
+            entry_path = entry.path.replace("\\", "/")
+            prev_path = (
+                entry.previous_path.replace("\\", "/")
+                if entry.previous_path
+                else None
+            )
+            if any(
+                entry_path == excl or entry_path.startswith(f"{excl}/")
+                for excl in excluded_patterns
+            ):
+                continue
+            if prev_path and any(
+                prev_path == excl or prev_path.startswith(f"{excl}/")
+                for excl in excluded_patterns
+            ):
+                continue
+            filtered.append(entry)
+        entries = tuple(filtered)
+        dirty = bool(entries)
+        status_entries_json = [item.model_dump(mode="json") for item in entries]
+        remote_omitted = any(w.code == "REMOTE_OMITTED" for w in observed.warnings)
+        fingerprint_payload = {
+            "probe_version": observed.probe_version,
+            "head_sha": observed.head_sha,
+            "branch_name": observed.branch_name,
+            "detached_head": observed.detached_head,
+            "dirty": dirty,
+            "status_entries": status_entries_json,
+            "remotes": list(observed.remotes),
+            "remote_omitted": remote_omitted,
+        }
+        status_fingerprint = canonical_hash(fingerprint_payload)
+    else:
+        dirty = observed.dirty
+        status_entries_json = [
+            item.model_dump(mode="json") for item in observed.status_entries
+        ]
+        status_fingerprint = observed.status_fingerprint
+
     return {
         "head_sha": observed.head_sha,
         "common_git_dir": observed.common_git_dir,
         "branch_name": observed.branch_name,
         "detached_head": observed.detached_head,
-        "dirty": observed.dirty,
-        "status_entries": [
-            item.model_dump(mode="json") for item in observed.status_entries
-        ],
-        "status_fingerprint": observed.status_fingerprint,
+        "dirty": dirty,
+        "status_entries": status_entries_json,
+        "status_fingerprint": status_fingerprint,
         "remotes": list(observed.remotes),
         "probe_version": observed.probe_version,
         "approved_config": _approved_git_config(Path(observed.common_git_dir)),
@@ -1296,7 +1347,8 @@ def _capture_repositories(
     for index, repository in enumerate(repositories):
         label = f"{index:04d}"
         destination = payload_root / label
-        excluded = _copy_tree(repository, destination, allow_symlinks=True)
+        worktree_excluded = _copy_tree(repository, destination, allow_symlinks=True)
+        excluded = list(worktree_excluded)
         components: list[dict[str, object]] = [
             {"kind": "worktree", "payload": f"repositories/{label}"}
         ]
@@ -1324,7 +1376,10 @@ def _capture_repositories(
             {
                 "index": index,
                 "source_path": str(repository),
-                "identity": _repository_identity(repository),
+                "identity": _repository_identity(
+                    repository,
+                    excluded=worktree_excluded,
+                ),
                 "components": components,
                 "excluded": sorted(excluded),
             }
