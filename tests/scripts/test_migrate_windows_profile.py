@@ -1,4 +1,5 @@
 # tests/scripts/test_migrate_windows_profile.py
+# ruff: noqa: EM101, PLR0915, TRY003
 """Test Windows development profile migration utility."""
 
 from __future__ import annotations
@@ -8,7 +9,6 @@ import hashlib
 import json
 import os
 import sqlite3
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,7 +26,6 @@ from scripts.migrate_windows_profile import (
 from utils.runtime_fence import FenceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
 pytestmark = pytest.mark.skipif(
@@ -195,7 +194,7 @@ def test_export_windows_profile_synthetic(tmp_path: Path) -> None:
 def test_paired_backup_consistency_locks_out_concurrent_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exporter holds exclusion locks throughout capture; writer is blocked."""
+    """Exporter holds locks throughout capture; writer is blocked on all databases."""
     profile_root = tmp_path / "dev_profile"
     profile_root.mkdir()
     artifacts = profile_root / "artifacts"
@@ -220,22 +219,35 @@ def test_paired_backup_consistency_locks_out_concurrent_writer(
     profile_json.write_text(json.dumps(metadata), encoding="utf-8")
 
     real_backup_db = mwp._backup_database
-    writer_attempted = False
-    writer_blocked = False
+    writer_business_attempted = False
+    writer_business_blocked = False
+    writer_trace_attempted = False
+    writer_trace_blocked = False
 
     def hooked_backup_database(source: Path, destination: Path) -> None:
-        nonlocal writer_attempted, writer_blocked
+        nonlocal writer_business_attempted, writer_business_blocked
+        nonlocal writer_trace_attempted, writer_trace_blocked
         real_backup_db(source, destination)
         if source == business_db:
-            writer_attempted = True
-            # Attempt concurrent write while trace_db not yet copied
+            writer_business_attempted = True
+            # Attempt concurrent write to business_db
             try:
                 conn = sqlite3.connect(business_db, timeout=0.1)
                 conn.execute("INSERT INTO test (value) VALUES ('race_writer')")
                 conn.commit()
                 conn.close()
             except (sqlite3.OperationalError, PermissionError, OSError):
-                writer_blocked = True
+                writer_business_blocked = True
+
+            writer_trace_attempted = True
+            # Attempt concurrent write to trace_db while guarded but uncopied
+            try:
+                conn_t = sqlite3.connect(trace_db, timeout=0.1)
+                conn_t.execute("INSERT INTO test (value) VALUES ('race_writer')")
+                conn_t.commit()
+                conn_t.close()
+            except (sqlite3.OperationalError, PermissionError, OSError):
+                writer_trace_blocked = True
 
     monkeypatch.setattr(mwp, "_backup_database", hooked_backup_database)
 
@@ -248,13 +260,19 @@ def test_paired_backup_consistency_locks_out_concurrent_writer(
     )
 
     assert result == dest
-    assert writer_attempted is True
-    assert writer_blocked is True
+    assert writer_business_attempted is True
+    assert writer_business_blocked is True
+    assert writer_trace_attempted is True
+    assert writer_trace_blocked is True
     assert dest.is_dir()
     verify_backup(dest)
 
-    # Verify business DB in dest has the original value, not race_writer
+    # Verify both databases in dest have the original value, not race_writer
     with sqlite3.connect(dest / "business.sqlite3") as conn:
+        rows = conn.execute("SELECT value FROM test").fetchall()
+        assert [r[0] for r in rows] == ["hello"]
+
+    with sqlite3.connect(dest / "trace.sqlite3") as conn:
         rows = conn.execute("SELECT value FROM test").fetchall()
         assert [r[0] for r in rows] == ["hello"]
 
@@ -287,18 +305,20 @@ def test_paired_backup_consistency_refuses_publication_on_mutated_database(
     profile_json.write_text(json.dumps(metadata), encoding="utf-8")
 
     # Simulate what happens if exclusive lock was bypassed/degraded:
-    # We allow the test writer to mutate both databases after business_db is copied
-    @contextmanager
-    def mock_exclusion_fence(
-        database_paths: Sequence[Path],
-    ) -> Iterator[dict[Path, mwp._DatabaseSnapshot]]:
-        # Captures initial snapshot as real fence does, but without OS-level lock
-        initial_snapshots = {p: mwp._take_database_snapshot(p) for p in database_paths}
-        yield initial_snapshots
-        for p in database_paths:
-            mwp._verify_source_database_unchanged(p, initial_snapshots[p])
+    # A mock fence records baseline snapshot without acquiring Win32 exclusion handles
+    class MockDegradedFence(mwp.DatabaseExclusionFence):
+        def __enter__(self) -> dict[Path, mwp._DatabaseSnapshot]:
+            for db_path in self.database_paths:
+                monitor = sqlite3.connect(
+                    f"{db_path.resolve().as_uri()}?mode=ro", uri=True
+                )
+                self._monitors[db_path] = monitor
+                self.initial_snapshots[db_path] = mwp._take_database_snapshot(
+                    db_path, monitor_conn=monitor
+                )
+            return self.initial_snapshots
 
-    monkeypatch.setattr(mwp, "win32_database_exclusion_fence", mock_exclusion_fence)
+    monkeypatch.setattr(mwp, "win32_database_exclusion_fence", MockDegradedFence)
 
     real_backup_db = mwp._backup_database
 
@@ -318,7 +338,9 @@ def test_paired_backup_consistency_refuses_publication_on_mutated_database(
     monkeypatch.setattr(mwp, "_backup_database", hooked_backup_database)
 
     dest = tmp_path / "backup_bundle"
-    with pytest.raises(TransferError, match=r"paired snapshot is inconsistent"):
+    with pytest.raises(
+        TransferError, match=r"paired snapshot is inconsistent|data_version changed"
+    ):
         export_windows_profile(
             profile_root=profile_root,
             destination=dest,
@@ -327,6 +349,74 @@ def test_paired_backup_consistency_refuses_publication_on_mutated_database(
         )
 
     # Exporter must NOT publish the inconsistent bundle
+    assert not dest.exists()
+
+
+def test_paired_backup_consistency_detects_data_version_change_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporter detects in-place data_version change even without file size change."""
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+    trace_db = profile_root / "adk-trace.sqlite3"
+    _init_sqlite_db(trace_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-data-version-inplace",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    class MockDegradedFence(mwp.DatabaseExclusionFence):
+        def __enter__(self) -> dict[Path, mwp._DatabaseSnapshot]:
+            for db_path in self.database_paths:
+                monitor = sqlite3.connect(
+                    f"{db_path.resolve().as_uri()}?mode=ro", uri=True
+                )
+                self._monitors[db_path] = monitor
+                self.initial_snapshots[db_path] = mwp._take_database_snapshot(
+                    db_path, monitor_conn=monitor
+                )
+            return self.initial_snapshots
+
+    monkeypatch.setattr(mwp, "win32_database_exclusion_fence", MockDegradedFence)
+
+    real_backup_db = mwp._backup_database
+
+    def hooked_backup_database(source: Path, destination: Path) -> None:
+        real_backup_db(source, destination)
+        if source == business_db:
+            # Perform in-place update (same byte length: 'hello' -> 'world')
+            conn = sqlite3.connect(business_db)
+            conn.execute("UPDATE test SET value = 'world' WHERE value = 'hello'")
+            conn.commit()
+            conn.close()
+
+    monkeypatch.setattr(mwp, "_backup_database", hooked_backup_database)
+
+    dest = tmp_path / "backup_bundle"
+    with pytest.raises(
+        TransferError, match=r"data_version changed|paired snapshot is inconsistent"
+    ):
+        export_windows_profile(
+            profile_root=profile_root,
+            destination=dest,
+            repositories=(),
+            model_config=model_config,
+        )
+
     assert not dest.exists()
 
 
@@ -370,6 +460,48 @@ def test_paired_backup_consistency_refuses_when_trace_db_created_during_capture(
     with pytest.raises(
         TransferError, match=r"adk-trace\.sqlite3 was created during capture"
     ):
+        export_windows_profile(
+            profile_root=profile_root,
+            destination=dest,
+            repositories=(),
+            model_config=model_config,
+        )
+
+    assert not dest.exists()
+
+
+def test_export_windows_profile_cleans_up_destination_on_verification_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporter removes destination directory if post-publication verification fails."""
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-cleanup-failure",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    def mock_verify_backup(_bundle: Path) -> None:
+        raise TransferError("simulated verification error")
+
+    monkeypatch.setattr(mwp, "verify_backup", mock_verify_backup)
+
+    dest = tmp_path / "backup_bundle"
+    with pytest.raises(TransferError, match=r"simulated verification error"):
         export_windows_profile(
             profile_root=profile_root,
             destination=dest,
