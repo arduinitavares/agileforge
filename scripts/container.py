@@ -10,9 +10,20 @@ import os
 import subprocess  # nosec B404
 import tarfile
 import tempfile
-import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import toml
+
+    class _TomlFallback:
+        @staticmethod
+        def load(stream: BinaryIO) -> dict[str, Any]:
+            return toml.loads(stream.read().decode("utf-8"))
+
+    tomllib = _TomlFallback()  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
