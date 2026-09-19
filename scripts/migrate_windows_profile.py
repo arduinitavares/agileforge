@@ -241,9 +241,7 @@ def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
     )
 
 
-def _verify_source_database_unchanged(
-    path: Path, expected: _DatabaseSnapshot
-) -> None:
+def _verify_source_database_unchanged(path: Path, expected: _DatabaseSnapshot) -> None:
     """Verify that source database has not been mutated or acquired active WAL/SHM."""
     wal_path = path.with_name(path.name + "-wal")
     shm_path = path.with_name(path.name + "-shm")
