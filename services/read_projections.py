@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import func
 from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, Team, UserStory
@@ -2140,8 +2141,20 @@ class DurableReadProjectionService:
             projects = session.exec(
                 select(Project).order_by(col(Project.project_id))
             ).all()
-            stories = session.exec(select(UserStory)).all()
-            sprints = session.exec(select(Sprint)).all()
+            story_counts = dict(
+                session.exec(
+                    select(UserStory.project_id, func.count())
+                    .where(col(UserStory.is_superseded).is_(False))
+                    .group_by(col(UserStory.project_id))
+                ).all()
+            )
+            sprint_counts = dict(
+                session.exec(
+                    select(Sprint.project_id, func.count()).group_by(
+                        col(Sprint.project_id)
+                    )
+                ).all()
+            )
         items: list[JsonValue] = []
         for project in projects:
             project_id = project.project_id
@@ -2153,14 +2166,8 @@ class DurableReadProjectionService:
                     "project_id": project_id,
                     "name": project.name,
                     "description": project.description,
-                    "user_stories_count": sum(
-                        1
-                        for story in stories
-                        if story.project_id == project_id and not story.is_superseded
-                    ),
-                    "sprint_count": sum(
-                        1 for sprint in sprints if sprint.project_id == project_id
-                    ),
+                    "user_stories_count": story_counts.get(project_id, 0),
+                    "sprint_count": sprint_counts.get(project_id, 0),
                     "updated_at": _iso(project.updated_at),
                 }
             )
