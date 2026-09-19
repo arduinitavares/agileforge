@@ -1,7 +1,7 @@
 # scripts/migrate_windows_profile.py
 """One-time migration utility for Windows AgileForge development profile."""
 
-# ruff: noqa: C901, EM101, EM102, PLR0912, PLR0915, TRY003, TRY004, TRY301
+# ruff: noqa: C901, EM101, EM102, PLR0912, PLR0915, TRY003, TRY004, TRY300, TRY301
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -228,9 +228,7 @@ def _read_sqlite_header(path: Path) -> bytes:
 
 def _read_sqlite_data_version(path: Path) -> int:
     """Read PRAGMA data_version from SQLite database."""
-    connection = sqlite3.connect(
-        f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True
-    )
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         row = connection.execute("PRAGMA data_version").fetchone()
         return int(row[0]) if row else 0
@@ -240,7 +238,9 @@ def _read_sqlite_data_version(path: Path) -> int:
         connection.close()
 
 
-def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
+def _take_database_snapshot(
+    path: Path, monitor_conn: sqlite3.Connection | None = None
+) -> _DatabaseSnapshot:
     """Capture snapshot fingerprint and change counter for an SQLite database."""
     header = _read_sqlite_header(path)
     change_counter = (
@@ -248,16 +248,29 @@ def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
         if len(header) >= _SQLITE_HEADER_MIN_SIZE
         else 0
     )
+    if monitor_conn is not None:
+        try:
+            row = monitor_conn.execute("PRAGMA data_version").fetchone()
+            data_version = int(row[0]) if row else 0
+        except sqlite3.Error:
+            data_version = 0
+    else:
+        data_version = _read_sqlite_data_version(path)
+
     return _DatabaseSnapshot(
         sha256=_sha256_file(path),
         size=path.stat().st_size,
         header=header,
         change_counter=change_counter,
-        data_version=_read_sqlite_data_version(path),
+        data_version=data_version,
     )
 
 
-def _verify_source_database_unchanged(path: Path, expected: _DatabaseSnapshot) -> None:
+def _verify_source_database_unchanged(
+    path: Path,
+    expected: _DatabaseSnapshot,
+    monitor_conn: sqlite3.Connection | None = None,
+) -> None:
     """Verify that source database has not been mutated or acquired active WAL/SHM."""
     wal_path = path.with_name(path.name + "-wal")
     shm_path = path.with_name(path.name + "-shm")
@@ -271,11 +284,26 @@ def _verify_source_database_unchanged(path: Path, expected: _DatabaseSnapshot) -
             f"database {path.name} active session appeared during capture: "
             f"{shm_path.name}"
         )
-    current = _take_database_snapshot(path)
+    if monitor_conn is not None:
+        try:
+            row = monitor_conn.execute("PRAGMA data_version").fetchone()
+            current_dv = int(row[0]) if row else 0
+            if current_dv != expected.data_version:
+                msg = (
+                    f"source database {path.name} was modified during capture "
+                    f"(data_version changed from {expected.data_version} to "
+                    f"{current_dv}): paired snapshot is inconsistent"
+                )
+                raise TransferError(msg)
+        except sqlite3.Error as err:
+            raise TransferError(
+                f"failed to read data_version for {path.name}: {err}"
+            ) from err
+
+    current = _take_database_snapshot(path, monitor_conn=monitor_conn)
     if (
         current.sha256 != expected.sha256
         or current.change_counter != expected.change_counter
-        or current.data_version != expected.data_version
         or current.header != expected.header
         or current.size != expected.size
     ):
@@ -285,58 +313,115 @@ def _verify_source_database_unchanged(path: Path, expected: _DatabaseSnapshot) -
         )
 
 
-@contextmanager
+class DatabaseExclusionFence:
+    """Hold Win32 exclusion locks and persistent SQLite change monitors."""
+
+    def __init__(self, database_paths: Sequence[Path]) -> None:
+        """Initialize exclusion fence for the provided database paths."""
+        self.database_paths: tuple[Path, ...] = tuple(database_paths)
+        self._kernel32 = (
+            ctypes.windll.kernel32 if os.name == "nt" else None  # type: ignore[attr-defined]
+        )
+        self._handles: list[int] = []
+        self._monitors: dict[Path, sqlite3.Connection] = {}
+        self.initial_snapshots: dict[Path, _DatabaseSnapshot] = {}
+
+    def __enter__(self) -> dict[Path, _DatabaseSnapshot]:
+        """Acquire Win32 locks, open monitors, and record initial snapshots."""
+        try:
+            for db_path in self.database_paths:
+                wal_path = db_path.with_name(db_path.name + "-wal")
+                shm_path = db_path.with_name(db_path.name + "-shm")
+                if wal_path.exists():
+                    msg = (
+                        f"database {db_path.name} is active (WAL present: "
+                        f"{wal_path.name})"
+                    )
+                    raise TransferError(msg)
+                if shm_path.exists():
+                    msg = (
+                        f"database {db_path.name} is active (SHM present: "
+                        f"{shm_path.name})"
+                    )
+                    raise TransferError(msg)
+                if os.name == "nt" and self._kernel32 is not None:
+                    handle = self._kernel32.CreateFileW(
+                        str(db_path),
+                        _GENERIC_READ,
+                        _FILE_SHARE_READ,
+                        None,
+                        _OPEN_EXISTING,
+                        _FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                    if handle == -1 or handle == ctypes.c_void_p(-1).value:
+                        error_code = ctypes.GetLastError()
+                        if error_code in (
+                            _ERROR_LOCK_VIOLATION,
+                            _ERROR_SHARING_VIOLATION,
+                        ):
+                            raise TransferError(
+                                f"database {db_path.name} is locked by an "
+                                "active process or writer"
+                            )
+                        raise TransferError(
+                            f"database {db_path.name} lock failed with WinError "
+                            f"{error_code}"
+                        )
+                    self._handles.append(handle)
+
+                monitor = sqlite3.connect(
+                    f"{db_path.resolve().as_uri()}?mode=ro", uri=True
+                )
+                self._monitors[db_path] = monitor
+                self.initial_snapshots[db_path] = _take_database_snapshot(
+                    db_path, monitor_conn=monitor
+                )
+
+            return self.initial_snapshots
+        except Exception:
+            self.close()
+            raise
+
+    def verify_database_unchanged(self, path: Path) -> None:
+        """Verify single database against baseline snapshot using active monitor."""
+        expected = self.initial_snapshots.get(path)
+        if expected is None:
+            raise TransferError(f"no baseline snapshot recorded for {path.name}")
+        monitor = self._monitors.get(path)
+        _verify_source_database_unchanged(path, expected, monitor_conn=monitor)
+
+    def verify_all_unchanged(self) -> None:
+        """Verify all guarded databases against baseline snapshots."""
+        for db_path in self.database_paths:
+            self.verify_database_unchanged(db_path)
+
+    def close(self) -> None:
+        """Release persistent monitor connections and Win32 handles."""
+        for monitor in self._monitors.values():
+            with suppress(Exception):
+                monitor.close()
+        self._monitors.clear()
+        if os.name == "nt" and self._kernel32 is not None:
+            for h in self._handles:
+                with suppress(Exception):
+                    self._kernel32.CloseHandle(h)
+            self._handles.clear()
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Verify state on clean exit and ensure all handles are closed."""
+        try:
+            if exc_type is None:
+                self.verify_all_unchanged()
+        finally:
+            self.close()
+
+
 def win32_database_exclusion_fence(
     database_paths: Sequence[Path],
-) -> Iterator[dict[Path, _DatabaseSnapshot]]:
-    """Hold Win32 shared-read locks on databases throughout capture."""
-    kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None  # type: ignore[attr-defined]
-    handles: list[int] = []
-    initial_snapshots: dict[Path, _DatabaseSnapshot] = {}
-    try:
-        for db_path in database_paths:
-            wal_path = db_path.with_name(db_path.name + "-wal")
-            shm_path = db_path.with_name(db_path.name + "-shm")
-            if wal_path.exists():
-                raise TransferError(
-                    f"database {db_path.name} is active (WAL present: {wal_path.name})"
-                )
-            if shm_path.exists():
-                raise TransferError(
-                    f"database {db_path.name} is active (SHM present: {shm_path.name})"
-                )
-            if os.name == "nt" and kernel32 is not None:
-                handle = kernel32.CreateFileW(
-                    str(db_path),
-                    _GENERIC_READ,
-                    _FILE_SHARE_READ,
-                    None,
-                    _OPEN_EXISTING,
-                    _FILE_ATTRIBUTE_NORMAL,
-                    None,
-                )
-                if handle == -1 or handle == ctypes.c_void_p(-1).value:
-                    error_code = ctypes.GetLastError()
-                    if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
-                        raise TransferError(
-                            f"database {db_path.name} is locked by an active process "
-                            "or writer"
-                        )
-                    raise TransferError(
-                        f"database {db_path.name} lock failed with WinError "
-                        f"{error_code}"
-                    )
-                handles.append(handle)
-            initial_snapshots[db_path] = _take_database_snapshot(db_path)
-
-        yield initial_snapshots
-
-        for db_path in database_paths:
-            _verify_source_database_unchanged(db_path, initial_snapshots[db_path])
-    finally:
-        if os.name == "nt" and kernel32 is not None:
-            for h in handles:
-                kernel32.CloseHandle(h)
+) -> DatabaseExclusionFence:
+    """Hold Win32 shared-read locks and persistent monitors throughout capture."""
+    return DatabaseExclusionFence(database_paths)
 
 
 def export_windows_profile(
@@ -423,7 +508,8 @@ def export_windows_profile(
             (business_db, trace_db) if initial_trace_exists else (business_db,)
         )
 
-        with win32_database_exclusion_fence(source_databases) as initial_snapshots:
+        fence = win32_database_exclusion_fence(source_databases)
+        with fence as _initial_snapshots:
             if repositories is not None and len(repositories) > 0:
                 repo_candidates = tuple(
                     Path(r).expanduser().absolute() for r in repositories
@@ -435,6 +521,7 @@ def export_windows_profile(
             staging: Path | None = Path(
                 tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=parent)
             )
+            target_published = False
             try:
                 _write_unpublished_marker(staging, target.name)
                 _backup_database(business_db, staging / "business.sqlite3")
@@ -463,8 +550,7 @@ def export_windows_profile(
                 _write_manifest(staging, manifest)
                 _verify_payload(staging, manifest)
 
-                for s_db in source_databases:
-                    _verify_source_database_unchanged(s_db, initial_snapshots[s_db])
+                fence.verify_all_unchanged()
                 if (
                     not initial_trace_exists
                     and (profile_root / "adk-trace.sqlite3").is_file()
@@ -487,9 +573,12 @@ def export_windows_profile(
                 win32_fsync_directory(target)
                 win32_fsync_directory(parent)
                 verify_backup(target)
+                target_published = True
             finally:
                 if staging is not None and staging.exists():
                     shutil.rmtree(staging)
+                if not target_published and target.exists():
+                    shutil.rmtree(target)
 
     return target
 
