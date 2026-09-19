@@ -737,10 +737,23 @@ def _install_restored_payload(profile_root: Path) -> None:
     generic_model_config = paths.root / "model-config"
     generic_trace = paths.root / "trace.sqlite3"
     provenance_root = paths.root / "provenance"
+    paths.root.chmod(0o700)
     paths.config_directory.mkdir(mode=0o700, exist_ok=True)
+    paths.config_directory.chmod(0o700)
     generic_model_config.replace(paths.model_config)
+    paths.model_config.chmod(0o600)
     if generic_trace.exists():
         generic_trace.replace(paths.trace_database)
+        paths.trace_database.chmod(0o600)
+    if paths.business_database.exists():
+        paths.business_database.chmod(0o600)
+    if paths.artifacts.is_dir():
+        paths.artifacts.chmod(0o700)
+        for root, dirs, files in os.walk(paths.artifacts):
+            for d in dirs:
+                (Path(root) / d).chmod(0o700)
+            for f in files:
+                (Path(root) / f).chmod(0o600)
     if provenance_root.is_dir():
         for item in sorted(provenance_root.iterdir()):
             if item.is_file():
