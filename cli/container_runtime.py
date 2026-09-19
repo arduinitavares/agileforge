@@ -41,6 +41,7 @@ from cli.production_state import (
     finalize_restored_production_state,
     initialize_production_state,
     load_production_state,
+    prepare_profile_parent,
     production_state_paths,
 )
 from cli.repository_transfer import (
@@ -765,6 +766,12 @@ def restore_production_state(
         if (bundle / "trace.sqlite3").is_file():
             verify_current_trace_schema(bundle / "trace.sqlite3")
         source_state = _load_restored_provenance(bundle)
+        owner_uid = (
+            _effective_uid()
+            if expected_owner_uid is None
+            else expected_owner_uid
+        )
+        prepare_profile_parent(profile_root.parent, expected_owner_uid=owner_uid)
         restored_manifest = restore_payload(bundle, profile_root)
         if restored_manifest != transfer_manifest:
             message = "restored transfer manifest changed during publication"
