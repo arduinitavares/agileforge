@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -59,6 +60,7 @@ _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_SHARING_VIOLATION = 32
+_SQLITE_HEADER_MIN_SIZE: int = 28
 
 
 class _OVERLAPPED(ctypes.Structure):
@@ -209,6 +211,119 @@ def verify_database_quiescence(database_path: Path) -> None:
             connection.close()
 
 
+@dataclass(frozen=True)
+class _DatabaseSnapshot:
+    sha256: str
+    size: int
+    header: bytes
+    change_counter: int
+
+
+def _read_sqlite_header(path: Path) -> bytes:
+    """Read the first 100 bytes containing SQLite database header."""
+    with path.open("rb") as handle:
+        return handle.read(100)
+
+
+def _take_database_snapshot(path: Path) -> _DatabaseSnapshot:
+    """Capture snapshot fingerprint and change counter for an SQLite database."""
+    header = _read_sqlite_header(path)
+    change_counter = (
+        int.from_bytes(header[24:28], byteorder="big")
+        if len(header) >= _SQLITE_HEADER_MIN_SIZE
+        else 0
+    )
+    return _DatabaseSnapshot(
+        sha256=_sha256_file(path),
+        size=path.stat().st_size,
+        header=header,
+        change_counter=change_counter,
+    )
+
+
+def _verify_source_database_unchanged(
+    path: Path, expected: _DatabaseSnapshot
+) -> None:
+    """Verify that source database has not been mutated or acquired active WAL/SHM."""
+    wal_path = path.with_name(path.name + "-wal")
+    shm_path = path.with_name(path.name + "-shm")
+    if wal_path.exists():
+        raise TransferError(
+            f"database {path.name} active session appeared during capture: "
+            f"{wal_path.name}"
+        )
+    if shm_path.exists():
+        raise TransferError(
+            f"database {path.name} active session appeared during capture: "
+            f"{shm_path.name}"
+        )
+    current = _take_database_snapshot(path)
+    if (
+        current.sha256 != expected.sha256
+        or current.change_counter != expected.change_counter
+        or current.header != expected.header
+        or current.size != expected.size
+    ):
+        raise TransferError(
+            f"source database {path.name} was modified during capture: "
+            "paired snapshot is inconsistent"
+        )
+
+
+@contextmanager
+def win32_database_exclusion_fence(
+    database_paths: Sequence[Path],
+) -> Iterator[dict[Path, _DatabaseSnapshot]]:
+    """Hold Win32 shared-read locks on databases throughout capture."""
+    kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None  # type: ignore[attr-defined]
+    handles: list[int] = []
+    initial_snapshots: dict[Path, _DatabaseSnapshot] = {}
+    try:
+        for db_path in database_paths:
+            wal_path = db_path.with_name(db_path.name + "-wal")
+            shm_path = db_path.with_name(db_path.name + "-shm")
+            if wal_path.exists():
+                raise TransferError(
+                    f"database {db_path.name} is active (WAL present: {wal_path.name})"
+                )
+            if shm_path.exists():
+                raise TransferError(
+                    f"database {db_path.name} is active (SHM present: {shm_path.name})"
+                )
+            if os.name == "nt" and kernel32 is not None:
+                handle = kernel32.CreateFileW(
+                    str(db_path),
+                    _GENERIC_READ,
+                    _FILE_SHARE_READ,
+                    None,
+                    _OPEN_EXISTING,
+                    _FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+                if handle == -1 or handle == ctypes.c_void_p(-1).value:
+                    error_code = ctypes.GetLastError()
+                    if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
+                        raise TransferError(
+                            f"database {db_path.name} is locked by an active process "
+                            "or writer"
+                        )
+                    raise TransferError(
+                        f"database {db_path.name} lock failed with WinError "
+                        f"{error_code}"
+                    )
+                handles.append(handle)
+            initial_snapshots[db_path] = _take_database_snapshot(db_path)
+
+        yield initial_snapshots
+
+        for db_path in database_paths:
+            _verify_source_database_unchanged(db_path, initial_snapshots[db_path])
+    finally:
+        if os.name == "nt" and kernel32 is not None:
+            for h in handles:
+                kernel32.CloseHandle(h)
+
+
 def export_windows_profile(
     *,
     profile_root: Path,
@@ -288,56 +403,78 @@ def export_windows_profile(
         if trace_db.is_file():
             verify_database_quiescence(trace_db)
 
-        if repositories is not None and len(repositories) > 0:
-            repo_candidates = tuple(
-                Path(r).expanduser().absolute() for r in repositories
-            )
-        else:
-            repo_candidates = discover_registered_repositories(business_db)
-        expanded_repositories = _expand_repository_groups(repo_candidates)
-
-        staging: Path | None = Path(
-            tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=parent)
+        initial_trace_exists = trace_db.is_file()
+        source_databases: tuple[Path, ...] = (
+            (business_db, trace_db) if initial_trace_exists else (business_db,)
         )
-        try:
-            _write_unpublished_marker(staging, target.name)
-            _backup_database(business_db, staging / "business.sqlite3")
-            if trace_db.is_file():
-                _backup_database(trace_db, staging / "trace.sqlite3")
-            _copy_tree(artifacts, staging / "artifacts", allow_symlinks=False)
-            _copy_regular(resolved_model_config, staging / "model-config")
 
-            provenance_root = staging / "provenance"
-            provenance_root.mkdir(mode=0o700)
-            _copy_regular(profile_json, provenance_root / "profile.json")
+        with win32_database_exclusion_fence(source_databases) as initial_snapshots:
+            if repositories is not None and len(repositories) > 0:
+                repo_candidates = tuple(
+                    Path(r).expanduser().absolute() for r in repositories
+                )
+            else:
+                repo_candidates = discover_registered_repositories(business_db)
+            expanded_repositories = _expand_repository_groups(repo_candidates)
 
-            repository_manifest = _capture_repositories(expanded_repositories, staging)
-            databases, observed_links = _database_manifest(staging)
-            manifest = TransferManifest(
-                format=_FORMAT,
-                created_at=datetime.now(tz=UTC).isoformat(),
-                files=_file_inventory(staging),
-                databases=databases,
-                repositories=repository_manifest,
-                model_config_sha256=_sha256_file(staging / "model-config"),
-                observed_links=observed_links,
+            staging: Path | None = Path(
+                tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=parent)
             )
-            _write_manifest(staging, manifest)
-            _verify_payload(staging, manifest)
-            win32_fsync_directory(staging)
-            staging.rename(target)
-            staging = None
-            win32_fsync_directory(parent)
-            marker = target / _UNPUBLISHED_NAME
-            if marker.read_text(encoding="utf-8") != target.name:
-                raise TransferError("transfer publication marker does not match target")
-            marker.unlink()
-            win32_fsync_directory(target)
-            win32_fsync_directory(parent)
-            verify_backup(target)
-        finally:
-            if staging is not None and staging.exists():
-                shutil.rmtree(staging)
+            try:
+                _write_unpublished_marker(staging, target.name)
+                _backup_database(business_db, staging / "business.sqlite3")
+                if initial_trace_exists:
+                    _backup_database(trace_db, staging / "trace.sqlite3")
+                _copy_tree(artifacts, staging / "artifacts", allow_symlinks=False)
+                _copy_regular(resolved_model_config, staging / "model-config")
+
+                provenance_root = staging / "provenance"
+                provenance_root.mkdir(mode=0o700)
+                _copy_regular(profile_json, provenance_root / "profile.json")
+
+                repository_manifest = _capture_repositories(
+                    expanded_repositories, staging
+                )
+                databases, observed_links = _database_manifest(staging)
+                manifest = TransferManifest(
+                    format=_FORMAT,
+                    created_at=datetime.now(tz=UTC).isoformat(),
+                    files=_file_inventory(staging),
+                    databases=databases,
+                    repositories=repository_manifest,
+                    model_config_sha256=_sha256_file(staging / "model-config"),
+                    observed_links=observed_links,
+                )
+                _write_manifest(staging, manifest)
+                _verify_payload(staging, manifest)
+
+                for s_db in source_databases:
+                    _verify_source_database_unchanged(s_db, initial_snapshots[s_db])
+                if (
+                    not initial_trace_exists
+                    and (profile_root / "adk-trace.sqlite3").is_file()
+                ):
+                    raise TransferError(
+                        "database adk-trace.sqlite3 was created during capture: "
+                        "paired snapshot is inconsistent"
+                    )
+
+                win32_fsync_directory(staging)
+                staging.rename(target)
+                staging = None
+                win32_fsync_directory(parent)
+                marker = target / _UNPUBLISHED_NAME
+                if marker.read_text(encoding="utf-8") != target.name:
+                    raise TransferError(
+                        "transfer publication marker does not match target"
+                    )
+                marker.unlink()
+                win32_fsync_directory(target)
+                win32_fsync_directory(parent)
+                verify_backup(target)
+            finally:
+                if staging is not None and staging.exists():
+                    shutil.rmtree(staging)
 
     return target
 
