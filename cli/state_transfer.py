@@ -49,6 +49,7 @@ _ADMIN_LINK_MIN_PARTS = 4
 _REPOSITORY_PATH_MIN_PARTS = 2
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
 _BUSINESS_DATABASE_ENV = "AGILEFORGE_DB_URL"
 _LAUNCHER_CHILD_ENV = "AGILEFORGE_LAUNCHER_CHILD"
 _APPROVED_CORE_KEYS = frozenset(
@@ -689,7 +690,7 @@ def _sha256_bytes(content: bytes) -> str:
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW
+    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)
@@ -709,7 +710,7 @@ def _copy_regular(source: Path, destination: Path) -> None:
         raise TransferError(f"source changed from a regular file: {source}")
     _owned(source_metadata, label="transfer source file")
     _reject_privileged_mode(source_metadata, label="transfer source file")
-    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW
+    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY
     source_fd = os.open(source, flags)
     try:
         opened = os.fstat(source_fd)
@@ -720,7 +721,7 @@ def _copy_regular(source: Path, destination: Path) -> None:
             raise TransferError(f"source changed during transfer: {source}")
         destination_fd = os.open(
             destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_BINARY,
             stat.S_IMODE(opened.st_mode),
         )
         try:
@@ -843,7 +844,12 @@ def _backup_database(source: Path, destination: Path) -> None:
     finally:
         destination_connection.close()
         source_connection.close()
-    flags = (os.O_RDWR if os.name == "nt" else os.O_RDONLY) | _O_CLOEXEC | _O_NOFOLLOW
+    flags = (
+        (os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+        | _O_CLOEXEC
+        | _O_NOFOLLOW
+        | _O_BINARY
+    )
     descriptor = os.open(destination, flags)
     try:
         os.fsync(descriptor)
@@ -1378,7 +1384,7 @@ def _write_unpublished_marker(root: Path, target_name: str) -> None:
     marker = root / _UNPUBLISHED_NAME
     descriptor = os.open(
         marker,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_BINARY,
         0o600,
     )
     try:
@@ -1780,7 +1786,7 @@ def install_approved_git_config(  # noqa: C901
         target = main.worktree / ".git" / "config"
         descriptor = os.open(
             target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY,
             0o600,
         )
         try:
