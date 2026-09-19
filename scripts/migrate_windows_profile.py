@@ -644,7 +644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             destination=args.destination,
             repositories=args.repository,
             model_config=args.model_config,
-            state_only=bool(args.state_only),
+            state_only=args.state_only,
         )
     except (FenceError, TransferError, OSError, ValueError) as error:
         if json_output:

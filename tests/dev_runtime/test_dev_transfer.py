@@ -150,10 +150,28 @@ def test_restored_profile_rejects_missing_relocation_record(
         load_profile(transfer_checkout, "restored")
 
 
+def test_backup_development_profile_state_only(
+    transfer_checkout: Path,
+    development_bundle: Path,
+    tmp_path: Path,
+) -> None:
+    """State-only backup produces a verified bundle omitting repositories."""
+    restore_development_profile(transfer_checkout, "source", development_bundle)
+    result = dev_transfer.backup_development_profile(
+        transfer_checkout,
+        "source",
+        tmp_path / "state-only-bundle",
+        state_only=True,
+    )
+    manifest = dev_transfer.verify_backup(result)
+    assert manifest.repositories == ()
+
+
 @pytest.mark.parametrize(
     "argv",
     [
         ["backup", "--profile", "source", "--destination", "/backup"],
+        ["backup", "--profile", "source", "--destination", "/backup", "--state-only"],
         ["verify-backup", "--bundle", "/backup"],
         ["restore", "--profile", "target", "--bundle", "/backup"],
     ],

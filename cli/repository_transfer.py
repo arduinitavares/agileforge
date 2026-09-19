@@ -321,13 +321,14 @@ def write_relocation_record(
                 if str(PureWindowsPath(candidate_source)) == normalized_source:
                     restored_path = candidate_worktree
                     break
-        if restored_path is None:
-            if manifest.repositories:
-                raise RepositoryTransferError(
-                    "active repository has no restored payload mapping"
-                )
-            continue
-        relocations.append(RepositoryRelocation(project_id, source_path, restored_path))
+        if restored_path is None and manifest.repositories:
+            raise RepositoryTransferError(
+                "active repository has no restored payload mapping"
+            )
+        if restored_path is not None:
+            relocations.append(
+                RepositoryRelocation(project_id, source_path, restored_path)
+            )
     document = {
         "format": _RELOCATION_FORMAT,
         "repositories": [item.to_dict() for item in relocations],

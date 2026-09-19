@@ -570,3 +570,116 @@ def test_export_windows_profile_handles_long_paths_and_readonly_files(
         assert len(manifest.files) > 0
     finally:
         repo.close()
+
+
+def test_export_windows_profile_state_only(tmp_path: Path) -> None:
+    """State-only export produces a bundle with empty repositories list."""
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-state-only",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    dest = tmp_path / "backup_bundle"
+    exported = export_windows_profile(
+        profile_root=profile_root,
+        destination=dest,
+        model_config=model_config,
+        state_only=True,
+    )
+    assert exported.exists()
+    manifest = verify_backup(exported)
+    assert manifest.repositories == ()
+
+
+def test_export_windows_profile_state_only_rejects_repositories(tmp_path: Path) -> None:
+    """State-only export rejects explicit repositories."""
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-state-only",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    dest = tmp_path / "backup_bundle"
+    with pytest.raises(
+        TransferError, match="state-only backup must not include repositories"
+    ):
+        export_windows_profile(
+            profile_root=profile_root,
+            destination=dest,
+            repositories=[tmp_path / "some_repo"],
+            model_config=model_config,
+            state_only=True,
+        )
+
+
+def test_migrate_windows_profile_cli_state_only(tmp_path: Path) -> None:
+    """CLI --state-only flag exports bundle with empty repositories."""
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-state-only",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    dest = tmp_path / "cli_bundle"
+    code = mwp.main(
+        [
+            "--profile-root",
+            str(profile_root),
+            "--destination",
+            str(dest),
+            "--model-config",
+            str(model_config),
+            "--state-only",
+            "--json",
+        ]
+    )
+    assert code == 0
+    assert dest.exists()
+    manifest = verify_backup(dest)
+    assert manifest.repositories == ()
