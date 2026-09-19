@@ -322,9 +322,11 @@ def write_relocation_record(
                     restored_path = candidate_worktree
                     break
         if restored_path is None:
-            raise RepositoryTransferError(
-                "active repository has no restored payload mapping"
-            )
+            if manifest.repositories:
+                raise RepositoryTransferError(
+                    "active repository has no restored payload mapping"
+                )
+            continue
         relocations.append(RepositoryRelocation(project_id, source_path, restored_path))
     document = {
         "format": _RELOCATION_FORMAT,

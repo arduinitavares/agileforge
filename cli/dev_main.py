@@ -366,6 +366,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_profile_argument(backup_parser)
     backup_parser.add_argument("--destination", type=Path, required=True)
     backup_parser.add_argument("--repository", type=Path, action="append")
+    backup_parser.add_argument(
+        "--state-only",
+        action="store_true",
+        help="Export profile state only, omitting registered and explicit repositories",
+    )
     backup_parser.add_argument("--json", action="store_true")
     verify_parser = commands.add_parser(
         "verify-backup", help="Verify a transfer bundle"
@@ -1297,6 +1302,7 @@ def _run_transfer(arguments: argparse.Namespace, *, checkout_root: Path) -> int:
                     if arguments.repository is not None
                     else None
                 ),
+                state_only=bool(arguments.state_only),
             )
             payload = {"status": "backed_up", "destination": str(destination)}
         elif arguments.command == "restore":
