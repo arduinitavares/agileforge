@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import configparser
+import ctypes
 import hashlib
 import json
 import os
@@ -21,7 +22,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import create_engine
@@ -332,7 +333,10 @@ def _parse_repositories(payload: object) -> tuple[dict[str, object], ...]:
         source_path = repository_record.get("source_path")
         if (
             not isinstance(source_path, str)
-            or not Path(source_path).is_absolute()
+            or not (
+                Path(source_path).is_absolute()
+                or PureWindowsPath(source_path).is_absolute()
+            )
             or "\x00" in source_path
         ):
             raise TransferError("transfer manifest repository source is invalid")
@@ -839,7 +843,8 @@ def _backup_database(source: Path, destination: Path) -> None:
     finally:
         destination_connection.close()
         source_connection.close()
-    descriptor = os.open(destination, os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW)
+    flags = (os.O_RDWR if os.name == "nt" else os.O_RDONLY) | _O_CLOEXEC | _O_NOFOLLOW
+    descriptor = os.open(destination, flags)
     try:
         os.fsync(descriptor)
     finally:
@@ -1338,7 +1343,30 @@ def _write_manifest(root: Path, manifest: TransferManifest) -> None:
         raise
 
 
+def _win32_fsync_directory(path: Path) -> None:
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.CreateFileW(
+        str(path),
+        0xC0000000,  # GENERIC_READ | GENERIC_WRITE
+        7,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    if handle == -1 or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError()
+    try:
+        if not kernel32.FlushFileBuffers(handle):
+            raise ctypes.WinError()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        _win32_fsync_directory(path)
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
