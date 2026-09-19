@@ -18,7 +18,7 @@ import stat
 import struct
 import tempfile
 from collections import Counter
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -685,11 +685,51 @@ def _publication_target(destination: Path) -> Path:
     raise TransferError(f"transfer destination already exists: {target}")
 
 
+_WIN_EXTENDED_PREFIX = "\\\\?\\"
+
+
+def _win_extended_str(path: Path | str) -> str:
+    if os.name != "nt":
+        return str(path)
+    raw = str(path)
+    if raw.startswith(_WIN_EXTENDED_PREFIX):
+        return raw
+    resolved = str(Path(path).resolve())
+    if resolved.startswith(_WIN_EXTENDED_PREFIX):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return _WIN_EXTENDED_PREFIX + "UNC\\" + resolved.lstrip("\\")
+    return _WIN_EXTENDED_PREFIX + resolved
+
+
+def _win_extended(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    return Path(_win_extended_str(path))
+
+
+def _safe_rmtree(path: Path) -> None:
+    target = _win_extended(path)
+    if not target.exists():
+        return
+
+    def _unlock_and_remove(func: object, p: str, _: object) -> None:
+        with suppress(OSError):
+            Path(p).chmod(stat.S_IWRITE)
+            func(p)  # type: ignore[operator]
+
+    try:
+        shutil.rmtree(target, onexc=_unlock_and_remove)
+    except TypeError:
+        shutil.rmtree(target, onerror=_unlock_and_remove)
+
+
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
+    path = _win_extended(path)
     digest = hashlib.sha256()
     flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY
     descriptor = os.open(path, flags)
@@ -706,6 +746,8 @@ def _sha256_file(path: Path) -> str:
 
 
 def _copy_regular(source: Path, destination: Path) -> None:
+    source = _win_extended(source)
+    destination = _win_extended(destination)
     source_metadata = source.lstat()
     if not stat.S_ISREG(source_metadata.st_mode):
         raise TransferError(f"source changed from a regular file: {source}")
@@ -785,6 +827,8 @@ def _copy_tree(
     allow_symlinks: bool,
     admin: bool = False,
 ) -> list[str]:
+    source = _win_extended(source)
+    destination = _win_extended(destination)
     metadata = source.lstat()
     _owned(metadata, label="transfer source directory")
     _reject_privileged_mode(metadata, label="transfer source directory")
@@ -1122,6 +1166,7 @@ def _entry_record(root: Path, path: Path, relative: PurePosixPath) -> FileRecord
 
 
 def _file_inventory(root: Path) -> tuple[FileRecord, ...]:
+    root = _win_extended(root)
     records: list[FileRecord] = []
 
     def visit(directory: Path, prefix: Path) -> None:
@@ -1697,8 +1742,8 @@ def backup_state(
             _fsync_directory(target.parent)
             verify_backup(target)
         finally:
-            if staging is not None and staging.exists():
-                shutil.rmtree(staging)
+            if staging is not None:
+                _safe_rmtree(staging)
     return target
 
 
@@ -1756,8 +1801,8 @@ def restore_payload(bundle: Path, destination: Path) -> TransferManifest:
         staging.rename(target)
         staging = None
     finally:
-        if staging is not None and staging.exists():
-            shutil.rmtree(staging)
+        if staging is not None:
+            _safe_rmtree(staging)
     return manifest
 
 

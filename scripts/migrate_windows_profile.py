@@ -10,7 +10,6 @@ import ctypes
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -32,8 +31,10 @@ from cli.state_transfer import (
     _database_manifest,
     _expand_repository_groups,
     _file_inventory,
+    _safe_rmtree,
     _sha256_file,
     _verify_payload,
+    _win_extended_str,
     _write_manifest,
     _write_unpublished_marker,
     discover_registered_repositories,
@@ -139,7 +140,7 @@ def win32_fsync_directory(path: Path) -> None:
         return
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     handle = kernel32.CreateFileW(
-        str(path),
+        _win_extended_str(path),
         _GENERIC_READ | _GENERIC_WRITE,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
         None,
@@ -575,10 +576,10 @@ def export_windows_profile(
                 verify_backup(target)
                 target_published = True
             finally:
-                if staging is not None and staging.exists():
-                    shutil.rmtree(staging)
-                if not target_published and target.exists():
-                    shutil.rmtree(target)
+                if staging is not None:
+                    _safe_rmtree(staging)
+                if not target_published:
+                    _safe_rmtree(target)
 
     return target
 

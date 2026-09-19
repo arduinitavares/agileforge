@@ -9,13 +9,14 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from typing import TYPE_CHECKING
 
 import pytest
 from git import Repo
 
 import scripts.migrate_windows_profile as mwp
-from cli.state_transfer import TransferError, verify_backup
+from cli.state_transfer import TransferError, _win_extended, verify_backup
 from scripts.migrate_windows_profile import (
     _LOCK_FILE_NAME,
     export_windows_profile,
@@ -27,6 +28,8 @@ from utils.runtime_fence import FenceError
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_WIN_MAX_PATH = 260
 
 pytestmark = pytest.mark.skipif(
     os.name != "nt",
@@ -510,3 +513,60 @@ def test_export_windows_profile_cleans_up_destination_on_verification_failure(
         )
 
     assert not dest.exists()
+
+
+def test_export_windows_profile_handles_long_paths_and_readonly_files(
+    tmp_path: Path,
+) -> None:
+    """Exporter handles paths > 260 characters and read-only Git repository files."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    repo = Repo.init(repo_dir)
+    (repo_dir / "README.md").write_text("initial", encoding="utf-8")
+    repo.index.add(["README.md"])
+    repo.index.commit("initial")
+
+    deep = repo_dir
+    for i in range(12):
+        deep = deep / f"long_path_segment_{i}"
+    deep = _win_extended(deep)
+    deep.mkdir(parents=True)
+    deep_file = deep / "deep_file.txt"
+    deep_file.write_text("deep content", encoding="utf-8")
+    deep_file.chmod(stat.S_IREAD)
+    assert len(str(deep_file)) > _WIN_MAX_PATH
+
+    profile_root = tmp_path / "dev_profile"
+    profile_root.mkdir()
+    artifacts = profile_root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.txt").write_text("ok", encoding="utf-8")
+
+    business_db = profile_root / "business.sqlite3"
+    _init_sqlite_db(business_db)
+
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("version: 1\n", encoding="utf-8")
+    model_hash = hashlib.sha256(model_config.read_bytes()).hexdigest()
+
+    profile_json = profile_root / "profile.json"
+    metadata = {
+        "name": "synth-longpath",
+        "model_config_path": str(model_config),
+        "model_config_sha256": model_hash,
+    }
+    profile_json.write_text(json.dumps(metadata), encoding="utf-8")
+
+    dest = tmp_path / "backup_bundle"
+    try:
+        exported = export_windows_profile(
+            profile_root=profile_root,
+            destination=dest,
+            repositories=[repo_dir],
+            model_config=model_config,
+        )
+        assert exported.exists()
+        manifest = verify_backup(exported)
+        assert len(manifest.files) > 0
+    finally:
+        repo.close()
