@@ -326,6 +326,25 @@ Copy the bundle and the target clone into the `workspace` volume as
 `10001:10001` before the restore. Use a throwaway helper container for the copy;
 the app itself never mounts host paths.
 
+Docker gives a new volume the owner of the image directory it is first mounted
+on. The production image owns `/workspace` and `/var/lib/agileforge` as
+`10001:10001`; a helper image such as `alpine` has neither, so a volume the
+helper creates is `root:root`, and the exclusive runtime fence then refuses the
+restore with `runtime fence root is not owned by this user: /workspace`. After
+copying, set the owner of the mount points themselves, not only the copied
+trees, and confirm both before restoring:
+
+```sh
+docker run --rm \
+  --mount "type=volume,source=$project_name-production-state,target=/var/lib/agileforge" \
+  --mount "type=volume,source=$project_name-workspace,target=/workspace" \
+  alpine sh -c 'chown 10001:10001 /var/lib/agileforge /workspace \
+    && ls -ldn /var/lib/agileforge /workspace'
+```
+
+The fences are taken before the bundle is read, so a restore refused this way
+writes nothing except the lock inode `.agileforge-runtime.lock`, which stays.
+
 ```sh
 docker compose run --rm production restore --profile default \
   --bundle /workspace/transfer/"$bundle_name" --from-development \
