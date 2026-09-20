@@ -18,6 +18,7 @@ import stat
 import struct
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1691,7 +1692,10 @@ def _current_trace_schema_shape() -> tuple[tuple[str, str, str, str | None], ...
 
     with tempfile.TemporaryDirectory(prefix="agileforge-trace-schema-") as directory:
         database = Path(directory) / "trace.sqlite3"
-        asyncio.run(initialize(database))
+        # The gate is synchronous but also runs under the dashboard's live event
+        # loop, so the probe gets a private loop on a worker thread.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(asyncio.run, initialize(database)).result()
         return _trace_schema_shape(database)
 
 

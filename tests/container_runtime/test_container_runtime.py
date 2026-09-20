@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 from git import Actor, Repo
+from google.adk.sessions import DatabaseSessionService
 
 from cli import container_runtime
 from cli.container_runtime import (
@@ -45,6 +46,7 @@ from cli.state_transfer import (
     StateLayout,
     TransferError,
     TransferManifest,
+    _current_trace_schema_shape,
     _file_inventory,
     _write_manifest,
     backup_state,
@@ -651,6 +653,46 @@ def test_backup_restore_preserves_state_identity_and_absent_trace(
         ).state_id
         == source.state_id
     )
+
+
+async def _create_adk_trace_database(database: Path) -> None:
+    service = DatabaseSessionService(
+        db_url=f"sqlite+aiosqlite:///{database.as_posix()}"
+    )
+    try:
+        await service.create_session(
+            app_name="agileforge-test",
+            user_id="dashboard-probe",
+            session_id="dashboard-probe",
+            state={},
+        )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_load_validates_trace_store_inside_running_loop(tmp_path: Path) -> None:
+    """The dashboard lifespan revalidates an initialized profile once traces exist."""
+    build = _build()
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("models:\n  default: test/model\n", encoding="utf-8")
+    model_config.chmod(0o600)
+    state = initialize_production_state(
+        tmp_path / "profiles" / "default",
+        build=build,
+        model_config_source=model_config,
+        expected_owner_uid=_current_uid(),
+    )
+    await _create_adk_trace_database(state.trace_database)
+    _current_trace_schema_shape.cache_clear()
+
+    loaded = load_production_state(
+        state.profile_root,
+        build=build,
+        expected_owner_uid=_current_uid(),
+    )
+
+    assert loaded.state_id == state.state_id
 
 
 def test_restore_rejects_unknown_schema_before_destination_publication(
