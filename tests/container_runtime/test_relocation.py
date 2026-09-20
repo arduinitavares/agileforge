@@ -551,7 +551,7 @@ def _state_only_payload(
         created_at=datetime.now(tz=UTC).isoformat(),
         files=(),
         databases={},
-        repositories=[],
+        repositories=(),
         model_config_sha256="",
         observed_links=(),
     )
@@ -645,14 +645,14 @@ def test_relocation_targets_reject_conflict_with_bundled_repository(
         created_at=manifest.created_at,
         files=(),
         databases={},
-        repositories=[
+        repositories=(
             {
                 "index": 0,
                 "source_path": "/old/first",
                 "components": [{"kind": "worktree", "payload": "repositories/0000"}],
                 "identity": {"common_git_dir": "/old/first/.git"},
-            }
-        ],
+            },
+        ),
         model_config_sha256="",
         observed_links=(),
     )
