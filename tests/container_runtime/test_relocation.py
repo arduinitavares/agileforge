@@ -25,6 +25,7 @@ from cli.repository_transfer import (
     _write_atomic,
     finalize_restored_repositories,
     pending_relocations,
+    validate_relocation_targets,
     write_relocation_record,
 )
 from cli.state_transfer import (
@@ -510,3 +511,171 @@ def test_write_relocation_record_unmapped_with_repositories(
         match="active repository has no restored payload mapping",
     ):
         write_relocation_record(manifest, payload_root, profile_root)
+
+
+def _state_only_payload(
+    tmp_path: Path,
+    bindings: dict[int, str],
+) -> tuple[Path, Path, TransferManifest]:
+    """Write a repository-less payload whose database has the given bindings."""
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir()
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    connection = sqlite3.connect(payload_root / "business.sqlite3")
+    connection.execute(
+        "CREATE TABLE projects ("
+        "project_id INTEGER PRIMARY KEY, "
+        "active_repository_binding_id INTEGER"
+        ")"
+    )
+    connection.execute(
+        "CREATE TABLE repository_bindings ("
+        "repository_binding_id INTEGER PRIMARY KEY, "
+        "worktree_path TEXT"
+        ")"
+    )
+    for offset, (project_id, worktree_path) in enumerate(sorted(bindings.items())):
+        binding_id = 10 + offset
+        connection.execute(
+            "INSERT INTO projects VALUES (?, ?)", (project_id, binding_id)
+        )
+        connection.execute(
+            "INSERT INTO repository_bindings VALUES (?, ?)",
+            (binding_id, worktree_path),
+        )
+    connection.commit()
+    connection.close()
+    manifest = TransferManifest(
+        format="agileforge.transfer-manifest.v1",
+        created_at=datetime.now(tz=UTC).isoformat(),
+        files=(),
+        databases={},
+        repositories=[],
+        model_config_sha256="",
+        observed_links=(),
+    )
+    return payload_root, profile_root, manifest
+
+
+def test_relocation_targets_map_every_active_binding(tmp_path: Path) -> None:
+    """Operator-supplied targets become guarded relocations for state-only payloads."""
+    windows_source = r"C:\Users\atavares\.codex\worktrees\054b\backend"
+    payload_root, profile_root, manifest = _state_only_payload(
+        tmp_path, {1: windows_source}
+    )
+    targets = {1: "/workspace/repos/targets/backend"}
+
+    validate_relocation_targets(payload_root / "business.sqlite3", manifest, targets)
+    write_relocation_record(
+        manifest, payload_root, profile_root, relocation_targets=targets
+    )
+
+    relocations = _read_relocation_record(profile_root)
+    assert len(relocations) == 1
+    assert relocations[0].project_id == 1
+    assert relocations[0].source_path == windows_source
+    assert relocations[0].restored_path == "/workspace/repos/targets/backend"
+    pending = pending_relocations(payload_root / "business.sqlite3", profile_root)
+    assert pending == relocations
+
+
+def test_relocation_targets_require_every_active_binding(tmp_path: Path) -> None:
+    """Strict targets refuse to leave any active binding unmapped."""
+    payload_root, profile_root, manifest = _state_only_payload(
+        tmp_path, {1: "/old/first", 2: "/old/second"}
+    )
+    targets = {1: "/workspace/repos/targets/first"}
+
+    with pytest.raises(
+        RepositoryTransferError, match="active repository has no relocation target"
+    ):
+        validate_relocation_targets(
+            payload_root / "business.sqlite3", manifest, targets
+        )
+    with pytest.raises(
+        RepositoryTransferError, match="active repository has no relocation target"
+    ):
+        write_relocation_record(
+            manifest, payload_root, profile_root, relocation_targets=targets
+        )
+    assert not (profile_root / _RELOCATION_NAME).exists()
+
+
+def test_relocation_targets_reject_unknown_project(tmp_path: Path) -> None:
+    """A target for a project without an active binding is an operator error."""
+    payload_root, _profile_root, manifest = _state_only_payload(
+        tmp_path, {1: "/old/first"}
+    )
+
+    with pytest.raises(
+        RepositoryTransferError,
+        match="relocation target names no active repository",
+    ):
+        validate_relocation_targets(
+            payload_root / "business.sqlite3",
+            manifest,
+            {1: "/workspace/repos/targets/first", 7: "/workspace/repos/targets/x"},
+        )
+
+
+def test_relocation_targets_reject_relative_path(tmp_path: Path) -> None:
+    """Relocation targets must be absolute container paths."""
+    payload_root, _profile_root, manifest = _state_only_payload(
+        tmp_path, {1: "/old/first"}
+    )
+
+    with pytest.raises(
+        RepositoryTransferError, match="relocation target path must be absolute"
+    ):
+        validate_relocation_targets(
+            payload_root / "business.sqlite3", manifest, {1: "repos/targets/first"}
+        )
+
+
+def test_relocation_targets_reject_conflict_with_bundled_repository(
+    tmp_path: Path,
+) -> None:
+    """A bundled repository keeps its restored mapping; a target may not override it."""
+    payload_root, _profile_root, manifest = _state_only_payload(
+        tmp_path, {1: "/old/first"}
+    )
+    bundled = TransferManifest(
+        format=manifest.format,
+        created_at=manifest.created_at,
+        files=(),
+        databases={},
+        repositories=[
+            {
+                "index": 0,
+                "source_path": "/old/first",
+                "components": [{"kind": "worktree", "payload": "repositories/0000"}],
+                "identity": {"common_git_dir": "/old/first/.git"},
+            }
+        ],
+        model_config_sha256="",
+        observed_links=(),
+    )
+
+    with pytest.raises(
+        RepositoryTransferError,
+        match="relocation target conflicts with restored payload mapping",
+    ):
+        validate_relocation_targets(
+            payload_root / "business.sqlite3",
+            bundled,
+            {1: "/workspace/repos/targets/first"},
+        )
+
+
+def test_relocation_targets_none_keeps_lenient_state_only_record(
+    tmp_path: Path,
+) -> None:
+    """Without targets a repository-less payload still writes an empty record."""
+    payload_root, profile_root, manifest = _state_only_payload(
+        tmp_path, {1: "/old/first"}
+    )
+
+    write_relocation_record(manifest, payload_root, profile_root)
+
+    assert _read_relocation_record(profile_root) == ()
