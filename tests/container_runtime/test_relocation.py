@@ -448,7 +448,7 @@ def test_write_relocation_record_empty_manifest_repositories(tmp_path: Path) -> 
         created_at=datetime.now(tz=UTC).isoformat(),
         files=(),
         databases={},
-        repositories=[],
+        repositories=(),
         model_config_sha256="",
         observed_links=(),
     )
@@ -493,14 +493,14 @@ def test_write_relocation_record_unmapped_with_repositories(
         created_at=datetime.now(tz=UTC).isoformat(),
         files=(),
         databases={},
-        repositories=[
+        repositories=(
             {
                 "index": 0,
                 "source_path": "/path/to/other",
                 "components": [{"kind": "worktree", "payload": "repositories/0000"}],
                 "identity": {"common_git_dir": "/path/to/other/.git"},
-            }
-        ],
+            },
+        ),
         model_config_sha256="",
         observed_links=(),
     )
