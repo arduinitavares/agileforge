@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from git import Repo
+from google.adk.sessions import DatabaseSessionService
 from sqlmodel import create_engine
 
 from cli.state_transfer import (
@@ -699,3 +700,32 @@ def test_handmade_trace_schema_is_rejected_by_runtime_gate(
     """A generic SQLite trace table is not a supported current ADK store."""
     with pytest.raises(TransferError, match="unsupported current trace schema"):
         verify_current_trace_schema(layout.trace_database)
+
+
+async def _create_adk_trace_database(database: Path) -> None:
+    service = DatabaseSessionService(
+        db_url=f"sqlite+aiosqlite:///{database.as_posix()}"
+    )
+    try:
+        await service.create_session(
+            app_name="agileforge-test",
+            user_id="running-loop-probe",
+            session_id="running-loop-probe",
+            state={},
+        )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_schema_gate_accepts_current_store_inside_running_loop(
+    tmp_path: Path,
+) -> None:
+    """The dashboard lifespan validates a live trace store under its event loop."""
+    from cli import state_transfer  # noqa: PLC0415
+
+    database = tmp_path / "adk-trace.sqlite3"
+    await _create_adk_trace_database(database)
+    state_transfer._current_trace_schema_shape.cache_clear()
+
+    verify_current_trace_schema(database)
