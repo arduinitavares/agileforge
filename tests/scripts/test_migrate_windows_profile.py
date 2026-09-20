@@ -94,7 +94,7 @@ def test_verify_database_quiescence_locked(tmp_path: Path) -> None:
     db_path = tmp_path / "test.sqlite3"
     _init_sqlite_db(db_path)
 
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32 = mwp._kernel32()
     handle = kernel32.CreateFileW(
         str(db_path),
         0xC0000000,

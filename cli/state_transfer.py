@@ -34,7 +34,7 @@ from utils.runtime_fence import runtime_fence
 from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
 _FORMAT = "agileforge.transfer.v1"
 _MANIFEST_NAME = "manifest.json"
@@ -714,10 +714,10 @@ def _safe_rmtree(path: Path) -> None:
     if not target.exists():
         return
 
-    def _unlock_and_remove(func: object, p: str, _: object) -> None:
+    def _unlock_and_remove(func: Callable[[str], object], p: str, _: object) -> None:
         with suppress(OSError):
             Path(p).chmod(stat.S_IWRITE)
-            func(p)  # type: ignore[operator]
+            func(p)
 
     try:
         shutil.rmtree(target, onexc=_unlock_and_remove)
@@ -1470,7 +1470,20 @@ def _write_manifest(root: Path, manifest: TransferManifest) -> None:
 
 
 def _win32_fsync_directory(path: Path) -> None:
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    loader = getattr(ctypes, "WinDLL", None)
+    if not callable(loader):
+        message = "Win32 kernel32 is unavailable on this platform"
+        raise TransferError(message)
+    kernel32 = loader("kernel32", use_last_error=True)
+
+    def _win_error() -> OSError:
+        reader = getattr(ctypes, "get_last_error", None)
+        code = int(reader()) if callable(reader) else 0
+        factory = getattr(ctypes, "WinError", None)
+        if callable(factory):
+            return cast("OSError", factory(code))
+        return OSError(code, "Win32 call failed")
+
     handle = kernel32.CreateFileW(
         str(path),
         0xC0000000,  # GENERIC_READ | GENERIC_WRITE
@@ -1481,10 +1494,10 @@ def _win32_fsync_directory(path: Path) -> None:
         None,
     )
     if handle == -1 or handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError()
+        raise _win_error()
     try:
         if not kernel32.FlushFileBuffers(handle):
-            raise ctypes.WinError()
+            raise _win_error()
     finally:
         kernel32.CloseHandle(handle)
 

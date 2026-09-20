@@ -17,7 +17,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from cli.state_transfer import (
     _FORMAT,
@@ -43,7 +43,7 @@ from cli.state_transfer import (
 from utils.runtime_fence import FenceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
@@ -64,6 +64,33 @@ _ERROR_SHARING_VIOLATION = 32
 _SQLITE_HEADER_MIN_SIZE: int = 28
 
 
+class _Kernel32(Protocol):
+    """The kernel32 surface this script calls; names resolve at call time."""
+
+    def __getattr__(self, name: str) -> Callable[..., int]: ...
+
+
+def _kernel32() -> _Kernel32:
+    """Load kernel32 through the guarded lookup that type-checks on every OS."""
+    loader = getattr(ctypes, "WinDLL", None)
+    if not callable(loader):
+        raise FenceError("Win32 kernel32 is unavailable on this platform")
+    return cast("_Kernel32", loader("kernel32", use_last_error=True))
+
+
+def _last_error() -> int:
+    reader = getattr(ctypes, "get_last_error", None)
+    return int(reader()) if callable(reader) else 0
+
+
+def _win_error() -> OSError:
+    code = _last_error()
+    factory = getattr(ctypes, "WinError", None)
+    if callable(factory):
+        return cast("OSError", factory(code))
+    return OSError(code, "Win32 call failed")
+
+
 class _OVERLAPPED(ctypes.Structure):
     _fields_ = [
         ("Internal", ctypes.c_void_p),
@@ -79,7 +106,7 @@ def win32_runtime_fence(profile_root: Path) -> Iterator[None]:
     """Hold an exclusive Win32 OS-level lock on .agileforge-runtime.lock."""
     if os.name != "nt":
         raise FenceError("win32_runtime_fence requires Windows")
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     lock_path = profile_root / _LOCK_FILE_NAME
     handle = kernel32.CreateFileW(
         str(lock_path),
@@ -91,7 +118,7 @@ def win32_runtime_fence(profile_root: Path) -> Iterator[None]:
         None,
     )
     if handle == -1 or handle == ctypes.c_void_p(-1).value:
-        error_code = ctypes.GetLastError()
+        error_code = _last_error()
         if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
             raise FenceError(f"runtime fence is busy for maintenance: {profile_root}")
         raise FenceError(
@@ -108,7 +135,7 @@ def win32_runtime_fence(profile_root: Path) -> Iterator[None]:
         ctypes.byref(overlapped),
     )
     if not locked:
-        error_code = ctypes.GetLastError()
+        error_code = _last_error()
         kernel32.CloseHandle(handle)
         if error_code in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
             raise FenceError(f"runtime fence is busy for maintenance: {profile_root}")
@@ -138,7 +165,7 @@ def win32_fsync_directory(path: Path) -> None:
         finally:
             os.close(descriptor)
         return
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     handle = kernel32.CreateFileW(
         _win_extended_str(path),
         _GENERIC_READ | _GENERIC_WRITE,
@@ -149,10 +176,10 @@ def win32_fsync_directory(path: Path) -> None:
         None,
     )
     if handle == -1 or handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError()
+        raise _win_error()
     try:
         if not kernel32.FlushFileBuffers(handle):
-            raise ctypes.WinError()
+            raise _win_error()
     finally:
         kernel32.CloseHandle(handle)
 
@@ -172,7 +199,7 @@ def verify_database_quiescence(database_path: Path) -> None:
             f"database {database_path.name} is active (SHM present: {shm_path.name})"
         )
     if os.name == "nt":
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = _kernel32()
         handle = kernel32.CreateFileW(
             str(database_path),
             _GENERIC_READ | _GENERIC_WRITE,
@@ -183,7 +210,7 @@ def verify_database_quiescence(database_path: Path) -> None:
             None,
         )
         if handle == -1 or handle == ctypes.c_void_p(-1).value:
-            error_code = ctypes.GetLastError()
+            error_code = _last_error()
             if error_code == _ERROR_SHARING_VIOLATION:
                 raise TransferError(
                     f"database {database_path.name} is locked by an active process"
@@ -320,9 +347,7 @@ class DatabaseExclusionFence:
     def __init__(self, database_paths: Sequence[Path]) -> None:
         """Initialize exclusion fence for the provided database paths."""
         self.database_paths: tuple[Path, ...] = tuple(database_paths)
-        self._kernel32 = (
-            ctypes.windll.kernel32 if os.name == "nt" else None  # type: ignore[attr-defined]
-        )
+        self._kernel32: _Kernel32 | None = _kernel32() if os.name == "nt" else None
         self._handles: list[int] = []
         self._monitors: dict[Path, sqlite3.Connection] = {}
         self.initial_snapshots: dict[Path, _DatabaseSnapshot] = {}
@@ -356,7 +381,7 @@ class DatabaseExclusionFence:
                         None,
                     )
                     if handle == -1 or handle == ctypes.c_void_p(-1).value:
-                        error_code = ctypes.GetLastError()
+                        error_code = _last_error()
                         if error_code in (
                             _ERROR_LOCK_VIOLATION,
                             _ERROR_SHARING_VIOLATION,
