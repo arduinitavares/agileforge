@@ -297,6 +297,59 @@ controller --project-name "$project_name" production-maintenance \
   --bundle /workspace/default-transfer --json
 ```
 
+### Promote a development profile into the packaged app
+
+State that was born under `agileforge-dev` carries `provenance/profile.json`,
+not `provenance/runtime.json`. Production `restore` refuses such a bundle unless
+`--from-development` is given, and refuses a production bundle when the flag is
+present. Promotion is a one-way move into a new production profile; the source
+profile and bundle stay untouched.
+
+On the source machine, capture state only. Registered repositories are never
+part of a promotion; the target repository is cloned separately on the Linux
+side.
+
+```sh
+./agileforge-dev backup --profile "$source_profile" --state-only \
+  --destination "$bundle_dir" --json
+./agileforge-dev verify-backup --bundle "$bundle_dir" --json
+```
+
+Every Project with an active repository binding in the bundle needs one
+`--bind-repository PROJECT_ID=PATH` naming the absolute container path where
+its Linux clone will live, normally `/workspace/repos/targets/<name>`. Restore
+refuses a missing target, a target for a Project without an active binding, a
+relative path, a duplicate Project, and a target that also appears as a bundled
+repository. Nothing is written to `/var/lib/agileforge` when validation fails.
+
+Copy the bundle and the target clone into the `workspace` volume as
+`10001:10001` before the restore. Use a throwaway helper container for the copy;
+the app itself never mounts host paths.
+
+```sh
+docker compose run --rm production restore --profile default \
+  --bundle /workspace/transfer/"$bundle_name" --from-development \
+  --bind-repository 1=/workspace/repos/targets/backend --json
+```
+
+The restored profile keeps the source descriptor as
+`config/source-profile.json` and records each target in
+`repository-relocations.json`. While a relocation is pending, `serve` refuses
+to start and `cli` permits only the exact guarded attach for that Project and
+path. Run it once per bound Project, then start the app normally.
+
+```sh
+docker compose run --rm production cli --profile default -- \
+  repository attach --project-id 1 --path /workspace/repos/targets/backend \
+  --idempotency-key "$attach_key" --actor "$operator"
+docker compose up -d
+```
+
+`info --json` stays available while the relocation is pending. Product CLI
+reads such as `cli --profile default -- status --project-id 1` work only after
+the attach. A promotion never advances workflow state; a blocked Project stays
+blocked.
+
 ## Live cutover gates
 
 Native macOS and Windows CI jobs have been retired with maintainer approval.

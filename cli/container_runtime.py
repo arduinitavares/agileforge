@@ -17,7 +17,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 from dotenv import dotenv_values
@@ -49,6 +49,7 @@ from cli.repository_transfer import (
     RepositoryTransferError,
     finalize_restored_repositories,
     pending_relocations,
+    validate_relocation_targets,
     write_relocation_record,
 )
 from cli.state_transfer import (
@@ -175,8 +176,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_profile_argument(restore_parser)
     restore_parser.add_argument("--bundle", type=Path, required=True)
+    restore_parser.add_argument(
+        "--from-development",
+        action="store_true",
+        help=(
+            "Promote an agileforge-dev bundle (provenance/profile.json) into a "
+            "production profile"
+        ),
+    )
+    restore_parser.add_argument(
+        "--bind-repository",
+        action="append",
+        metavar="PROJECT_ID=PATH",
+        help=(
+            "Absolute container path the named Project's repository will be "
+            "attached at; required for every active binding when promoting"
+        ),
+    )
     restore_parser.add_argument("--json", action="store_true")
     return parser
+
+
+def parse_relocation_targets(values: Sequence[str]) -> dict[int, str]:
+    """Parse repeated ``PROJECT_ID=PATH`` options into one strict mapping."""
+    targets: dict[int, str] = {}
+    for value in values:
+        project_text, separator, target = value.partition("=")
+        if not separator or not project_text.isdecimal() or int(project_text) < 1:
+            message = f"--bind-repository expects PROJECT_ID=PATH, got {value!r}"
+            raise ContainerRuntimeError(message)
+        project_id = int(project_text)
+        if not PurePosixPath(target).is_absolute():
+            message = f"--bind-repository path must be absolute, got {target!r}"
+            raise ContainerRuntimeError(message)
+        if project_id in targets:
+            message = f"--bind-repository names duplicate project {project_id}"
+            raise ContainerRuntimeError(message)
+        targets[project_id] = target
+    return targets
+
+
+def _restore_relocation_targets(
+    arguments: argparse.Namespace,
+) -> dict[int, str] | None:
+    if arguments.bind_repository is None:
+        return None
+    if not arguments.from_development:
+        message = "--bind-repository requires --from-development"
+        raise ContainerRuntimeError(message)
+    return parse_relocation_targets(arguments.bind_repository)
 
 
 def load_runtime_secrets(
@@ -582,9 +630,28 @@ def backup_production_state(
     )
 
 
+def _check_bundle_mode(bundle: Path, *, from_development: bool) -> None:
+    """Refuse bundle/flag mismatches before any provenance is parsed."""
+    runtime_provenance = bundle / "provenance" / "runtime.json"
+    profile_provenance = bundle / "provenance" / "profile.json"
+    if runtime_provenance.is_file() and from_development:
+        message = "production bundle must be restored without --from-development"
+        raise ContainerRuntimeError(message)
+    if (
+        profile_provenance.is_file()
+        and not runtime_provenance.is_file()
+        and not from_development
+    ):
+        message = "development profile bundle requires --from-development"
+        raise ContainerRuntimeError(message)
+
+
 def _load_restored_provenance(  # noqa: C901
     bundle: Path,
+    *,
+    from_development: bool = False,
 ) -> ProductionStateManifest:
+    _check_bundle_mode(bundle, from_development=from_development)
     runtime_provenance = bundle / "provenance" / "runtime.json"
     profile_provenance = bundle / "provenance" / "profile.json"
     if runtime_provenance.is_file():
@@ -764,21 +831,39 @@ def _install_restored_payload(profile_root: Path) -> None:
         provenance_root.rmdir()
 
 
-def restore_production_state(
+def restore_production_state(  # noqa: PLR0913
     bundle: Path,
     profile_root: Path,
     *,
     build: BuildIdentity,
     deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
     expected_owner_uid: int | None = None,
+    from_development: bool = False,
+    relocation_targets: Mapping[int, str] | None = None,
 ) -> ProductionStateManifest:
-    """Restore, validate, rebase, and publish one production profile."""
+    """Restore, validate, rebase, and publish one production profile.
+
+    ``from_development`` promotes an ``agileforge-dev`` bundle. Promotion is
+    strict about repositories: every active binding in the bundle must map to
+    a ``relocation_targets`` entry, and the resulting record keeps the
+    dashboard blocked until that exact guarded attach succeeds.
+    """
+    if relocation_targets is not None and not from_development:
+        message = "relocation targets require --from-development"
+        raise ContainerRuntimeError(message)
+    targets = dict(relocation_targets or {}) if from_development else None
     with _runtime_fences(deployment_root, exclusive=True):
         transfer_manifest = verify_backup(bundle)
         verify_current_business_schema(bundle / "business.sqlite3")
         if (bundle / "trace.sqlite3").is_file():
             verify_current_trace_schema(bundle / "trace.sqlite3")
-        source_state = _load_restored_provenance(bundle)
+        source_state = _load_restored_provenance(
+            bundle, from_development=from_development
+        )
+        if targets is not None:
+            validate_relocation_targets(
+                bundle / "business.sqlite3", transfer_manifest, targets
+            )
         owner_uid = (
             _effective_uid() if expected_owner_uid is None else expected_owner_uid
         )
@@ -792,6 +877,7 @@ def restore_production_state(
             transfer_manifest,
             profile_root,
             profile_root,
+            relocation_targets=targets,
         )
         relocation_sha256 = _sha256_file(relocation_record)
         _install_restored_payload(profile_root)
@@ -914,12 +1000,15 @@ def main(  # noqa: C901, PLR0911
                     except KeyboardInterrupt:
                         return 0
         if arguments.command == "restore":
+            relocation_targets = _restore_relocation_targets(arguments)
             state = restore_production_state(
                 arguments.bundle,
                 profile_root,
                 build=build,
                 deployment_root=deployment_root,
                 expected_owner_uid=expected_state_owner_uid,
+                from_development=arguments.from_development,
+                relocation_targets=relocation_targets,
             )
             _emit_payload(_runtime_payload(state, build))
             return 0

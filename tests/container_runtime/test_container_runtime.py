@@ -35,13 +35,19 @@ from cli.production_state import (
     initialize_production_state,
     load_production_state,
 )
-from cli.repository_transfer import RepositoryRelocation, pending_relocations
+from cli.repository_transfer import (
+    RepositoryRelocation,
+    RepositoryTransferError,
+    pending_relocations,
+)
 from cli.state_transfer import (
     _FORMAT,
+    StateLayout,
     TransferError,
     TransferManifest,
     _file_inventory,
     _write_manifest,
+    backup_state,
     verify_backup,
 )
 from utils.build_identity import BuildIdentity
@@ -251,6 +257,19 @@ def _record_relocated_binding(
         ),
         (
             ["restore", "--profile", "default", "--bundle", "/backup"],
+            "restore",
+        ),
+        (
+            [
+                "restore",
+                "--profile",
+                "default",
+                "--bundle",
+                "/backup",
+                "--from-development",
+                "--bind-repository",
+                "1=/workspace/repos/targets/backend",
+            ],
             "restore",
         ),
     ],
@@ -899,6 +918,7 @@ def test_restore_production_state_from_windows_migration_bundle(
         build=build,
         deployment_root=tmp_path,
         expected_owner_uid=_current_uid(),
+        from_development=True,
     )
     assert restored.profile_name == "restored"
     assert restored.provenance == "restored"
@@ -907,3 +927,378 @@ def test_restore_production_state_from_windows_migration_bundle(
     saved_metadata = json.loads(source_profile.read_text(encoding="utf-8"))
     assert saved_metadata["name"] == "win-profile"
     assert not (restored.profile_root / "provenance").exists()
+    assert pending_relocations(restored.business_database, restored.profile_root) == ()
+
+
+def _development_bundle(
+    tmp_path: Path,
+    build: BuildIdentity,
+    *,
+    repository: Repo | None,
+) -> tuple[Path, int | None]:
+    """Build a repository-less development bundle, optionally with an active binding.
+
+    The source database is a production state so its schema is current; the
+    ``profile.json`` provenance and the absent ``runtime.json`` make the bundle
+    look exactly like an ``agileforge-dev backup --state-only`` export.
+    """
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("models:\n  default: test/model\n", encoding="utf-8")
+    model_config.chmod(0o600)
+    source = initialize_production_state(
+        tmp_path / "profiles" / "default",
+        build=build,
+        model_config_source=model_config,
+        expected_owner_uid=_current_uid(),
+    )
+    project_id = (
+        None
+        if repository is None
+        else _register_active_repository(source.business_database, repository)
+    )
+    profile_file = source.profile_root / "profile.json"
+    profile_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "name": "pid-verification-terra",
+                "mode": "development",
+                "created_at": "2026-09-19T10:00:00+00:00",
+                "checkout": {
+                    "root": r"C:\Users\atavares\Projects\agileforge",
+                    "branch": "master",
+                    "commit": build.revision,
+                },
+                "model_config_sha256": source.model_config_sha256,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    profile_file.chmod(0o600)
+    bundle = backup_state(
+        StateLayout(
+            root=source.profile_root,
+            business_database=source.business_database,
+            trace_database=source.trace_database,
+            artifacts=source.artifacts,
+            model_config=source.model_config_path,
+            repositories=None,
+            include_registered_repositories=False,
+            maintenance_roots=(tmp_path,),
+            provenance_files=(profile_file,),
+        ),
+        tmp_path / "dev-bundle",
+    )
+    assert verify_backup(bundle).repositories == ()
+    return bundle, project_id
+
+
+def test_development_bundle_requires_explicit_promotion(tmp_path: Path) -> None:
+    """Plain restore refuses a development bundle instead of guessing its format."""
+    build = _build()
+    bundle, _ = _development_bundle(tmp_path, build, repository=None)
+    destination = tmp_path / "profiles" / "restored"
+
+    with pytest.raises(ContainerRuntimeError, match="requires --from-development"):
+        restore_production_state(
+            bundle,
+            destination,
+            build=build,
+            deployment_root=tmp_path,
+            expected_owner_uid=_current_uid(),
+        )
+
+    assert not destination.exists()
+
+
+def test_production_bundle_refuses_development_promotion(tmp_path: Path) -> None:
+    """Promotion is only for development bundles; production bundles use restore."""
+    build = _build()
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("models:\n  default: test/model\n", encoding="utf-8")
+    model_config.chmod(0o600)
+    source = initialize_production_state(
+        tmp_path / "profiles" / "default",
+        build=build,
+        model_config_source=model_config,
+        expected_owner_uid=_current_uid(),
+    )
+    bundle = backup_production_state(
+        source, tmp_path / "backup", deployment_root=tmp_path
+    )
+    destination = tmp_path / "profiles" / "restored"
+
+    with pytest.raises(ContainerRuntimeError, match="without --from-development"):
+        restore_production_state(
+            bundle,
+            destination,
+            build=build,
+            deployment_root=tmp_path,
+            expected_owner_uid=_current_uid(),
+            from_development=True,
+        )
+
+    assert not destination.exists()
+
+
+def test_promotion_requires_relocation_target_for_active_binding(
+    tmp_path: Path,
+) -> None:
+    """A promoted profile never starts with a binding pointing at the old machine."""
+    build = _build()
+    (tmp_path / "source-machine").mkdir()
+    repository = _committed_repository(tmp_path / "source-machine" / "backend")
+    bundle, _ = _development_bundle(tmp_path, build, repository=repository)
+    destination = tmp_path / "profiles" / "restored"
+
+    with pytest.raises(
+        RepositoryTransferError, match="active repository has no relocation target"
+    ):
+        restore_production_state(
+            bundle,
+            destination,
+            build=build,
+            deployment_root=tmp_path,
+            expected_owner_uid=_current_uid(),
+            from_development=True,
+        )
+
+    assert not destination.exists()
+
+
+def test_promotion_rejects_target_without_active_binding(tmp_path: Path) -> None:
+    """A mistyped project id fails before anything is published."""
+    build = _build()
+    bundle, _ = _development_bundle(tmp_path, build, repository=None)
+    destination = tmp_path / "profiles" / "restored"
+
+    with pytest.raises(
+        RepositoryTransferError, match="relocation target names no active repository"
+    ):
+        restore_production_state(
+            bundle,
+            destination,
+            build=build,
+            deployment_root=tmp_path,
+            expected_owner_uid=_current_uid(),
+            from_development=True,
+            relocation_targets={7: "/workspace/repos/targets/backend"},
+        )
+
+    assert not destination.exists()
+
+
+def test_relocation_targets_require_development_promotion(tmp_path: Path) -> None:
+    """Targets belong to promotion; plain restore keeps its payload-derived mapping."""
+    build = _build()
+    model_config = tmp_path / "models.yaml"
+    model_config.write_text("models:\n  default: test/model\n", encoding="utf-8")
+    model_config.chmod(0o600)
+    source = initialize_production_state(
+        tmp_path / "profiles" / "default",
+        build=build,
+        model_config_source=model_config,
+        expected_owner_uid=_current_uid(),
+    )
+    bundle = backup_production_state(
+        source, tmp_path / "backup", deployment_root=tmp_path
+    )
+    destination = tmp_path / "profiles" / "restored"
+
+    with pytest.raises(ContainerRuntimeError, match="require --from-development"):
+        restore_production_state(
+            bundle,
+            destination,
+            build=build,
+            deployment_root=tmp_path,
+            expected_owner_uid=_current_uid(),
+            relocation_targets={1: "/workspace/repos/targets/backend"},
+        )
+
+    assert not destination.exists()
+
+
+def test_promoted_binding_waits_for_exact_guarded_attach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The named target gates the dashboard until that exact attach succeeds."""
+    build = _build()
+    (tmp_path / "source-machine").mkdir()
+    old_repository = _committed_repository(tmp_path / "source-machine" / "backend")
+    bundle, project_id = _development_bundle(tmp_path, build, repository=old_repository)
+    assert project_id is not None
+    (tmp_path / "workspace" / "repos" / "targets").mkdir(parents=True)
+    new_repository = _committed_repository(
+        tmp_path / "workspace" / "repos" / "targets" / "backend"
+    )
+    target = Path(new_repository.working_tree_dir or "").resolve(strict=True)
+
+    restored = restore_production_state(
+        bundle,
+        tmp_path / "profiles" / "restored",
+        build=build,
+        deployment_root=tmp_path,
+        expected_owner_uid=_current_uid(),
+        from_development=True,
+        relocation_targets={project_id: str(target)},
+    )
+
+    assert restored.provenance == "restored"
+    assert (restored.profile_root / "config" / "source-profile.json").is_file()
+    pending = pending_relocations(restored.business_database, restored.profile_root)
+    assert len(pending) == 1
+    assert pending[0].project_id == project_id
+    assert pending[0].source_path == str(
+        Path(old_repository.working_tree_dir or "").resolve(strict=True)
+    )
+    assert pending[0].restored_path == str(target)
+
+    def should_not_start(**_kwargs: object) -> UIChild:
+        message = "blocked serve started a child"
+        raise AssertionError(message)
+
+    with pytest.raises(ContainerRuntimeError, match="pending repository relocation"):
+        serve_production(
+            restored,
+            build,
+            secrets={},
+            port=8765,
+            ready_timeout=1.0,
+            start=should_not_start,
+        )
+    with pytest.raises(ContainerRuntimeError, match="guarded attach"):
+        run_product_cli(
+            restored,
+            build,
+            forwarded=(
+                "--",
+                "repository",
+                "attach",
+                "--project-id",
+                str(project_id),
+                "--path",
+                str(tmp_path / "somewhere-else"),
+            ),
+            secrets={},
+            child_arguments=(sys.executable, "-c", "raise SystemExit(0)"),
+        )
+
+    with monkeypatch.context() as patch:
+        observations = iter((pending, ()))
+        patch.setattr(
+            container_runtime,
+            "pending_relocations",
+            lambda *_args: next(observations),
+        )
+        patch.setattr(
+            container_runtime,
+            "_run_owned_cli_child",
+            lambda *_args, **_kwargs: 0,
+        )
+        assert (
+            run_product_cli(
+                restored,
+                build,
+                forwarded=(
+                    "--",
+                    "repository",
+                    "attach",
+                    "--project-id",
+                    str(project_id),
+                    "--path",
+                    str(target),
+                    "--idempotency-key",
+                    "promotion-attach",
+                    "--actor",
+                    "migration-operator",
+                ),
+                secrets={},
+            )
+            == 0
+        )
+
+    _record_relocated_binding(
+        restored.business_database,
+        project_id=project_id,
+        repository=new_repository,
+    )
+    assert pending_relocations(restored.business_database, restored.profile_root) == ()
+    child = UIChild(process=_FinishedProcess(), port=8765)
+    assert (
+        serve_production(
+            restored,
+            build,
+            secrets={},
+            port=8765,
+            ready_timeout=1.0,
+            start=lambda **_kwargs: child,
+            wait_ready=lambda *_args, **_kwargs: None,
+            stop=_stop_ui,
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        (
+            ["--bind-repository", "1=/workspace/repos/targets/backend"],
+            "requires --from-development",
+        ),
+        (["--from-development", "--bind-repository", "backend"], "PROJECT_ID=PATH"),
+        (
+            ["--from-development", "--bind-repository", "x=/workspace/x"],
+            "PROJECT_ID=PATH",
+        ),
+        (
+            ["--from-development", "--bind-repository", "0=/workspace/x"],
+            "PROJECT_ID=PATH",
+        ),
+        (["--from-development", "--bind-repository", "1=repos/x"], "must be absolute"),
+        (
+            [
+                "--from-development",
+                "--bind-repository",
+                "1=/workspace/a",
+                "--bind-repository",
+                "1=/workspace/b",
+            ],
+            "duplicate",
+        ),
+    ],
+)
+def test_restore_rejects_malformed_relocation_options(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    expected: str,
+) -> None:
+    """Relocation options fail closed before any bundle or state is touched."""
+    build_path = tmp_path / "build.json"
+    build_path.write_text(_build().model_dump_json(), encoding="utf-8")
+    build_path.chmod(0o444)
+
+    exit_code = main(
+        [
+            "restore",
+            "--profile",
+            "default",
+            "--bundle",
+            str(tmp_path / "missing-bundle"),
+            "--json",
+            *extra,
+        ],
+        deployment_root=tmp_path,
+        build_path=build_path,
+        expected_build_owner_uid=_current_uid(),
+        expected_state_owner_uid=_current_uid(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == _ERROR_EXIT
+    assert payload["ok"] is False
+    assert expected in payload["error"]
+    assert not (tmp_path / "profiles").exists()

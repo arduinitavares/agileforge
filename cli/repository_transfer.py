@@ -12,7 +12,7 @@ import stat
 import subprocess  # nosec B404
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 
 from cli.state_transfer import (
@@ -24,7 +24,7 @@ from cli.state_transfer import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 _GIT_POINTER_PREFIX = "gitdir: "
 _GIT_POINTER_MAX_BYTES = 4096
@@ -299,28 +299,87 @@ def _write_atomic(path: Path, content: bytes) -> None:
         raise
 
 
+def _normalized_source(path: str) -> str:
+    """Compare source paths the way a Windows-origin binding would spell them."""
+    return str(PureWindowsPath(path))
+
+
+def _lookup_by_source(by_source: Mapping[str, str], source_path: str) -> str | None:
+    restored_path = by_source.get(source_path)
+    if restored_path is not None:
+        return restored_path
+    normalized_source = _normalized_source(source_path)
+    for candidate_source, candidate_worktree in by_source.items():
+        if _normalized_source(candidate_source) == normalized_source:
+            return candidate_worktree
+    return None
+
+
+def validate_relocation_targets(
+    database: Path,
+    manifest: TransferManifest,
+    relocation_targets: Mapping[int, str],
+) -> None:
+    """Refuse targets that leave, invent, or override an active binding.
+
+    Runs against the bundle before publication so a bad operator mapping never
+    produces a partially restored profile. Bundled repositories keep the
+    payload-derived mapping; targets only cover bindings without one.
+    """
+    active = _active_bindings(database)
+    bundled = {
+        _normalized_source(cast("str", item["source_path"]))
+        for item in manifest.repositories
+    }
+    for project_id, target in relocation_targets.items():
+        source_path = active.get(project_id)
+        if source_path is None:
+            raise RepositoryTransferError(
+                "relocation target names no active repository"
+            )
+        if not PurePosixPath(target).is_absolute():
+            raise RepositoryTransferError("relocation target path must be absolute")
+        if _normalized_source(source_path) in bundled:
+            raise RepositoryTransferError(
+                "relocation target conflicts with restored payload mapping"
+            )
+    for project_id, source_path in active.items():
+        if (
+            _normalized_source(source_path) not in bundled
+            and project_id not in relocation_targets
+        ):
+            raise RepositoryTransferError("active repository has no relocation target")
+
+
 def write_relocation_record(
     manifest: TransferManifest,
     payload_root: Path,
     profile_root: Path,
+    *,
+    relocation_targets: Mapping[int, str] | None = None,
 ) -> Path:
-    """Persist a non-secret source-to-restored Project mapping after restore."""
+    """Persist a non-secret source-to-restored Project mapping after restore.
+
+    Without ``relocation_targets`` every binding maps through the restored
+    payload and a repository-less bundle writes an empty record. With targets
+    the mapping is strict: every active binding must resolve through the
+    payload or a target, so the guarded attach gate covers each Project.
+    """
     payload = _owned_directory(payload_root, label="restored payload root")
     profile = _owned_directory(profile_root, label="profile root")
+    database = payload / "business.sqlite3"
+    if relocation_targets is not None:
+        validate_relocation_targets(database, manifest, relocation_targets)
     by_source = {
         item.source_path: str(item.worktree)
         for item in restored_repositories(manifest, payload)
     }
-    active = _active_bindings(payload / "business.sqlite3")
+    active = _active_bindings(database)
     relocations: list[RepositoryRelocation] = []
     for project_id, source_path in active.items():
-        restored_path = by_source.get(source_path)
-        if restored_path is None:
-            normalized_source = str(PureWindowsPath(source_path))
-            for candidate_source, candidate_worktree in by_source.items():
-                if str(PureWindowsPath(candidate_source)) == normalized_source:
-                    restored_path = candidate_worktree
-                    break
+        restored_path = _lookup_by_source(by_source, source_path)
+        if restored_path is None and relocation_targets is not None:
+            restored_path = relocation_targets.get(project_id)
         if restored_path is None and manifest.repositories:
             raise RepositoryTransferError(
                 "active repository has no restored payload mapping"
@@ -423,5 +482,6 @@ __all__ = [
     "finalize_restored_repositories",
     "pending_relocations",
     "repair_linked_worktrees",
+    "validate_relocation_targets",
     "write_relocation_record",
 ]
