@@ -71,7 +71,7 @@ def _holder(
     context = multiprocessing.get_context("fork")
     ready = context.Event()
     release = context.Event()
-    process = context.Process(  # ty: ignore[unresolved-attribute]
+    process = context.Process(
         target=_hold_fence,
         args=(str(root), exclusive, ready, release),
     )
@@ -126,7 +126,7 @@ def test_dead_process_releases_fence(tmp_path: Path) -> None:
     """Leaking a lock after process death would require unsafe manual recovery."""
     context = multiprocessing.get_context("fork")
     ready = context.Event()
-    process = context.Process(  # ty: ignore[unresolved-attribute]
+    process = context.Process(
         target=_acquire_then_exit,
         args=(str(tmp_path), ready),
     )
