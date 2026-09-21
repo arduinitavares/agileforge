@@ -246,3 +246,76 @@ container. The corrected suite passed all 14 tests with the repository-pinned
 pytest and PyYAML versions; seven deliberately broken workflow variants were
 also rejected. Ruff and formatting passed, and independent review found no
 issues. Full CI must pass on the correction before reporting CI as green.
+
+## Final state
+
+Live cutover was approved and completed: the pidextract profile's business
+and trace databases, artifacts, and repository worktrees were exported from
+the Windows host and restored into the WSL/Docker Compose production runtime.
+`docker compose ps` shows the running `agileforge-production` container
+serving that data; the Windows checkout is retained as a cold backup, not
+deleted.
+
+With cutover complete, the remaining post-cutover removal work landed in
+three PRs on top of the guard:
+
+- [#278](https://github.com/arduinitavares/agileforge/pull/278) —
+  `utils/platform_support.py`: `require_linux()` refuses non-Linux hosts with
+  exit code 2 before any argument parsing or filesystem access, wired into
+  `agileforge-dev`, `cli/main.py`, `cli/dev_main.py`,
+  `cli/container_runtime.py`, and the API lifespan. Tests that execute the
+  real launcher/API/product processes are marked Linux-only; the rest of the
+  suite bypasses the guard through an autouse `tests/conftest.py` fixture so
+  it still runs on developer laptops.
+- [#279](https://github.com/arduinitavares/agileforge/pull/279) — removed
+  `services/vision_evidence_windows.py`,
+  `services/specification_source_registration.py`'s `nt` branch, the Windows
+  dev-secrets/UI-runtime/launcher branches, `tests/windows/` (all 5 files),
+  the Windows repository/state-transfer paths (Win32 extended paths,
+  kernel32 `FlushFileBuffers`, `O_BINARY`), the one-off
+  `scripts/migrate_windows_profile.py` and
+  `scripts/rehearse_windows_to_linux.py`, and the Windows branches in
+  `scripts/verify_distribution.py` and `tests/test_distribution_smoke.py`.
+  `[tool.ty] python-platform` changed from `"all"` to `"linux"`. Net: about
+  1,500 lines removed across 20 files, no new skips, no coverage-threshold
+  change. Windows-spelled repository source paths (`PureWindowsPath`
+  recognition in `cli/repository_transfer.py` and `cli/state_transfer.py`)
+  are kept: the pidextract bundle's binding history stores
+  `C:\Users\atavares\...` and restores must keep resolving it, pinned by the
+  existing named tests in `tests/container_runtime/test_relocation.py`.
+- Documentation (README, `docs/linux-containers.md`, `AGENTS.md`) now states
+  the Linux-only runtime and points non-Linux hosts at Docker Compose.
+
+Master tip after all three merges: `fe49e0a`. CI on the removal PR
+([run 35607994576](https://github.com/arduinitavares/agileforge/actions/runs/35607994576)):
+Python 3.13 full gate 1h03m09s, Linux container canonical gate 1h15m52s, Node
+frontend tests 9s — all pass, no skips added, coverage threshold unchanged
+from the baseline recorded above. These times are consistent with the earlier
+post-guard runs (PR #274: 52m53s / 1h11m46s; PR #278: 1h02m48s / 1h13m55s);
+the guard and removals did not regress gate duration. #265 owns further
+test-suite speed work and is unaffected by this issue.
+
+### Acceptance criteria
+
+| # | Criterion | Evidence |
+| --- | --- | --- |
+| 1 | Reviewed design | This document plus the approved implementation plan; PRs #273, #278, #279 |
+| 2 | Fresh Linux checkout builds all container targets | `containers/pins.json`, `compose.yaml`; proven by the Linux container canonical gate on every PR above |
+| 3 | Real dev-agent workflow, incl. Git and linked worktrees | This session's own work: edits, `git`, linked worktrees (`/tmp/af-t4`), Python/Node/browser checks, all via `./agileforge-dev` |
+| 4 | Canonical gate, frontend/browser, security, package checks pass in-container | CI runs cited above; three retained jobs (Python full gate, Linux container gate, Node frontend) |
+| 5 | Packaged production image: identity, loopback readiness, clean shutdown | WSL `agileforge-production` container: `docker compose ps` shows it `Up`; dashboard reachable at `127.0.0.1:8766`; prior sessions verified graceful shutdown and process-tree cleanup |
+| 6 | Secrets explicit at runtime, absent from images/logs | `utils/dev_secrets`/production secret contract unchanged by this work; no secret literal in any diff |
+| 7 | Repository registration/source capture, identity + file-safety guards | `services/specification_source_registration.py` POSIX-only path now the only path; existing identity/race/hash tests unchanged and passing |
+| 8 | Equal profile names in different worktrees isolated; business/trace DBs separate | Existing profile isolation tests (`tests/dev_runtime/test_profiles.py`) pass unchanged post-removal |
+| 9 | Container replacement preserves project/profile/business/trace/artifact state | Verified earlier in this document (Compose stop/up, restart) and again by the pidextract cutover itself |
+| 10 | Backup/transfer rehearsal: metadata, integrity, identifiers, bytes/hashes, history, bindings | Real pidextract export/restore into WSL, `tests/container_runtime/test_relocation.py`, `test_state_transfer.py` |
+| 11 | Approved active cutover with recovery path | Completed: pidextract now runs from the WSL Docker Compose installation; Windows checkout/profile kept as rollback |
+| 12 | CI uses Linux containers only; Windows/macOS jobs and native compatibility support removed | `.github/workflows/ci.yml` (3 ubuntu jobs, since PR #273); #278/#279 removed the remaining native code paths |
+| 13 | Native unsupported execution fails before state creation/mutation | `utils/platform_support.require_linux()`, exit code 2, called before argparse/state access in every entry point (#278) |
+| 14 | Documentation supports a fresh developer/operator end to end | README, `docs/linux-containers.md`, `AGENTS.md` (#279); this evidence document |
+| 15 | Before/after measurements separate platform-removal work from Linux performance | Job-elapsed timings above (baseline, #274, #278, #279); no test removed for speed, no skip or threshold change used as "improvement" |
+
+All 15 acceptance criteria have evidence on master `fe49e0a`. #263 is closed
+with this comment as the final record. #265 (test-suite performance) and #268
+(dashboard latency) stay open as separate research issues; each received a
+pointer comment to this section.
