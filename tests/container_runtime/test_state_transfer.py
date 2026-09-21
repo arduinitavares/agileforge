@@ -614,7 +614,7 @@ def test_special_artifact_file_is_rejected(
 ) -> None:
     """Copying a FIFO/device/socket could block or cross the archive trust boundary."""
     fifo = layout.artifacts / "blocked.fifo"
-    os.mkfifo(fifo)  # ty: ignore[possibly-missing-attribute]
+    os.mkfifo(fifo)
 
     with pytest.raises(TransferError, match="special"):
         backup_state(layout, tmp_path / "backup")

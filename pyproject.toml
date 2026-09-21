@@ -207,7 +207,7 @@ skips = [
 
 [tool.ty.environment]
 python-version = "3.13"
-python-platform = "all"
+python-platform = "linux"
 root = ["."]
 
 [tool.ty.analysis]
