@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess  # nosec B404
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -49,8 +50,8 @@ _KILL_PROCESS_GROUP: Callable[[int, int], None] = cast(
 )
 _SIGNAL_KILL: int = int(getattr(signal, "SIGKILL", 9))
 pytestmark = pytest.mark.skipif(
-    not hasattr(os, "killpg"),
-    reason="requires Unix process groups",
+    sys.platform != "linux",
+    reason="executes the real launcher, which refuses non-Linux hosts",
 )
 _ISSUE_200_INCOMPLETE_MESSAGE: str = (
     "Specification structurer returned incomplete output. Increase "
