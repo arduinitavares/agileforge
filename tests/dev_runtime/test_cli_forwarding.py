@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -28,11 +27,6 @@ _JSON_FAILURE_EXIT = 9
 _INVALID_CHILD_EXIT = 13
 _INVALID_CHILD_RESULT = {"ok": False, "error": "invalid_production_cli_output"}
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
-_WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
-_WINDOWS_TEXT_WRITER_ONLY = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="Windows text writers expand LF before capture",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +74,6 @@ class LocalCredentialEchoRunner:
     """Run one local dummy child through the production text-capture boundary."""
 
     checkout: Path
-    writer: str
     calls: list[tuple[tuple[str, ...], Path, dict[str, str] | None]] = field(
         default_factory=list
     )
@@ -102,25 +95,14 @@ class LocalCredentialEchoRunner:
                 stdout=f"{_git(self.checkout, 'rev-parse', 'HEAD')}\n",
             )
         assert copied_env is not None
-        if self.writer == "bytes":
-            child = (
-                "import os, sys\n"
-                "value = os.environ['OPEN_ROUTER_API_KEY'].encode('utf-8')\n"
-                "sys.stdout.buffer.write(value)\n"
-                "sys.stdout.buffer.flush()\n"
-                "sys.stderr.buffer.write(value)\n"
-                "sys.stderr.buffer.flush()\n"
-            )
-        else:
-            assert self.writer == "text"
-            child = (
-                "import os, sys\n"
-                "value = os.environ['OPEN_ROUTER_API_KEY']\n"
-                "sys.stdout.write(value)\n"
-                "sys.stdout.flush()\n"
-                "sys.stderr.write(value)\n"
-                "sys.stderr.flush()\n"
-            )
+        child = (
+            "import os, sys\n"
+            "value = os.environ['OPEN_ROUTER_API_KEY'].encode('utf-8')\n"
+            "sys.stdout.buffer.write(value)\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.stderr.buffer.write(value)\n"
+            "sys.stderr.buffer.flush()\n"
+        )
         return dev_main.SubprocessCommandRunner().run(
             (sys.executable, "-c", child),
             cwd=cwd,
@@ -292,11 +274,6 @@ def test_cli_forwarding_installs_only_profile_environment(
         **profile_environment(profile),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
     }
-    if os.name == "nt":
-        expected_environment["SystemRoot"] = os.environ["SYSTEMROOT"]
-        temp_directory = dev_main._profile_temporary_directory(profile)
-        expected_environment["TEMP"] = temp_directory
-        expected_environment["TMP"] = temp_directory
     expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = (
         dev_main._resolve_git_executable()
     )
@@ -390,12 +367,8 @@ def test_cli_reads_secrets_from_one_no_follow_descriptor(
     ) -> dict[str, str | None]:
         nonlocal swap_count
         swap_count += 1
-        if sys.platform == "win32":
-            with pytest.raises(PermissionError):
-                alternate.replace(selected)
-        else:
-            selected.unlink()
-            selected.symlink_to(alternate)
+        selected.unlink()
+        selected.symlink_to(alternate)
         return real_dotenv_values(
             dotenv_path=dotenv_path,
             stream=stream,
@@ -443,14 +416,7 @@ def test_cli_rejects_non_regular_secrets_file(
     if kind == "symlink":
         target.write_text("OPEN_ROUTER_API_KEY=not-loaded\n", encoding="utf-8")
         selected = tmp_path / "linked.env"
-        try:
-            selected.symlink_to(target)
-        except OSError as error:
-            if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
-                pytest.skip(
-                    "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
-                )
-            raise
+        selected.symlink_to(target)
     else:
         selected = tmp_path / "secrets"
         selected.mkdir()
@@ -537,42 +503,12 @@ def test_cli_raw_mode_redacts_credentials_from_both_streams(
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(("\r", r"\r", "file", "bytes"), id="bytes-file-cr"),
-        pytest.param(("\n", r"\n", "file", "bytes"), id="bytes-file-lf"),
-        pytest.param(("\r\n", r"\r\n", "file", "bytes"), id="bytes-file-crlf"),
-        pytest.param(("\r", r"\r", "environment", "bytes"), id="bytes-env-cr"),
-        pytest.param(("\n", r"\n", "environment", "bytes"), id="bytes-env-lf"),
-        pytest.param(("\r\n", r"\r\n", "environment", "bytes"), id="bytes-env-crlf"),
-        pytest.param(
-            ("\r", r"\r", "file", "text"),
-            id="text-file-cr",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
-        pytest.param(
-            ("\n", r"\n", "file", "text"),
-            id="text-file-lf",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
-        pytest.param(
-            ("\r\n", r"\r\n", "file", "text"),
-            id="text-file-crlf",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
-        pytest.param(
-            ("\r", r"\r", "environment", "text"),
-            id="text-env-cr",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
-        pytest.param(
-            ("\n", r"\n", "environment", "text"),
-            id="text-env-lf",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
-        pytest.param(
-            ("\r\n", r"\r\n", "environment", "text"),
-            id="text-env-crlf",
-            marks=_WINDOWS_TEXT_WRITER_ONLY,
-        ),
+        pytest.param(("\r", r"\r", "file"), id="file-cr"),
+        pytest.param(("\n", r"\n", "file"), id="file-lf"),
+        pytest.param(("\r\n", r"\r\n", "file"), id="file-crlf"),
+        pytest.param(("\r", r"\r", "environment"), id="env-cr"),
+        pytest.param(("\n", r"\n", "environment"), id="env-lf"),
+        pytest.param(("\r\n", r"\r\n", "environment"), id="env-crlf"),
     ],
 )
 def test_cli_raw_mode_redacts_newline_normalized_credentials_from_real_child(
@@ -580,10 +516,10 @@ def test_cli_raw_mode_redacts_newline_normalized_credentials_from_real_child(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    case: tuple[str, str, str, str],
+    case: tuple[str, str, str],
 ) -> None:
     """Universal-newline capture must not disclose an accepted credential."""
-    line_ending, dotenv_escape, source, writer = case
+    line_ending, dotenv_escape, source = case
     before = "dummy-before-newline"
     after = "dummy-after-newline"
     credential = f"{before}{line_ending}{after}"
@@ -599,7 +535,7 @@ def test_cli_raw_mode_redacts_newline_normalized_credentials_from_real_child(
     else:
         monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential)
     arguments.extend(("--", "project", "list"))
-    runner = LocalCredentialEchoRunner(checkout=checkout, writer=writer)
+    runner = LocalCredentialEchoRunner(checkout=checkout)
 
     assert (
         dev_main.main(

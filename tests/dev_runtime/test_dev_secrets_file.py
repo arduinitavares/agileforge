@@ -21,7 +21,7 @@ def no_invoking_credential(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_regular_file_loads_on_the_actual_platform(tmp_path: Path) -> None:
-    """Missing POSIX flags must not disable native Windows regular-file reads."""
+    """Regular secrets files load through the native platform path."""
     selected = tmp_path / "provider.env"
     selected.write_text("OPEN_ROUTER_API_KEY=dummy-native-sentinel\n", encoding="utf-8")
     assert dev_main._provider_environment(selected) == {
@@ -62,7 +62,7 @@ def test_invalid_utf8_has_a_content_free_error(
     assert sentinel.decode() not in str(caught.value)
     assert sentinel.decode() not in caplog.text
     assert caught.value.__suppress_context__
-    selected.unlink()  # Also proves no Windows handle remains open.
+    selected.unlink()  # Also proves no file handle remains open.
 
 
 def test_malformed_dotenv_diagnostics_do_not_expose_content(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
@@ -34,7 +33,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _MANIFEST_MODE = 0o600
-_WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
 
 
 def _git(checkout: Path, *arguments: str) -> str:
@@ -185,8 +183,7 @@ def test_initialize_persists_private_atomic_manifest(checkout: Path) -> None:
     paths = profile_paths(checkout, "atomic")
 
     assert load_profile(checkout, "atomic") == profile
-    if os.name != "nt":
-        assert stat.S_IMODE(paths.manifest.stat().st_mode) == _MANIFEST_MODE
+    assert stat.S_IMODE(paths.manifest.stat().st_mode) == _MANIFEST_MODE
     assert list(paths.root.glob(".profile.*.tmp")) == []
 
 
@@ -528,14 +525,7 @@ def test_load_rejects_symlinked_database(checkout: Path, tmp_path: Path) -> None
     paths = profile_paths(checkout, "linked-database")
     target = tmp_path / "outside.sqlite3"
     target.touch()
-    try:
-        paths.business_database.symlink_to(target)
-    except OSError as error:
-        if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
-            pytest.skip(
-                "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
-            )
-        raise
+    paths.business_database.symlink_to(target)
 
     with pytest.raises(ValueError, match="symlink"):
         load_profile(checkout, "linked-database")
@@ -548,14 +538,7 @@ def test_profile_paths_reject_symlinked_state_ancestor(
     """Reject symlinked checkout-local state ancestors."""
     outside = tmp_path / "outside"
     outside.mkdir()
-    try:
-        (checkout / ".agileforge").symlink_to(outside, target_is_directory=True)
-    except OSError as error:
-        if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
-            pytest.skip(
-                "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
-            )
-        raise
+    (checkout / ".agileforge").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="symlink"):
         profile_paths(checkout, "linked-state")
@@ -630,14 +613,7 @@ def test_reset_refuses_symlinked_profile_content(
     paths = profile_paths(checkout, "linked-reset")
     outside = tmp_path / "outside.txt"
     outside.write_text("keep\n", encoding="utf-8")
-    try:
-        (paths.root / "linked.txt").symlink_to(outside)
-    except OSError as error:
-        if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
-            pytest.skip(
-                "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
-            )
-        raise
+    (paths.root / "linked.txt").symlink_to(outside)
 
     with pytest.raises(ValueError, match="symlink"):
         reset_profile(checkout, "linked-reset", "linked-reset")
