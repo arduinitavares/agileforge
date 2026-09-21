@@ -77,6 +77,7 @@ from services.specification_source_registration import (
     SpecificationSourceRegistrationErrorCode,
 )
 from services.vision_evidence import VisionEvidenceCollectionError
+from utils.platform_support import require_linux
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from utils.runtime_ownership import (
     INSTALLED_ROOT,
@@ -101,6 +102,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Initialize the business schema without creating routing sessions."""
     from models.db import ensure_business_db_ready  # noqa: PLC0415
 
+    require_linux()
     with runtime_access():
         ensure_business_db_ready()
         yield

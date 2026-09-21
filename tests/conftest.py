@@ -60,6 +60,24 @@ def _permit_windows_testclient_socketpair(
         monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
 
+@pytest.fixture
+def _real_platform_guard() -> None:
+    """Opt a test out of the suite-wide Linux guard bypass."""
+
+
+@pytest.fixture(autouse=True)
+def _bypass_platform_guard_off_linux(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Let the unit suite run on developer macOS while the product refuses it."""
+    if sys.platform == "linux" or "_real_platform_guard" in request.fixturenames:
+        return
+    from utils import platform_support  # noqa: PLC0415
+
+    monkeypatch.setattr(platform_support, "current_platform", lambda: "linux")
+
+
 _TEST_MODEL_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "models.test.yaml"
 )

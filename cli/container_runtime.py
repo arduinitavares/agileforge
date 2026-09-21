@@ -67,6 +67,12 @@ from utils.build_identity import (
     BuildIdentityError,
     load_build_identity,
 )
+from utils.cli_output import emit
+from utils.platform_support import (
+    UNSUPPORTED_PLATFORM_EXIT_CODE,
+    UnsupportedPlatformError,
+    require_linux,
+)
 from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
@@ -924,6 +930,11 @@ def main(  # noqa: C901, PLR0911
     expected_state_owner_uid: int | None = None,
 ) -> int:
     """Run one explicit installed-runtime lifecycle command."""
+    try:
+        require_linux()
+    except UnsupportedPlatformError as error:
+        emit(str(error), file=sys.stderr)
+        return UNSUPPORTED_PLATFORM_EXIT_CODE
     arguments = build_parser().parse_args(argv)
     json_output = bool(getattr(arguments, "json", False))
     try:
