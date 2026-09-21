@@ -151,6 +151,17 @@ Keep the POSIX evidence/security guarantees, profile/secret/lifecycle regression
 the isolated distribution verifier, and the unchanged coverage threshold.
 Only then add early unsupported-platform rejection and remove native setup docs.
 
+Status: completed after the live cutover. `utils/platform_support.py` supplies
+the early rejection wired into `agileforge-dev`, `cli/main.py`,
+`cli/dev_main.py`, `cli/container_runtime.py`, and the API lifespan.
+`tests/windows/`, `services/vision_evidence_windows.py`,
+`services/specification_source_windows.py`, the Windows launcher, secrets, UI
+runtime, and state transfer branches, `scripts/migrate_windows_profile.py`,
+and `scripts/rehearse_windows_to_linux.py` were removed. Windows-spelled
+repository source paths remain recognised as legacy bundle data so restores of
+previously exported profiles still relocate correctly. `[tool.ty]` now checks
+`python-platform = "linux"`.
+
 ## Compose startup follow-up
 
 The user requested ordinary Docker startup for the packaged app. Against the

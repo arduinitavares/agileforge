@@ -74,7 +74,9 @@ The image pins are in `containers/pins.json`. The application user is
 
 Do not bind-mount a macOS or Windows source tree into `/workspace`. The host
 controller uses `uv`; project work, Git, tests, and developer commands run in
-the Linux container. `compose.yaml` publishes the two UI ports only on
+the Linux container. AgileForge itself refuses to start on a non-Linux host:
+`agileforge-dev`, the production CLI, the container runtime CLI, and the API
+exit with code 2 and point here. `compose.yaml` publishes the two UI ports only on
 loopback: development `127.0.0.1:8765` and production `127.0.0.1:8766`.
 
 Set a lower-case project namespace once per shell. It names the task-owned
@@ -373,8 +375,12 @@ blocked.
 
 Native macOS and Windows CI jobs have been retired with maintainer approval.
 The real launcher smoke now runs in the Linux container gate; shared security,
-profile, secret, and lifecycle tests remain. Native adapters and platform-specific
-tests are retained pending the separate cutover and removal inventory.
+profile, secret, and lifecycle tests remain. After the approved live cutover,
+the native Windows adapters, launcher branches, transfer paths, host migration
+scripts, and `tests/windows/` were removed, and every entry point gained an
+early Linux-only guard. Tests that execute the real launcher, API, or product
+processes are marked Linux-only; the rest of the suite bypasses the guard
+through an autouse fixture so it still runs on developer laptops.
 
 Synthetic implementation work and CI retirement do not grant any of the
 following approvals. Keep #263 open until all three gates have been explicitly

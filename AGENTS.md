@@ -19,6 +19,12 @@ This check is not required for unrelated documentation edits. Each worktree owns
 separate profiles, business and ADK trace databases, and UI ports. Older branches
 must merge or rebase the launcher change before using it.
 
+AgileForge runs only on Linux. On macOS or Windows hosts, run the launcher,
+CLI, and tests inside the Docker Compose container (`docs/linux-containers.md`);
+native invocations refuse to start with exit code 2. The pytest suite itself
+runs on any host through the autouse guard bypass in `tests/conftest.py`, but
+tests that execute the real launcher, API, or product processes are Linux-only.
+
 ## Typing Style
 
 Keep repo-level style guidance short, specific, and broadly applicable.

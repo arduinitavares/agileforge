@@ -70,8 +70,12 @@ Human Specification review remains an explicit workflow transition.
 
 ## Quick Start
 
-Prerequisites: Python 3.13.15, [uv](https://docs.astral.sh/uv/), and an OpenRouter
-key only when running model-backed nodes.
+AgileForge runs only on Linux. On macOS or Windows, use the Docker Compose
+runtime described in [Run with Docker](#run-with-docker); the launcher, CLI, and
+API refuse to start on any other host with exit code 2.
+
+Prerequisites on a Linux host: Python 3.13.15, [uv](https://docs.astral.sh/uv/),
+and an OpenRouter key only when running model-backed nodes.
 
 ```sh
 git clone https://github.com/arduinitavares/agileforge.git
@@ -166,7 +170,8 @@ selection, separate installations, credentials, and building from source.
 For the Linux/amd64 container workflow, use the
 [container runbook](docs/linux-containers.md). It covers Compose startup,
 agent commands, installed production runtime, and verified backup/restore.
-Native support remains available until the separately approved data cutover.
+Native execution is supported on Linux only; macOS and Windows hosts run the
+same commands through the container.
 
 Use the checkout's locked Python 3.13.15 environment and the same `pyrepo-check`
 controller pinned in `.github/workflows/ci.yml`. Run from that checkout's root.
@@ -182,7 +187,7 @@ Restart the terminal if the executable directory was added to `PATH`. Confirm
 `pyrepo-check --help` works before running the commands below.
 
 `pyrepo-check` provisions and invokes the repository Python through uv; the full
-gate remains `./agileforge-dev check` (`sh ./agileforge-dev check` in PowerShell).
+gate remains `./agileforge-dev check`.
 Quality checks do not require an initialized operator profile. Before runtime
 mutations, inspect the selected existing profile with
 `./agileforge-dev info --profile <name> --json`.
