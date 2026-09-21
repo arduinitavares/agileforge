@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+import pytest
 from sqlalchemy import inspect
 from sqlmodel import SQLModel
 
@@ -95,6 +96,10 @@ def _bootstrap_worker(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the fresh API process refuses native execution outside Linux",
+)
 def test_production_api_bootstrap_creates_complete_fresh_schema(
     tmp_path: Path,
 ) -> None:

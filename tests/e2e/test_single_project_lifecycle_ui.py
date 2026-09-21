@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -43,7 +44,13 @@ type JsonValue = (
 )
 type JsonObject = dict[str, JsonValue]
 
-pytestmark = pytest.mark.allow_hosts(["127.0.0.1"])
+pytestmark = [
+    pytest.mark.allow_hosts(["127.0.0.1"]),
+    pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="the real dashboard process refuses native execution outside Linux",
+    ),
+]
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROJECT_ID = 1

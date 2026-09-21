@@ -35,6 +35,10 @@ _EXPECTED_TABLES = {"projects", "spec_registry", "workflow_events"}
 _FORBIDDEN_TABLES = {"products", "sessions", "cli_" + "mutation" + "_ledger"}
 _DEFAULT_READY_TIMEOUT = 15.0
 _USAGE_EXIT_CODE = 2
+_real_launcher = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the real launcher refuses native execution outside Linux",
+)
 _HOSTILE_UV_CONTROLS = (
     "UV_CONFIG_FILE",
     "UV_ENV_FILE",
@@ -295,6 +299,7 @@ def test_parser_uses_standard_structured_usage_exit_code() -> None:
     assert error.value.code == _USAGE_EXIT_CODE
 
 
+@_real_launcher
 def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     """Delegate from the launcher's checkout even when caller CWD differs."""
     module_path = Path(cast("str", _module().__file__))
@@ -379,6 +384,7 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     ]
 
 
+@_real_launcher
 def test_bootstrap_rejects_real_hostile_uv_project_and_environment(
     tmp_path: Path,
 ) -> None:
@@ -435,6 +441,7 @@ def test_bootstrap_rejects_real_hostile_uv_project_and_environment(
     assert "HOSTILE_UV_ENVIRONMENT" not in stdout
 
 
+@_real_launcher
 def test_bootstrap_rejects_real_shadow_module_source_controls(
     tmp_path: Path,
 ) -> None:
@@ -476,6 +483,7 @@ def test_bootstrap_rejects_real_shadow_module_source_controls(
     assert not marker.exists()
 
 
+@_real_launcher
 def test_bootstrap_rejects_symlinked_entrypoint(tmp_path: Path) -> None:
     """Refuse delegation when the invoked bootstrap path is a symlink."""
     module_path = Path(cast("str", _module().__file__))
@@ -1419,6 +1427,7 @@ def test_launcher_child_environment_ignores_ambient_temp_and_uses_profile_root(
     assert "TMP" not in dumped
 
 
+@_real_launcher
 def test_real_launcher_child_environment_executes_git_cli_and_dashboard_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
