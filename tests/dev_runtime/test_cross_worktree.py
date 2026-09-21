@@ -371,6 +371,10 @@ def _assert_concurrent_ui_isolation(
     assert config_two["business_database"] == expected.profiles[1]["business_database"]
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the real launcher refuses native execution outside Linux",
+)
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
     tmp_path: Path,

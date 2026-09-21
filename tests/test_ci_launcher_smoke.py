@@ -646,8 +646,8 @@ def _current_sha(checkout: Path) -> str:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "killpg"),
-    reason="POSIX process-group smoke adapter requires os.killpg",
+    sys.platform != "linux",
+    reason="the real launcher refuses native execution outside Linux",
 )
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_real_script_runs_complete_launcher_lifecycle() -> None:
@@ -689,8 +689,8 @@ def test_real_script_runs_complete_launcher_lifecycle() -> None:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "killpg"),
-    reason="POSIX process-group smoke adapter requires os.killpg",
+    sys.platform != "linux",
+    reason="the real launcher refuses native execution outside Linux",
 )
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_real_pre_identity_failure_cleans_process_group_and_profiles() -> None:

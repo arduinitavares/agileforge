@@ -902,6 +902,10 @@ def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkou
                 assert b"STALE_EGG_INFO_SENTINEL" not in stream.read()
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the installed product refuses native execution outside Linux",
+)
 def test_built_distributions_pass_isolated_smoke_and_preserve_checkout() -> None:
     """Verify both installed artifacts while leaving the checkout unchanged."""
     checkout = Path(__file__).resolve().parents[1]
