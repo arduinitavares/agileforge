@@ -62,6 +62,11 @@ from services.contracts.story import is_story_sentinel_text
 from services.sprint_ownership import SprintOwnerEvidence, sprint_owner_projection
 from utils.build_identity import BuildIdentityError
 from utils.logging_config import configure_logging
+from utils.platform_support import (
+    UNSUPPORTED_PLATFORM_EXIT_CODE,
+    UnsupportedPlatformError,
+    require_linux,
+)
 from utils.runtime_fence import FenceError
 from utils.runtime_ownership import runtime_access
 from workflow.contracts import (
@@ -2360,6 +2365,11 @@ def _emit_result(result: TransitionResult) -> int:
 
 def main(argv: list[str] | None = None, *, application: object | None = None) -> int:
     """Run one graph-backed CLI command."""
+    try:
+        require_linux()
+    except UnsupportedPlatformError as error:
+        _write_json({"ok": False, "error": str(error)})
+        return UNSUPPORTED_PLATFORM_EXIT_CODE
     parser = build_parser()
     try:
         args = parser.parse_args(argv)

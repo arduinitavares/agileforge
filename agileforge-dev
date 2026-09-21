@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+KERNEL=$(uname -s)
+case "$KERNEL" in
+    Linux) ;;
+    *)
+        printf '%s\n' "AgileForge runs only on Linux; this launcher started on '$KERNEL'. Use the Docker Compose runtime (docker compose up -d from the checkout) instead. See docs/linux-containers.md." >&2
+        exit 2
+        ;;
+esac
+
 BOOTSTRAP=$0
 case "$BOOTSTRAP" in
     /*) ;;

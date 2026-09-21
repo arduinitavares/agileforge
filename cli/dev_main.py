@@ -53,6 +53,11 @@ from cli.dev_server import (
     wait_for_readiness,
 )
 from utils.cli_output import emit
+from utils.platform_support import (
+    UNSUPPORTED_PLATFORM_EXIT_CODE,
+    UnsupportedPlatformError,
+    require_linux,
+)
 from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
@@ -1330,6 +1335,11 @@ def main(  # noqa: PLR0911 - one explicit return per launcher command
     clock: Clock | None = None,
 ) -> int:
     """Run one developer command and return its process exit code."""
+    try:
+        require_linux()
+    except UnsupportedPlatformError as error:
+        emit(str(error), file=sys.stderr)
+        return UNSUPPORTED_PLATFORM_EXIT_CODE
     arguments = build_parser().parse_args(argv)
     command_runner = runner or SubprocessCommandRunner()
     command_clock = clock or SystemClock()
