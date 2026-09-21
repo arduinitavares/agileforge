@@ -2,10 +2,9 @@
 
 import importlib
 import os
-import socket
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -14,50 +13,6 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
-
-_ORIGINAL_SOCKET: type[socket.socket] = socket.socket
-_WIN_ERROR_PRIVILEGE_NOT_HELD: int = 1314
-
-
-def _windows_testclient_socketpair() -> tuple[socket.socket, socket.socket]:
-    """Create only the loopback pair required by Windows ProactorEventLoop."""
-    with _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        address = listener.getsockname()
-        with ExitStack() as sockets:
-            client = _ORIGINAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.callback(client.close)
-            client.setblocking(False)
-            with suppress(BlockingIOError, InterruptedError):
-                client.connect(address)
-            client.setblocking(True)
-            accept_fn = getattr(listener, "_accept")  # noqa: B009
-            accepted_fd, _ = accept_fn()
-            server = _ORIGINAL_SOCKET(
-                listener.family,
-                listener.type,
-                listener.proto,
-                fileno=accepted_fd,
-            )
-            sockets.callback(server.close)
-            if (
-                server.getsockname() != client.getpeername()
-                or client.getsockname() != server.getpeername()
-            ):
-                msg = "socketpair endpoints did not match"
-                raise RuntimeError(msg)
-            sockets.pop_all()
-            return server, client
-
-
-@pytest.fixture(autouse=True)
-def _permit_windows_testclient_socketpair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Permit only Proactor's internal pair while pytest-socket blocks sockets."""
-    if sys.platform == "win32":
-        monkeypatch.setattr(socket, "socketpair", _windows_testclient_socketpair)
 
 
 @pytest.fixture
@@ -199,24 +154,9 @@ def session(engine: Engine) -> Iterator[Session]:  # pylint: disable=redefined-o
 
 @pytest.fixture
 def create_symlink() -> Callable[[Path, Path | str], None]:
-    """Create a symlink, skipping or failing on Windows if unprivileged."""
+    """Create a symlink at ``link`` pointing to ``target``."""
 
     def _create_symlink(link: Path, target: Path | str) -> None:
-        try:
-            link.symlink_to(target)
-        except OSError as error:
-            if (
-                os.name == "nt"
-                and getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD
-            ):
-                if os.environ.get("AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS") == "1":
-                    pytest.fail(
-                        "Windows SeCreateSymbolicLinkPrivilege not held and "
-                        "AGILEFORGE_REQUIRE_WINDOWS_SYMLINK_TESTS is set.",  # ty: ignore[invalid-argument-type]
-                    )
-                pytest.skip(
-                    "Windows SeCreateSymbolicLinkPrivilege not held.",  # ty: ignore[too-many-positional-arguments]
-                )
-            raise
+        link.symlink_to(target)
 
     return _create_symlink

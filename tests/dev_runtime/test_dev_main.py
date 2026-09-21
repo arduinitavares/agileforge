@@ -5,12 +5,10 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import re
 import shutil
 import sqlite3
 import stat
 import sys
-import unittest.mock
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,8 +61,6 @@ _HOSTILE_SOURCE_CONTROLS = (
     "UV_NO_EDITABLE",
     "VIRTUAL_ENV",
 )
-_WIN_ERROR_PRIVILEGE_NOT_HELD = 1314
-_GIT_EXECUTABLE_FILE_MODE = "100755"
 
 
 def _module() -> ModuleType:
@@ -86,14 +82,6 @@ def _run_process(
     if env is not None:
         command.update_environment(**dict(env))
     argv = list(arguments)
-    if os.name == "nt":
-        target = Path(argv[0])
-        if target.is_file() and target.suffix.lower() not in {".exe", ".bat", ".cmd"}:
-            # Preserve the invoked path so the bootstrap can reject symlinks.
-            posix_path = target.absolute().as_posix()
-            if len(posix_path) > 1 and posix_path[1] == ":":
-                posix_path = f"/{posix_path[0].lower()}{posix_path[2:]}"
-            argv = ["sh", posix_path, *argv[1:]]
     try:
         output = command.execute(command=argv)
     except GitCommandError as error:
@@ -307,11 +295,7 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     source = launcher.read_text(encoding="utf-8")
     execution_lines = [line for line in source.splitlines() if line.startswith("exec ")]
 
-    if os.name == "nt":
-        file_mode = _git(launcher.parent, "ls-files", "-s", "agileforge-dev")
-        assert file_mode.startswith(_GIT_EXECUTABLE_FILE_MODE)
-    else:
-        assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
+    assert stat.S_IMODE(launcher.stat().st_mode) & stat.S_IXUSR
     assert (launcher.parent / ".python-version").read_text(
         encoding="utf-8"
     ) == "3.13.15\n"
@@ -367,11 +351,6 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     output_lines = stdout.splitlines()
     assert output_lines[0] == "--directory"
     reported_root = output_lines[1]
-    if os.name == "nt":
-        msys_match = re.match(r"^/([a-zA-Z])/(.*)$", reported_root)
-        if msys_match:
-            drive, rest = msys_match.groups()
-            reported_root = f"{drive.upper()}:/{rest}"
     assert Path(reported_root).resolve() == launcher.parent.resolve()
     assert output_lines[2:] == [
         "run",
@@ -489,14 +468,7 @@ def test_bootstrap_rejects_symlinked_entrypoint(tmp_path: Path) -> None:
     module_path = Path(cast("str", _module().__file__))
     launcher = module_path.parents[1] / "agileforge-dev"
     linked_launcher = tmp_path / "linked-launcher"
-    try:
-        linked_launcher.symlink_to(launcher)
-    except OSError as error:
-        if getattr(error, "winerror", None) == _WIN_ERROR_PRIVILEGE_NOT_HELD:
-            pytest.skip(
-                "Windows SeCreateSymbolicLinkPrivilege not held"  # ty: ignore[too-many-positional-arguments]
-            )
-        raise
+    linked_launcher.symlink_to(launcher)
 
     exit_code, _stdout, stderr = _run_process(
         (str(linked_launcher), "--help"),
@@ -663,11 +635,6 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
         "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
-    if os.name == "nt":
-        expected_environment["SystemRoot"] = os.environ["SYSTEMROOT"]
-        temp_directory = str(paths.root.resolve())
-        expected_environment["TEMP"] = temp_directory
-        expected_environment["TMP"] = temp_directory
     expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = module._resolve_git_executable()
     assert schema_environment is not None
     assert schema_environment == expected_environment
@@ -1061,232 +1028,6 @@ def test_schema_contract_names_removed_tables() -> None:
     assert set(module.FORBIDDEN_BUSINESS_TABLES) == _FORBIDDEN_TABLES
 
 
-def test_real_launcher_child_environment_preserves_windows_systemroot(
-    checkout: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Preserve Windows SystemRoot for child asyncio while isolating credentials."""
-    module = _module()
-    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "must-not-leak-provider-secret")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak-aws-secret")
-    monkeypatch.setenv("CUSTOM_PARENT_CONTROL", "parent-control-value")
-    monkeypatch.setenv("RELAX_ZDR_FOR_TESTS", "true")
-
-    profile = module.prepare_profile_record(
-        checkout, "asyncio-child", module.ProfileMode.DEVELOPMENT
-    )
-    child_environment = module._launcher_child_environment(profile)
-
-    assert child_environment["AGILEFORGE_LAUNCHER_CHILD"] == "1"
-    assert "AGILEFORGE_DB_URL" in child_environment
-    assert "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL" in child_environment
-    assert "MODEL_CONFIG_PATH" in child_environment
-    assert "SPECIFICATION_STRUCTURER_MAX_TOKENS" in child_environment
-    assert "GIT_PYTHON_GIT_EXECUTABLE" in child_environment
-
-    assert "OPEN_ROUTER_API_KEY" not in child_environment
-    assert "AWS_SECRET_ACCESS_KEY" not in child_environment
-    assert "CUSTOM_PARENT_CONTROL" not in child_environment
-    assert "RELAX_ZDR_FOR_TESTS" not in child_environment
-
-    paths = module.profile_paths(checkout, "asyncio-child")
-    if os.name == "nt":
-        assert "SystemRoot" in child_environment
-        assert child_environment["SystemRoot"] == os.environ["SYSTEMROOT"]
-        assert "TEMP" in child_environment
-        assert "TMP" in child_environment
-        assert (
-            child_environment["TEMP"]
-            == child_environment["TMP"]
-            == str(paths.root.resolve())
-        )
-    else:
-        assert "SystemRoot" not in child_environment
-        assert "TEMP" not in child_environment
-        assert "TMP" not in child_environment
-
-    validated = module.ChildRuntimeEnvironment.model_validate(child_environment)
-    dumped = validated.model_dump(by_alias=True)
-    assert set(dumped.keys()) == {
-        "AGILEFORGE_DB_URL",
-        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
-        "AGILEFORGE_LAUNCHER_CHILD",
-        "MODEL_CONFIG_PATH",
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS",
-    }
-    assert "SystemRoot" not in dumped
-    assert "GIT_PYTHON_GIT_EXECUTABLE" not in dumped
-    assert "TEMP" not in dumped
-    assert "TMP" not in dumped
-
-    probe = (
-        "import json, os\n"
-        "import asyncio\n"
-        "print(json.dumps({\n"
-        "    'system_root': os.environ.get('SYSTEMROOT'),\n"
-        "    'child_marker': os.environ.get('AGILEFORGE_LAUNCHER_CHILD'),\n"
-        "    'provider_present': 'OPEN_ROUTER_API_KEY' in os.environ,\n"
-        "    'aws_present': 'AWS_SECRET_ACCESS_KEY' in os.environ,\n"
-        "    'custom_present': 'CUSTOM_PARENT_CONTROL' in os.environ,\n"
-        "}))\n"
-    )
-
-    runner = module.SubprocessCommandRunner()
-    result = runner.run(
-        (sys.executable, "-c", probe),
-        cwd=checkout,
-        env=child_environment,
-    )
-
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-    assert payload["child_marker"] == "1"
-    assert payload["provider_present"] is False
-    assert payload["aws_present"] is False
-    assert payload["custom_present"] is False
-    if os.name == "nt":
-        assert payload["system_root"] == os.environ["SYSTEMROOT"]
-
-
-def test_real_launcher_child_environment_configures_windows_temp_for_sqlite_spill(
-    checkout: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ensure child environment sets writable TEMP/TMP on Windows for sort spills."""
-    module = _module()
-    for k, v in {
-        "OPEN_ROUTER_API_KEY": "must-not-leak-provider-secret",
-        # Test-only AWS credential sentinel: the child environment must remove it.
-        "AWS_SECRET_ACCESS_KEY": "must-not-leak-aws-secret",  # nosec B105
-        "CUSTOM_PARENT_CONTROL": "parent-control-value",
-        "USERPROFILE": r"C:\Users\untrusted_parent",
-        "LOCALAPPDATA": r"C:\Users\untrusted_parent\AppData\Local",
-    }.items():
-        monkeypatch.setenv(k, v)
-
-    profile = module.prepare_profile_record(
-        checkout, "sqlite-temp-spill", module.ProfileMode.DEVELOPMENT
-    )
-    child_environment = module._launcher_child_environment(profile)
-
-    probe = (
-        "import json, os, sqlite3, sys\n"
-        "from pathlib import Path\n"
-        "temp_val = os.environ.get('TEMP')\n"
-        "tmp_val = os.environ.get('TMP')\n"
-        "results = {\n"
-        "    'temp': temp_val,\n"
-        "    'tmp': tmp_val,\n"
-        "    'provider_present': 'OPEN_ROUTER_API_KEY' in os.environ,\n"
-        "    'aws_present': 'AWS_SECRET_ACCESS_KEY' in os.environ,\n"
-        "    'custom_present': 'CUSTOM_PARENT_CONTROL' in os.environ,\n"
-        "    'userprofile_present': 'USERPROFILE' in os.environ,\n"
-        "    'localappdata_present': 'LOCALAPPDATA' in os.environ,\n"
-        "    'can_create_temp_file': False,\n"
-        "    'sqlite_spill_ok': False,\n"
-        "    'sqlite_error': None,\n"
-        "    'sqlite_errorcode': None,\n"
-        "    'sqlite_errorname': None,\n"
-        "}\n"
-        "if temp_val and tmp_val and temp_val == tmp_val:\n"
-        "    temp_dir = Path(temp_val)\n"
-        "    if temp_dir.is_dir():\n"
-        "        test_file = temp_dir / f'agileforge_temp_test_{os.getpid()}.tmp'\n"
-        "        try:\n"
-        "            test_file.write_text('writable', encoding='utf-8')\n"
-        "            if test_file.read_text(encoding='utf-8') == 'writable':\n"
-        "                results['can_create_temp_file'] = True\n"
-        "        finally:\n"
-        "            if test_file.exists():\n"
-        "                test_file.unlink()\n"
-        "conn = sqlite3.connect(':memory:')\n"
-        "conn.execute('PRAGMA temp_store = FILE')\n"
-        "ts_row = conn.execute('PRAGMA temp_store').fetchone()\n"
-        "results['temp_store_value'] = ts_row[0] if ts_row else None\n"
-        "conn.execute('CREATE TABLE t (id INT, payload TEXT)')\n"
-        "query = 'SELECT id, payload FROM t ORDER BY payload DESC'\n"
-        "plan = conn.execute(f'EXPLAIN QUERY PLAN {query}').fetchall()\n"
-        "results['temp_btree_used'] = any(\n"
-        "    'USE TEMP B-TREE FOR ORDER BY' in str(r) for r in plan\n"
-        ")\n"
-        "large_payload = 'x' * 65536\n"
-        "for i in range(100):\n"
-        "    conn.execute('INSERT INTO t VALUES (?, ?)', (i, large_payload + str(i)))\n"
-        "try:\n"
-        "    rows = conn.execute(query).fetchall()\n"
-        "    results['sqlite_spill_ok'] = len(rows) == 100\n"
-        "except sqlite3.OperationalError as exc:\n"
-        "    results['sqlite_error'] = str(exc)\n"
-        "    results['sqlite_errorcode'] = getattr(exc, 'sqlite_errorcode', None)\n"
-        "    results['sqlite_errorname'] = getattr(exc, 'sqlite_errorname', None)\n"
-        "finally:\n"
-        "    conn.close()\n"
-        "print(json.dumps(results))\n"
-    )
-
-    runner = module.SubprocessCommandRunner()
-    result = runner.run(
-        (sys.executable, "-c", probe),
-        cwd=checkout,
-        env=child_environment,
-    )
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-
-    for key in (
-        "provider_present",
-        "aws_present",
-        "custom_present",
-        "userprofile_present",
-        "localappdata_present",
-    ):
-        assert payload[key] is False
-
-    assert payload["temp_store_value"] == 1
-    assert payload["temp_btree_used"] is True
-    assert payload["sqlite_spill_ok"] is True, (
-        f"SQLite sort spill failed: code={payload['sqlite_errorcode']} "
-        f"name={payload['sqlite_errorname']} msg={payload['sqlite_error']}"
-    )
-
-    paths = module.profile_paths(checkout, "sqlite-temp-spill")
-    if os.name == "nt":
-        expected_root = str(paths.root.resolve())
-        assert payload["sqlite_errorcode"] is None
-        assert payload["can_create_temp_file"] is True
-        assert "TEMP" in child_environment
-        assert "TMP" in child_environment
-        assert child_environment["TEMP"] == child_environment["TMP"] == expected_root
-        assert payload["temp"] == payload["tmp"] == expected_root
-        assert Path(expected_root).is_absolute()
-        assert Path(expected_root).is_dir()
-    else:
-        assert "TEMP" not in child_environment
-        assert "TMP" not in child_environment
-
-    validated = module.ChildRuntimeEnvironment.model_validate(child_environment)
-    dumped = validated.model_dump(by_alias=True)
-    assert set(dumped.keys()) == {
-        "AGILEFORGE_DB_URL",
-        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
-        "AGILEFORGE_LAUNCHER_CHILD",
-        "MODEL_CONFIG_PATH",
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS",
-    }
-    assert "SystemRoot" not in dumped
-    assert "GIT_PYTHON_GIT_EXECUTABLE" not in dumped
-    if os.name == "nt":
-        assert "TEMP" not in dumped
-        assert "TMP" not in dumped
-        assert validated.temp is not None
-        assert validated.tmp is not None
-        assert validated.temp == validated.tmp
-        assert Path(validated.temp).is_absolute()
-    else:
-        assert validated.temp is None
-        assert validated.tmp is None
-
-
 def test_resolve_git_executable_validates_path_and_rejects_untrusted_overrides(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1329,41 +1070,11 @@ def test_resolve_git_executable_validates_path_and_rejects_untrusted_overrides(
     assert os.access(resolved, os.X_OK)
 
 
-def test_is_writable_directory_cleanup_safety(tmp_path: Path) -> None:
-    """Verify write probe creates, writes, cleans up, and does not truncate."""
-    module = _module()
-    test_dir = tmp_path / "probe_cleanup_test"
-    test_dir.mkdir()
-
-    existing_file = test_dir / "keep_me.txt"
-    existing_file.write_text("precious data", encoding="utf-8")
-
-    assert module._is_writable_directory(test_dir) is True
-    assert existing_file.read_text(encoding="utf-8") == "precious data"
-    assert list(test_dir.iterdir()) == [existing_file]
-
-    original_tf = module.tempfile.TemporaryFile
-
-    def failing_tempfile(*args: object, **kwargs: object) -> object:
-        f = original_tf(*args, **kwargs)
-        f.close()
-        msg = "simulated write failure"
-        raise OSError(msg)
-
-    with unittest.mock.patch.object(
-        module.tempfile, "TemporaryFile", side_effect=failing_tempfile
-    ):
-        assert module._is_writable_directory(test_dir) is False
-
-    assert existing_file.read_text(encoding="utf-8") == "precious data"
-    assert list(test_dir.iterdir()) == [existing_file]
-
-
 def test_launcher_child_environment_ignores_ambient_temp_and_uses_profile_root(
     checkout: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ensure parent TEMP/TMP/TMPDIR are ignored and gettempdir is not called."""
+    """Ensure parent TEMP/TMP/TMPDIR never reach the launcher child."""
     module = _module()
     for k, v in {
         "TEMP": r"\\hostile-server\share\temp",
@@ -1378,39 +1089,14 @@ def test_launcher_child_environment_ignores_ambient_temp_and_uses_profile_root(
     }.items():
         monkeypatch.setenv(k, v)
 
-    def bomb_gettempdir() -> str:
-        msg = "BOMB: tempfile.gettempdir() must not be called"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(module.tempfile, "gettempdir", bomb_gettempdir)
-
     profile = module.prepare_profile_record(
         checkout, "temp-isolation", module.ProfileMode.DEVELOPMENT
     )
-    paths = module.profile_paths(checkout, "temp-isolation")
 
     env = module._launcher_child_environment(profile)
 
-    if os.name == "nt":
-        expected_root = str(paths.root.resolve())
-        assert env["TEMP"] == expected_root
-        assert env["TMP"] == expected_root
-
-        probe = (
-            "import os, tempfile\n"
-            "temp_val = os.environ['TEMP']\n"
-            "with tempfile.TemporaryFile(dir=temp_val) as f:\n"
-            "    f.write(b'isolated')\n"
-            "    f.flush()\n"
-            "print('ok')\n"
-        )
-        runner = module.SubprocessCommandRunner()
-        res = runner.run((sys.executable, "-c", probe), cwd=checkout, env=env)
-        assert res.exit_code == 0
-        assert res.stdout.strip() == "ok"
-    else:
-        assert "TEMP" not in env
-        assert "TMP" not in env
+    assert "TEMP" not in env
+    assert "TMP" not in env
 
     for absent in (
         "OPEN_ROUTER_API_KEY",

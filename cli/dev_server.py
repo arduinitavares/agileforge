@@ -195,37 +195,6 @@ def select_loopback_port(*, max_attempts: int = _DEFAULT_PORT_ATTEMPTS) -> int:
     raise OSError(message) from last_error
 
 
-def _ui_python(
-    environment: Mapping[str, str], *, reload: bool
-) -> tuple[str, dict[str, str]]:
-    """Own the serving interpreter directly for Windows venv non-reload UI.
-
-    CPython 3.13 multiprocessing uses this same base-executable/launcher
-    pair to avoid the Windows venv redirector while retaining the venv.
-    Keep reload on its existing supervisor/redirector cleanup path.
-    """
-    child_environment = dict(environment)
-    executable = sys.executable
-    if sys.platform != "win32" or reload:
-        return executable, child_environment
-    if not isinstance(executable, str) or not executable:
-        message = "Windows UI requires a valid Python executable"
-        raise UIReadinessError(message)
-    base_executable = getattr(sys, "_base_executable", None)
-    if not isinstance(base_executable, str) or not base_executable:
-        message = "Windows UI requires a valid base Python executable"
-        raise UIReadinessError(message)
-    for value in (executable, base_executable):
-        path = Path(value)
-        if not path.is_absolute() or not path.is_file():
-            message = "Windows UI requires absolute existing Python executables"
-            raise UIReadinessError(message)
-    if os.path.normcase(executable) == os.path.normcase(base_executable):
-        return executable, child_environment
-    child_environment["__PYVENV_LAUNCHER__"] = executable
-    return base_executable, child_environment
-
-
 def start_ui(  # noqa: PLR0913
     *,
     checkout_root: Path,
@@ -243,9 +212,9 @@ def start_ui(  # noqa: PLR0913
     if owned_process_group and os.name != "posix":
         message = "owned process groups require a POSIX runtime"
         raise ValueError(message)
-    executable, child_environment = _ui_python(environment, reload=reload)
+    child_environment = dict(environment)
     arguments = (
-        executable,
+        sys.executable,
         "-m",
         "uvicorn",
         "api:app",

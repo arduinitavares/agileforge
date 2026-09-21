@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,10 +11,6 @@ from cli import dev_main
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="requires native POSIX file semantics"
-)
 
 
 @pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
