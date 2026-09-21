@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import configparser
-import ctypes
 import hashlib
 import json
 import os
@@ -51,10 +50,8 @@ _ADMIN_LINK_MIN_PARTS = 4
 _REPOSITORY_PATH_MIN_PARTS = 2
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_BINARY = getattr(os, "O_BINARY", 0)
 _BUSINESS_DATABASE_ENV = "AGILEFORGE_DB_URL"
 _LAUNCHER_CHILD_ENV = "AGILEFORGE_LAUNCHER_CHILD"
-_ERROR_CANT_ACCESS_FILE = 1920
 _APPROVED_CORE_KEYS = frozenset(
     {"repositoryformatversion", "filemode", "bare", "logallrefupdates"}
 )
@@ -687,31 +684,8 @@ def _publication_target(destination: Path) -> Path:
     raise TransferError(f"transfer destination already exists: {target}")
 
 
-_WIN_EXTENDED_PREFIX = "\\\\?\\"
-
-
-def _win_extended_str(path: Path | str) -> str:
-    if os.name != "nt":
-        return str(path)
-    raw = str(path)
-    if raw.startswith(_WIN_EXTENDED_PREFIX):
-        return raw
-    resolved = str(Path(path).resolve())
-    if resolved.startswith(_WIN_EXTENDED_PREFIX):
-        return resolved
-    if resolved.startswith("\\\\"):
-        return _WIN_EXTENDED_PREFIX + "UNC\\" + resolved.lstrip("\\")
-    return _WIN_EXTENDED_PREFIX + resolved
-
-
-def _win_extended(path: Path) -> Path:
-    if os.name != "nt":
-        return path
-    return Path(_win_extended_str(path))
-
-
 def _safe_rmtree(path: Path) -> None:
-    target = _win_extended(path)
+    target = path
     if not target.exists():
         return
 
@@ -731,9 +705,8 @@ def _sha256_bytes(content: bytes) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    path = _win_extended(path)
     digest = hashlib.sha256()
-    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY
+    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)
@@ -748,14 +721,12 @@ def _sha256_file(path: Path) -> str:
 
 
 def _copy_regular(source: Path, destination: Path) -> None:
-    source = _win_extended(source)
-    destination = _win_extended(destination)
     source_metadata = source.lstat()
     if not stat.S_ISREG(source_metadata.st_mode):
         raise TransferError(f"source changed from a regular file: {source}")
     _owned(source_metadata, label="transfer source file")
     _reject_privileged_mode(source_metadata, label="transfer source file")
-    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY
+    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW
     source_fd = os.open(source, flags)
     try:
         opened = os.fstat(source_fd)
@@ -766,7 +737,7 @@ def _copy_regular(source: Path, destination: Path) -> None:
             raise TransferError(f"source changed during transfer: {source}")
         destination_fd = os.open(
             destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_BINARY,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC,
             stat.S_IMODE(opened.st_mode),
         )
         try:
@@ -828,19 +799,13 @@ def _is_tree_excluded(relative: PurePosixPath, *, admin: bool) -> bool:
     return _is_secret_path(relative, admin=admin)
 
 
-def _is_inaccessible_error(exc: OSError) -> bool:
-    return os.name == "nt" and getattr(exc, "winerror", None) == _ERROR_CANT_ACCESS_FILE
-
-
-def _copy_tree(  # noqa: C901
+def _copy_tree(
     source: Path,
     destination: Path,
     *,
     allow_symlinks: bool,
     admin: bool = False,
 ) -> list[str]:
-    source = _win_extended(source)
-    destination = _win_extended(destination)
     metadata = source.lstat()
     _owned(metadata, label="transfer source directory")
     _reject_privileged_mode(metadata, label="transfer source directory")
@@ -848,18 +813,13 @@ def _copy_tree(  # noqa: C901
     destination.chmod(stat.S_IMODE(metadata.st_mode))
     excluded: list[str] = []
 
-    def visit(  # noqa: C901
+    def visit(
         source_directory: Path,
         destination_directory: Path,
         prefix: Path,
     ) -> None:
-        try:
-            with os.scandir(source_directory) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
-        except OSError as exc:
-            if _is_inaccessible_error(exc):
-                return
-            raise
+        with os.scandir(source_directory) as iterator:
+            entries = sorted(iterator, key=lambda item: item.name)
         for entry in entries:
             relative_path = prefix / entry.name
             relative = PurePosixPath(relative_path.as_posix())
@@ -868,13 +828,7 @@ def _copy_tree(  # noqa: C901
                 continue
             source_path = Path(entry.path)
             destination_path = destination_directory / entry.name
-            try:
-                entry_metadata = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                if _is_inaccessible_error(exc):
-                    excluded.append(relative.as_posix())
-                    continue
-                raise
+            entry_metadata = entry.stat(follow_symlinks=False)
             _owned(entry_metadata, label="transfer tree entry")
             _reject_privileged_mode(entry_metadata, label="transfer tree entry")
             if stat.S_ISDIR(entry_metadata.st_mode):
@@ -912,12 +866,7 @@ def _backup_database(source: Path, destination: Path) -> None:
     finally:
         destination_connection.close()
         source_connection.close()
-    flags = (
-        (os.O_RDWR if os.name == "nt" else os.O_RDONLY)
-        | _O_CLOEXEC
-        | _O_NOFOLLOW
-        | _O_BINARY
-    )
+    flags = os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW
     descriptor = os.open(destination, flags)
     try:
         os.fsync(descriptor)
@@ -1189,7 +1138,6 @@ def _entry_record(root: Path, path: Path, relative: PurePosixPath) -> FileRecord
 
 
 def _file_inventory(root: Path) -> tuple[FileRecord, ...]:
-    root = _win_extended(root)
     records: list[FileRecord] = []
 
     def visit(directory: Path, prefix: Path) -> None:
@@ -1470,43 +1418,7 @@ def _write_manifest(root: Path, manifest: TransferManifest) -> None:
         raise
 
 
-def _win32_fsync_directory(path: Path) -> None:
-    loader = getattr(ctypes, "WinDLL", None)
-    if not callable(loader):
-        message = "Win32 kernel32 is unavailable on this platform"
-        raise TransferError(message)
-    kernel32 = loader("kernel32", use_last_error=True)
-
-    def _win_error() -> OSError:
-        reader = getattr(ctypes, "get_last_error", None)
-        code = int(reader()) if callable(reader) else 0
-        factory = getattr(ctypes, "WinError", None)
-        if callable(factory):
-            return cast("OSError", factory(code))
-        return OSError(code, "Win32 call failed")
-
-    handle = kernel32.CreateFileW(
-        str(path),
-        0xC0000000,  # GENERIC_READ | GENERIC_WRITE
-        7,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
-        None,
-        3,  # OPEN_EXISTING
-        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
-        None,
-    )
-    if handle == -1 or handle == ctypes.c_void_p(-1).value:
-        raise _win_error()
-    try:
-        if not kernel32.FlushFileBuffers(handle):
-            raise _win_error()
-    finally:
-        kernel32.CloseHandle(handle)
-
-
 def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        _win32_fsync_directory(path)
-        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
@@ -1518,7 +1430,7 @@ def _write_unpublished_marker(root: Path, target_name: str) -> None:
     marker = root / _UNPUBLISHED_NAME
     descriptor = os.open(
         marker,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_BINARY,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC,
         0o600,
     )
     try:
@@ -1923,7 +1835,7 @@ def install_approved_git_config(  # noqa: C901
         target = main.worktree / ".git" / "config"
         descriptor = os.open(
             target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_NOFOLLOW | _O_BINARY,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_CLOEXEC | _O_NOFOLLOW,
             0o600,
         )
         try:
