@@ -9,7 +9,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
@@ -32,15 +32,8 @@ from services.contracts.specification_source import (
     specification_source_adr_id,
 )
 from services.repository_probe import RepositoryProbeError
-from services.specification_source_windows import (
-    UnsafeWindowsSourceError,
-    WindowsSpecificationSourceWorktree,
-    open_windows_source_worktree,
-)
 from services.vision_evidence_reader import (
     RepositoryEvidenceCapability,
-    RepositoryEvidenceCapabilityError,
-    RepositoryEvidenceChangedError,
 )
 from workflow.contracts import FrozenModel
 from workflow.definitions.product_goal import (
@@ -674,31 +667,7 @@ def _checked_package_total(total_bytes: int, captured: _CapturedDocument) -> int
 
 
 @contextmanager
-def _source_root(
-    worktree_path: str,
-) -> Iterator[int | WindowsSpecificationSourceWorktree]:
-    if os.name == "nt":
-        try:
-            with open_windows_source_worktree(Path(worktree_path)) as worktree:
-                yield worktree
-        except UnsafeWindowsSourceError as error:
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.UNSAFE_FILE,
-                str(error),
-            ) from error
-        except RepositoryEvidenceCapabilityError as error:
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.CAPABILITY_UNAVAILABLE,
-                "Specification capture needs native 64-bit Windows and a local "
-                "NTFS/ReFS worktree with safe handle support. "
-                "This runtime or filesystem cannot provide that support.",
-            ) from error
-        except RepositoryEvidenceChangedError as error:
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.SOURCE_CHANGED_DURING_CAPTURE,
-                str(error),
-            ) from error
-        return
+def _source_root(worktree_path: str) -> Iterator[int]:
     descriptor = _open_root(worktree_path)
     try:
         yield descriptor
@@ -718,30 +687,12 @@ def _open_root(worktree_path: str) -> int:
 
 
 def _capture_document(
-    root_descriptor: int | WindowsSpecificationSourceWorktree,
+    root_descriptor: int,
     *,
     relative_path: str,
     source_id: str,
     required: bool,
 ) -> _CapturedDocument | None:
-    if isinstance(root_descriptor, WindowsSpecificationSourceWorktree):
-        captured = root_descriptor.capture(
-            relative_path, MAX_SPECIFICATION_SOURCE_DOCUMENT_BYTES
-        )
-        if captured is None:
-            if not required:
-                return None
-            raise SpecificationSourceRegistrationError(
-                SpecificationSourceRegistrationErrorCode.SOURCE_MISSING,
-                f"Selected source path is missing: {relative_path}",
-            )
-        return _document_from_bytes(
-            captured.content,
-            relative_path=relative_path,
-            source_id=source_id,
-            device=captured.volume,
-            inode=captured.file_id,
-        )
     return _capture_posix_document(
         root_descriptor,
         relative_path=relative_path,

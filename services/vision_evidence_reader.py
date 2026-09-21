@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -111,13 +110,7 @@ class RepositoryEvidenceChangedError(RuntimeError):
 
 
 def repository_evidence_reader() -> RepositoryEvidenceReader:
-    """Select one platform adapter without importing Windows code on POSIX."""
-    if sys.platform == "win32":
-        from services.vision_evidence_windows import (  # noqa: PLC0415
-            WindowsRepositoryEvidenceReader,
-        )
-
-        return WindowsRepositoryEvidenceReader()
+    """Return the POSIX adapter; AgileForge runs only inside Linux containers."""
     from services.vision_evidence_posix import (  # noqa: PLC0415
         PosixRepositoryEvidenceReader,
     )

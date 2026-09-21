@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -437,10 +435,6 @@ def test_json_spec_symlink_rejects_approved_markdown_target(
     assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or sys.platform == "win32",
-    reason="requires POSIX descriptor instrumentation",
-)
 def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -474,10 +468,6 @@ def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
     assert len(str(readme_item.content).encode("utf-8")) == MAX_EVIDENCE_ITEM_BYTES
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or sys.platform == "win32",
-    reason="requires POSIX descriptor instrumentation",
-)
 def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -588,10 +578,6 @@ def test_missing_nonblocking_open_capability_fails_before_leaf_open(
     assert [warning.code for warning in warnings] == ["EVIDENCE_UNREADABLE"]
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or sys.platform == "win32",
-    reason="requires POSIX descriptor instrumentation",
-)
 def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -632,10 +618,6 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     assert [warning.code for warning in bundle.warnings] == ["EVIDENCE_UNREADABLE"]
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or sys.platform == "win32",
-    reason="requires POSIX descriptor instrumentation",
-)
 def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -1114,10 +1096,6 @@ def test_change_during_collection_discards_partial_evidence(
     )
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or sys.platform == "win32",
-    reason="requires POSIX descriptor instrumentation",
-)
 @pytest.mark.parametrize("operation", ["read", "stat"])
 def test_post_open_races_fail_with_the_closed_repository_changed_error(
     engine: Engine,

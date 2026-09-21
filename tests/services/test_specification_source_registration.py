@@ -45,7 +45,6 @@ if TYPE_CHECKING:
 
 _EXPECTED_PROBE_CALLS = 3
 _MIDDLE_PROBE_CALL = 2
-_WINDOWS_PRIVILEGE_NOT_HELD = 1314
 _COMPLETE_PACKAGE_ADR_COUNT = 14
 _COMPLETE_PACKAGE_BYTES = 125_432
 
@@ -372,14 +371,7 @@ def test_prepare_rejects_symlink_source(engine: Engine, tmp_path: Path) -> None:
     repository = _git_repository(tmp_path)
     (repository / "real-source.md").write_bytes(b"real source\n")
     (repository / "specification.md").unlink()
-    try:
-        (repository / "specification.md").symlink_to("real-source.md")
-    except OSError as error:
-        if getattr(error, "winerror", None) == _WINDOWS_PRIVILEGE_NOT_HELD:
-            raise pytest.skip.Exception(
-                msg="Windows user lacks symbolic-link creation privilege"
-            ) from error
-        raise
+    (repository / "specification.md").symlink_to("real-source.md")
     repo = Repo(repository)
     repo.index.remove(["specification.md"])
     repo.index.add(["real-source.md", "specification.md"])
@@ -513,7 +505,7 @@ def test_prepare_stops_capturing_adrs_when_the_aggregate_limit_is_reached(
     original_capture = registration_module._capture_document
 
     def record_capture(
-        root_descriptor: int | registration_module.WindowsSpecificationSourceWorktree,
+        root_descriptor: int,
         *,
         relative_path: str,
         source_id: str,
