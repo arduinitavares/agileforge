@@ -118,8 +118,9 @@ An earlier run passed 906 workflow tests before the dashboard bundle and
 candidate-validation cache were added; that is supporting evidence, not a full
 suite result for the final patch.
 
-The complete CI workflow, package installation checks, and production rollout
-rehearsal have not been run. The change has not been deployed.
+The checks above describe validation completed with the refresh measurements.
+The full release gate, package installation checks, and installed-container
+startup rehearsals are separate from those measurements.
 
 The owner tested the copied PIDExtract dashboard on 2026-09-23 and approved the
 refresh improvement. This records browser acceptance; release checks remain a
