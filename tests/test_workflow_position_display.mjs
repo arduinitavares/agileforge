@@ -4,11 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { dashboardBundle } from './dashboard_bundle_fixture.mjs';
 
 const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
 
-function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}' }), windowOverrides = {}) {
+function loadFrontend(fetchImpl = async (url) => ({ ok: true, text: async () => JSON.stringify(
+    url.endsWith('/dashboard') ? dashboardBundle() : {},
+) }), windowOverrides = {}) {
     const createElement = () => ({
         _textContent: '',
         innerHTML: '',
@@ -223,15 +226,15 @@ function dashboardResponse(state) {
         if (options.method === 'POST') {
             return { ok: true, status: 200, text: async () => '{}' };
         }
-        if (url.endsWith('/position')) {
+        if (url.endsWith('/dashboard')) {
             return {
                 ok: true,
                 status: 200,
-                text: async () => JSON.stringify({ data: state.position, actions: state.actions }),
+                text: async () => JSON.stringify(dashboardBundle({
+                    position: { status: 200, body: { data: state.position, actions: state.actions } },
+                    backlogReview: { status: 200, body: { data: state.planningReviews.backlog } },
+                })),
             };
-        }
-        if (url.endsWith('/backlog/review')) {
-            return { ok: true, status: 200, text: async () => JSON.stringify({ data: state.planningReviews.backlog }) };
         }
         return { ok: true, status: 200, text: async () => JSON.stringify({ data: {} }) };
     };
@@ -965,7 +968,7 @@ test('Backlog correction token survives an aborted and superseded dashboard load
     let fetchCount = 0;
     const context = loadFrontend(async (_url, options = {}) => {
         fetchCount += 1;
-        if (fetchCount <= 16) {
+        if (fetchCount === 1) {
             return new Promise((_resolve, reject) => {
                 options.signal.addEventListener('abort', () => reject(new Error('aborted')));
             });
@@ -3347,13 +3350,15 @@ test('structural and selection mutation payloads bind exact Story state and reus
 test('Story mutation token lock survives a 409 authority reload and releases only on recovery', async () => {
     let conflict = true;
     const context = loadFrontend(async (path) => {
-        if (conflict && path.endsWith('/story/dependencies')) {
+        if (path.endsWith('/dashboard')) {
             return {
-                ok: false,
-                status: 409,
-                text: async () => JSON.stringify({
-                    detail: { error: { code: 'STALE_POSITION', message: 'Projection changed.' } },
-                }),
+                ok: true,
+                status: 200,
+                text: async () => JSON.stringify(dashboardBundle(conflict ? {
+                    storyDependencies: { status: 409, body: {
+                        detail: { error: { code: 'STALE_POSITION', message: 'Projection changed.' } },
+                    } },
+                } : {})),
             };
         }
         return { ok: true, status: 200, text: async () => '{"data":{}}' };

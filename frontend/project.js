@@ -5033,11 +5033,15 @@ async function requestJson(path, options = {}) {
             throw new Error('The dashboard received an unreadable response.');
         }
     }
-    if (!response.ok) {
+    return checkedResponsePayload(payload, response.status, response.ok);
+}
+
+function checkedResponsePayload(payload, status, ok) {
+    if (!ok) {
         const error = new Error(
             responseErrorMessage(payload, 'The requested action failed.'),
         );
-        error.status = response.status;
+        error.status = status;
         error.code = payload?.detail?.error?.code
             ?? payload?.detail?.errors?.[0]?.code
             ?? payload?.code
@@ -5078,6 +5082,47 @@ async function requestSprintStatus(url, options) {
         }
         return { kind: 'error', message: error.message };
     }
+}
+
+async function requestDashboard(base, options = {}) {
+    const response = await requestJson(`${base}/dashboard`, options);
+    const names = [
+        'project', 'position', 'vision', 'goal', 'specification', 'repository',
+        'backlogReview', 'roadmapReview', 'acceptedRoadmap', 'storyReviews',
+        'sprintPlanReview', 'storyPending', 'storyDependencies', 'sprintCandidates',
+        'sprintStatusResponse', 'sprintHistory',
+    ];
+    const planningReviews = new Set([
+        'backlogReview', 'roadmapReview', 'storyReviews', 'sprintPlanReview',
+    ]);
+    const slots = names.map((name) => {
+        const slot = response?.data?.[name];
+        if (!Number.isInteger(slot?.status) || slot.status < 200 || slot.status > 599
+            || !slot.body || typeof slot.body !== 'object' || Array.isArray(slot.body)) {
+            throw new Error('The dashboard received an incomplete dashboard response.');
+        }
+        return slot;
+    });
+    return slots.map((slot, index) => {
+        const name = names[index];
+        try {
+            const payload = checkedResponsePayload(slot.body, slot.status, slot.status < 300);
+            if (name === 'acceptedRoadmap') return { kind: 'ready', data: payload.data ?? {} };
+            if (name === 'sprintStatusResponse') return { kind: 'candidate', data: payload.data };
+            return payload;
+        } catch (error) {
+            if (planningReviews.has(name) && error.status === 409
+                && error.code === 'PLANNING_REVIEW_NOT_AVAILABLE') return { data: {} };
+            if (name === 'acceptedRoadmap') {
+                return { kind: 'error', code: error.code, message: error.message };
+            }
+            if (name === 'sprintStatusResponse') {
+                if (error.status === 404 && error.code === 'SPRINT_NOT_FOUND') return { kind: 'absent' };
+                return { kind: 'error', message: error.message };
+            }
+            throw error;
+        }
+    });
 }
 
 async function loadDashboard() {
@@ -5123,24 +5168,7 @@ async function loadDashboard() {
             sprintCandidates,
             sprintStatusResponse,
             sprintHistory,
-        ] = await Promise.all([
-            requestJson(base, options),
-            requestJson(`${base}/position`, options),
-            requestJson(`${base}/vision/status`, options),
-            requestJson(`${base}/goals/status`, options),
-            requestJson(`${base}/specifications/review`, options),
-            requestJson(`${base}/repository`, options),
-            requestPlanningReview(`${base}/backlog/review`, options),
-            requestPlanningReview(`${base}/roadmap/review`, options),
-            requestAcceptedRoadmap(`${base}/roadmap`, options),
-            requestPlanningReview(`${base}/story/reviews`, options),
-            requestPlanningReview(`${base}/sprint/plan/review`, options),
-            requestJson(`${base}/story/pending`, options),
-            requestJson(`${base}/story/dependencies`, options),
-            requestJson(`${base}/sprint/candidates`, options),
-            requestSprintStatus(`${base}/sprint/status`, options),
-            requestJson(`${base}/sprints`, options),
-        ]);
+        ] = await requestDashboard(base, options);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         const sprintPlanReviewData = sprintPlanReview.data ?? {};
         const sprintCandidatesData = sprintCandidates?.data ?? {};

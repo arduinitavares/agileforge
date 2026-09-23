@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { dashboardBundle } from './dashboard_bundle_fixture.mjs';
 
 const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -285,17 +286,13 @@ function retryHarness({
         const dashboardState = retryStarted && afterStartState
             ? afterStartState
             : (retryCreated && afterRetryState ? afterRetryState : state);
-        if (request.url.endsWith('/position')) {
-            return response({ data: dashboardState.position, actions: dashboardState.actions });
-        }
-        if (request.url.endsWith('/sprint/status')) {
-            return response({ data: dashboardState.status });
-        }
-        if (request.url.endsWith('/sprints')) {
-            return response({ data: dashboardState.history ?? { project_id: 7, execution_attempts: [] } });
-        }
-        if (request.url.endsWith('/projects/7')) {
-            return response({ data: { id: 7, name: 'Retry Project' } });
+        if (request.url.endsWith('/dashboard')) {
+            return response(dashboardBundle({
+                project: { status: 200, body: { data: { id: 7, name: 'Retry Project' } } },
+                position: { status: 200, body: { data: dashboardState.position, actions: dashboardState.actions } },
+                sprintStatusResponse: { status: 200, body: { data: dashboardState.status } },
+                sprintHistory: { status: 200, body: { data: dashboardState.history ?? { project_id: 7, execution_attempts: [] } } },
+            }));
         }
         return response({ data: {}, actions: [] });
     };

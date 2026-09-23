@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { randomUUID, webcrypto } from 'node:crypto';
 import test from 'node:test';
+import { dashboardBundle } from './dashboard_bundle_fixture.mjs';
 
 const sourcePath = path.resolve('frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -99,28 +100,28 @@ function harness(actions = []) {
 const bootstrap = { request_kind: 'generate_vision_bootstrap', endpoint: 'vision/bootstrap', availability: 'available' };
 const failed = { ok: false, status: 500, text: async () => JSON.stringify({ message: 'Controlled test stop.' }) };
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
-const dashboardReadCount = 16;
+const dashboardReadCount = 1;
 
 function assertDashboardGets(requests) {
     assert.equal(requests.length, dashboardReadCount);
-    assert.equal(requests.filter((request) => request.url === '/api/projects/7/roadmap').length, 1);
+    assert.equal(requests[0].url, '/api/projects/7/dashboard');
     assert.ok(requests.every((request) => (request.options.method ?? 'GET') === 'GET'));
 }
 
-function completeDashboardGets(requests, actions, fail = false) {
+function completeDashboardGets(requests, actions, fail = false, overrides = {}) {
     assertDashboardGets(requests);
-    for (const request of requests) {
-        if (fail && request.url === '/api/projects/7') {
-            request.reject(new Error('Controlled recovery GET failure.'));
-        } else if (request.url.endsWith('/sprint/status')) {
-            request.resolve({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'SPRINT_NOT_FOUND' }) });
-        } else {
-            const data = request.url === '/api/projects/7'
-                ? { id: 7, name: 'Initialized dashboard' }
-                : (request.url.endsWith('/roadmap') ? { state: 'absent', project_id: 7 } : {});
-            request.resolve({ ok: true, text: async () => JSON.stringify({ data, ...(request.url.endsWith('/position') ? { actions } : {}) }) });
-        }
+    if (fail) {
+        requests[0].reject(new Error('Controlled recovery GET failure.'));
+        return;
     }
+    const payload = dashboardBundle({
+        project: { status: 200, body: { data: { id: 7, name: 'Initialized dashboard' } } },
+        position: { status: 200, body: { data: {}, actions } },
+        acceptedRoadmap: { status: 200, body: { data: { state: 'absent', project_id: 7 } } },
+        sprintStatusResponse: { status: 404, body: { code: 'SPRINT_NOT_FOUND' } },
+        ...overrides,
+    });
+    requests[0].resolve({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
 }
 
 async function successfulDashboardLoad(h, actions) {
@@ -491,18 +492,10 @@ test('superseded refresh does not relock cockpit after a newer refresh has alrea
         },
     };
     function finishGets(requests, marker) {
-        assertDashboardGets(requests);
-        for (const request of requests) {
-            if (request.url.endsWith('/sprint/status')) {
-                request.resolve({ ok: false, status: 404, text: async () => JSON.stringify({ code: 'SPRINT_NOT_FOUND' }) });
-                continue;
-            }
-            let data = {};
-            if (request.url === '/api/projects/7') data = { id: 7, name: marker };
-            if (request.url.endsWith('/roadmap')) data = { state: 'absent', project_id: 7 };
-            if (request.url.endsWith('/sprint/candidates')) data = { project_id: 7, items: [], sprint_owner: owner };
-            request.resolve({ ok: true, text: async () => JSON.stringify({ data, ...(request.url.endsWith('/position') ? { actions: [action] } : {}) }) });
-        }
+        completeDashboardGets(requests, [action], false, {
+            project: { status: 200, body: { data: { id: 7, name: marker } } },
+            sprintCandidates: { status: 200, body: { data: { project_id: 7, items: [], sprint_owner: owner } } },
+        });
     }
 
     const pendingMutation = h.context.runDirectAction(action.request_kind, h.direct(action));
@@ -633,14 +626,11 @@ test('backend reload errors remain visible in Story selection and Dependency rev
 
     // The reload fails with an authoritative backend error message
     const reloadRequests = h.requests.slice(postIndex + 1);
-    assertDashboardGets(reloadRequests);
-    for (const request of reloadRequests) {
-        if (request.url.endsWith('/story/dependencies')) {
-            request.reject(new Error('Story authority projection conflicted.'));
-        } else {
-            request.resolve({ ok: true, text: async () => '{}' });
-        }
-    }
+    completeDashboardGets(reloadRequests, [action], false, {
+        storyDependencies: { status: 409, body: { detail: { error: {
+            code: 'STALE_POSITION', message: 'Story authority projection conflicted.',
+        } } } },
+    });
     await button.completion;
 
     // Error message from backend reload must be preserved in project-error

@@ -1,6 +1,10 @@
 """Tests for workflow fact and decision fingerprints."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event, Lock
+
+import pytest
 
 from services.agent_workbench.fingerprints import (
     canonical_hash as legacy_canonical_hash,
@@ -36,6 +40,79 @@ def test_fact_fingerprint_is_stable_for_equivalent_snapshots() -> None:
     second = first.model_copy(deep=True)
     assert fact_fingerprint(first) == fact_fingerprint(second)
     assert fact_fingerprint(first).startswith("sha256:")
+
+
+@pytest.mark.parametrize("first_dump_raises", [False, True])
+def test_snapshot_serialization_does_not_overlap_between_threads(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch, first_dump_raises: bool
+) -> None:
+    """A slow or failing dump cannot overlap another snapshot's dump."""
+    created = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    first = WorkflowFactSnapshot(
+        project=ProjectFact(project_id=3, name="first", created_at=created)
+    )
+    second = WorkflowFactSnapshot(
+        project=ProjectFact(project_id=4, name="second", created_at=created)
+    )
+    expected_second = business_fact_fingerprint(second)
+    assert expected_second != business_fact_fingerprint(first)
+
+    original_dump = WorkflowFactSnapshot.model_dump
+    first_entered = Event()
+    second_entered = Event()
+    release_first = Event()
+    second_started = Event()
+    active = 0
+    peak = 0
+    count_lock = Lock()
+
+    def observed_dump(
+        snapshot: WorkflowFactSnapshot, *, mode: str
+    ) -> dict[str, object]:
+        nonlocal active, peak
+        with count_lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            result = original_dump(snapshot, mode=mode)
+            if snapshot is first:
+                first_entered.set()
+                if not release_first.wait(timeout=5):
+                    message = "first serialization was never released"
+                    raise AssertionError(message)
+                if first_dump_raises:
+                    message = "first serialization failed"
+                    raise RuntimeError(message)
+            else:
+                second_entered.set()
+            return result
+        finally:
+            with count_lock:
+                active -= 1
+
+    monkeypatch.setattr(WorkflowFactSnapshot, "model_dump", observed_dump)
+
+    def hash_second() -> str:
+        second_started.set()
+        return business_fact_fingerprint(second)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_result = executor.submit(business_fact_fingerprint, first)
+        try:
+            assert first_entered.wait(timeout=5)
+            second_result = executor.submit(hash_second)
+            assert second_started.wait(timeout=5)
+            assert not second_entered.wait(timeout=0.25)
+        finally:
+            release_first.set()
+
+        if first_dump_raises:
+            with pytest.raises(RuntimeError, match="first serialization failed"):
+                first_result.result(timeout=5)
+        else:
+            assert first_result.result(timeout=5) != expected_second
+        assert second_result.result(timeout=5) == expected_second
+        assert peak == 1
 
 
 def test_attempt_changes_full_fingerprint_but_not_business_fingerprint() -> None:

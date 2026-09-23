@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -1870,10 +1871,7 @@ def _accepted_roadmap_progress(
                 artifact_matches_current_roadmap and artifact_matches_current_backlog
             )
             if (
-                not (
-                    story_matches_current_lineage
-                    or artifact_matches_current_lineage
-                )
+                not (story_matches_current_lineage or artifact_matches_current_lineage)
                 or linked_backlog_item_id not in release.backlog_item_ids
             ):
                 continue
@@ -1915,9 +1913,7 @@ def _accepted_roadmap_progress(
                 "backlog_item_ids": list(release.backlog_item_ids),
                 "stories": story_rows,
                 "completion": "not_established",
-                "evidence_state": (
-                    "qualified" if milestone_qualified else "available"
-                ),
+                "evidence_state": ("qualified" if milestone_qualified else "available"),
             }
         )
     active: JsonValue = None
@@ -2131,13 +2127,35 @@ class _ExecutionScopeReadFailure:
 class DurableReadProjectionService:
     """Read supported operator views without deriving workflow availability."""
 
-    def __init__(self, *, engine: Engine) -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        session: Session | None = None,
+        snapshot: WorkflowFactSnapshot | None = None,
+    ) -> None:
         """Bind durable records used by read-only projections."""
         self._engine = engine
+        self._bound_session = session
+        self._bound_snapshot = snapshot
+
+    def _session(self) -> Session | nullcontext[Session]:
+        """Reuse only the caller-owned dashboard session when one is bound."""
+        if self._bound_session is not None:
+            return nullcontext(self._bound_session)
+        return Session(self._engine)
+
+    def _load_snapshot(self, session: Session, project_id: int) -> WorkflowFactSnapshot:
+        if self._bound_snapshot is not None:
+            if self._bound_snapshot.project.project_id != project_id:
+                msg = "Dashboard snapshot belongs to another Project."
+                raise ValueError(msg)
+            return self._bound_snapshot
+        return WorkflowFactRepository(session).load(project_id)
 
     def project_list(self) -> JsonObject:
         """Return durable Project identities and aggregate counts."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             projects = session.exec(
                 select(Project).order_by(col(Project.project_id))
             ).all()
@@ -2179,14 +2197,14 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         project = context.project
-        with Session(self._engine) as session:
+        with self._session() as session:
             stories = session.exec(
                 select(UserStory).where(col(UserStory.project_id) == project_id)
             ).all()
             sprints = session.exec(
                 select(Sprint).where(col(Sprint.project_id) == project_id)
             ).all()
-            snapshot = WorkflowFactRepository(session).load(project_id)
+            snapshot = self._load_snapshot(session, project_id)
         vision = accepted_current_vision(snapshot)
         goal = accepted_current_goal(snapshot)
         return _success(
@@ -2243,7 +2261,7 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 record = _load_backlog_review_record(
                     session,
                     project_id=project_id,
@@ -2276,7 +2294,7 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 record = _load_roadmap_review_record(
                     session,
                     project_id=project_id,
@@ -2304,7 +2322,7 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 record = _load_current_accepted_roadmap_record(
                     session,
                     project_id=project_id,
@@ -2312,7 +2330,7 @@ class DurableReadProjectionService:
                 if record is None:
                     return _success({"state": "absent", "project_id": project_id})
                 try:
-                    snapshot = WorkflowFactRepository(session).load(project_id)
+                    snapshot = self._load_snapshot(session, project_id)
                     progress: JsonObject = _accepted_roadmap_progress(
                         record,
                         snapshot,
@@ -2337,7 +2355,7 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 record = _load_story_review_record(
                     session,
                     project_id=project_id,
@@ -2362,7 +2380,7 @@ class DurableReadProjectionService:
     def _repository_data(self, project: Project) -> JsonObject | None:
         if project.active_repository_binding_id is None:
             return None
-        with Session(self._engine) as session:
+        with self._session() as session:
             binding = session.get(
                 RepositoryBinding,
                 project.active_repository_binding_id,
@@ -2764,7 +2782,7 @@ class DurableReadProjectionService:
         project_or_error = self._project(project_id)
         if isinstance(project_or_error, _ProjectReadFailure):
             return project_or_error.error
-        with Session(self._engine) as session:
+        with self._session() as session:
             statement = select(WorkflowNodeAttempt).where(
                 col(WorkflowNodeAttempt.project_id) == project_id,
                 col(WorkflowNodeAttempt.node_id) == node_id,
@@ -2830,7 +2848,7 @@ class DurableReadProjectionService:
 
     def story_show(self, *, story_id: int) -> JsonObject:
         """Return one durable Story record with canonical readiness facts."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             story = session.get(UserStory, story_id)
             if story is None:
                 return _error(
@@ -2921,7 +2939,7 @@ class DurableReadProjectionService:
         *,
         expected_fingerprint: str,
     ) -> dict[str, str]:
-        with Session(self._engine) as session:
+        with self._session() as session:
             backlog_artifact = session.get(BacklogArtifact, backlog_artifact_id)
             if backlog_artifact is None:
                 return {}
@@ -3266,8 +3284,11 @@ class DurableReadProjectionService:
 
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         """Return durable dependency edges and reviewed sets."""
-        with Session(self._engine) as session:
-            if session.get_bind().dialect.name == "sqlite":
+        with self._session() as session:
+            if (
+                self._bound_session is None
+                and session.get_bind().dialect.name == "sqlite"
+            ):
                 # sqlite3 legacy mode does not begin a transaction for SELECT.
                 session.connection().exec_driver_sql("BEGIN")
             snapshot_or_error = self._snapshot_in_session(session, project_id)
@@ -3377,7 +3398,7 @@ class DurableReadProjectionService:
 
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return Story facts currently eligible for Sprint planning."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             try:
                 owner = resolve_sprint_owner(
                     session,
@@ -3422,7 +3443,7 @@ class DurableReadProjectionService:
         sprint_plan_artifact_id: int,
     ) -> JsonObject:
         """Return one immutable Sprint-plan review with pinned evidence."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             if session.get(Project, project_id) is None:
                 return _error(
                     "PROJECT_NOT_FOUND",
@@ -3539,7 +3560,7 @@ class DurableReadProjectionService:
                         sprint_plan_artifact_id=sprint_plan_artifact_id,
                     )
                 try:
-                    snapshot = WorkflowFactRepository(session).load(project_id)
+                    snapshot = self._load_snapshot(session, project_id)
                 except WorkflowFactLoadError:
                     return _error(
                         "PLANNING_ARTIFACT_LINEAGE_INVALID",
@@ -4043,7 +4064,7 @@ class DurableReadProjectionService:
         ):
             return self._sprint_status_inconsistent(project_id, sprint_id)
 
-        with Session(self._engine) as session:
+        with self._session() as session:
             sprint_row = session.get(Sprint, sprint_id)
             team_row = (
                 None if sprint_row is None else session.get(Team, sprint_row.team_id)
@@ -4283,7 +4304,7 @@ class DurableReadProjectionService:
         )
         if detail.get("ok") is not True:
             return detail
-        with Session(self._engine) as session:
+        with self._session() as session:
             statement = select(TaskExecutionLog).where(
                 col(TaskExecutionLog.task_id) == task_id
             )
@@ -4393,7 +4414,7 @@ class DurableReadProjectionService:
         )
 
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 packet = build_task_packet(
                     session,
                     project_id=project_id,
@@ -4419,7 +4440,7 @@ class DurableReadProjectionService:
         )
 
         try:
-            with Session(self._engine) as session:
+            with self._session() as session:
                 packet = build_story_packet(
                     session,
                     project_id=project_id,
@@ -4465,7 +4486,7 @@ class DurableReadProjectionService:
         decision_state: str,
     ) -> _SpecificationReadProjection | _SpecificationReadFailure:
         """Resolve the selected fact to one candidate, via registry if accepted."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             registry: SpecRegistry | None = None
             if spec is not None:
                 registry = session.get(SpecRegistry, spec.spec_version_id)
@@ -4562,9 +4583,9 @@ class DurableReadProjectionService:
         project_or_error = self._project(project_id)
         if isinstance(project_or_error, _ProjectReadFailure):
             return project_or_error.error
-        with Session(self._engine) as session:
+        with self._session() as session:
             try:
-                return WorkflowFactRepository(session).load(project_id)
+                return self._load_snapshot(session, project_id)
             except WorkflowFactLoadError as error:
                 return _error(
                     "PROJECT_FACTS_UNAVAILABLE",
@@ -4572,8 +4593,8 @@ class DurableReadProjectionService:
                     project_id=project_id,
                 )
 
-    @staticmethod
     def _snapshot_in_session(
+        self,
         session: Session,
         project_id: int,
     ) -> WorkflowFactSnapshot | JsonObject:
@@ -4585,7 +4606,7 @@ class DurableReadProjectionService:
                 project_id=project_id,
             )
         try:
-            return WorkflowFactRepository(session).load(project_id)
+            return self._load_snapshot(session, project_id)
         except WorkflowFactLoadError as error:
             return _error(
                 "PROJECT_FACTS_UNAVAILABLE",
@@ -4595,7 +4616,7 @@ class DurableReadProjectionService:
 
     def _project(self, project_id: int) -> _ProjectReadContext | _ProjectReadFailure:
         """Establish one Project identity before any project-scoped read."""
-        with Session(self._engine) as session:
+        with self._session() as session:
             project = session.get(Project, project_id)
         if project is None:
             return _ProjectReadFailure(

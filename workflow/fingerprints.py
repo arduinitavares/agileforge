@@ -6,12 +6,18 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
+from threading import RLock
 from typing import TYPE_CHECKING, TypedDict
 
 from workflow.contracts import GRAPH_VERSION
 
 if TYPE_CHECKING:
     from workflow.facts import WorkflowFactSnapshot
+
+
+# Concurrent Pydantic dumps of a large snapshot measured much slower than
+# sequential dumps; guard only that serialization, not canonical hashing.
+_snapshot_dump_lock: RLock = RLock()
 
 
 class VisionInterviewProvenance(TypedDict):
@@ -139,7 +145,8 @@ def _snapshot_fingerprint(
     *,
     include_node_attempts: bool,
 ) -> str:
-    facts = snapshot.model_dump(mode="json")
+    with _snapshot_dump_lock:
+        facts = snapshot.model_dump(mode="json")
     if not snapshot.sprint_retries:
         facts.pop("sprint_retries")
     if not include_node_attempts:

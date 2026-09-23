@@ -80,12 +80,13 @@ def _overlay_agentic_attempt(
     evaluation: RuleEvaluation,
     snapshot: WorkflowFactSnapshot,
     evaluated_at: datetime,
+    business_facts_hash: Callable[[], str],
 ) -> RuleEvaluation:
     """Overlay one exact-instance durable attempt on an available node rule."""
     execution = node.agentic_execution
     if execution is None or evaluation.category is not RuleCategory.AVAILABLE:
         return evaluation
-    current_business_facts = business_fact_fingerprint(snapshot)
+    current_business_facts = business_facts_hash()
     attempts = tuple(
         attempt
         for attempt in snapshot.node_attempts
@@ -206,11 +207,21 @@ class WorkflowGraph:
     ) -> WorkflowPosition:
         """Evaluate all rules deterministically against one immutable snapshot."""
         facts_hash = fact_fingerprint(snapshot)
+        current_business_facts: str | None = None
+
+        def business_facts_hash() -> str:
+            nonlocal current_business_facts
+            if current_business_facts is None:
+                current_business_facts = business_fact_fingerprint(snapshot)
+            return current_business_facts
+
         decisions: list[NodeDecision] = []
 
         for node in self.root.iter_nodes():
             evaluations = tuple(
-                _overlay_agentic_attempt(node, item, snapshot, evaluated_at)
+                _overlay_agentic_attempt(
+                    node, item, snapshot, evaluated_at, business_facts_hash
+                )
                 for item in node.evaluate_rule(snapshot, evaluated_at)
             )
             instance_keys: set[str | None] = set()
@@ -235,6 +246,7 @@ class WorkflowGraph:
                     evaluation,
                     snapshot,
                     evaluated_at,
+                    business_facts_hash,
                 )
                 decision = self._decision(
                     node,
@@ -338,12 +350,13 @@ class WorkflowGraph:
         evaluation: RuleEvaluation,
         snapshot: WorkflowFactSnapshot,
         evaluated_at: datetime,
+        business_facts_hash: Callable[[], str],
     ) -> tuple[FactReference, ...]:
         """Append the exact failed or expired attempt to recovery decisions."""
         recommendation = evaluation.recommendation_kind or node.recommendation_kind
         if recommendation is not RecommendationKind.RECOVERY:
             return evaluation.fact_references
-        current_business_facts = business_fact_fingerprint(snapshot)
+        current_business_facts = business_facts_hash()
         candidates = tuple(
             attempt
             for attempt in snapshot.node_attempts

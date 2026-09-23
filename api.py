@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
@@ -72,6 +73,7 @@ from services.contracts.specification_source import (
     SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
     SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
 )
+from services.dashboard_reads import dashboard_read_view
 from services.specification_source_registration import (
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
@@ -899,6 +901,120 @@ def get_project_position(project_id: int) -> dict[str, object]:
         "data": position.model_dump(mode="json"),
         "actions": _workflow_actions(position, application=application),
     }
+
+
+_DASHBOARD_SLOT_NAMES: tuple[str, ...] = (
+    "project",
+    "position",
+    "vision",
+    "goal",
+    "specification",
+    "repository",
+    "backlogReview",
+    "roadmapReview",
+    "acceptedRoadmap",
+    "storyReviews",
+    "sprintPlanReview",
+    "storyPending",
+    "storyDependencies",
+    "sprintCandidates",
+    "sprintStatusResponse",
+    "sprintHistory",
+)
+
+logger: logging.Logger = logging.getLogger(name=__name__)
+
+
+def _dashboard_slot(read: Callable[[], dict[str, object]]) -> dict[str, object]:
+    """Preserve one endpoint's HTTP status and JSON body inside the bundle."""
+    try:
+        return {"status": 200, "body": read()}
+    except HTTPException as error:
+        return {"status": error.status_code, "body": {"detail": error.detail}}
+    except Exception:
+        logger.exception("Dashboard slot read failed")
+        return {"status": 500, "body": {"detail": "Internal Server Error"}}
+
+
+@app.get("/api/projects/{project_id}/dashboard")
+def get_project_dashboard(project_id: int) -> dict[str, object]:
+    """Read the dashboard panels from one durable Project snapshot."""
+    application = _application()
+    with dashboard_read_view(application, project_id) as context:
+        if context.error is not None:
+            error = context.error
+            failure = _dashboard_slot(lambda: _read_payload(error))
+            return {
+                "status": "success",
+                "data": dict.fromkeys(_DASHBOARD_SLOT_NAMES, failure),
+            }
+        view = context.application
+        position = context.position
+        if view is None or position is None:
+            msg = "Dashboard read view is incomplete."
+            raise RuntimeError(msg)
+        reads = view.reads
+        slots: dict[str, object] = {
+            "project": _dashboard_slot(
+                lambda: _read_payload(reads.project_show(project_id=project_id))
+            ),
+            "position": _dashboard_slot(
+                lambda: {
+                    "status": "success",
+                    "data": position.model_dump(mode="json"),
+                }
+            ),
+            "vision": _dashboard_slot(
+                lambda: _read_payload(reads.vision_status(project_id=project_id))
+            ),
+            "goal": _dashboard_slot(
+                lambda: _read_payload(reads.product_goal_status(project_id=project_id))
+            ),
+            "specification": _dashboard_slot(
+                lambda: _read_payload(reads.specification_review(project_id=project_id))
+            ),
+            "repository": _dashboard_slot(
+                lambda: _read_payload(reads.repository_status(project_id=project_id))
+            ),
+            "backlogReview": _dashboard_slot(
+                lambda: _read_payload(view.backlog_review(project_id))
+            ),
+            "roadmapReview": _dashboard_slot(
+                lambda: _read_payload(view.roadmap_review(project_id))
+            ),
+            "acceptedRoadmap": _dashboard_slot(
+                lambda: _read_payload(reads.accepted_roadmap(project_id=project_id))
+            ),
+            "storyReviews": _dashboard_slot(
+                lambda: _read_payload(view.story_reviews(project_id))
+            ),
+            "sprintPlanReview": _dashboard_slot(
+                lambda: _read_payload(view.sprint_plan_review(project_id))
+            ),
+            "storyPending": _dashboard_slot(
+                lambda: _read_payload(reads.story_pending(project_id=project_id))
+            ),
+            "storyDependencies": _dashboard_slot(
+                lambda: _read_payload(
+                    reads.story_dependencies_inspect(project_id=project_id)
+                )
+            ),
+            "sprintCandidates": _dashboard_slot(
+                lambda: _read_payload(reads.sprint_candidates(project_id=project_id))
+            ),
+            "sprintStatusResponse": _dashboard_slot(
+                lambda: _read_payload(
+                    reads.sprint_status(project_id=project_id, sprint_id=None)
+                )
+            ),
+            "sprintHistory": _dashboard_slot(
+                lambda: _read_payload(reads.sprint_history(project_id=project_id))
+            ),
+        }
+    position_slot = slots["position"]
+    position_body = cast("dict[str, object]", position_slot["body"])
+    position_body["actions"] = _workflow_actions(position, application=application)
+    return {"status": "success", "data": slots}
 
 
 @app.post("/api/projects/{project_id}/vision/bootstrap")

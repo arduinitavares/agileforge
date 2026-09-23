@@ -253,6 +253,12 @@ class WorkflowDomain:
         with Session(self._engine) as session:
             return self._position_in_session(session, project_id, evaluated_at)
 
+    def position_from_snapshot(
+        self, snapshot: WorkflowFactSnapshot
+    ) -> WorkflowPosition:
+        """Evaluate caller-owned read facts with this domain's graph and clock."""
+        return self._graph.evaluate(snapshot, self._clock.now())
+
     def replay_project_transition(
         self,
         *,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import nullcontext
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -485,6 +487,7 @@ class DeliveryReviewSelectionService:
     """Verify graph-selected delivery artifacts against durable rows."""
 
     engine: Engine
+    session: Session | None = None
 
     def replay_transition(
         self,
@@ -505,7 +508,12 @@ class DeliveryReviewSelectionService:
         if target is None:
             return None
         artifact_id, reference = target
-        with Session(self.engine) as session:
+        bound_session = (
+            nullcontext(self.session)
+            if self.session is not None
+            else Session(self.engine)
+        )
+        with bound_session as session:
             if fact_type == "backlog":
                 artifact = session.get(BacklogArtifact, artifact_id)
                 valid = (
@@ -2360,6 +2368,7 @@ class AgileForgeApplication:
     ) -> None:
         """Retain the workflow and read boundaries."""
         self._workflow_domain = workflow_domain
+        self._read_position: WorkflowPosition | None = None
         self._recipe_registry = recipe_registry
         self._read_projection = read_projection
         self._vision_input = lifecycle_services.get("vision_input")
@@ -2411,7 +2420,37 @@ class AgileForgeApplication:
 
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return the current durable workflow position."""
+        if self._read_position is not None:
+            if self._read_position.project_id != project_id:
+                msg = "Dashboard position belongs to another Project."
+                raise ValueError(msg)
+            return self._read_position
         return self._workflow_domain.position(project_id)
+
+    def position_from_snapshot(
+        self, snapshot: WorkflowFactSnapshot
+    ) -> WorkflowPosition:
+        """Evaluate one dashboard snapshot with the injected graph and clock."""
+        from workflow.domain import WorkflowDomain  # noqa: PLC0415
+
+        if not isinstance(self._workflow_domain, WorkflowDomain):
+            msg = "Dashboard reads require a WorkflowDomain."
+            raise TypeError(msg)
+        return self._workflow_domain.position_from_snapshot(snapshot)
+
+    def dashboard_read_view(
+        self,
+        *,
+        position: WorkflowPosition,
+        read_projection: _ReadProjectionPort,
+        selection: _DeliveryReviewSelectionPort,
+    ) -> AgileForgeApplication:
+        """Bind one request's position and durable reads on an application copy."""
+        view = copy(self)
+        view._read_position = position
+        view._read_projection = read_projection
+        view._delivery_review_selection = selection
+        return view
 
     def vision_bootstrap_capability(
         self,
