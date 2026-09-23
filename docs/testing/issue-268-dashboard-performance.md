@@ -120,3 +120,7 @@ suite result for the final patch.
 
 The complete CI workflow, package installation checks, and production rollout
 rehearsal have not been run. The change has not been deployed.
+
+The owner tested the copied PIDExtract dashboard on 2026-09-23 and approved the
+refresh improvement. This records browser acceptance; release checks remain a
+separate gate.

@@ -27,6 +27,7 @@ _EXPECTED_COMMANDS = (
         "tests/test_lifecycle_workspace.mjs",
         "tests/test_sprint_retry_dashboard.mjs",
         "tests/test_dashboard_review_safety.mjs",
+        "tests/test_dashboard_bundle.mjs",
         "tests/test_cockpit_action_synchronization.mjs",
         "tests/test_create_project_modal_required_fields.mjs",
         "tests/test_vision_interview_ui.mjs",
