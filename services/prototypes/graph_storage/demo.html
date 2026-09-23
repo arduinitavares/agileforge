@@ -1,0 +1,1099 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgileForge · Graph storage prototype</title>
+<style>
+:root{font:16px/1.5 system-ui,sans-serif;color:#203128;background:#f5f6f2;--accent:#27604b;--line:#d3dcd5}*{box-sizing:border-box}body{margin:0}main{max-width:1120px;margin:auto;padding:38px 28px 70px}h1{font-size:34px;letter-spacing:-.8px;line-height:1.2;margin:12px 0}h2{font-size:21px;margin:0 0 16px}h3{font-size:17px;margin:0 0 10px}p{max-width:850px}.eyebrow{font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);font-weight:750}.intro{font-size:18px;color:#526158}.muted{color:#58665e;font-size:14px}.panel{background:white;border:1px solid var(--line);border-radius:12px;padding:24px;margin:20px 0}.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}.spread{justify-content:space-between}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.notice{padding:15px 18px;background:#eef5ee;border-left:4px solid var(--accent);margin:15px 0;font-weight:550}.blocked{background:#fff6e8;border-color:#af752a}button,select{font:inherit;padding:9px 14px;border:1px solid #aab9ae;border-radius:7px;background:white;color:#243b2d;cursor:pointer}button:hover{background:#eef5ee}button:focus-visible,select:focus-visible{outline:3px solid #39866c;outline-offset:3px}button.primary,button[aria-selected=true]{background:var(--accent);color:white;border-color:var(--accent)}button:disabled{opacity:.55;cursor:default}label{font-weight:650}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:10px 8px;text-align:left;border-bottom:1px solid #e1e6df;vertical-align:top}th{font-weight:650;color:#536156}pre{font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f2;padding:15px;border-radius:6px}details{margin-top:14px}summary{cursor:pointer;font-weight:600}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}.steps{display:flex;gap:10px;flex-wrap:wrap}.step{display:flex;gap:8px;align-items:center}.badge{background:#e9eee7;padding:3px 8px;border-radius:4px;font-size:13px;display:inline-block}.table-scroll{overflow-x:auto}svg{width:100%;height:auto;max-height:250px}svg text{font-family:system-ui,sans-serif;font-size:14px}.measurements{margin-top:38px}.query-card{border-top:1px solid var(--line);margin-top:20px;padding-top:16px}.inline-code{font:13px ui-monospace,monospace}.history{font-size:14px}.footer{font-size:14px;color:#526158;margin-top:28px}@media(max-width:760px){main{padding:24px 16px}h1{font-size:28px}.grid{grid-template-columns:1fr}.panel{padding:18px}}
+</style>
+<main>
+<header><div class="eyebrow">AgileForge / throwaway experiment</div><h1>What changes when the data is a graph?</h1>
+<p class="intro">Does graph storage simplify dependency analysis, and does it fix Story replacement by itself?</p>
+<p>This page has two parts. The interactive model below is a <strong>simulation of the lifecycle rule</strong>. The measurements further down come from actual scratch SQLite and Neo4j databases. Neither part connects to your AgileForge installation.</p></header>
+<section class="panel"><div class="row spread"><h2>1. Explore the replacement rule</h2><div class="row"><label for="policy">Replacement policy</label><select id="policy"><option value="review">Explicit replacement review</option><option value="existing">Existing behavior</option></select><button id="reset">Reset</button></div></div>
+<p class="muted">B depends on A. D depends on B. C is A's replacement. Arrows point from dependent to prerequisite. Both database choices can represent exactly this state.</p>
+<div id="message" class="notice" role="status" aria-live="polite"></div><div id="graph"></div>
+<div class="grid"><div><h3>Stories</h3><div id="stories"></div></div><div><h3>New planning and active work</h3><div id="readiness"></div></div></div>
+<div class="grid" style="margin-top:24px"><div><h3>Current dependency decisions</h3><div id="edges"></div><div id="review"></div></div><div><h3>Preserved evidence</h3><div id="history" class="history"></div><div id="sprint" class="history"></div></div></div></section>
+<section class="panel"><h2>Free play</h2><p class="muted">Try actions in any order. An action that is not allowed explains why and preserves the state.</p><div id="actions" class="row"></div></section>
+<section class="panel"><h2>Guided walkthroughs</h2><div class="tabs" id="tabs" role="tablist" aria-label="Walkthrough"></div><p id="scenario-description"></p><div id="steps" class="steps"></div></section>
+<section class="measurements"><div class="eyebrow">Actual database experiment</div><h2>2. Compare the query work</h2><p>Identical synthetic entities and relationships are loaded into SQLite and Neo4j. A Python graph rebuilt from the SQLite tables gives a third result for comparison. Query results must agree before a timing is recorded.</p><div id="measurements"></div></section>
+<p class="footer">Scope: a storage experiment and an illustrative lifecycle model. This does not migrate AgileForge or implement its complete Sprint, approval, transaction, or concurrency rules. See README.md and VERDICT.md on branch <span class="inline-code">alex/prototype-graph-storage</span>.</p>
+</main>
+<script id="benchmark-data" type="application/json">{
+  "status": "completed",
+  "generated_at": "2026-09-23T15:11:16Z",
+  "engine_versions": {
+    "python": "3.13.15",
+    "sqlite": "3.53.1",
+    "neo4j": [
+      [
+        "Neo4j Kernel",
+        [
+          "2026.09.0"
+        ],
+        "community"
+      ],
+      [
+        "Cypher",
+        [
+          "5",
+          "25"
+        ],
+        ""
+      ]
+    ],
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.39"
+  },
+  "readiness_wait_seconds": 0.042,
+  "protocol": "One warm-up + seven measured iterations per query; warm medians. Neo4j HTTP client time includes serialization, new connection, execution, transfer and decoding. SQLite in-process. Projection rebuild measured separately. No cold-start or general throughput conclusion.",
+  "datasets": [
+    {
+      "label": "48 Stories",
+      "nodes": 117,
+      "edges": 197,
+      "fixture_sha256": "e03702424eaa77ce16fe74073fe0bc16404da31538972aba2adb9464442ab243",
+      "sqlite_load_ms": 0.803,
+      "neo4j_load_ms": 74.729,
+      "projection_rebuild_ms": 0.519,
+      "queries": [
+        {
+          "name": "dependents",
+          "sqlite_ms": 0.0781,
+          "projection_ms": 0.0228,
+          "neo4j_ms": 6.9298,
+          "result_count": 47,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001"
+            ],
+            [
+              "S00002"
+            ],
+            [
+              "S00003"
+            ],
+            [
+              "S00004"
+            ],
+            [
+              "S00005"
+            ]
+          ],
+          "result_sha256": "f742e7a2f1d03826ca8b39dd45fed6aec9adef156d428344d06a31ef0e1b1d90",
+          "samples_ms": {
+            "sqlite": [
+              0.0835,
+              0.0671,
+              0.0764,
+              0.0713,
+              0.0968,
+              0.089,
+              0.0781
+            ],
+            "projection": [
+              0.0227,
+              0.0275,
+              0.0233,
+              0.0137,
+              0.0228,
+              0.0302,
+              0.0158
+            ],
+            "neo4j": [
+              7.6315,
+              8.118,
+              6.9298,
+              6.1742,
+              4.834,
+              7.9416,
+              5.9144
+            ]
+          }
+        },
+        {
+          "name": "requirement_impact",
+          "sqlite_ms": 0.0324,
+          "projection_ms": 0.006,
+          "neo4j_ms": 6.0159,
+          "result_count": 29,
+          "equal": true,
+          "sample_rows": [
+            [
+              "C00000"
+            ],
+            [
+              "F00000"
+            ],
+            [
+              "F00001"
+            ],
+            [
+              "F00002"
+            ],
+            [
+              "F00003"
+            ]
+          ],
+          "result_sha256": "4ce740c8070c4a4f876d95c788cc3db86ce55565b59ee0a1eb092527d01271f1",
+          "samples_ms": {
+            "sqlite": [
+              0.0302,
+              0.0338,
+              0.0324,
+              0.0317,
+              0.0454,
+              0.0333,
+              0.0286
+            ],
+            "projection": [
+              0.008,
+              0.006,
+              0.0215,
+              0.0063,
+              0.005,
+              0.0047,
+              0.0047
+            ],
+            "neo4j": [
+              6.683,
+              6.0268,
+              6.0159,
+              6.5647,
+              5.1694,
+              5.2071,
+              3.8169
+            ]
+          }
+        },
+        {
+          "name": "blocking_paths",
+          "sqlite_ms": 0.0077,
+          "projection_ms": 0.0016,
+          "neo4j_ms": 4.3437,
+          "result_count": 2,
+          "equal": true,
+          "sample_rows": [
+            [
+              "|S00011|S00003|S00001|S00000|"
+            ],
+            [
+              "|S00011|S00005|S00002|S00000|"
+            ]
+          ],
+          "result_sha256": "818c9497bc9d5cd3afbae98baff299eed876afc19c26a929669c52e7a49fcfb6",
+          "samples_ms": {
+            "sqlite": [
+              0.0118,
+              0.0082,
+              0.008,
+              0.0072,
+              0.0075,
+              0.0077,
+              0.0076
+            ],
+            "projection": [
+              0.0027,
+              0.002,
+              0.0016,
+              0.0017,
+              0.0016,
+              0.0015,
+              0.0014
+            ],
+            "neo4j": [
+              4.3437,
+              3.5846,
+              3.4645,
+              3.9023,
+              11.3375,
+              8.4435,
+              5.6344
+            ]
+          }
+        },
+        {
+          "name": "shared_files",
+          "sqlite_ms": 0.0371,
+          "projection_ms": 0.0371,
+          "neo4j_ms": 4.9233,
+          "result_count": 48,
+          "equal": true,
+          "sample_rows": [
+            [
+              "T00000",
+              "T00001",
+              "F00000"
+            ],
+            [
+              "T00000",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00001",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00003",
+              "T00004",
+              "F00001"
+            ],
+            [
+              "T00003",
+              "T00005",
+              "F00001"
+            ]
+          ],
+          "result_sha256": "14e160968e74130853efe91d522a8b4620d2c6c746fe313fbd32781bc848605b",
+          "samples_ms": {
+            "sqlite": [
+              0.0371,
+              0.0389,
+              0.0364,
+              0.0362,
+              0.0356,
+              0.0478,
+              0.0378
+            ],
+            "projection": [
+              0.0357,
+              0.0371,
+              0.0352,
+              0.0363,
+              0.1292,
+              0.0427,
+              0.0408
+            ],
+            "neo4j": [
+              4.7309,
+              5.9001,
+              4.9233,
+              6.6013,
+              4.591,
+              4.0196,
+              5.164
+            ]
+          }
+        },
+        {
+          "name": "obsolete_endpoints",
+          "sqlite_ms": 0.0053,
+          "projection_ms": 0.0056,
+          "neo4j_ms": 4.6913,
+          "result_count": 4,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001",
+              "S00000"
+            ],
+            [
+              "S00002",
+              "S00000"
+            ],
+            [
+              "S00012",
+              "S00000"
+            ],
+            [
+              "S00024",
+              "S00000"
+            ]
+          ],
+          "result_sha256": "a2138b6532d5eb6e36feeca7860873c6b9b483d57c7552fd486c63a003a072b6",
+          "samples_ms": {
+            "sqlite": [
+              0.0074,
+              0.006,
+              0.0057,
+              0.0053,
+              0.0053,
+              0.005,
+              0.0051
+            ],
+            "projection": [
+              0.0069,
+              0.006,
+              0.0056,
+              0.0056,
+              0.0055,
+              0.0057,
+              0.0055
+            ],
+            "neo4j": [
+              4.9102,
+              4.6913,
+              4.5669,
+              3.8819,
+              4.3814,
+              12.9004,
+              13.7944
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "label": "480 Stories",
+      "nodes": 1170,
+      "edges": 1979,
+      "fixture_sha256": "4ac00d82420b3915ddab390de3abb1e9a55f806c4a0850460739694860c00030",
+      "sqlite_load_ms": 9.808,
+      "neo4j_load_ms": 306.047,
+      "projection_rebuild_ms": 2.571,
+      "queries": [
+        {
+          "name": "dependents",
+          "sqlite_ms": 0.8891,
+          "projection_ms": 0.2338,
+          "neo4j_ms": 7.3498,
+          "result_count": 479,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001"
+            ],
+            [
+              "S00002"
+            ],
+            [
+              "S00003"
+            ],
+            [
+              "S00004"
+            ],
+            [
+              "S00005"
+            ]
+          ],
+          "result_sha256": "0b02332233f4c0abd3d658a7f9e67daa08c650a20ee60bdb7998f4251c3bc48a",
+          "samples_ms": {
+            "sqlite": [
+              0.9523,
+              0.8665,
+              0.894,
+              0.8776,
+              0.865,
+              1.0124,
+              0.8891
+            ],
+            "projection": [
+              0.2706,
+              0.2706,
+              0.2338,
+              0.2445,
+              0.2276,
+              0.2241,
+              0.2237
+            ],
+            "neo4j": [
+              7.9426,
+              10.6058,
+              7.3498,
+              7.3218,
+              5.7641,
+              5.2204,
+              9.643
+            ]
+          }
+        },
+        {
+          "name": "requirement_impact",
+          "sqlite_ms": 0.0435,
+          "projection_ms": 0.0071,
+          "neo4j_ms": 5.8252,
+          "result_count": 29,
+          "equal": true,
+          "sample_rows": [
+            [
+              "C00000"
+            ],
+            [
+              "F00000"
+            ],
+            [
+              "F00001"
+            ],
+            [
+              "F00002"
+            ],
+            [
+              "F00003"
+            ]
+          ],
+          "result_sha256": "4ce740c8070c4a4f876d95c788cc3db86ce55565b59ee0a1eb092527d01271f1",
+          "samples_ms": {
+            "sqlite": [
+              0.0519,
+              0.0461,
+              0.0447,
+              0.0435,
+              0.0423,
+              0.0433,
+              0.0423
+            ],
+            "projection": [
+              0.0107,
+              0.0089,
+              0.0075,
+              0.007,
+              0.0071,
+              0.0069,
+              0.0071
+            ],
+            "neo4j": [
+              4.3578,
+              4.4419,
+              7.3138,
+              7.6502,
+              5.8252,
+              5.4683,
+              6.8176
+            ]
+          }
+        },
+        {
+          "name": "blocking_paths",
+          "sqlite_ms": 0.0073,
+          "projection_ms": 0.0014,
+          "neo4j_ms": 8.5542,
+          "result_count": 2,
+          "equal": true,
+          "sample_rows": [
+            [
+              "|S00011|S00003|S00001|S00000|"
+            ],
+            [
+              "|S00011|S00005|S00002|S00000|"
+            ]
+          ],
+          "result_sha256": "818c9497bc9d5cd3afbae98baff299eed876afc19c26a929669c52e7a49fcfb6",
+          "samples_ms": {
+            "sqlite": [
+              0.0105,
+              0.0084,
+              0.0078,
+              0.0069,
+              0.0071,
+              0.007,
+              0.0073
+            ],
+            "projection": [
+              0.0019,
+              0.0014,
+              0.0019,
+              0.0016,
+              0.0014,
+              0.0014,
+              0.0013
+            ],
+            "neo4j": [
+              9.4523,
+              9.9824,
+              6.2862,
+              7.5678,
+              9.519,
+              8.5542,
+              5.7895
+            ]
+          }
+        },
+        {
+          "name": "shared_files",
+          "sqlite_ms": 0.3328,
+          "projection_ms": 0.346,
+          "neo4j_ms": 5.1169,
+          "result_count": 480,
+          "equal": true,
+          "sample_rows": [
+            [
+              "T00000",
+              "T00001",
+              "F00000"
+            ],
+            [
+              "T00000",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00001",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00003",
+              "T00004",
+              "F00001"
+            ],
+            [
+              "T00003",
+              "T00005",
+              "F00001"
+            ]
+          ],
+          "result_sha256": "98655070a0b62329ee9c8c51059f67d08310e78f195b267bc81944dff58265d7",
+          "samples_ms": {
+            "sqlite": [
+              0.3399,
+              0.3623,
+              0.3328,
+              0.3317,
+              0.3286,
+              0.3243,
+              0.5665
+            ],
+            "projection": [
+              0.3672,
+              0.346,
+              0.3549,
+              0.343,
+              0.3438,
+              0.3369,
+              0.3529
+            ],
+            "neo4j": [
+              4.8435,
+              5.1428,
+              5.5957,
+              5.109,
+              5.3303,
+              5.1169,
+              4.913
+            ]
+          }
+        },
+        {
+          "name": "obsolete_endpoints",
+          "sqlite_ms": 0.0153,
+          "projection_ms": 0.0457,
+          "neo4j_ms": 4.4198,
+          "result_count": 30,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001",
+              "S00000"
+            ],
+            [
+              "S00002",
+              "S00000"
+            ],
+            [
+              "S00012",
+              "S00000"
+            ],
+            [
+              "S00024",
+              "S00000"
+            ],
+            [
+              "S00049",
+              "S00048"
+            ]
+          ],
+          "result_sha256": "be968444aea934edd322e1d5a9e71d0724a86bd90638f08dd77e44b67d66e43a",
+          "samples_ms": {
+            "sqlite": [
+              0.0171,
+              0.016,
+              0.0156,
+              0.0143,
+              0.0139,
+              0.0143,
+              0.0153
+            ],
+            "projection": [
+              0.0468,
+              0.0457,
+              0.0455,
+              0.0454,
+              0.0453,
+              0.0458,
+              0.0565
+            ],
+            "neo4j": [
+              4.1992,
+              3.7463,
+              6.5475,
+              5.5238,
+              4.4198,
+              5.2284,
+              4.3444
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "label": "4800 Stories",
+      "nodes": 11700,
+      "edges": 19799,
+      "fixture_sha256": "379e31077d72b300b64f33311c27765c36caa58604fa4779799563f270bdcc55",
+      "sqlite_load_ms": 63.492,
+      "neo4j_load_ms": 803.782,
+      "projection_rebuild_ms": 41.328,
+      "queries": [
+        {
+          "name": "dependents",
+          "sqlite_ms": 7.4658,
+          "projection_ms": 1.8443,
+          "neo4j_ms": 26.4892,
+          "result_count": 4799,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001"
+            ],
+            [
+              "S00002"
+            ],
+            [
+              "S00003"
+            ],
+            [
+              "S00004"
+            ],
+            [
+              "S00005"
+            ]
+          ],
+          "result_sha256": "9bba5db6e47bdd6861e4df789238629c2dfc8b6e072cc5733f7a6e1e60c3f682",
+          "samples_ms": {
+            "sqlite": [
+              7.5724,
+              7.75,
+              7.4547,
+              6.6091,
+              7.7172,
+              6.8355,
+              7.4658
+            ],
+            "projection": [
+              1.8443,
+              1.7542,
+              1.7943,
+              1.8116,
+              1.8835,
+              2.6451,
+              2.6147
+            ],
+            "neo4j": [
+              26.3935,
+              21.3244,
+              30.3728,
+              26.4892,
+              29.0199,
+              24.0227,
+              28.3738
+            ]
+          }
+        },
+        {
+          "name": "requirement_impact",
+          "sqlite_ms": 0.0402,
+          "projection_ms": 0.007,
+          "neo4j_ms": 3.6617,
+          "result_count": 29,
+          "equal": true,
+          "sample_rows": [
+            [
+              "C00000"
+            ],
+            [
+              "F00000"
+            ],
+            [
+              "F00001"
+            ],
+            [
+              "F00002"
+            ],
+            [
+              "F00003"
+            ]
+          ],
+          "result_sha256": "4ce740c8070c4a4f876d95c788cc3db86ce55565b59ee0a1eb092527d01271f1",
+          "samples_ms": {
+            "sqlite": [
+              0.0466,
+              0.0416,
+              0.0393,
+              0.0402,
+              0.0382,
+              0.0391,
+              0.0608
+            ],
+            "projection": [
+              0.0098,
+              0.008,
+              0.007,
+              0.007,
+              0.0063,
+              0.0066,
+              0.0063
+            ],
+            "neo4j": [
+              3.99,
+              3.6176,
+              3.6321,
+              4.719,
+              4.0655,
+              3.6617,
+              3.589
+            ]
+          }
+        },
+        {
+          "name": "blocking_paths",
+          "sqlite_ms": 0.0077,
+          "projection_ms": 0.0023,
+          "neo4j_ms": 36.4677,
+          "result_count": 2,
+          "equal": true,
+          "sample_rows": [
+            [
+              "|S00011|S00003|S00001|S00000|"
+            ],
+            [
+              "|S00011|S00005|S00002|S00000|"
+            ]
+          ],
+          "result_sha256": "818c9497bc9d5cd3afbae98baff299eed876afc19c26a929669c52e7a49fcfb6",
+          "samples_ms": {
+            "sqlite": [
+              0.0121,
+              0.0092,
+              0.0098,
+              0.0077,
+              0.0077,
+              0.0074,
+              0.0077
+            ],
+            "projection": [
+              0.0032,
+              0.0025,
+              0.0023,
+              0.0026,
+              0.0018,
+              0.0023,
+              0.0018
+            ],
+            "neo4j": [
+              36.4677,
+              33.6998,
+              39.0538,
+              32.8195,
+              43.0811,
+              42.231,
+              34.0209
+            ]
+          }
+        },
+        {
+          "name": "shared_files",
+          "sqlite_ms": 5.5179,
+          "projection_ms": 5.425,
+          "neo4j_ms": 31.166,
+          "result_count": 4800,
+          "equal": true,
+          "sample_rows": [
+            [
+              "T00000",
+              "T00001",
+              "F00000"
+            ],
+            [
+              "T00000",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00001",
+              "T00002",
+              "F00000"
+            ],
+            [
+              "T00003",
+              "T00004",
+              "F00001"
+            ],
+            [
+              "T00003",
+              "T00005",
+              "F00001"
+            ]
+          ],
+          "result_sha256": "dff51f76fb70bb70829f8ae22ac1243647f1210c6ec5a690f0864bbe1ba1a0d4",
+          "samples_ms": {
+            "sqlite": [
+              4.8336,
+              5.2814,
+              4.5795,
+              5.5179,
+              5.8076,
+              6.2042,
+              10.8128
+            ],
+            "projection": [
+              5.425,
+              5.4709,
+              6.0009,
+              4.9396,
+              4.9139,
+              5.6026,
+              5.2651
+            ],
+            "neo4j": [
+              32.0889,
+              24.8898,
+              33.279,
+              31.166,
+              28.1848,
+              32.5751,
+              22.9939
+            ]
+          }
+        },
+        {
+          "name": "obsolete_endpoints",
+          "sqlite_ms": 0.177,
+          "projection_ms": 0.7571,
+          "neo4j_ms": 5.7614,
+          "result_count": 300,
+          "equal": true,
+          "sample_rows": [
+            [
+              "S00001",
+              "S00000"
+            ],
+            [
+              "S00002",
+              "S00000"
+            ],
+            [
+              "S00012",
+              "S00000"
+            ],
+            [
+              "S00024",
+              "S00000"
+            ],
+            [
+              "S00049",
+              "S00048"
+            ]
+          ],
+          "result_sha256": "259b706cd51affb063f845ecc42a359ca79e45157afa61812fca29b890e477a3",
+          "samples_ms": {
+            "sqlite": [
+              0.1788,
+              0.177,
+              0.1728,
+              0.167,
+              0.1707,
+              0.2202,
+              0.1847
+            ],
+            "projection": [
+              0.7764,
+              0.7571,
+              0.8298,
+              0.7162,
+              0.7241,
+              0.7391,
+              0.8025
+            ],
+            "neo4j": [
+              5.7614,
+              5.5893,
+              6.3469,
+              12.5899,
+              7.8094,
+              5.5045,
+              5.4315
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "query_sources": {
+    "sqlite": {
+      "dependents": "WITH RECURSIVE affected(id) AS (\n        SELECT src FROM edge WHERE kind='DEPENDS_ON' AND dst=:id\n        UNION SELECT e.src FROM edge e JOIN affected a ON e.dst=a.id\n        WHERE e.kind='DEPENDS_ON') SELECT id FROM affected ORDER BY id",
+      "requirement_impact": "WITH RECURSIVE affected(id) AS (\n        SELECT dst FROM edge WHERE src=:id AND kind='DERIVES'\n        UNION SELECT e.dst FROM edge e JOIN affected a ON e.src=a.id\n        WHERE e.kind IN ('HAS_TASK','TARGETS')) SELECT id FROM affected ORDER BY id",
+      "blocking_paths": "WITH RECURSIVE walk(id,path,depth) AS (\n        SELECT :id, '|'||:id||'|', 0\n        UNION ALL SELECT e.dst,w.path||e.dst||'|',w.depth+1\n        FROM walk w JOIN edge e ON e.src=w.id\n        WHERE e.kind='DEPENDS_ON' AND w.depth<32\n        AND instr(w.path,'|'||e.dst||'|')=0)\n        SELECT path FROM walk WHERE id=:target AND depth>0 ORDER BY path",
+      "shared_files": "SELECT a.src,b.src,a.dst FROM edge a JOIN edge b\n        ON a.dst=b.dst AND a.src<b.src\n        WHERE a.kind='TARGETS' AND b.kind='TARGETS' ORDER BY a.src,b.src,a.dst",
+      "obsolete_endpoints": "SELECT e.src,e.dst FROM edge e JOIN node n ON n.id=e.dst\n        WHERE e.kind='DEPENDS_ON' AND n.state='superseded' ORDER BY e.src,e.dst"
+    },
+    "neo4j": {
+      "dependents": "MATCH (s:Entity {id:$id})<-[:DEPENDS_ON*1..32]-(d)\n        RETURN DISTINCT d.id ORDER BY d.id",
+      "requirement_impact": "MATCH (:Entity {id:$id})-[:DERIVES]->(s)\n        MATCH (s)-[:HAS_TASK|TARGETS*0..2]->(affected)\n        RETURN DISTINCT affected.id ORDER BY affected.id",
+      "blocking_paths": "MATCH p=(:Entity {id:$id})-[:DEPENDS_ON*1..32]->(:Entity {id:$target})\n        WHERE all(n IN nodes(p) WHERE single(m IN nodes(p) WHERE m=n))\n        RETURN reduce(text='|', n IN nodes(p) | text+n.id+'|') AS path ORDER BY path",
+      "shared_files": "MATCH (a)-[:TARGETS]->(f)<-[:TARGETS]-(b)\n        WHERE a.id<b.id RETURN a.id,b.id,f.id ORDER BY a.id,b.id,f.id",
+      "obsolete_endpoints": "MATCH (b)-[:DEPENDS_ON]->(a:Entity {state:'superseded'})\n        RETURN b.id,a.id ORDER BY b.id,a.id"
+    }
+  },
+  "lifecycle": {
+    "storage_only": {
+      "sqlite_stale_edges": [
+        [
+          "B",
+          "A"
+        ]
+      ],
+      "neo4j_stale_edges": [
+        [
+          "B",
+          "A"
+        ]
+      ],
+      "illustrative_review": {
+        "selected": [
+          "B"
+        ],
+        "approved_edges": [
+          [
+            "B",
+            "A"
+          ]
+        ],
+        "source_fingerprint": "selected-B-v1"
+      },
+      "illustrative_review_unchanged": true,
+      "migration_alone_fixes_188": false
+    },
+    "explicit_policy": {
+      "assumption": "Operator approves B depending on C; the probe does not execute or persist a human review.",
+      "review_required_before_repair": true,
+      "sqlite_edges_after_assumed_approval": [
+        [
+          "B",
+          "C"
+        ]
+      ],
+      "neo4j_edges_after_assumed_approval": [
+        [
+          "B",
+          "C"
+        ]
+      ],
+      "historical_review_in_memory": {
+        "selected": [
+          "B"
+        ],
+        "approved_edges": [
+          [
+            "B",
+            "A"
+          ]
+        ],
+        "source_fingerprint": "selected-B-v1"
+      },
+      "pinned_snapshot_unchanged": true,
+      "limitation": "History is copied in memory for this probe; production transactions, Sprint locks, and audit persistence are not implemented."
+    }
+  }
+}
+</script>
+<script>
+// Portable model: no DOM, network, storage, or timing dependencies.
+const Model = (() => {
+ const copy = value => JSON.parse(JSON.stringify(value));
+ function initial(policy='review') {return {policy,stories:{A:{done:false,current:true},B:{done:false,current:true},D:{done:false,current:true}},edges:[['B','A'],['D','B']],review:{id:1,state:'approved',edge:['B','A']},history:[],sprint:null,message:'The dependency review is approved. B waits for A to finish.'};}
+ function ready(state,id) {
+  if(!state.stories[id]) return {ok:false,reason:'This Story does not exist yet.'};
+  if(!state.stories[id].current) return {ok:false,reason:'Historical Story; unavailable for new planning.'};
+  if(state.stories[id].done) return {ok:false,reason:'Already complete.'};
+  if(id==='B'&&state.review.state==='stale') return {ok:false,reason:'Dependency review required after A was replaced.'};
+  const missing=state.edges.filter(([b])=>b===id).map(([,a])=>a).filter(a=>!state.stories[a].done);
+  return missing.length?{ok:false,reason:'Waiting for '+missing.join(', ')+(missing.some(a=>!state.stories[a].current)?' (superseded)':'')+'.'}:{ok:true,reason:'Eligible for new planning.'};
+ }
+ function apply(original,action) {
+  const state=copy(original); const deny=reason=>({...original,message:reason});
+  if(action==='replace') {
+   if(state.stories.C) return deny('A has already been replaced. Reset to repeat the experiment.');
+   state.stories.A.current=false; state.stories.C={done:false,current:true};
+   if(state.policy==='review') {state.review.state='stale';state.message='A is historical. B needs a new dependency decision; approval has not transferred to C.';}
+   else state.message='A is historical, but the old review and B → A edge remain unchanged. B still waits for A. Changing storage alone preserves this defect.';
+  } else if(action==='approve'||action==='remove') {
+   if(state.sprint?.active) return deny('Review is locked while the Sprint is active. Its pinned dependency snapshot must remain unchanged.');
+   if(state.policy!=='review'||state.review.state!=='stale') return deny('This action requires the explicit policy and a stale dependency review.');
+   if(action==='approve'&&!state.stories.C?.current) return deny('The replacement must be a current accepted Story.');
+   state.history.push({...copy(state.review),state:'approved',note:'Approval as recorded before replacement; historical evidence only.'});
+   state.edges=state.edges.filter(([b])=>b!=='B');
+   if(action==='approve') state.edges.push(['B','C']);
+   state.review={id:state.review.id+1,state:'approved',edge:action==='approve'?['B','C']:null};
+   state.message=action==='approve'?'A fresh review approves B → C. '+(state.stories.B.done?'B is already complete; the completed Sprint keeps its original snapshot.':'B waits for C to finish.'):'A fresh review explicitly removes the obsolete prerequisite. '+(state.stories.B.done?'B is already complete.':'B can now be planned; old evidence is preserved.');
+  } else if(action.startsWith('complete:')) {
+   const id=action.split(':')[1];
+   if(!state.stories[id]) return deny(id+' does not exist yet.');
+   if(state.stories[id].done) return deny(id+' is already complete.');
+   const pinned=id==='B'&&state.sprint?.active&&state.sprint.prerequisitesComplete;
+   if(!pinned&&!ready(state,id).ok) return deny('Cannot complete '+id+': '+ready(state,id).reason);
+   state.stories[id].done=true;
+   state.message=id+' is complete.'+(pinned?' Completion uses the approved Sprint snapshot. New planning still needs its own current review.':'');
+  } else if(action==='pin') {
+   if(state.sprint) return deny('This walkthrough already has a Sprint. Reset to start another.');
+   if(!ready(state,'B').ok) return deny('Cannot start this example Sprint: '+ready(state,'B').reason);
+   state.sprint={active:true,review:copy(state.review),dependencies:copy(state.edges.filter(([b])=>b==='B')),prerequisitesComplete:true};
+   state.message='Sprint started for B. Its reviewed dependency snapshot is copied and pinned.';
+  } else if(action==='finish') {
+   if(!state.sprint?.active) return deny('There is no active Sprint.');
+   if(!state.stories.B.done) return deny('Complete B under its pinned Sprint before closing and triaging.');
+   state.sprint.active=false; state.message='Sprint completed and triaged in this simplified model. Dependency review is unlocked; historical evidence remains.';
+  }
+  return state;
+ }
+ return {initial,ready,apply};
+})();
+
+// Disposable page shell.
+const actionLabels={replace:'Accept C as replacement for A',approve:'Approve B depending on C',remove:'Remove obsolete dependency after review','complete:A':'Complete A','complete:C':'Complete C','complete:B':'Complete B',pin:'Start Sprint for B',finish:'Close and triage Sprint'};
+const scenarios=[
+ {title:'Storage alone',policy:'existing',description:'Replace an unfinished prerequisite. The same valid stored link causes the obsolete blocker in either database.',steps:['replace','complete:A']},
+ {title:'Reviewed replacement',policy:'review',description:'Replacement makes the review stale. Approve the new relationship explicitly, then complete its prerequisite.',steps:['replace','approve','complete:C','complete:B']},
+ {title:'Historical Sprint',policy:'review',description:'Start from a satisfied prerequisite. Replacement preserves the Sprint snapshot and locks new review until execution is completed and triaged.',steps:['complete:A','pin','replace','approve','complete:B','finish','approve']},
+ {title:'Explicit removal',policy:'review',description:'Removing the dependency is a new reviewed decision. Simply filtering a superseded node out would silently transfer the old approval.',steps:['replace','remove']}
+];
+let state=Model.initial(),scenario=1,step=0;
+const $=id=>document.getElementById(id);
+const esc=value=>String(value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const table=(heads,rows)=>'<div class="table-scroll"><table><thead><tr>'+heads.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(c=>'<td>'+esc(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
+function graph() {
+ const positions={A:[115,65],C:[115,180],B:[375,65],D:[640,65]};
+ const lines=state.edges.map(([from,to])=>{const a=positions[from],b=positions[to];return `<line x1="${a[0]-55}" y1="${a[1]}" x2="${b[0]+64}" y2="${b[1]}" stroke="#27604b" stroke-width="2" marker-end="url(#arrow)"/><text x="${(a[0]+b[0])/2-32}" y="${(a[1]+b[1])/2-10}">depends on</text>`;}).join('');
+ const lineage=state.stories.C?'<line x1="115" y1="157" x2="115" y2="96" stroke="#718174" stroke-dasharray="4 4" marker-end="url(#arrow)"/><text x="126" y="131">replaces</text>':'';
+ return '<svg viewBox="0 0 760 225" role="img" aria-label="Current Story dependency graph"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#27604b"/></marker></defs>'+lines+lineage+Object.entries(state.stories).map(([id,s])=>{const [x,y]=positions[id];return `<rect x="${x-55}" y="${y-24}" width="110" height="48" rx="8" fill="${s.current?'#edf4eb':'#eeeae2'}" stroke="#bdcabc"/><text x="${x}" y="${y-3}" text-anchor="middle" font-weight="650">Story ${id}</text><text x="${x}" y="${y+15}" text-anchor="middle">${s.current?(s.done?'complete':'unfinished'):'superseded'}</text>`;}).join('')+'</svg>';
+}
+function render() {
+ $('policy').value=state.policy; $('message').textContent=state.message;
+ $('message').className='notice'+(Model.ready(state,'B').ok?'':' blocked'); $('graph').innerHTML=graph();
+ $('stories').innerHTML=table(['Story','Version','Work'],Object.entries(state.stories).map(([id,s])=>[id,s.current?'Current':'Superseded',s.done?'Complete':'Unfinished']));
+ $('readiness').innerHTML=table(['Scope','Decision'],[['B: new planning',Model.ready(state,'B').reason],['D: new planning',Model.ready(state,'D').reason],['B: Sprint execution',state.sprint?.active?'Pinned approval remains in force.':'No active Sprint.']]);
+ $('edges').innerHTML=table(['Dependent','Prerequisite','Meaning'],state.edges.map(([b,a])=>[b,a,state.stories[a].current?'Current endpoint':'Historical endpoint; requires resolution for new planning']));
+ $('review').innerHTML='<p><span class="badge">Review '+state.review.id+': '+esc(state.review.state)+'</span> '+(state.review.edge?esc(state.review.edge.join(' → ')):'No prerequisite for B')+'</p>';
+ $('history').innerHTML=state.history.length?state.history.map(r=>'<p>Review '+r.id+': '+esc(r.edge?.join(' → ')||'No prerequisite')+'<br>'+esc(r.note)+'</p>').join(''):'<p>No replacement review recorded yet. The original review is still visible beside this panel.</p>';
+ $('sprint').innerHTML=state.sprint?'<p><strong>Sprint '+(state.sprint.active?'active':'completed and triaged')+'</strong><br>Pinned review '+state.sprint.review.id+'<br>Frozen dependencies: '+esc(state.sprint.dependencies.map(e=>e.join(' → ')).join(', ')||'none')+'<br>Prerequisites were complete at Sprint start.</p>':'<p>No Sprint snapshot.</p>';
+ document.querySelectorAll('[role=tab]').forEach((button,i)=>button.setAttribute('aria-selected',String(i===scenario)));
+ $('scenario-description').textContent=scenarios[scenario].description;
+ $('steps').replaceChildren(...scenarios[scenario].steps.map((action,i)=>{const b=document.createElement('button');b.textContent=(i+1)+'. '+actionLabels[action];b.disabled=i!==step;b.className=i===step?'primary':'';b.onclick=()=>{state=Model.apply(state,action);step++;render();};return b;}));
+}
+Object.entries(actionLabels).forEach(([action,label])=>{const button=document.createElement('button');button.textContent=label;button.onclick=()=>{state=Model.apply(state,action);render();};$('actions').append(button);});
+scenarios.forEach((s,i)=>{const b=document.createElement('button');b.textContent=s.title;b.setAttribute('role','tab');b.onclick=()=>{scenario=i;step=0;state=Model.initial(s.policy);render();};$('tabs').append(b);});
+$('reset').onclick=()=>{state=Model.initial(state.policy);step=0;render();};
+$('policy').onchange=event=>{state=Model.initial(event.target.value);scenario=state.policy==='existing'?0:1;step=0;render();};
+function measurements() {
+ const data=JSON.parse($('benchmark-data').textContent);
+ if(data.status==='not_run') {$('measurements').textContent='Database comparison has not run yet.';return;}
+ let html='<div class="notice">'+data.datasets.reduce((n,d)=>n+d.queries.filter(q=>q.equal).length,0)+' query comparisons returned identical results. Storage alone preserved the obsolete dependency in both databases.</div><p class="muted">Warm medians in milliseconds, seven measured calls after one warm-up. SQLite runs in-process; Neo4j includes an HTTP request on a local container network. These are synthetic measurements, not a general engine benchmark. The Python projection must first be rebuilt from the SQLite tables.</p>';
+ html+=data.datasets.map(d=>'<div class="panel"><h3>'+esc(d.label)+'</h3><p class="muted">'+d.nodes+' entities · '+d.edges+' relationships · projection rebuild '+d.projection_rebuild_ms+' ms</p>'+table(['Query','SQLite ms','Python ms','Neo4j ms','Rows','Same results'],d.queries.map(q=>[q.name,q.sqlite_ms,q.projection_ms,q.neo4j_ms,q.result_count,q.equal?'Yes':'No']))+'</div>').join('');
+ html+='<details><summary>Inspect the actual queries</summary>'+Object.keys(data.query_sources.sqlite).map(name=>'<div class="query-card"><h3>'+esc(name)+'</h3><div class="grid"><div><strong>SQLite</strong><pre>'+esc(data.query_sources.sqlite[name])+'</pre></div><div><strong>Neo4j Cypher</strong><pre>'+esc(data.query_sources.neo4j[name])+'</pre></div></div></div>').join('')+'</details><details><summary>Engine versions and measured lifecycle evidence</summary><pre>'+esc(JSON.stringify({versions:data.engine_versions,lifecycle:data.lifecycle},null,2))+'</pre></details>';
+ $('measurements').innerHTML=html;
+}
+render();measurements();
+</script>
+</html>

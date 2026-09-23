@@ -1,0 +1,24 @@
+{
+  "story_a": 1,
+  "story_b": 2,
+  "replacement_c": [
+    3
+  ],
+  "a_is_superseded": true,
+  "source_fingerprint_before": "sha256:170a15932f8302439d5b0be686f00854f26a61112fc0cccdb258f6c00d5d8df6",
+  "source_fingerprint_after": "sha256:170a15932f8302439d5b0be686f00854f26a61112fc0cccdb258f6c00d5d8df6",
+  "review_unchanged": true,
+  "edges": [
+    {
+      "dependency_id": 1,
+      "dependent_story_id": 2,
+      "prerequisite_story_id": 1,
+      "status": "active",
+      "source": "manual_review",
+      "confidence": "reviewed",
+      "reason": "B needs the capability delivered by A."
+    }
+  ],
+  "decision_category": "blocked",
+  "decision_reason": "STORY_DEPENDENCY_EXTERNAL_INCOMPLETE"
+}

@@ -1,0 +1,12 @@
+{
+  "baseline": "85d0ce735fa1fdbc4d4efaf56c105158e775caad",
+  "graph_image": "sha256:bb04cf06a54e54eb4f7b1b4e249e155fda99db9dfbb341730e1f444215ec7bf1",
+  "runner_image": "sha256:cad86af86d0fa6735a6724a8d4f1b009dd35e9e791901b500c7b5c1fa99762c6",
+  "compose_version": "2.33.0",
+  "graph_digest": "sha256:29efb5ebfb51ec75545a945bc3ac0bdfbeb6bc2686a8ae5053fe0f4dcc926441",
+  "graph_heap": "256m initial,512m max",
+  "graph_pagecache": "256m",
+  "graph_memory_limit": "2g",
+  "networks": "graph/probe private internal bridge; preview separate loopback port",
+  "production_data_access": false
+}

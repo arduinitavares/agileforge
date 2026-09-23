@@ -1,0 +1,56 @@
+name: agileforge-graph-prototype
+services:
+  preview:
+    profiles: [preview]
+    image: agileforge-production:local
+    pull_policy: never
+    user: "10001:10001"
+    read_only: true
+    entrypoint: ["/usr/local/bin/uv", "run", "--no-project", "--python", "/build/.venv/bin/python", "python", "-m", "http.server", "8080", "--bind", "0.0.0.0", "--directory", "/preview"]
+    environment:
+      UV_CACHE_DIR: /cache/uv
+    tmpfs:
+      - /cache:uid=10001,gid=10001,mode=0755
+    ports: ["127.0.0.1:8877:8080"]
+    volumes:
+      - type: bind
+        source: ./demo.html
+        target: /preview/demo.html
+        read_only: true
+    networks: [preview]
+  graph:
+    image: neo4j:2026.09.0@sha256:29efb5ebfb51ec75545a945bc3ac0bdfbeb6bc2686a8ae5053fe0f4dcc926441
+    platform: linux/amd64
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    mem_limit: 2g
+    tmpfs:
+      - /data:uid=7474,gid=7474,mode=0755
+    networks: [scratch]
+  probe:
+    image: agileforge-production:local
+    pull_policy: never
+    platform: linux/amd64
+    user: "10001:10001"
+    read_only: true
+    entrypoint: ["/usr/local/bin/uv", "run", "--no-project", "--python", "/build/.venv/bin/python", "python", "/input/compare.py"]
+    environment:
+      UV_CACHE_DIR: /cache/uv
+      PYTHONDONTWRITEBYTECODE: "1"
+      NEO4J_URL: http://graph:7474
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1777
+      - /cache:uid=10001,gid=10001,mode=0755
+    volumes:
+      - type: bind
+        source: ./compare.py
+        target: /input/compare.py
+        read_only: true
+    networks: [scratch]
+networks:
+  preview: {}
+  scratch:
+    internal: true
