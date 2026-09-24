@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import sqlite3
 from datetime import UTC, datetime
 from http import HTTPStatus
+from threading import Event
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import api
@@ -24,6 +27,7 @@ from models.workflow import (
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services import application as application_module
 from services import story_sprint_selection as selection_service
 from services.application import (
     AgileForgeApplication,
@@ -36,6 +40,7 @@ from tests.test_create_user_story import (
     _seed_story_parent,
 )
 from tests.test_story_validation_service import _accepted_story
+from workflow import domain as domain_module
 from workflow.clock import FixedClock
 from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
@@ -781,10 +786,55 @@ def test_same_state_is_receipted_and_stale_expected_state_fails_closed(
     assert len(receipts) == 3  # noqa: PLR2004
 
 
+def _hold_selection_writer_until_peer_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_finished: Event,
+) -> None:
+    """Force the competing call to exhaust its lock wait before the commit."""
+    apply_selection = application_module.apply_story_sprint_selection_in_session
+
+    def apply_and_wait(
+        session: Session,
+        request: selection_service.StorySprintSelectionRequest,
+        *,
+        receipt: WorkflowTransitionReceipt,
+    ) -> selection_service.StorySprintSelectionFact:
+        fact = apply_selection(session, request, receipt=receipt)
+        assert caller_finished.wait(timeout=10)
+        return fact
+
+    monkeypatch.setattr(
+        application_module, "apply_story_sprint_selection_in_session", apply_and_wait
+    )
+
+
+def _selection_result_after_lock_expiry(
+    future: concurrent.futures.Future[JsonObject],
+    app: AgileForgeApplication,
+    request: selection_service.StorySprintSelectionRequest,
+) -> JsonObject:
+    """Replay the same key after an identified SQLite writer-lock expiry only."""
+    try:
+        return future.result(timeout=10)
+    except OperationalError as error:
+        if (
+            not isinstance(error.orig, sqlite3.OperationalError)
+            or error.orig.sqlite_errorcode != sqlite3.SQLITE_BUSY
+            or error.statement != "BEGIN IMMEDIATE"
+        ):
+            raise
+    return app.apply_story_sprint_selection(request)
+
+
+@pytest.mark.parametrize("force_lock_expiry", [False, True])
 def test_concurrent_identical_selection_requests_share_one_event(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_lock_expiry: bool,
 ) -> None:
-    """SQLite writer serialization returns one receipt result and one audit event."""
+    """Concurrent selection converges after an explicit retry of lock expiry."""
+    if force_lock_expiry:
+        monkeypatch.setattr(domain_module, "_SQLITE_BUSY_TIMEOUT_MS", 0)
     database = tmp_path / "selection-race.sqlite3"
     engine = create_engine(
         f"sqlite:///{database}",
@@ -808,11 +858,29 @@ def test_concurrent_identical_selection_requests_share_one_event(
             key="concurrent-selection",
         )
         app = _build_application(engine)
+        caller_finished = Event()
+        if force_lock_expiry:
+            _hold_selection_writer_until_peer_returns(monkeypatch, caller_finished)
+
+        def apply_selection() -> JsonObject:
+            try:
+                return app.apply_story_sprint_selection(request)
+            finally:
+                caller_finished.set()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(app.apply_story_sprint_selection, request)
-            second = executor.submit(app.apply_story_sprint_selection, request)
-            first_result = first.result(timeout=10)
-            second_result = second.result(timeout=10)
+            first = executor.submit(apply_selection)
+            second = executor.submit(apply_selection)
+        assert any(future.exception() is None for future in (first, second))
+        if force_lock_expiry:
+            assert (
+                sum(future.exception() is not None for future in (first, second)) == 1
+            )
+        # The production lock wait is finite. Once both calls finish, an explicit
+        # retry with the same key must replay the single committed selection.
+        first_result = _selection_result_after_lock_expiry(first, app, request)
+        second_result = _selection_result_after_lock_expiry(second, app, request)
+        assert first_result["ok"] is True
         assert first_result == second_result
         with Session(engine) as session:
             assert (

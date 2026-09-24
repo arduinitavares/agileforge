@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from enum import StrEnum
+from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 
 ENVELOPE_VERSION: str = "agileforge.spec-candidate-envelope.v2"
 Fingerprint = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+_CANDIDATE_VALIDATION_CACHE_MAX_CHARS: int = 256 * 1024
 _MARKDOWN_LEADING_RE: re.Pattern[str] = re.compile(
     r"^(\s*)((?:[#\-*+>])|(?:\d+\.)(?=\s|$))"
 )
@@ -725,7 +727,29 @@ def load_candidate_contract(
     *,
     expected_candidate_fingerprint: str,
 ) -> tuple[SpecificationPayload, SpecificationCandidateEnvelope]:
-    """Load persistence bytes and fail closed on any fingerprint mismatch."""
+    """Load a candidate after cached pure checks and fresh model validation."""
+    if len(serialized) > _CANDIDATE_VALIDATION_CACHE_MAX_CHARS:
+        _validate_candidate_contract_uncached(
+            serialized,
+            expected_candidate_fingerprint,
+        )
+    else:
+        _validate_candidate_contract_cached(
+            serialized,
+            expected_candidate_fingerprint,
+        )
+
+    raw = json.loads(serialized)
+    payload = SpecificationPayload.model_validate(raw["payload"])
+    envelope = SpecificationCandidateEnvelope.model_validate(raw["envelope"])
+    return payload, envelope
+
+
+def _validate_candidate_contract_uncached(
+    serialized: str,
+    expected_candidate_fingerprint: str,
+) -> None:
+    """Validate one serialized contract without retaining parsed mutable values."""
     try:
         raw = json.loads(serialized)
     except json.JSONDecodeError as exc:
@@ -743,7 +767,18 @@ def load_candidate_contract(
     if envelope.candidate_fingerprint != expected_candidate_fingerprint:
         message = "candidate fingerprint does not match expected decision target"
         raise ValueError(message)
-    return payload, envelope
+
+
+@lru_cache(maxsize=16)
+def _validate_candidate_contract_cached(
+    serialized: str,
+    expected_candidate_fingerprint: str,
+) -> None:
+    """Reuse only success for an exact bounded candidate string and target hash."""
+    _validate_candidate_contract_uncached(
+        serialized,
+        expected_candidate_fingerprint,
+    )
 
 
 __all__ = [

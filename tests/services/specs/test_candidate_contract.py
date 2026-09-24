@@ -9,6 +9,7 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
+from services.specs import candidate_contract
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -70,10 +71,17 @@ def _payload() -> SpecificationPayload:
 
 WORKFLOW_NODE_ATTEMPT_ID = 71
 BASE_SPECIFICATION_ID = 91
+CANDIDATE_VALIDATION_CACHE_ENTRY_LIMIT = 16
 
 
 def _fingerprint(label: str) -> str:
     return f"sha256:{hashlib.sha256(label.encode('utf-8')).hexdigest()}"
+
+
+def _clear_candidate_validation_cache() -> None:
+    cache = getattr(candidate_contract, "_validate_candidate_contract_cached", None)
+    if cache is not None:
+        cache.cache_clear()
 
 
 def _envelope(**overrides: object) -> SpecificationCandidateEnvelope:
@@ -202,6 +210,259 @@ def test_candidate_canonical_json_round_trips_with_fingerprint_verification() ->
             retired_json,
             expected_candidate_fingerprint=envelope.candidate_fingerprint,
         )
+
+
+def test_repeated_candidate_load_reuses_pure_fingerprint_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated exact bytes derive their canonical fingerprints only once."""
+    payload = _payload()
+    envelope = _envelope(correlation_id="candidate-cache-validation-count")
+    serialized = canonical_candidate_json(payload, envelope)
+    _clear_candidate_validation_cache()
+
+    original = candidate_contract.canonical_candidate_json
+    derivations = 0
+
+    def count_derivations(
+        candidate_payload: SpecificationPayload,
+        candidate_envelope: SpecificationCandidateEnvelope,
+    ) -> str:
+        nonlocal derivations
+        derivations += 1
+        return original(candidate_payload, candidate_envelope)
+
+    monkeypatch.setattr(
+        candidate_contract,
+        "canonical_candidate_json",
+        count_derivations,
+    )
+    load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+    load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+
+    assert derivations == 1
+
+
+def test_candidate_cache_keys_include_contract_bytes_and_expected_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed valid bytes cannot reuse another candidate's successful check."""
+    _clear_candidate_validation_cache()
+    payload = _payload()
+    changed_payload_data = payload.model_dump(mode="json")
+    changed_payload_data["summary"] = "Recommend a valid squad with clear evidence."
+    changed_payload = SpecificationPayload.model_validate(changed_payload_data)
+    envelope = _envelope(correlation_id="candidate-cache-key-original")
+    changed_envelope = _envelope(
+        payload=changed_payload,
+        correlation_id="candidate-cache-key-changed",
+    )
+    serialized = canonical_candidate_json(payload, envelope)
+    changed_serialized = canonical_candidate_json(changed_payload, changed_envelope)
+    assert envelope.candidate_fingerprint != changed_envelope.candidate_fingerprint
+
+    original = candidate_contract.canonical_candidate_json
+    derivations = 0
+
+    def count_derivations(
+        candidate_payload: SpecificationPayload,
+        candidate_envelope: SpecificationCandidateEnvelope,
+    ) -> str:
+        nonlocal derivations
+        derivations += 1
+        return original(candidate_payload, candidate_envelope)
+
+    monkeypatch.setattr(
+        candidate_contract,
+        "canonical_candidate_json",
+        count_derivations,
+    )
+    load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+    with pytest.raises(ValueError, match="expected decision target"):
+        load_candidate_contract(
+            changed_serialized,
+            expected_candidate_fingerprint=envelope.candidate_fingerprint,
+        )
+    with pytest.raises(ValueError, match="expected decision target"):
+        load_candidate_contract(
+            serialized,
+            expected_candidate_fingerprint=changed_envelope.candidate_fingerprint,
+        )
+
+    changed_result, changed_result_envelope = load_candidate_contract(
+        changed_serialized,
+        expected_candidate_fingerprint=changed_envelope.candidate_fingerprint,
+    )
+    assert changed_result == changed_payload
+    assert changed_result_envelope == changed_envelope
+    expected_derivation_count = 4
+    assert derivations == expected_derivation_count
+
+
+def test_warm_candidate_cache_still_rejects_malformed_and_noncanonical_bytes() -> None:
+    """Successful cache entries do not mask malformed alternate strings."""
+    _clear_candidate_validation_cache()
+    envelope = _envelope(correlation_id="candidate-cache-invalid-bytes")
+    serialized = canonical_candidate_json(_payload(), envelope)
+    load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+
+    with pytest.raises(ValueError, match="candidate contract JSON is invalid"):
+        load_candidate_contract(
+            "{",
+            expected_candidate_fingerprint=envelope.candidate_fingerprint,
+        )
+    with pytest.raises(ValueError, match="noncanonical"):
+        load_candidate_contract(
+            f"{serialized}\n",
+            expected_candidate_fingerprint=envelope.candidate_fingerprint,
+        )
+
+
+def test_cached_validation_returns_fresh_models_and_nested_values() -> None:
+    """Mutating one returned model or dump cannot affect a later fresh load."""
+    _clear_candidate_validation_cache()
+    payload = _payload()
+    envelope = _envelope(correlation_id="candidate-cache-fresh-models")
+    serialized = canonical_candidate_json(payload, envelope)
+    first_payload, first_envelope = load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+    second_payload, second_envelope = load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+
+    assert first_payload is not second_payload
+    assert first_payload.items[0] is not second_payload.items[0]
+    assert first_envelope is not second_envelope
+    assert first_envelope.source_manifest[0] is not second_envelope.source_manifest[0]
+
+    first_dump = first_payload.model_dump(mode="json")
+    second_dump = second_payload.model_dump(mode="json")
+    first_items = first_dump["items"]
+    second_items = second_dump["items"]
+    assert isinstance(first_items, list)
+    assert isinstance(second_items, list)
+    first_item = first_items[0]
+    second_item = second_items[0]
+    assert isinstance(first_item, dict)
+    assert isinstance(second_item, dict)
+    first_item["title"] = "Mutated dump"
+    assert second_item["title"] == "Weekly decision support"
+
+    object.__setattr__(first_payload, "title", "Mutated model")
+    object.__setattr__(first_payload.items[0], "title", "Mutated nested model")
+    object.__setattr__(first_envelope.source_manifest[0], "source_id", "SRC.changed")
+    third_payload, third_envelope = load_candidate_contract(
+        serialized,
+        expected_candidate_fingerprint=envelope.candidate_fingerprint,
+    )
+
+    assert third_payload.title == payload.title
+    assert third_payload.items[0].title == "Weekly decision support"
+    assert third_envelope.source_manifest[0].source_id == "SRC.goal"
+
+
+def test_oversized_candidate_contract_bypasses_validation_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contracts over the character bound revalidate on every load."""
+    _clear_candidate_validation_cache()
+    payload = _payload()
+    envelope = _envelope(correlation_id="candidate-cache-oversized")
+    serialized = canonical_candidate_json(payload, envelope)
+    monkeypatch.setattr(
+        candidate_contract,
+        "_CANDIDATE_VALIDATION_CACHE_MAX_CHARS",
+        len(serialized) - 1,
+    )
+
+    original = candidate_contract.canonical_candidate_json
+    derivations = 0
+
+    def count_derivations(
+        candidate_payload: SpecificationPayload,
+        candidate_envelope: SpecificationCandidateEnvelope,
+    ) -> str:
+        nonlocal derivations
+        derivations += 1
+        return original(candidate_payload, candidate_envelope)
+
+    monkeypatch.setattr(
+        candidate_contract,
+        "canonical_candidate_json",
+        count_derivations,
+    )
+    load_count = 2
+    for _ in range(load_count):
+        load_candidate_contract(
+            serialized,
+            expected_candidate_fingerprint=envelope.candidate_fingerprint,
+        )
+
+    assert derivations == load_count
+
+
+def test_candidate_validation_cache_holds_only_the_most_recent_sixteen_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry evicted from the bounded cache is validated again."""
+    _clear_candidate_validation_cache()
+    payload = _payload()
+    candidate_count = CANDIDATE_VALIDATION_CACHE_ENTRY_LIMIT + 1
+    candidates: list[tuple[str, str]] = []
+    for index in range(candidate_count):
+        envelope = _envelope(correlation_id=f"candidate-cache-entry-{index}")
+        candidates.append(
+            (
+                canonical_candidate_json(payload, envelope),
+                envelope.candidate_fingerprint,
+            )
+        )
+    assert len({serialized for serialized, _ in candidates}) == len(candidates)
+    assert len({fingerprint for _, fingerprint in candidates}) == 1
+
+    original = candidate_contract.canonical_candidate_json
+    derivations = 0
+
+    def count_derivations(
+        candidate_payload: SpecificationPayload,
+        candidate_envelope: SpecificationCandidateEnvelope,
+    ) -> str:
+        nonlocal derivations
+        derivations += 1
+        return original(candidate_payload, candidate_envelope)
+
+    monkeypatch.setattr(
+        candidate_contract,
+        "canonical_candidate_json",
+        count_derivations,
+    )
+    for serialized, fingerprint in candidates:
+        load_candidate_contract(
+            serialized,
+            expected_candidate_fingerprint=fingerprint,
+        )
+    first_serialized, first_fingerprint = candidates[0]
+    load_candidate_contract(
+        first_serialized,
+        expected_candidate_fingerprint=first_fingerprint,
+    )
+
+    assert derivations == len(candidates) + 1
 
 
 def test_candidate_fingerprint_excludes_host_execution_metadata() -> None:

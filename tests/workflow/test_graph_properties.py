@@ -7,12 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import workflow.graph as graph_module
 from workflow.clock import FixedClock
 from workflow.contracts import (
     GRAPH_VERSION,
     Blocker,
     FactReference,
     InputField,
+    JsonObject,
     RecommendationKind,
 )
 from workflow.definitions.execution import EXECUTION_NODES
@@ -55,6 +57,7 @@ from workflow.facts import (
 )
 from workflow.fingerprints import business_fact_fingerprint, fact_fingerprint
 from workflow.graph import (
+    AgenticExecutionSpec,
     ChildGraphSpec,
     NodeSpec,
     RuleCategory,
@@ -691,6 +694,177 @@ def _graph(
             nodes=(),
             children=(ChildGraphSpec(child_graph_id="properties", nodes=nodes),),
         ),
+    )
+
+
+def test_business_facts_hash_is_shared_by_attempt_overlay_and_recovery_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hash business facts once while preserving exact attempt decisions and refs."""
+    snapshot = _snapshot()
+    business_hash = business_fact_fingerprint(snapshot)
+    attempts = (
+        NodeAttemptFact(
+            attempt_id=1,
+            node_id="properties.agentic",
+            instance_key="failed",
+            graph_version=GRAPH_VERSION,
+            input_fingerprint="sha256:input",
+            fact_fingerprint="sha256:facts",
+            business_fact_fingerprint=business_hash,
+            decision_fingerprint="sha256:decision",
+            attempt_fingerprint="sha256:failed-attempt",
+            model_id="fixed-model",
+            lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+            outcome="failure",
+        ),
+        NodeAttemptFact(
+            attempt_id=2,
+            node_id="properties.agentic",
+            instance_key="expired",
+            graph_version=GRAPH_VERSION,
+            input_fingerprint="sha256:input",
+            fact_fingerprint="sha256:facts",
+            business_fact_fingerprint=business_hash,
+            decision_fingerprint="sha256:decision",
+            attempt_fingerprint="sha256:expired-attempt",
+            model_id="fixed-model",
+            lease_expires_at=EVALUATED_AT - timedelta(minutes=1),
+            outcome=None,
+        ),
+        NodeAttemptFact(
+            attempt_id=3,
+            node_id="properties.agentic",
+            instance_key="active",
+            graph_version=GRAPH_VERSION,
+            input_fingerprint="sha256:input",
+            fact_fingerprint="sha256:facts",
+            business_fact_fingerprint=business_hash,
+            decision_fingerprint="sha256:decision",
+            attempt_fingerprint="sha256:active-attempt",
+            model_id="fixed-model",
+            lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+            outcome=None,
+        ),
+        NodeAttemptFact(
+            attempt_id=4,
+            node_id="properties.agentic",
+            instance_key="stale",
+            graph_version=GRAPH_VERSION,
+            input_fingerprint="sha256:input",
+            fact_fingerprint="sha256:facts",
+            business_fact_fingerprint="sha256:old-business-facts",
+            decision_fingerprint="sha256:decision",
+            attempt_fingerprint="sha256:stale-attempt",
+            model_id="fixed-model",
+            lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+            outcome=None,
+        ),
+    )
+    snapshot = snapshot.model_copy(update={"node_attempts": attempts})
+    node = replace(
+        _node(
+            "properties.agentic",
+            tuple(
+                RuleEvaluation(RuleCategory.AVAILABLE, "READY", instance_key=key)
+                for key in ("failed", "expired", "active", "stale", "unmatched")
+            ),
+        ),
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="ACTIVE",
+            failure_reason="FAILED",
+            recovery_reason="EXPIRED",
+        ),
+    )
+    graph = _graph(node)
+    expected = graph.evaluate(snapshot, EVALUATED_AT)
+    calls = 0
+
+    def counted_hash(facts: WorkflowFactSnapshot) -> str:
+        nonlocal calls
+        calls += 1
+        return business_fact_fingerprint(facts)
+
+    monkeypatch.setattr(graph_module, "business_fact_fingerprint", counted_hash)
+    actual = graph.evaluate(snapshot, EVALUATED_AT)
+
+    assert calls == 1
+    assert actual == expected
+    assert tuple(
+        (decision.instance_key, decision.reason_code, decision.recommendation_kind)
+        for decision in actual.decisions
+    ) == (
+        ("active", "ACTIVE", RecommendationKind.REQUIRED),
+        ("expired", "EXPIRED", RecommendationKind.RECOVERY),
+        ("failed", "FAILED", RecommendationKind.RECOVERY),
+        ("stale", "READY", RecommendationKind.REQUIRED),
+        ("unmatched", "READY", RecommendationKind.REQUIRED),
+    )
+    assert tuple(
+        tuple(
+            (reference.fact_type, reference.fact_id, reference.fingerprint)
+            for reference in decision.fact_references
+        )
+        for decision in actual.decisions
+    ) == (
+        (),
+        (("node_attempt", "2", "sha256:expired-attempt"),),
+        (("node_attempt", "1", "sha256:failed-attempt"),),
+        (),
+        (),
+    )
+
+
+def test_business_facts_hash_is_lazy_and_recomputed_for_nested_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip unused business hashes and never cache across evaluations."""
+    nested: JsonObject = {"summary": {"text": "before"}}
+    snapshot = _snapshot().model_copy(
+        update={
+            "post_sprint_triage": (
+                PostSprintTriageFact(
+                    triage_id=1,
+                    sprint_id=1,
+                    impact="none",
+                    canonical_payload=nested,
+                    payload_fingerprint="sha256:triage",
+                ),
+            ),
+        }
+    )
+    agentic = replace(
+        _node(
+            "properties.agentic",
+            (RuleEvaluation(RuleCategory.AVAILABLE, "READY"),),
+        ),
+        agentic_execution=AgenticExecutionSpec("ACTIVE", "FAILED", "EXPIRED"),
+    )
+    plain = _graph(
+        _node("properties.plain", (RuleEvaluation(RuleCategory.AVAILABLE, "READY"),))
+    )
+    graph = _graph(agentic)
+    calls = 0
+
+    def counted_hash(facts: WorkflowFactSnapshot) -> str:
+        nonlocal calls
+        calls += 1
+        return business_fact_fingerprint(facts)
+
+    monkeypatch.setattr(graph_module, "business_fact_fingerprint", counted_hash)
+    plain.evaluate(snapshot, EVALUATED_AT)
+    assert calls == 0
+    before = graph.evaluate(snapshot, EVALUATED_AT)
+    summary = snapshot.post_sprint_triage[0].canonical_payload["summary"]
+    assert isinstance(summary, dict)
+    summary["text"] = "after"
+    after = graph.evaluate(snapshot, EVALUATED_AT)
+    expected_evaluations = 2
+    assert calls == expected_evaluations
+    assert before.fact_fingerprint != after.fact_fingerprint
+    assert (
+        before.decisions[0].decision_fingerprint
+        != after.decisions[0].decision_fingerprint
     )
 
 

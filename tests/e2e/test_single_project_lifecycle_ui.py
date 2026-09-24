@@ -57,6 +57,24 @@ _PROJECT_ID = 1
 _HTTP_OK = 200
 _HTTP_CREATED = 201
 _HTTP_CONFLICT = 409
+_DASHBOARD_BUNDLE_READS: tuple[tuple[str, str], ...] = (
+    ("project", ""),
+    ("position", "/position"),
+    ("vision", "/vision/status"),
+    ("goal", "/goals/status"),
+    ("specification", "/specifications/review"),
+    ("repository", "/repository"),
+    ("backlogReview", "/backlog/review"),
+    ("roadmapReview", "/roadmap/review"),
+    ("acceptedRoadmap", "/roadmap"),
+    ("storyReviews", "/story/reviews"),
+    ("sprintPlanReview", "/sprint/plan/review"),
+    ("storyPending", "/story/pending"),
+    ("storyDependencies", "/story/dependencies"),
+    ("sprintCandidates", "/sprint/candidates"),
+    ("sprintStatusResponse", "/sprint/status"),
+    ("sprintHistory", "/sprints"),
+)
 _UI_SETTLE_MS = 150
 _SPRINT_CAPACITY_POINTS = 8
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
@@ -398,70 +416,87 @@ class FakeLifecycle:
         assert self.project is not None, "Project must exist before scoped reads."
         suffix = path.removeprefix(prefix)
         if request.method == "GET":
-            response: tuple[int, JsonObject] | None = None
-            if (
-                suffix == "/story/dependencies"
-                and self.dependency_reload_conflict
-                and self.dependency_apply_requests
-            ):
-                response = (
-                    _HTTP_CONFLICT,
-                    {
-                        "detail": {
-                            "error": {
-                                "code": "STALE_DEPENDENCY_PROJECTION",
-                                "message": self.dependency_reload_conflict,
-                            }
-                        }
-                    },
-                )
-            elif (
-                suffix == "/story/dependencies"
-                and self.story_reload_conflict
-                and (
-                    self.sprint_selection_requests or self.structural_reconcile_requests
-                )
-            ):
-                response = (
-                    _HTTP_CONFLICT,
-                    {
-                        "detail": {
-                            "error": {
-                                "code": "STALE_STORY_PROJECTION",
-                                "message": self.story_reload_conflict,
-                            }
-                        }
-                    },
-                )
-            elif suffix == "/roadmap" and self.accepted_roadmap_error:
-                response = (
-                    _HTTP_CONFLICT,
-                    {
-                        "detail": {
-                            "errors": [
-                                {
-                                    "code": self.accepted_roadmap_error_code,
-                                    "message": self.accepted_roadmap_error,
-                                }
-                            ]
-                        }
-                    },
-                )
-            elif suffix == "/position":
-                response = (_HTTP_OK, self.position_envelope())
-            elif suffix == "/sprint/status":
-                response = self._sprint_status_response()
-            else:
-                response = self._planning_review_response(suffix)
-                if response is None:
-                    response = (_HTTP_OK, self._success(self._read(suffix)))
-            return response
+            if suffix == "/dashboard":
+                return self._dashboard_bundle_response()
+            return self._get_response(suffix)
         assert request.method == "POST", f"Unexpected method: {request.method}"
         return self._mutate(
             suffix,
             self._request_body(route),
             dict(request.headers),
         )
+
+    def _get_response(self, suffix: str) -> tuple[int, JsonObject]:
+        response: tuple[int, JsonObject] | None = None
+        if (
+            suffix == "/story/dependencies"
+            and self.dependency_reload_conflict
+            and self.dependency_apply_requests
+        ):
+            response = (
+                _HTTP_CONFLICT,
+                {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_DEPENDENCY_PROJECTION",
+                            "message": self.dependency_reload_conflict,
+                        }
+                    }
+                },
+            )
+        elif (
+            suffix == "/story/dependencies"
+            and self.story_reload_conflict
+            and (self.sprint_selection_requests or self.structural_reconcile_requests)
+        ):
+            response = (
+                _HTTP_CONFLICT,
+                {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_STORY_PROJECTION",
+                            "message": self.story_reload_conflict,
+                        }
+                    }
+                },
+            )
+        elif suffix == "/roadmap" and self.accepted_roadmap_error:
+            response = (
+                _HTTP_CONFLICT,
+                {
+                    "detail": {
+                        "errors": [
+                            {
+                                "code": self.accepted_roadmap_error_code,
+                                "message": self.accepted_roadmap_error,
+                            }
+                        ]
+                    }
+                },
+            )
+        elif suffix == "/position":
+            response = _HTTP_OK, self.position_envelope()
+        elif suffix == "/sprint/status":
+            response = self._sprint_status_response()
+        else:
+            response = self._planning_review_response(suffix)
+        if response is None:
+            response = _HTTP_OK, self._success(self._read(suffix))
+        return response
+
+    def _dashboard_bundle_response(self) -> tuple[int, JsonObject]:
+        slots: JsonObject = {}
+        for name, suffix in _DASHBOARD_BUNDLE_READS:
+            try:
+                status, body = self._get_response(suffix)
+            except (AssertionError, KeyError, TypeError, ValueError) as error:
+                self.api_errors.append(str(error))
+                status = 500
+                error_body: JsonObject = {"detail": {"message": str(error)}}
+                body = error_body
+            slot: JsonObject = {"status": status, "body": body}
+            slots[name] = slot
+        return _HTTP_OK, self._success(slots)
 
     @staticmethod
     def _request_body(route: Route) -> JsonObject:
@@ -2204,8 +2239,7 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
             assert body["instance_key"] == "retry:101:story:101"
             assert headers.get("x-agileforge-expected-decision") == _fingerprint("f")
             assert (
-                headers.get("x-agileforge-expected-instance")
-                == "retry:101:story:101"
+                headers.get("x-agileforge-expected-instance") == "retry:101:story:101"
             )
             self.retry_story_close_requests.append(dict(body))
             self.retry_story_closed = True
@@ -2228,8 +2262,7 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
             }
             assert headers.get("x-agileforge-expected-decision") == _fingerprint("e")
             assert (
-                headers.get("x-agileforge-expected-instance")
-                == "retry:101:sprint:31"
+                headers.get("x-agileforge-expected-instance") == "retry:101:sprint:31"
             )
             self.retry_triage_requests.append(dict(body))
             self.retry_triage_recorded = True
@@ -3443,9 +3476,7 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         stories_stage,
         specification_stage,
         same_stage=False,
-        reconciled_content=page.get_by_text(
-            "Successor pending candidate", exact=False
-        ),
+        reconciled_content=page.get_by_text("Successor pending candidate", exact=False),
     )
     specification_stage.click()
     expect(page.get_by_text("Successor pending candidate", exact=False)).to_be_visible()
@@ -3563,9 +3594,7 @@ def test_issue_211_fails_closed_for_malformed_and_hostile_source_projections(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
         wait_until="networkidle",
     )
-    page.wait_for_function(
-        "typeof globalThis.specificationPanelMarkup === 'function'"
-    )
+    page.wait_for_function("typeof globalThis.specificationPanelMarkup === 'function'")
     registration_action: JsonObject = {
         "request_kind": "register_specification_source",
         "endpoint": "specifications/source",
@@ -3788,17 +3817,26 @@ def test_single_project_dashboard_uses_direct_specification_lifecycle() -> None:
 
 
 def test_single_project_dashboard_loads_every_exact_planning_review() -> None:
-    """Load every dedicated planning review surface for one Project."""
+    """Load every planning review slot through the Project dashboard bundle."""
     source = _PROJECT_JS.read_text(encoding="utf-8")
+    request_dashboard_start = source.index("async function requestDashboard")
+    load_dashboard_start = source.index("async function loadDashboard")
+    request_dashboard = source[request_dashboard_start:load_dashboard_start]
+    slot_names_start = request_dashboard.index("const names = [")
+    slot_names_end = request_dashboard.index("];", slot_names_start)
+    slot_names = request_dashboard[slot_names_start:slot_names_end]
+    load_dashboard = source[load_dashboard_start:]
 
-    for endpoint in (
-        "/backlog/review",
-        "/roadmap/review",
-        "/story/reviews",
-        "/sprint/plan/review",
-        "/sprint/status",
+    assert "requestJson(`${base}/dashboard`, options)" in request_dashboard
+    for slot in (
+        "backlogReview",
+        "roadmapReview",
+        "storyReviews",
+        "sprintPlanReview",
+        "sprintStatusResponse",
     ):
-        assert endpoint in source
+        assert f"'{slot}'" in slot_names
+    assert "await requestDashboard(base, options)" in load_dashboard
 
 
 def test_review_evidence_is_rendered_before_decision_controls() -> None:
