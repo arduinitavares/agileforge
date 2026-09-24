@@ -24,6 +24,7 @@ from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import services.story_dependencies as story_dependencies_module
+import workflow.domain as domain_module
 from models.core import (
     Project,
     ProjectTeam,
@@ -143,6 +144,9 @@ EXPECTED_REQUEST_VARIANT_COUNT = 35
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
+TEMPORARY_LOCK_CONFLICT_MESSAGE: str = (
+    "Another workflow transition holds the Project fact lock."
+)
 _JSON_OBJECT = TypeAdapter(JsonObject)
 PLANNING_REQUESTS = (
     RecordRoadmapDraft,
@@ -2094,10 +2098,85 @@ def test_sprint_start_failure_after_audit_write_rolls_back_every_row(
         )
 
 
+def _run_concurrent_sprint_draft_attempts(
+    domain: WorkflowDomain,
+    requests: list[RecordSprintPlan],
+    force_lock_expiry: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[RecordSprintPlan, TransitionResult]]:
+    """Hold one commit open so a zero-timeout peer deterministically expires."""
+    barrier = threading.Barrier(2, timeout=5)
+    caller_finished = threading.Event()
+    complete_receipt = domain._complete_receipt
+
+    if force_lock_expiry:
+
+        def complete_and_wait(
+            session: Session,
+            receipt: WorkflowTransitionReceipt,
+            result: TransitionResult,
+            evaluated_at: datetime,
+        ) -> None:
+            complete_receipt(session, receipt, result, evaluated_at)
+            assert caller_finished.wait(timeout=5)
+
+        monkeypatch.setattr(domain, "_complete_receipt", complete_and_wait)
+
+    def record(request: RecordSprintPlan) -> tuple[RecordSprintPlan, TransitionResult]:
+        barrier.wait()
+        try:
+            return request, domain.transition(request)
+        finally:
+            if force_lock_expiry:
+                caller_finished.set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        attempts = list(executor.map(record, requests))
+    if force_lock_expiry:
+        monkeypatch.setattr(domain, "_complete_receipt", complete_receipt)
+    return attempts
+
+
+def _assert_concurrent_sprint_draft_race_resolves(
+    domain: WorkflowDomain,
+    attempts: list[tuple[RecordSprintPlan, TransitionResult]],
+    force_lock_expiry: bool,
+) -> None:
+    """Retry only the exact temporary lock conflict and require stale guards."""
+    results = [result for _request, result in attempts]
+    successes = [result for result in results if result.ok]
+    failures = [attempt for attempt in attempts if not attempt[1].ok]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    failed_request, first_failure = failures[0]
+    assert first_failure.error is not None
+    observed_lock_conflict = (
+        first_failure.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        and first_failure.error.message == TEMPORARY_LOCK_CONFLICT_MESSAGE
+    )
+    if force_lock_expiry:
+        assert observed_lock_conflict
+
+    if first_failure.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT:
+        assert observed_lock_conflict
+        final_failure = domain.transition(failed_request)
+    else:
+        assert first_failure.error.code is WorkflowErrorCode.STALE_POSITION
+        final_failure = first_failure
+    assert final_failure.ok is False
+    assert final_failure.error is not None
+    assert final_failure.error.code is WorkflowErrorCode.STALE_POSITION
+
+
+@pytest.mark.parametrize("force_lock_expiry", [False, True])
 def test_concurrent_distinct_sprint_drafts_serialize_to_one_leaf(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_lock_expiry: bool,
 ) -> None:
-    """Use BEGIN IMMEDIATE so one stale guarded draft cannot fork the stream."""
+    """Serialize competing guarded drafts before checking persisted state."""
+    if force_lock_expiry:
+        monkeypatch.setattr(domain_module, "_SQLITE_BUSY_TIMEOUT_MS", 0)
     race_engine = create_engine(
         f"sqlite:///{tmp_path / 'task-10-draft-race.db'}",
         connect_args={"check_same_thread": False},
@@ -2124,30 +2203,33 @@ def test_concurrent_distinct_sprint_drafts_serialize_to_one_leaf(
         specification = accepted_current_spec(snapshot)
         assert specification is not None
         position = domain.position(project_id)
-        barrier = threading.Barrier(2)
-
-        def record(index: int) -> TransitionResult:
-            plan = _sprint_plan(story_id)
-            plan["sprint_goal"] = f"Concurrent Sprint plan {index}."
-            request = RecordSprintPlan(
+        requests = [
+            RecordSprintPlan(
                 **_guards(position, "planning.sprint.plan"),
                 idempotency_key=f"concurrent-sprint-plan-{index}",
                 team_name="Concurrent Draft Team",
                 spec_version_id=specification.spec_version_id,
                 spec_hash=specification.spec_hash,
-                planner_output=SprintPlannerOutput.model_validate(plan),
+                planner_output=SprintPlannerOutput.model_validate(
+                    {
+                        **_sprint_plan(story_id),
+                        "sprint_goal": f"Concurrent Sprint plan {index}.",
+                    }
+                ),
             )
-            barrier.wait()
-            return domain.transition(request)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(record, (1, 2)))
-        successes = [item for item in results if item.ok]
-        failures = [item for item in results if not item.ok]
-        assert len(successes) == 1
-        assert len(failures) == 1
-        assert failures[0].error is not None
-        assert failures[0].error.code is WorkflowErrorCode.STALE_POSITION
+            for index in (1, 2)
+        ]
+        attempts = _run_concurrent_sprint_draft_attempts(
+            domain,
+            requests,
+            force_lock_expiry,
+            monkeypatch,
+        )
+        _assert_concurrent_sprint_draft_race_resolves(
+            domain,
+            attempts,
+            force_lock_expiry,
+        )
         with Session(race_engine) as session:
             artifacts = session.exec(select(SprintPlanArtifact)).all()
             assert len(artifacts) == 1
