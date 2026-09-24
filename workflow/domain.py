@@ -249,15 +249,22 @@ class WorkflowDomain:
 
     def position(self, project_id: int) -> WorkflowPosition:
         """Derive one position from complete durable facts and the injected clock."""
-        evaluated_at = self._clock.now()
+        evaluated_at = self.evaluation_time()
         with Session(self._engine) as session:
             return self._position_in_session(session, project_id, evaluated_at)
 
+    def evaluation_time(self) -> datetime:
+        """Capture the injected clock before a caller begins loading facts."""
+        return self._clock.now()
+
     def position_from_snapshot(
-        self, snapshot: WorkflowFactSnapshot
+        self,
+        snapshot: WorkflowFactSnapshot,
+        *,
+        evaluated_at: datetime,
     ) -> WorkflowPosition:
-        """Evaluate caller-owned read facts with this domain's graph and clock."""
-        return self._graph.evaluate(snapshot, self._clock.now())
+        """Evaluate caller-owned read facts at the captured request time."""
+        return self._graph.evaluate(snapshot, evaluated_at)
 
     def replay_project_transition(
         self,

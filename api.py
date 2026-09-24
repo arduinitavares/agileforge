@@ -11,8 +11,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Literal, Self, TypedDict, cast
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from git import Git
 from git.exc import GitCommandError
@@ -73,7 +73,7 @@ from services.contracts.specification_source import (
     SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
     SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
 )
-from services.dashboard_reads import dashboard_read_view
+from services.dashboard_reads import DashboardSnapshotTimeoutError, dashboard_read_view
 from services.specification_source_registration import (
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
@@ -111,6 +111,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="AgileForge API", lifespan=lifespan)
+
+
+@app.exception_handler(DashboardSnapshotTimeoutError)
+async def _dashboard_snapshot_timeout(
+    _request: Request,
+    _error: DashboardSnapshotTimeoutError,
+) -> JSONResponse:
+    """Fail the whole bundle when its complete read copy cannot be captured."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Dashboard snapshot is temporarily unavailable."},
+        headers={"Retry-After": "1"},
+    )
+
+
 app.mount(
     "/dashboard",
     StaticFiles(directory=str(_FRONTEND_ROOT), html=True),

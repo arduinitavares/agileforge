@@ -20,6 +20,7 @@ from typing import (
     Unpack,
     assert_never,
     cast,
+    runtime_checkable,
 )
 
 from pydantic import (
@@ -252,6 +253,24 @@ class WorkflowDomainPort(Protocol):
         attempt_fingerprint: str,
     ) -> JsonObject:
         """Load trusted input for a durable node attempt."""
+        ...
+
+
+@runtime_checkable
+class SnapshotWorkflowDomainPort(WorkflowDomainPort, Protocol):
+    """Optional domain capability for a timed, caller-owned fact snapshot."""
+
+    def evaluation_time(self) -> datetime:
+        """Capture the injected clock at the read request boundary."""
+        ...
+
+    def position_from_snapshot(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        *,
+        evaluated_at: datetime,
+    ) -> WorkflowPosition:
+        """Evaluate facts at the request's captured time."""
         ...
 
 
@@ -2427,16 +2446,27 @@ class AgileForgeApplication:
             return self._read_position
         return self._workflow_domain.position(project_id)
 
-    def position_from_snapshot(
-        self, snapshot: WorkflowFactSnapshot
-    ) -> WorkflowPosition:
-        """Evaluate one dashboard snapshot with the injected graph and clock."""
-        from workflow.domain import WorkflowDomain  # noqa: PLC0415
-
-        if not isinstance(self._workflow_domain, WorkflowDomain):
-            msg = "Dashboard reads require a WorkflowDomain."
+    def dashboard_evaluation_time(self) -> datetime:
+        """Capture a domain clock value before any dashboard persistence read."""
+        if not isinstance(self._workflow_domain, SnapshotWorkflowDomainPort):
+            msg = "Dashboard reads require timed snapshot evaluation."
             raise TypeError(msg)
-        return self._workflow_domain.position_from_snapshot(snapshot)
+        return self._workflow_domain.evaluation_time()
+
+    def position_from_snapshot(
+        self,
+        snapshot: WorkflowFactSnapshot,
+        *,
+        evaluated_at: datetime,
+    ) -> WorkflowPosition:
+        """Evaluate one dashboard snapshot at the captured request time."""
+        if not isinstance(self._workflow_domain, SnapshotWorkflowDomainPort):
+            msg = "Dashboard reads require timed snapshot evaluation."
+            raise TypeError(msg)
+        return self._workflow_domain.position_from_snapshot(
+            snapshot,
+            evaluated_at=evaluated_at,
+        )
 
     def dashboard_read_view(
         self,
