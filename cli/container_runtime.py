@@ -33,6 +33,7 @@ from cli.dev_server import (
     stop_ui,
     wait_for_readiness,
 )
+from cli.production_model_config import configure_models, recover_models
 from cli.production_state import (
     PRODUCTION_STATE_BASE,
     ProductionStateError,
@@ -175,6 +176,21 @@ def build_parser() -> argparse.ArgumentParser:
     backup_parser.add_argument("--destination", type=Path, required=True)
     backup_parser.add_argument("--repository", type=Path, action="append")
     backup_parser.add_argument("--json", action="store_true")
+
+    configure_parser = commands.add_parser(
+        "configure-models", help="Update a production profile's model configuration"
+    )
+    _add_profile_argument(configure_parser)
+    configure_parser.add_argument("--model-config", type=Path, required=True)
+    configure_parser.add_argument("--backup-directory", type=Path, required=True)
+    configure_parser.add_argument("--json", action="store_true")
+
+    recover_parser = commands.add_parser(
+        "recover-models", help="Restore a recorded previous model configuration"
+    )
+    _add_profile_argument(recover_parser)
+    recover_parser.add_argument("--backup-directory", type=Path, required=True)
+    recover_parser.add_argument("--json", action="store_true")
 
     restore_parser = commands.add_parser(
         "restore",
@@ -921,7 +937,7 @@ def _unsupported_command() -> Never:
     raise ContainerRuntimeError(message)
 
 
-def main(  # noqa: C901, PLR0911
+def main(  # noqa: C901, PLR0911, PLR0912, PLR0915
     argv: Sequence[str] | None = None,
     *,
     deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
@@ -976,6 +992,32 @@ def main(  # noqa: C901, PLR0911
                     maintenance_fences_held=True,
                 )
             _emit_payload({"ok": True, "backup": str(bundle)})
+            return 0
+        if arguments.command in {"configure-models", "recover-models"}:
+            owner_uid = (
+                _effective_uid()
+                if expected_state_owner_uid is None
+                else expected_state_owner_uid
+            )
+            with _runtime_fences(deployment_root, exclusive=True):
+                if arguments.command == "configure-models":
+                    result = configure_models(
+                        profile_root,
+                        arguments.model_config,
+                        arguments.backup_directory,
+                        build=build,
+                        deployment_root=deployment_root,
+                        expected_owner_uid=owner_uid,
+                    )
+                else:
+                    result = recover_models(
+                        profile_root,
+                        arguments.backup_directory,
+                        build=build,
+                        deployment_root=deployment_root,
+                        expected_owner_uid=owner_uid,
+                    )
+            _emit_payload(result)
             return 0
         if arguments.command in {"info", "serve", "cli"}:
             with _runtime_fences(deployment_root):

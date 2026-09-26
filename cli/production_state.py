@@ -294,7 +294,7 @@ def _validate_no_aliases(
         raise ProductionStateError(message)
 
 
-def load_production_state(  # noqa: C901, PLR0915
+def load_production_state(
     profile_root: Path,
     *,
     build: BuildIdentity,
@@ -302,10 +302,36 @@ def load_production_state(  # noqa: C901, PLR0915
     validate_current_schema: bool = True,
 ) -> ProductionStateManifest:
     """Load one complete production profile without creating any state."""
+    from cli.production_model_config import validate_startup_marker  # noqa: PLC0415
+
+    paths = production_state_paths(profile_root)
+    owner_uid = _effective_uid() if expected_owner_uid is None else expected_owner_uid
+    _require_owned_directory(
+        paths.root, label="production profile root", expected_owner_uid=owner_uid
+    )
+    validate_startup_marker(paths, expected_owner_uid=owner_uid)
+    return _load_production_state_pair(
+        profile_root,
+        build=build,
+        expected_owner_uid=owner_uid,
+        validate_current_schema=validate_current_schema,
+    )
+
+
+def _load_production_state_pair(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    profile_root: Path,
+    *,
+    build: BuildIdentity,
+    expected_owner_uid: int,
+    validate_current_schema: bool = True,
+    expected_manifest_sha256: str | None = None,
+    expected_model_sha256: str | None = None,
+) -> ProductionStateManifest:
+    """Validate an exact pair under a caller-held exclusive runtime fence."""
     if build.schema_version != "agileforge.build.v1":
         message = "unsupported installed build identity"
         raise ProductionStateError(message)
-    owner_uid = _effective_uid() if expected_owner_uid is None else expected_owner_uid
+    owner_uid = expected_owner_uid
     paths = production_state_paths(profile_root)
     _require_owned_directory(
         paths.root,
@@ -327,6 +353,12 @@ def load_production_state(  # noqa: C901, PLR0915
         label="production state manifest",
         expected_owner_uid=owner_uid,
     )
+    if (
+        expected_manifest_sha256 is not None
+        and _file_sha256(paths.manifest) != expected_manifest_sha256
+    ):
+        message = "production state manifest does not match recorded operation"
+        raise ProductionStateError(message)
     try:
         state = ProductionStateManifest.model_validate_json(paths.manifest.read_bytes())
     except (OSError, ValidationError) as error:
@@ -353,6 +385,12 @@ def load_production_state(  # noqa: C901, PLR0915
         label="model configuration",
         expected_owner_uid=owner_uid,
     )
+    if (
+        expected_model_sha256 is not None
+        and _file_sha256(paths.model_config) != expected_model_sha256
+    ):
+        message = "model configuration does not match recorded operation"
+        raise ProductionStateError(message)
     try:
         trace_metadata = paths.trace_database.lstat()
     except FileNotFoundError:

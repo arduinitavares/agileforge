@@ -150,9 +150,38 @@ def test_production_maintenance_refuses_unknown_writable_container(
         )
 
 
+@pytest.mark.parametrize("action", ["configure-models", "recover-models"])
+def test_model_maintenance_uses_exact_image_and_writable_consumer_check(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """Both model commands pass through the production maintenance transport."""
+    commands: list[tuple[str, ...]] = []
+    resolved = f"sha256:{'a' * 64}"
+    monkeypatch.setattr(container, "_maintenance_consumers", lambda _resources: [])
+    monkeypatch.setattr(
+        container, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout=resolved)
+    )
+    monkeypatch.setattr(
+        container, "_forward", lambda argv: commands.append(tuple(argv))
+    )
+    container.production_maintenance(
+        "synthetic", "agileforge-production:reviewed", (action, "--profile", "default")
+    )
+    assert commands[0][-3:] == (action, "--profile", "default")
+    assert resolved in commands[0]
+    assert "type=volume,source=synthetic-workspace,target=/workspace" in commands[0]
+    monkeypatch.setattr(
+        container, "_maintenance_consumers", lambda _resources: ["active-writer"]
+    )
+    with pytest.raises(RuntimeError, match="active-writer"):
+        container.production_maintenance(
+            "synthetic", "agileforge-production:reviewed", (action,)
+        )
+
+
 def test_production_maintenance_rejects_non_maintenance_runtime_command() -> None:
     """The controller cannot start the installed service through maintenance mode."""
-    with pytest.raises(ValueError, match="init, backup, or restore"):
+    with pytest.raises(ValueError, match="init, backup, restore"):
         container.production_maintenance(
             "synthetic", "sha256:reviewed-image", ("serve", "--profile", "demo")
         )
