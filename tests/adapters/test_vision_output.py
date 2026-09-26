@@ -38,9 +38,9 @@ def test_invalid_raw_response_has_safe_code_and_bounded_metadata(
 ) -> None:
     """Differentiate EOF from malformed JSON while preserving only safe metadata."""
     usage: JsonObject = {
-        "prompt_token_count": 42,
-        "candidates_token_count": 17,
-        "thoughts_token_count": True,
+        "prompt_token_count": 42,  # nosec B105
+        "candidates_token_count": 17,  # nosec B105
+        "thoughts_token_count": True,  # nosec B105
         "total_token_count": -1,
         "untrusted_text": "secret value",
     }
@@ -58,10 +58,10 @@ def test_invalid_raw_response_has_safe_code_and_bounded_metadata(
         "stage": "primary",
         "code": expected_code,
         "finish_reason": finish_reason,
-        "prompt_token_count": 42,
-        "candidates_token_count": 17,
-        "thoughts_token_count": None,
-        "total_token_count": None,
+        "prompt_token_count": 42,  # nosec B105
+        "candidates_token_count": 17,  # nosec B105
+        "thoughts_token_count": None,  # nosec B105
+        "total_token_count": None,  # nosec B105
         "response_bytes": None if text is None else len(text.encode("utf-8")),
         "response_sha256": (
             None

@@ -676,6 +676,9 @@ class AdkWorkflowRunner:
         state_key: str,
     ) -> None:
         """Append bounded diagnostic metadata without changing the original error."""
+        diagnostic_kind = (
+            "Vision" if state_key == "vision_output_diagnostic" else "Specification"
+        )
         try:
             session = await session_service.get_session(
                 app_name=self._config.identity.app_name,
@@ -684,7 +687,8 @@ class AdkWorkflowRunner:
             )
             if session is None or not invocation_id:
                 logger.warning(
-                    "Output diagnostic could not be appended: session_id=%s",
+                    "%s output diagnostic could not be appended: session_id=%s",
+                    diagnostic_kind,
                     session_id,
                 )
                 return
@@ -700,7 +704,8 @@ class AdkWorkflowRunner:
             raise
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Output diagnostic could not be appended: session_id=%s",
+                "%s output diagnostic could not be appended: session_id=%s",
+                diagnostic_kind,
                 session_id,
             )
 

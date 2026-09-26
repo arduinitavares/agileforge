@@ -1437,10 +1437,10 @@ def test_max_tokens_eof_is_a_precise_durable_vision_failure(engine: Engine) -> N
         "stage": "primary",
         "code": "VISION_OUTPUT_INCOMPLETE",
         "finish_reason": "MAX_TOKENS",
-        "prompt_token_count": 42,
-        "candidates_token_count": 17,
-        "thoughts_token_count": None,
-        "total_token_count": 59,
+        "prompt_token_count": 42,  # nosec B105
+        "candidates_token_count": 17,  # nosec B105
+        "thoughts_token_count": None,  # nosec B105
+        "total_token_count": 59,  # nosec B105
         "response_bytes": 18,
         "response_sha256": (
             "sha256:" + hashlib.sha256(b'{"schema_version":').hexdigest()
