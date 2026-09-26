@@ -299,6 +299,45 @@ controller --project-name "$project_name" production-maintenance \
   --bundle /workspace/default-transfer --json
 ```
 
+To change an existing production profile's model choices, place a complete
+`models.yaml` in the workspace volume and prepare an owned, private parent for
+the recovery record outside every registered repository and Git admin tree.
+The target directory must not already exist. Keep it on `/workspace` or
+`/var/lib/agileforge` so the same maintenance container can reach it. Stop the
+service and other writers as for backup, then run:
+
+```sh
+controller --project-name "$project_name" production-maintenance \
+  --image agileforge-production:local -- configure-models --profile default \
+  --model-config /workspace/model-candidates/models.yaml \
+  --backup-directory /workspace/model-recovery/default-2026-09-26 --json
+```
+
+The result gives the profile and state ID, old and new model configuration
+hashes, and the private recovery directory. The operation validates every
+retained role and optional reasoning settings, preserves the profile's identity
+and history, and records the exact previous `models.yaml` and `runtime.json`
+bytes. Restart the service after a successful update so its adapters load the
+new configuration. Keep the recovery directory private and intact until a
+later update supersedes it or the rollback window is deliberately closed.
+
+If an update or recovery is interrupted, normal startup refuses the pending
+operation. Use the directory recorded in the update result or the profile's
+`model-config-update.json` marker to recover explicitly:
+
+```sh
+controller --project-name "$project_name" production-maintenance \
+  --image agileforge-production:local -- recover-models --profile default \
+  --backup-directory /workspace/model-recovery/default-2026-09-26 --json
+```
+
+Recovery checks the marker, receipt, saved bytes, state identity, and current
+file hashes before restoring the literal previous pair. Repeating the same
+recovery is safe. A completed update can also be rolled back before another
+configuration update. The command refuses unrelated manual drift and a wrong
+or modified recovery record; preserve both files and investigate such a refusal
+rather than editing the manifest by hand.
+
 ### Promote a development profile into the packaged app
 
 State that was born under `agileforge-dev` carries `provenance/profile.json`,

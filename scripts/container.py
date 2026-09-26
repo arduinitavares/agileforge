@@ -390,8 +390,17 @@ def _maintenance_runtime_command(command: Sequence[str]) -> tuple[str, ...]:
     runtime_command = tuple(command)
     while runtime_command[:1] == ("--",):
         runtime_command = runtime_command[1:]
-    if runtime_command[:1] not in {("init",), ("backup",), ("restore",)}:
-        raise ValueError("production maintenance accepts only init, backup, or restore")
+    if runtime_command[:1] not in {
+        ("init",),
+        ("backup",),
+        ("restore",),
+        ("configure-models",),
+        ("recover-models",),
+    }:
+        raise ValueError(
+            "production maintenance accepts only init, backup, restore, "
+            "configure-models, or recover-models"
+        )
     return runtime_command
 
 

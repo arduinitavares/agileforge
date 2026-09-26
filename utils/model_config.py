@@ -15,6 +15,7 @@ from utils.runtime_config import get_bool_env, load_runtime_env
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_RESOURCE = files("config").joinpath("models.yaml")
 _OPENROUTER_OPENAI_GPT_5_PREFIX = "openrouter/openai/gpt-5"
+_OPENROUTER_OPENAI_GPT_6_PREFIX = "openrouter/openai/gpt-6"
 
 load_runtime_env()
 
@@ -87,6 +88,38 @@ class StoryPipelineModeError(ValueError):
         super().__init__("story_pipeline.mode must be 'batch' or 'single'")
 
 
+class ReasoningSectionMappingError(TypeError):
+    """Raised when reasoning is present but is not a mapping."""
+
+    def __init__(self) -> None:
+        """Describe the required reasoning section type."""
+        super().__init__("reasoning must be a mapping in models.yaml")
+
+
+class ReasoningEffortError(ValueError):
+    """Raised when the configured reasoning effort is unsupported."""
+
+    def __init__(self) -> None:
+        """Describe the supported deployment effort."""
+        super().__init__("reasoning.effort must be 'max' in models.yaml")
+
+
+class ModelIdentifierError(ValueError):
+    """Raised for an empty or nonstring model identifier."""
+
+    def __init__(self, role: object) -> None:
+        """Name the role with the invalid identifier."""
+        super().__init__(f"models.{role} must be a nonempty model identifier")
+
+
+class MissingModelRolesError(ValueError):
+    """Raised when a complete profile omits active roles."""
+
+    def __init__(self, missing: list[str]) -> None:
+        """Name every missing role for the profile maintainer."""
+        super().__init__(f"models missing required roles: {', '.join(missing)}")
+
+
 def is_zdr_routing_error(exception: BaseException) -> bool:
     """Check if an exception is a ZDR/privacy routing failure.
 
@@ -113,6 +146,38 @@ def _get_config_path() -> Path | None:
     return candidate
 
 
+def _validate_model_roles(models: object, *, require_all_roles: bool) -> None:
+    """Validate role values and optional complete-profile coverage."""
+    if not isinstance(models, dict):
+        raise ModelsSectionMappingError
+    for role, model_id in models.items():
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ModelIdentifierError(role)
+    if require_all_roles:
+        from adapters.adk.model_roles import RETAINED_MODEL_ROLES  # noqa: PLC0415
+
+        missing = sorted(RETAINED_MODEL_ROLES.difference(models))
+        if missing:
+            raise MissingModelRolesError(missing)
+
+
+def parse_model_config(raw: str, *, require_all_roles: bool = False) -> dict[str, Any]:
+    """Parse and validate model YAML without reading environment or cached state."""
+    data = yaml.safe_load(raw)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ModelConfigMappingError
+    _validate_model_roles(data.get("models", {}), require_all_roles=require_all_roles)
+    if "reasoning" in data:
+        reasoning = data["reasoning"]
+        if not isinstance(reasoning, dict):
+            raise ReasoningSectionMappingError
+        if reasoning.get("effort") != "max" or len(reasoning) != 1:
+            raise ReasoningEffortError
+    return data
+
+
 @lru_cache(maxsize=1)
 def _load_config() -> dict[str, Any]:
     config_path = _get_config_path()
@@ -122,10 +187,7 @@ def _load_config() -> dict[str, Any]:
         if not config_path.exists():
             raise ModelConfigNotFoundError(config_path)
         raw = config_path.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw) or {}
-    if not isinstance(data, dict):
-        raise ModelConfigMappingError
-    return data
+    return parse_model_config(raw)
 
 
 def clear_config_cache() -> None:
@@ -152,6 +214,12 @@ def get_model_id(key: str) -> str:
     return str(model_id)
 
 
+def get_model_reasoning_config() -> dict[str, str]:
+    """Return the validated optional reasoning setting for new requests."""
+    reasoning = _load_config().get("reasoning")
+    return {} if reasoning is None else {"effort": reasoning["effort"]}
+
+
 def _get_provider_config() -> dict[str, Any]:
     relax_privacy = get_bool_env("RELAX_ZDR_FOR_TESTS", default=False)
     if not relax_privacy:
@@ -170,13 +238,19 @@ def _get_provider_config() -> dict[str, Any]:
 
 
 def get_openrouter_extra_body() -> dict[str, Any]:
-    """Return extra_body for OpenRouter requests with privacy routing."""
-    return {"provider": _get_provider_config()}
+    """Return privacy routing and optional reasoning for OpenRouter requests."""
+    body: dict[str, Any] = {"provider": _get_provider_config()}
+    reasoning = get_model_reasoning_config()
+    if reasoning:
+        body["reasoning"] = reasoning
+    return body
 
 
 def get_model_token_limit_args(model_id: str, token_limit: int) -> dict[str, int]:
     """Return the token-limit argument supported by the configured model family."""
-    if model_id.startswith(_OPENROUTER_OPENAI_GPT_5_PREFIX):
+    if model_id.startswith(
+        (_OPENROUTER_OPENAI_GPT_5_PREFIX, _OPENROUTER_OPENAI_GPT_6_PREFIX)
+    ):
         return {"max_completion_tokens": token_limit}
     return {"max_tokens": token_limit}
 

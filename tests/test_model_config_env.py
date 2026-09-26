@@ -70,34 +70,30 @@ def test_model_config_path_env_overrides(
         model_config.clear_config_cache()
 
 
-_DEFAULT_LUNA_MODEL_ROLES: tuple[str, ...] = (
-    "product_goal",
-    "product_vision",
-    "specification_structurer",
-)
-_DEFAULT_TERRA_MODEL_ROLES: tuple[str, ...] = (
-    "backlog_primer",
-    "roadmap_builder",
-    "spec_validator",
-    "sprint_planner",
-    "user_story_writer",
-)
+_EXPECTED_PRODUCTION_MODELS = {
+    "product_vision": "openrouter/openai/gpt-5.6-luna",
+    "product_goal": "openrouter/openai/gpt-5.6-luna",
+    "specification_structurer": "openrouter/openai/gpt-6-sol",
+    "spec_validator": "openrouter/openai/gpt-6-sol",
+    "backlog_primer": "openrouter/openai/gpt-5.6-luna",
+    "roadmap_builder": "openrouter/openai/gpt-6-sol",
+    "user_story_writer": "openrouter/openai/gpt-5.6-luna",
+    "sprint_planner": "openrouter/openai/gpt-5.6-luna",
+}
 
 
-def test_default_model_config_uses_cheapest_gpt_5_6_model(
+def test_default_model_config_assigns_all_eight_roles_and_max_reasoning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Production agent roles should route upstream to Luna and planning to Terra."""
+    """Catch a wrong role assignment or lost shared reasoning setting."""
     monkeypatch.delenv("MODEL_CONFIG_PATH", raising=False)
     model_config.clear_config_cache()
 
     try:
-        assert {get_model_id(key) for key in _DEFAULT_LUNA_MODEL_ROLES} == {
-            "openrouter/openai/gpt-5.6-luna"
-        }
-        assert {get_model_id(key) for key in _DEFAULT_TERRA_MODEL_ROLES} == {
-            "openrouter/openai/gpt-5.6-terra"
-        }
+        assert {key: get_model_id(key) for key in _EXPECTED_PRODUCTION_MODELS} == (
+            _EXPECTED_PRODUCTION_MODELS
+        )
+        assert model_config.get_model_reasoning_config() == {"effort": "max"}
     finally:
         model_config.clear_config_cache()
 
@@ -113,8 +109,59 @@ def test_test_model_config_uses_pinned_free_model(
         assert {get_model_id(key) for key in _RUNTIME_MODEL_KEYS} == {
             "openrouter/openai/gpt-oss-20b:free"
         }
+        assert model_config.get_model_reasoning_config() == {}
     finally:
         model_config.clear_config_cache()
+
+
+def test_reasoning_config_does_not_leak_between_config_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Switching profiles must not carry a cached reasoning choice forward."""
+    with_reasoning = tmp_path / "with.yaml"
+    with_reasoning.write_text(
+        "models: {}\nreasoning:\n  effort: max\n", encoding="utf-8"
+    )
+    without_reasoning = tmp_path / "without.yaml"
+    without_reasoning.write_text("models: {}\n", encoding="utf-8")
+    try:
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(with_reasoning))
+        model_config.clear_config_cache()
+        assert model_config.get_model_reasoning_config() == {"effort": "max"}
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(without_reasoning))
+        model_config.clear_config_cache()
+        assert model_config.get_model_reasoning_config() == {}
+    finally:
+        model_config.clear_config_cache()
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        ("[]", "YAML mapping"),
+        ("models: []", "models must be a mapping"),
+        ("models:\n  product_goal: ''", "models.product_goal"),
+        ("models:\n  product_goal: 42", "models.product_goal"),
+        ("reasoning: max", "reasoning must be a mapping"),
+        ("reasoning:\n  effort: low", "reasoning.effort"),
+        ("reasoning:\n  effort: 1", "reasoning.effort"),
+    ],
+)
+def test_pure_model_parser_rejects_invalid_config(raw: str, error: str) -> None:
+    """Reject malformed maintenance inputs before publishing them."""
+    with pytest.raises((TypeError, ValueError), match=error):
+        model_config.parse_model_config(raw)
+
+
+def test_pure_model_parser_requires_all_roles_only_when_requested() -> None:
+    """Maintenance enforces complete role coverage while old test configs stay valid."""
+    assert model_config.parse_model_config("models:\n  product_goal: test/model\n") == {
+        "models": {"product_goal": "test/model"}
+    }
+    with pytest.raises(ValueError, match="product_vision"):
+        model_config.parse_model_config(
+            "models:\n  product_goal: test/model\n", require_all_roles=True
+        )
 
 
 def test_model_configs_exactly_match_live_production_roles() -> None:
