@@ -706,10 +706,10 @@ function visionSourceKindsMarkup(sourceKinds) {
 
 function visionComponentsMarkup(components) {
     const items = Array.isArray(components) ? components : [];
-    return `<section class="min-w-0">
+    return `<section class="vision-components min-w-0">
         <h3 class="text-sm font-semibold">Components and basis</h3>
         <dl class="mt-3 divide-y divide-slate-200 border-y border-slate-200">${items.map((component) => `
-            <div class="grid min-w-0 gap-2 py-3 sm:grid-cols-[10rem_minmax(0,1fr)] sm:gap-4">
+            <div class="vision-component-row grid min-w-0 gap-2 py-3">
                 <dt class="break-words text-xs font-semibold uppercase text-slate-500">${escapeWorkflowText(visionComponentLabel(component?.name))}</dt>
                 <dd class="min-w-0">
                     <p class="break-words text-sm leading-6 ${component?.value ? 'text-slate-800' : 'text-slate-500'}">${escapeWorkflowText(component?.value ?? 'Not yet defined')}</p>
@@ -751,12 +751,12 @@ function visionConflictsMarkup(conflicts) {
 }
 
 function visionReviewMaterialMarkup(material, label) {
-    return `<div class="max-w-4xl min-w-0">
+    return `<div class="vision-review-material max-w-4xl min-w-0">
         <div class="border-l-4 border-accent pl-4">
             <p class="text-xs font-semibold uppercase text-accent">${escapeWorkflowText(label)}</p>
             <p class="mt-2 break-words text-base font-semibold leading-7">${escapeWorkflowText(material?.statement)}</p>
         </div>
-        <div class="mt-6 grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(16rem,1fr)]">
+        <div class="vision-review-layout mt-6 grid min-w-0 gap-6">
             ${visionComponentsMarkup(material?.components)}
             <div class="grid min-w-0 content-start gap-6">
                 ${visionAssumptionsMarkup(material?.assumptions)}
