@@ -1,7 +1,10 @@
 """Tests for OpenRouter privacy routing configuration."""
 
+from pathlib import Path
+
 import pytest
 
+from utils import model_config
 from utils.model_config import (
     OPENROUTER_PRIVACY_ERROR_MESSAGE,
     OPENROUTER_PROVIDER,
@@ -16,6 +19,13 @@ from utils.model_config import (
 def test_gpt_5_openrouter_models_use_max_completion_tokens() -> None:
     """Strict GPT-5 routing should retain Luna's supported token parameter."""
     assert get_model_token_limit_args("openrouter/openai/gpt-5.6-luna", 4096) == {
+        "max_completion_tokens": 4096
+    }
+
+
+def test_gpt_6_sol_uses_max_completion_tokens() -> None:
+    """Sol's reasoning budget must share the configured completion limit."""
+    assert get_model_token_limit_args("openrouter/openai/gpt-6-sol", 4096) == {
         "max_completion_tokens": 4096
     }
 
@@ -35,6 +45,24 @@ def test_openrouter_extra_body_includes_provider(
     extra_body = get_openrouter_extra_body()
     assert extra_body["provider"] == OPENROUTER_PROVIDER
     assert extra_body["provider"] is not OPENROUTER_PROVIDER
+
+
+def test_openrouter_extra_body_preserves_privacy_with_max_reasoning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shared request body sends effort without weakening provider controls."""
+    config = tmp_path / "models.yaml"
+    config.write_text("models: {}\nreasoning:\n  effort: max\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(config))
+    monkeypatch.setenv("RELAX_ZDR_FOR_TESTS", "false")
+    model_config.clear_config_cache()
+    try:
+        assert get_openrouter_extra_body() == {
+            "provider": OPENROUTER_PROVIDER,
+            "reasoning": {"effort": "max"},
+        }
+    finally:
+        model_config.clear_config_cache()
 
 
 def test_openrouter_privacy_error_message_is_stable() -> None:

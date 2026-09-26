@@ -141,7 +141,7 @@ from services.vision_evidence import (
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from services.vision_input import VisionInputService
-from utils.model_config import get_model_id
+from utils.model_config import get_model_id, get_model_reasoning_config
 from utils.runtime_config import get_specification_structurer_generation_config
 from workflow.contracts import (
     Blocker,
@@ -1770,6 +1770,9 @@ def _agentic_execution_settings(
 ) -> JsonObject:
     """Return effective non-secret settings included in attempt identity."""
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
+    reasoning = get_model_reasoning_config()
+    if reasoning:
+        settings["reasoning"] = reasoning
     if node_id == "specification.structure":
         generation_config = _JSON_OBJECT.validate_python(
             get_specification_structurer_generation_config()

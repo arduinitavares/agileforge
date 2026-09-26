@@ -12,6 +12,7 @@ from services.application import (
     SpecificationStructuringRequest,
     _agentic_execution_settings,
 )
+from utils import model_config
 from workflow.contracts import (
     FactReference,
     NodeCategory,
@@ -25,6 +26,8 @@ from workflow.contracts import (
 from workflow.requests import DecideSpecification
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
     from services.node_attempt_replay import NodeAttemptReplayQuery
@@ -216,6 +219,30 @@ def test_structuring_persists_its_effective_generation_config(
         "timeout_seconds": 120,
         "max_attempts": 2,
     }
+
+
+def test_new_attempt_settings_capture_effective_reasoning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """New attempt identity changes when configured effort changes."""
+    config = tmp_path / "models.yaml"
+    config.write_text("models: {}\nreasoning:\n  effort: max\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(config))
+    model_config.clear_config_cache()
+    try:
+        assert _agentic_execution_settings("vision.interview") == {
+            "timeout_seconds": 120,
+            "max_attempts": 2,
+            "reasoning": {"effort": "max"},
+        }
+        config.write_text("models: {}\n", encoding="utf-8")
+        model_config.clear_config_cache()
+        assert _agentic_execution_settings("vision.interview") == {
+            "timeout_seconds": 120,
+            "max_attempts": 2,
+        }
+    finally:
+        model_config.clear_config_cache()
 
 
 def test_structuring_uses_the_composed_agent_config_after_environment_drift(
