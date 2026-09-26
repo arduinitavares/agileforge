@@ -6,7 +6,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -342,6 +342,43 @@ def test_specification_structure_cli_returns_nonzero_on_invalid_payload(
     cli_payload = json.loads(capsys.readouterr().out)
     assert cli_payload["error"]["code"] == "INVALID_SPECIFICATION_PAYLOAD"
     assert cli_payload["error"]["message"] == safe_message
+
+
+def test_vision_bootstrap_cli_preserves_precise_output_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose the safe Vision failure code and message in CLI JSON."""
+    failure = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.VISION_OUTPUT_INCOMPLETE,
+            message=(
+                "Vision generation returned incomplete output. Retry this Vision step."
+            ),
+        ),
+    )
+
+    class FailedVisionApplication:
+        def bootstrap_vision(self, _request: object) -> TransitionResult:
+            return failure
+
+    exit_code = cli_main.main(
+        [
+            "vision",
+            "bootstrap",
+            "--project-id",
+            "41",
+            "--idempotency-key",
+            "vision-output-failed",
+            "--actor",
+            "operator",
+        ],
+        application=cast("Any", FailedVisionApplication()),
+    )
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert failure.error is not None
+    assert payload["error"] == failure.error.model_dump(mode="json")
 
 
 def test_retired_specification_author_command_is_not_parseable() -> None:

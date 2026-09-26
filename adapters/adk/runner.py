@@ -27,6 +27,7 @@ from adapters.adk.errors import (
     SpecificationAgenticExecutionError,
     SpecificationOutputValidationError,
     VisionAgenticPreflightError,
+    VisionOutputValidationError,
 )
 from adapters.adk.preflight import (
     SpecificationAttemptRevalidator,
@@ -115,6 +116,7 @@ _AGENTIC_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
     VisionAgenticPreflightError,
+    VisionOutputValidationError,
     SpecificationAgenticExecutionError,
     *_ADK_EXECUTION_ERRORS,
 )
@@ -417,7 +419,7 @@ class AdkWorkflowRunner:
             )
         )
 
-    def _handle_execution_failure(
+    def _handle_execution_failure(  # noqa: PLR0911
         self,
         *,
         request: AdkRunRequest,
@@ -454,6 +456,18 @@ class AdkWorkflowRunner:
                     durable_code=error.code.value,
                     durable_message=error.message,
                     transport_code=error.code,
+                    transport_message=error.message,
+                ),
+            )
+        if isinstance(error, VisionOutputValidationError):
+            return self._fail_attempt(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                failure=_AttemptFailure(
+                    durable_code=error.code,
+                    durable_message=error.message,
+                    transport_code=WorkflowErrorCode(error.code),
                     transport_message=error.message,
                 ),
             )
@@ -552,7 +566,7 @@ class AdkWorkflowRunner:
             ),
         )
 
-    async def _run_recipe(
+    async def _run_recipe(  # noqa: C901
         self,
         recipe: AdkRecipe,
         *,
@@ -588,6 +602,7 @@ class AdkWorkflowRunner:
                 ],
             )
             is_specification = recipe.node_id == "specification.structure"
+            is_vision = recipe.node_id in ("vision.bootstrap", "vision.interview")
             invocation_id = ""
             output: object | None = None
             try:
@@ -595,10 +610,10 @@ class AdkWorkflowRunner:
                     user_id=self._config.identity.user_id,
                     session_id=session_id,
                     new_message=message,
-                    yield_user_message=is_specification,
+                    yield_user_message=is_specification or is_vision,
                 ):
                     if (
-                        is_specification
+                        (is_specification or is_vision)
                         and event.author == "user"
                         and not invocation_id
                     ):
@@ -612,6 +627,17 @@ class AdkWorkflowRunner:
                         session_id=session_id,
                         invocation_id=invocation_id,
                         diagnostic=error.diagnostic,
+                    )
+                raise
+            except VisionOutputValidationError as error:
+                if is_vision:
+                    await self._append_output_diagnostic(
+                        session_service=session_service,
+                        session_id=session_id,
+                        invocation_id=invocation_id,
+                        diagnostic=error.diagnostic,
+                        author="vision_output_validator",
+                        state_key="vision_output_diagnostic",
                     )
                 raise
             if output is None:
@@ -630,6 +656,29 @@ class AdkWorkflowRunner:
         invocation_id: str,
         diagnostic: JsonObject,
     ) -> None:
+        await self._append_output_diagnostic(
+            session_service=session_service,
+            session_id=session_id,
+            invocation_id=invocation_id,
+            diagnostic=diagnostic,
+            author="specification_output_validator",
+            state_key="specification_output_diagnostic",
+        )
+
+    async def _append_output_diagnostic(  # noqa: PLR0913
+        self,
+        *,
+        session_service: BaseSessionService,
+        session_id: str,
+        invocation_id: str,
+        diagnostic: JsonObject,
+        author: str,
+        state_key: str,
+    ) -> None:
+        """Append bounded diagnostic metadata without changing the original error."""
+        diagnostic_kind = (
+            "Vision" if state_key == "vision_output_diagnostic" else "Specification"
+        )
         try:
             session = await session_service.get_session(
                 app_name=self._config.identity.app_name,
@@ -638,27 +687,25 @@ class AdkWorkflowRunner:
             )
             if session is None or not invocation_id:
                 logger.warning(
-                    "Specification output diagnostic could not be appended: "
-                    "session_id=%s",
+                    "%s output diagnostic could not be appended: session_id=%s",
+                    diagnostic_kind,
                     session_id,
                 )
                 return
             await session_service.append_event(
                 session=session,
                 event=Event(
-                    author="specification_output_validator",
+                    author=author,
                     invocation_id=invocation_id,
-                    actions=EventActions(
-                        state_delta={"specification_output_diagnostic": diagnostic}
-                    ),
+                    actions=EventActions(state_delta={state_key: diagnostic}),
                 ),
             )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Specification output diagnostic could not be appended: "
-                "session_id=%s",
+                "%s output diagnostic could not be appended: session_id=%s",
+                diagnostic_kind,
                 session_id,
             )
 

@@ -55,10 +55,24 @@ class SpecificationOutputValidationError(SpecificationAgenticExecutionError):
     diagnostic: JsonObject = field(default_factory=dict, repr=False)
 
 
+@dataclass
+class VisionOutputValidationError(RuntimeError):
+    """Safe Vision output failure with bounded provider diagnostics."""
+
+    code: str
+    message: str
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        """Render only the bounded safe failure message."""
+        return self.message
+
+
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
     "SpecificationAgenticExecutionError",
     "SpecificationOutputValidationError",
     "VisionAgenticPreflightError",
+    "VisionOutputValidationError",
 ]

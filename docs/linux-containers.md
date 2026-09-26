@@ -57,6 +57,16 @@ delete them to silence the warning. Use a fresh project name for a trial run.
 Provider-backed actions require an explicit runtime secret mount as described
 below. Startup itself does not load the host's credentials.
 
+Project Vision generation uses a built-in 128,000 completion-token limit for
+both its primary and semantic-repair calls. Its recipe has a 600-second total
+deadline and a 660-second durable attempt lease. It makes one generation call
+and, only for a semantically invalid complete draft, at most one repair call.
+New attempts record the effective limit, deadline, and retry policy. Incomplete
+output and invalid payloads surface as `VISION_OUTPUT_INCOMPLETE` and
+`INVALID_VISION_PAYLOAD` with bounded diagnostic metadata. Other agentic roles
+retain their existing limits. The production launcher does not forward
+`VISION_INTERVIEWER_MAX_TOKENS`; the built-in default needs no override.
+
 ## Paths, ownership, and scope
 
 The image pins are in `containers/pins.json`. The application user is

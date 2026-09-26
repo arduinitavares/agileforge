@@ -106,7 +106,11 @@ from workflow.execution_scope import (
     current_execution_scope,
     resolve_execution_scope,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    business_fact_fingerprint,
+    canonical_hash,
+    canonical_json,
+)
 from workflow.planning_integrity import current_task_content_fingerprint
 
 if TYPE_CHECKING:
@@ -151,6 +155,15 @@ _VISION_COMPONENT_NAMES: tuple[str, ...] = (
 _VISION_BASIS_SOURCE_KINDS: frozenset[str] = frozenset(
     {"human", "evidence", "inference"}
 )
+_VISION_FAILURE_MESSAGES: dict[str, str] = {
+    "VISION_OUTPUT_INCOMPLETE": (
+        "Vision returned an incomplete response. No new draft was saved."
+    ),
+    "INVALID_VISION_PAYLOAD": (
+        "Vision returned an invalid response. No new draft was saved."
+    ),
+    "ADK_EXECUTION_FAILED": "Vision generation failed. No new draft was saved.",
+}
 
 
 def _success(data: JsonObject) -> JsonObject:
@@ -2475,6 +2488,54 @@ class DurableReadProjectionService:
             ),
             "stale_reason": None if vision is not None else "VISION_NOT_ACCEPTED",
         }
+        node_id: str | None = None
+        instance_key: str | None = None
+        if data["bootstrap_available"]:
+            node_id = "vision.bootstrap"
+            if selection.open_revision is not None:
+                instance_key = (
+                    f"revision:{selection.open_revision.vision_revision_intent_id}"
+                )
+        elif selection.transcript and (
+            selection.open_revision is not None or selection.artifact is None
+        ):
+            node_id = "vision.interview"
+            instance_key = (
+                f"after-turn:{selection.transcript[-1].vision_interview_turn_id}"
+            )
+        elif (
+            selection.artifact is not None
+            and selection.decision is not None
+            and selection.decision.decision in {"feedback", "rejected"}
+        ):
+            node_id = "vision.interview"
+            turn_id = (
+                selection.transcript[-1].vision_interview_turn_id
+                if selection.transcript
+                else selection.artifact.source_interview_turn_id
+            )
+            instance_key = f"after-turn:{turn_id}"
+        if node_id is not None:
+            business_fingerprint = business_fact_fingerprint(snapshot)
+            current_attempts = (
+                attempt
+                for attempt in snapshot.node_attempts
+                if attempt.node_id == node_id
+                and attempt.instance_key == instance_key
+                and attempt.business_fact_fingerprint == business_fingerprint
+            )
+            latest_attempt = max(
+                current_attempts, key=lambda attempt: attempt.attempt_id, default=None
+            )
+            if latest_attempt is not None and latest_attempt.outcome == "failure":
+                code = latest_attempt.failure_code
+                message = _VISION_FAILURE_MESSAGES.get(code or "")
+                if message is not None:
+                    data["last_failure"] = {
+                        "code": code,
+                        "message": message,
+                        "attempt_id": latest_attempt.attempt_id,
+                    }
         return _success(data)
 
     def product_goal_status(self, *, project_id: int) -> JsonObject:

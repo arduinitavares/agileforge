@@ -142,7 +142,11 @@ from services.vision_evidence import (
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id, get_model_reasoning_config
-from utils.runtime_config import get_specification_structurer_generation_config
+from utils.runtime_config import (
+    get_specification_structurer_generation_config,
+    get_vision_generation_config,
+)
+from utils.runtime_controls import VISION_LEASE_SECONDS, VISION_TIMEOUT_SECONDS
 from workflow.contracts import (
     Blocker,
     FactReference,
@@ -1635,6 +1639,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     execution_action_selection: _ExecutionActionSelectionPort | None
     sprint_planning_input: _SprintPlanningInputPort | None
     specification_generation_config: JsonObject | None
+    vision_generation_config: JsonObject | None
 
 
 class _ReadProjectionPort(Protocol):
@@ -1767,12 +1772,26 @@ def _agentic_execution_settings(
     node_id: str,
     *,
     specification_generation_config: JsonObject | None = None,
+    vision_generation_config: JsonObject | None = None,
 ) -> JsonObject:
     """Return effective non-secret settings included in attempt identity."""
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
     reasoning = get_model_reasoning_config()
     if reasoning:
         settings["reasoning"] = _JSON_OBJECT.validate_python(reasoning)
+    if node_id in ("vision.bootstrap", "vision.interview"):
+        generation_config = _JSON_OBJECT.validate_python(
+            get_vision_generation_config()
+            if vision_generation_config is None
+            else vision_generation_config
+        )
+        settings = {
+            **settings,
+            "timeout_seconds": VISION_TIMEOUT_SECONDS,
+            "max_attempts": 1,
+            "max_semantic_repairs": 1,
+            "generation_config": generation_config,
+        }
     if node_id == "specification.structure":
         generation_config = _JSON_OBJECT.validate_python(
             get_specification_structurer_generation_config()
@@ -2418,6 +2437,9 @@ class AgileForgeApplication:
         self._specification_generation_config = lifecycle_services.get(
             "specification_generation_config"
         )
+        self._vision_generation_config = lifecycle_services.get(
+            "vision_generation_config"
+        )
         self._project_lifecycle: ProjectLifecycleService | None = None
 
     @property
@@ -2935,8 +2957,13 @@ class AgileForgeApplication:
                     specification_generation_config=(
                         self._specification_generation_config
                     ),
+                    vision_generation_config=self._vision_generation_config,
                 ),
-                lease_seconds=_LEASE_SECONDS,
+                lease_seconds=(
+                    VISION_LEASE_SECONDS
+                    if request.node_id in ("vision.bootstrap", "vision.interview")
+                    else _LEASE_SECONDS
+                ),
                 actor=request.actor,
                 correlation_id=request.correlation_id,
             ),
@@ -6853,6 +6880,14 @@ def production_application() -> AgileForgeApplication:
             exclude_none=True,
         ),
     )
+    configured_vision_generation = vision_interview_agent.generate_content_config
+    if configured_vision_generation is None:
+        message = "Vision generation configuration is required."
+        raise RuntimeError(message)
+    vision_generation_config = cast(
+        "JsonObject",
+        configured_vision_generation.model_dump(mode="json", exclude_none=True),
+    )
     graph = project_graph()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
@@ -6867,6 +6902,10 @@ def production_application() -> AgileForgeApplication:
             sprint_planning=sprint_agent,
         ),
         execution_settings=_EXECUTION_SETTINGS,
+        vision_execution_settings=_agentic_execution_settings(
+            "vision.bootstrap",
+            vision_generation_config=vision_generation_config,
+        ),
     )
     engine = get_engine()
     ensure_business_db_ready(engine)
@@ -6902,6 +6941,7 @@ def production_application() -> AgileForgeApplication:
         ),
         specification_structuring_input=specification_structuring_input,
         specification_generation_config=specification_generation_config,
+        vision_generation_config=vision_generation_config,
         specification_source_registration=specification_source_registration,
         specification_source_replay=DurableTransitionReplayService(engine=engine),
         delivery_review_selection=DeliveryReviewSelectionService(engine=engine),

@@ -203,6 +203,24 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert not hasattr(recipe, "next_command")
 
 
+def test_vision_registry_deadline_is_scoped_to_vision() -> None:
+    """A long Vision generation cannot be cut off by the shared recipe limit."""
+    vision_timeout = 600
+    other_timeout = 120
+    registry = build_agentic_recipe_registry(
+        nodes=_agentic_nodes(),
+        execution_settings={"timeout_seconds": other_timeout, "max_attempts": 2},
+        vision_execution_settings={
+            "timeout_seconds": vision_timeout,
+            "max_attempts": 1,
+        },
+    )
+    assert registry.require("vision.bootstrap").workflow.timeout == vision_timeout
+    assert registry.require("vision.interview").workflow.timeout == vision_timeout
+    assert registry.require("goal.interview").workflow.timeout == other_timeout
+    assert registry.require("specification.structure").workflow.timeout == other_timeout
+
+
 def test_structuring_recipe_has_no_authoring_compatibility_alias() -> None:
     """Keep the renamed provider boundary hard instead of dual-wiring it."""
     nodes = _agentic_nodes()
