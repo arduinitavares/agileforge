@@ -197,6 +197,52 @@ test('initial Vision state offers one generation action without fallback input',
     assert.equal(fetchCalls, 0);
 });
 
+test('current Vision output failure survives a fresh dashboard render with its retry action', () => {
+    const projection = {
+        bootstrap_available: true,
+        current: null,
+        draft: null,
+        transcript: [],
+        candidate: null,
+        review: null,
+        last_failure: {
+            code: 'VISION_OUTPUT_INCOMPLETE',
+            message: 'Vision returned an incomplete response. No new draft was saved.',
+            attempt_id: 21,
+        },
+    };
+    const firstRender = loadFrontend().visionPanelMarkup(projection, [bootstrapAction]);
+    const freshRender = loadFrontend().visionPanelMarkup(structuredClone(projection), [bootstrapAction]);
+
+    for (const markup of [firstRender, freshRender]) {
+        assert.match(markup, /role="alert"/);
+        assert.match(markup, /Vision returned an incomplete response\. No new draft was saved\./);
+        assert.match(markup, /data-direct-action="generate_vision_bootstrap"/);
+    }
+});
+
+test('Vision failure message is escaped and an interview keeps its advertised response action', () => {
+    const context = loadFrontend();
+    const markup = context.visionPanelMarkup({
+        bootstrap_available: false,
+        current: null,
+        draft: reviewMaterial(),
+        transcript: [],
+        candidate: null,
+        review: null,
+        last_failure: {
+            code: '<script>untrusted-code()</script>',
+            message: 'Vision failed <img src=x onerror=alert(1)>',
+            attempt_id: 22,
+        },
+    }, [respondAction]);
+
+    assert.match(markup, /role="alert"/);
+    assert.match(markup, /Vision failed &lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.match(markup, /data-interview-scope="vision"/);
+    assert.doesNotMatch(markup, /<img|<script>|untrusted-code/);
+});
+
 test('locked Vision generation renders disabled and cannot execute from a stale control', async () => {
     let fetchCalls = 0;
     const cockpitButton = { disabled: false, onclick: null };

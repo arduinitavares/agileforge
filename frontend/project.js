@@ -821,11 +821,14 @@ function visionBootstrapContextMarkup(context) {
 }
 
 function visionPanelMarkup(projection, actions = [], context = {}) {
+    const failureMarkup = projection?.last_failure?.message
+        ? `<p role="alert" class="mb-5 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">${escapeWorkflowText(projection.last_failure.message)}</p>`
+        : '';
     const candidate = projection?.candidate;
     const reviewState = projection?.review?.state;
     const reviewAction = findAction(actions, 'decide_vision_review');
     if (candidate && reviewState === 'pending') {
-        return `${visionReviewMaterialMarkup(candidate, 'Vision candidate')}${reviewControlsMarkup('vision', reviewAction)}`;
+        return `${failureMarkup}${visionReviewMaterialMarkup(candidate, 'Vision candidate')}${reviewControlsMarkup('vision', reviewAction)}`;
     }
 
     const respondAction = findAction(actions, 'record_vision_interview_turn');
@@ -835,7 +838,7 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
         const feedback = ['feedback', 'rejected'].includes(reviewState)
             ? `<p class="mb-5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"><strong>Review response:</strong> ${escapeWorkflowText(projection?.review?.rationale ?? 'Revise the Vision with the review in mind.')}</p>`
             : '';
-        return `${feedback}${visionReviewMaterialMarkup(material, 'Vision draft')}<div class="mt-6">${interviewFormMarkup(
+        return `${failureMarkup}${feedback}${visionReviewMaterialMarkup(material, 'Vision draft')}<div class="mt-6">${interviewFormMarkup(
             'vision',
             questions,
             projection?.transcript ?? [],
@@ -852,7 +855,7 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
                 <p class="mt-2 break-words text-base font-semibold leading-7">${escapeWorkflowText(projection.current.statement)}</p>
             </div>`
             : '';
-        return `${current}<p class="mb-4 text-sm leading-6 text-slate-600">Draft from available Project context.</p>
+        return `${failureMarkup}${current}<p class="mb-4 text-sm leading-6 text-slate-600">Draft from available Project context.</p>
             ${visionBootstrapContextMarkup(context)}
             <button type="button" data-direct-action="generate_vision_bootstrap" data-action-availability="${bootstrapLocked ? 'locked' : 'available'}" class="mt-5 ${BUTTON_PRIMARY}"${bootstrapLocked ? ' disabled aria-disabled="true"' : ''}>
                 <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>${bootstrapLocked ? 'Vision generation unavailable' : 'Generate Vision draft'}</span>
@@ -861,14 +864,14 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
 
     if (projection?.current) {
         const revisionAction = findAction(actions, 'begin_vision_revision');
-        return `<div class="max-w-3xl border-l-4 border-emerald-500 pl-4">
+        return `${failureMarkup}<div class="max-w-3xl border-l-4 border-emerald-500 pl-4">
             <p class="text-xs font-semibold uppercase text-emerald-700">Accepted Vision</p>
             <p class="mt-2 break-words text-base font-semibold leading-7">${escapeWorkflowText(projection.current.statement)}</p>
         </div>
         ${revisionAction ? `<button type="button" data-vision-revision="true" class="mt-5 ${BUTTON_SECONDARY}"><span class="material-symbols-outlined" aria-hidden="true">edit</span><span>Revise Vision</span></button>` : ''}`;
     }
 
-    return '<p class="text-sm text-slate-600">Vision is waiting for the current lifecycle state.</p>';
+    return `${failureMarkup}<p class="text-sm text-slate-600">Vision is waiting for the current lifecycle state.</p>`;
 }
 
 function acceptedVisionMarkup(acceptedVision) {

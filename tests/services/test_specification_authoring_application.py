@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import adapters.adk.runner as runner_module
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from adapters.adk.recipes import AdkRecipeRegistry
+    from adapters.adk.runner import AdkExecutionConfig, AdkRunRequest
     from services.node_attempt_replay import NodeAttemptReplayQuery
     from workflow.contracts import JsonObject
     from workflow.requests import TransitionRequest
@@ -216,8 +219,10 @@ def test_structuring_persists_its_effective_generation_config(
         "generation_config": {"max_output_tokens": 24_576},
     }
     assert _agentic_execution_settings("vision.interview") == {
-        "timeout_seconds": 120,
-        "max_attempts": 2,
+        "timeout_seconds": 600,
+        "max_attempts": 1,
+        "max_semantic_repairs": 1,
+        "generation_config": {"max_output_tokens": 128_000},
     }
 
 
@@ -231,15 +236,19 @@ def test_new_attempt_settings_capture_effective_reasoning(
     model_config.clear_config_cache()
     try:
         assert _agentic_execution_settings("vision.interview") == {
-            "timeout_seconds": 120,
-            "max_attempts": 2,
+            "timeout_seconds": 600,
+            "max_attempts": 1,
+            "max_semantic_repairs": 1,
+            "generation_config": {"max_output_tokens": 128_000},
             "reasoning": {"effort": "max"},
         }
         config.write_text("models: {}\n", encoding="utf-8")
         model_config.clear_config_cache()
         assert _agentic_execution_settings("vision.interview") == {
-            "timeout_seconds": 120,
-            "max_attempts": 2,
+            "timeout_seconds": 600,
+            "max_attempts": 1,
+            "max_semantic_repairs": 1,
+            "generation_config": {"max_output_tokens": 128_000},
         }
     finally:
         model_config.clear_config_cache()
@@ -259,6 +268,66 @@ def test_structuring_uses_the_composed_agent_config_after_environment_drift(
         "timeout_seconds": 120,
         "max_attempts": 2,
         "generation_config": composed_config,
+    }
+
+
+def test_vision_uses_composed_budget_after_environment_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved attempt settings match the already composed Vision request."""
+    monkeypatch.setenv("VISION_INTERVIEWER_MAX_TOKENS", "22222")
+    settings = _agentic_execution_settings(
+        "vision.bootstrap",
+        vision_generation_config={"max_output_tokens": 11111},
+    )
+    assert settings == {
+        "timeout_seconds": 600,
+        "max_attempts": 1,
+        "max_semantic_repairs": 1,
+        "generation_config": {"max_output_tokens": 11111},
+    }
+    assert _agentic_execution_settings("goal.interview") == {
+        "timeout_seconds": 120,
+        "max_attempts": 2,
+    }
+
+
+def test_vision_attempt_lease_is_longer_without_affecting_other_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The application gives Vision enough time without delaying other leases."""
+    captured: list[AdkExecutionConfig] = []
+
+    class CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(cast("AdkExecutionConfig", kwargs["config"]))
+
+        def run_request(self, _request: AdkRunRequest) -> TransitionResult:
+            return TransitionResult(ok=True)
+
+    monkeypatch.setattr(runner_module, "AdkWorkflowRunner", CapturingRunner)
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(),
+        recipe_registry=cast("AdkRecipeRegistry", object()),
+        vision_generation_config={"max_output_tokens": 11111},
+    )
+    for node_id in ("vision.bootstrap", "goal.interview"):
+        application.run_agentic_action(
+            AgenticActionRequest(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts",
+                decision_fingerprint="decision",
+                node_id=node_id,
+                input_payload={},
+                model_id="fake/model",
+                idempotency_key=f"lease-{node_id}",
+                actor="operator",
+            )
+        )
+    assert [config.lease_seconds for config in captured] == [660, 300]
+    assert captured[0].execution_settings["generation_config"] == {
+        "max_output_tokens": 11111
     }
 
 

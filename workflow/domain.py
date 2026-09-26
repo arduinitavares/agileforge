@@ -1063,6 +1063,8 @@ class WorkflowDomain:
         )
         precise_failure_codes = {
             WorkflowErrorCode.VISION_EVIDENCE_STALE,
+            WorkflowErrorCode.VISION_OUTPUT_INCOMPLETE,
+            WorkflowErrorCode.INVALID_VISION_PAYLOAD,
             WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
             WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,

@@ -143,9 +143,7 @@ class _JoinedBacklogValidations(BaseModel):
 class _BacklogCorrectionRecipeInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     accepted_backlog_artifact_id: Annotated[int, Field(strict=True, gt=0)]
-    accepted_backlog_artifact_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    accepted_backlog_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     guidance: Annotated[
         str,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=32_768),
@@ -190,9 +188,7 @@ class _StorySetCorrectionRecipeInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     accepted_story_artifact_id: int = Field(gt=0)
-    accepted_story_artifact_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    accepted_story_artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class _StoryRecipePayload(BaseModel):
@@ -878,9 +874,7 @@ async def _run_story_leaf_with_schema_repair(
                     validation_errors = safe_story_validation_errors(
                         raw_validation_errors
                     )
-                    error_message = safe_story_validation_message(
-                        raw_validation_errors
-                    )
+                    error_message = safe_story_validation_message(raw_validation_errors)
                     failure_cause = ValueError(error_message)
             elif isinstance(error, StoryReferenceContentError):
                 validation_errors = [
@@ -1323,6 +1317,7 @@ def build_agentic_recipe_registry(
     *,
     nodes: AgenticRecipeNodes,
     execution_settings: JsonObject,
+    vision_execution_settings: JsonObject | None = None,
 ) -> AdkRecipeRegistry:
     """Compose exactly one execution-only recipe for every agentic domain node."""
     return AdkRecipeRegistry(
@@ -1332,7 +1327,11 @@ def build_agentic_recipe_registry(
                 workflow=build_vision_workflow(
                     primary_leaf=nodes.vision_interview,
                     repair_leaf=nodes.vision_repair,
-                    execution_settings=execution_settings,
+                    execution_settings=(
+                        execution_settings
+                        if vision_execution_settings is None
+                        else vision_execution_settings
+                    ),
                 ),
                 output_adapter=_vision_interview_output_adapter,
             ),
@@ -1341,7 +1340,11 @@ def build_agentic_recipe_registry(
                 workflow=build_vision_workflow(
                     primary_leaf=nodes.vision_interview,
                     repair_leaf=nodes.vision_repair,
-                    execution_settings=execution_settings,
+                    execution_settings=(
+                        execution_settings
+                        if vision_execution_settings is None
+                        else vision_execution_settings
+                    ),
                 ),
                 output_adapter=_vision_interview_output_adapter,
             ),

@@ -6344,6 +6344,35 @@ def test_specification_structure_api_returns_409_conflict_on_invalid_payload(
     assert response.json()["detail"]["error"]["message"] == safe_message
 
 
+def test_vision_bootstrap_api_preserves_precise_output_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the safe Vision failure through the API conflict envelope."""
+    safe_message = (
+        "Vision generation returned an invalid payload. Retry this Vision step."
+    )
+    failure = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.INVALID_VISION_PAYLOAD,
+            message=safe_message,
+        ),
+    )
+
+    class FailedVisionApplication:
+        def bootstrap_vision(self, _request: object) -> TransitionResult:
+            return failure
+
+    monkeypatch.setattr(api_module, "_application", FailedVisionApplication)
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/vision/bootstrap",
+        json={"idempotency_key": "vision-output-failed", "actor": "operator"},
+    )
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert failure.error is not None
+    assert response.json()["detail"]["error"] == failure.error.model_dump(mode="json")
+
+
 def test_retired_specification_author_endpoint_is_not_registered() -> None:
     """Hard-break the retired combined authoring transport."""
     response = TestClient(api_module.app).post(

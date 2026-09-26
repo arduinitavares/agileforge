@@ -13,6 +13,7 @@ from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
     SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
+    VISION_MAX_TOKENS_DEFAULT,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -280,6 +281,15 @@ def get_spec_validator_max_tokens(default: int = 4096) -> int:
 def get_vision_interviewer_max_tokens(default: int = 4096) -> int:
     """Return the max token budget for the vision interviewer."""
     return get_int_env("VISION_INTERVIEWER_MAX_TOKENS", default)
+
+
+def get_vision_generation_config() -> dict[str, int]:
+    """Return the Vision-only output budget, preserving explicit overrides."""
+    return {
+        "max_output_tokens": get_vision_interviewer_max_tokens(
+            VISION_MAX_TOKENS_DEFAULT
+        )
+    }
 
 
 def get_specification_structurer_max_tokens(

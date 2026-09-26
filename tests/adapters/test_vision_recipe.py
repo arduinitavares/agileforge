@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,9 @@ from google.genai import types
 from pydantic import BaseModel, Field, TypeAdapter
 from sqlmodel import Session, col, select
 
+from adapters.adk.agents.vision import repair_agent as production_vision_repair_agent
+from adapters.adk.agents.vision import root_agent as production_vision_agent
+from adapters.adk.errors import VisionOutputValidationError
 from adapters.adk.recipes import (
     AdkRecipeRegistry,
     AgenticRecipeNodes,
@@ -45,10 +49,12 @@ from services.contracts.vision import (
     VisionAgentInput,
     VisionDraftOutput,
     VisionModelInput,
+    VisionRepairInput,
 )
 from services.vision_input import VisionInputService
 from tests.adapters.test_adk_workflow_runner import TrackingSessionService
 from tests.services.test_vision_evidence import _bind_repository
+from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.clock import FixedClock
 from workflow.contracts import (
     GRAPH_VERSION,
@@ -132,6 +138,41 @@ class CapturingLlm(BaseLlm):
                 parts=[types.Part(text=json.dumps(self.output))],
             )
         )
+
+
+class RawVisionLlm(BaseLlm):
+    """Return one provider response without bypassing ADK agent processing."""
+
+    response: LlmResponse
+    calls: int = 0
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Return the provided raw ADK response."""
+        del llm_request, stream
+        self.calls += 1
+        yield self.response
+
+
+class FailingVisionLlm(BaseLlm):
+    """Raise a real provider-boundary exception inside an ADK Agent."""
+
+    calls: int = 0
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Fail before yielding any response."""
+        del llm_request, stream
+        self.calls += 1
+        message = "provider unavailable"
+        raise RuntimeError(message)
+        yield  # pragma: no cover
 
 
 def _evidence(name: str = "Vision") -> JsonObject:
@@ -1311,3 +1352,187 @@ def test_schema_failure_records_no_vision_facts(engine: Engine) -> None:
         assert session.exec(select(VisionEvidenceSnapshot)).all() == []
         assert session.exec(select(VisionInterviewTurn)).all() == []
         assert session.exec(select(VisionArtifact)).all() == []
+
+
+def test_max_tokens_eof_is_a_precise_durable_vision_failure(engine: Engine) -> None:
+    """A truncated ADK response retains its finish reason and creates no draft."""
+    project = Project(name="Truncated Vision")
+    with Session(engine) as session:
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+
+    model = RawVisionLlm(
+        model="raw-vision",
+        response=LlmResponse(
+            content=types.Content(
+                role="model", parts=[types.Part(text='{"schema_version":')]
+            ),
+            finish_reason=types.FinishReason.MAX_TOKENS,
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=42,
+                candidates_token_count=17,
+                total_token_count=59,
+            ),
+        ),
+    )
+    primary = Agent(
+        name="raw_vision_primary",
+        model=model,
+        input_schema=VisionModelInput,
+        output_schema=VisionDraftOutput,
+        instruction="Return a Vision draft.",
+        after_model_callback=production_vision_agent.after_model_callback,
+        mode="single_turn",
+    )
+    registry = _registry(primary, _leaf("repair", [_draft()]))
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=NOW),
+        adk_recipe_registry=registry,
+    )
+    trace = TrackingSessionService()
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=trace,
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=60,
+            actor="operator@example.com",
+        ),
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    result = runner.run(
+        decision,
+        _bootstrap_input(),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="truncated-vision",
+            actor="operator@example.com",
+        ),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code.value == "VISION_OUTPUT_INCOMPLETE"
+    assert model.calls == 1
+    diagnostic_session = asyncio.run(
+        trace.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=trace.created_session_ids[0],
+        )
+    )
+    assert diagnostic_session is not None
+    diagnostic = diagnostic_session.state["vision_output_diagnostic"]
+    assert diagnostic == {
+        "stage": "primary",
+        "code": "VISION_OUTPUT_INCOMPLETE",
+        "finish_reason": "MAX_TOKENS",
+        "prompt_token_count": 42,
+        "candidates_token_count": 17,
+        "thoughts_token_count": None,
+        "total_token_count": 59,
+        "response_bytes": 18,
+        "response_sha256": (
+            "sha256:" + hashlib.sha256(b'{"schema_version":').hexdigest()
+        ),
+    }
+    replayed = runner.run(
+        decision,
+        _bootstrap_input(),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="truncated-vision",
+            actor="operator@example.com",
+        ),
+    )
+    assert replayed.replayed is True
+    assert replayed.error == result.error
+    assert model.calls == 1
+    with Session(engine) as session:
+        assert session.exec(select(VisionEvidenceSnapshot)).all() == []
+        assert session.exec(select(VisionInterviewTurn)).all() == []
+        assert session.exec(select(VisionArtifact)).all() == []
+
+
+def test_actual_repair_agent_classifies_malformed_output_at_repair_stage() -> None:
+    """A malformed repair result cannot trigger another model call."""
+    primary_model = RawVisionLlm(
+        model="raw-vision-primary",
+        response=LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text=json.dumps(_draft(source_kind="human")))],
+            ),
+            finish_reason=types.FinishReason.STOP,
+        ),
+    )
+    repair_model = RawVisionLlm(
+        model="raw-vision-repair",
+        response=LlmResponse(
+            content=types.Content(
+                role="model", parts=[types.Part(text='{"schema_version":')]
+            ),
+            finish_reason=types.FinishReason.STOP,
+        ),
+    )
+    primary = Agent(
+        name="raw_vision_repair_primary",
+        model=primary_model,
+        input_schema=VisionModelInput,
+        output_schema=VisionDraftOutput,
+        instruction="Return the supplied draft.",
+        after_model_callback=production_vision_agent.after_model_callback,
+        mode="single_turn",
+    )
+    repair = Agent(
+        name="raw_vision_repair_leaf",
+        model=repair_model,
+        input_schema=VisionRepairInput,
+        output_schema=VisionDraftOutput,
+        instruction="Return the supplied repair.",
+        after_model_callback=production_vision_repair_agent.after_model_callback,
+        mode="single_turn",
+    )
+    workflow = build_vision_workflow(
+        primary_leaf=primary,
+        repair_leaf=repair,
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    with pytest.raises(VisionOutputValidationError) as captured:
+        asyncio.run(_run_workflow_async(workflow, _bootstrap_input()))
+    assert captured.value.code == "VISION_OUTPUT_INCOMPLETE"
+    assert captured.value.diagnostic["stage"] == "repair"
+    assert primary_model.calls == 1
+    assert repair_model.calls == 1
+
+
+def test_actual_vision_provider_exception_stays_distinct() -> None:
+    """An upstream failure must not be labeled as malformed model output."""
+    model = FailingVisionLlm(model="failing-vision")
+    primary = Agent(
+        name="failing_vision_primary",
+        model=model,
+        input_schema=VisionModelInput,
+        output_schema=VisionDraftOutput,
+        instruction="Return a Vision draft.",
+        after_model_callback=production_vision_agent.after_model_callback,
+        mode="single_turn",
+    )
+    workflow = build_vision_workflow(
+        primary_leaf=primary,
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    with pytest.raises(RuntimeError, match="provider unavailable") as captured:
+        asyncio.run(_run_workflow_async(workflow, _bootstrap_input()))
+    assert not isinstance(captured.value, VisionOutputValidationError)
+    assert model.calls == 1
