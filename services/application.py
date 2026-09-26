@@ -1772,7 +1772,7 @@ def _agentic_execution_settings(
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
     reasoning = get_model_reasoning_config()
     if reasoning:
-        settings["reasoning"] = reasoning
+        settings["reasoning"] = _JSON_OBJECT.validate_python(reasoning)
     if node_id == "specification.structure":
         generation_config = _JSON_OBJECT.validate_python(
             get_specification_structurer_generation_config()

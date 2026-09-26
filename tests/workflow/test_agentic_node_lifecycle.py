@@ -42,6 +42,7 @@ EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
 LEASE_SECONDS = 60
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 EXPECTED_REPLACEMENT_ATTEMPT_COUNT = 2
+EXPECTED_CONFIG_ATTEMPT_COUNT = 3
 
 
 @dataclass
@@ -318,8 +319,15 @@ def test_new_model_and_reasoning_are_stored_without_rewriting_old_attempt(
     assert old_receipt.ok
 
     clock.now_value += timedelta(seconds=LEASE_SECONDS)
-    new_request = _start_request(
-        domain, project_id, node_id, idempotency_key="after-config-change"
+    changed_model_request = _start_request(
+        domain, project_id, node_id, idempotency_key="after-model-change"
+    ).model_copy(update={"model_id": "openrouter/openai/gpt-6-sol"})
+    changed_model_receipt = domain.transition(changed_model_request)
+    assert changed_model_receipt.ok
+
+    clock.now_value += timedelta(seconds=LEASE_SECONDS)
+    changed_effort_request = _start_request(
+        domain, project_id, node_id, idempotency_key="after-effort-change"
     ).model_copy(
         update={
             "model_id": "openrouter/openai/gpt-6-sol",
@@ -329,20 +337,23 @@ def test_new_model_and_reasoning_are_stored_without_rewriting_old_attempt(
             },
         }
     )
-    new_receipt = domain.transition(new_request)
-    assert new_receipt.ok
+    changed_effort_receipt = domain.transition(changed_effort_request)
+    assert changed_effort_receipt.ok
 
     with Session(engine) as session:
         attempts = session.exec(select(WorkflowNodeAttempt)).all()
-        assert len(attempts) == EXPECTED_REPLACEMENT_ATTEMPT_COUNT
+        assert len(attempts) == EXPECTED_CONFIG_ATTEMPT_COUNT
         assert attempts[0].model_id == "openrouter/openai/gpt-5.6-luna"
         assert json.loads(attempts[0].execution_settings_json) == EXECUTION_SETTINGS
         assert attempts[1].model_id == "openrouter/openai/gpt-6-sol"
-        assert json.loads(attempts[1].execution_settings_json) == {
+        assert json.loads(attempts[1].execution_settings_json) == EXECUTION_SETTINGS
+        assert attempts[2].model_id == "openrouter/openai/gpt-6-sol"
+        assert json.loads(attempts[2].execution_settings_json) == {
             **EXECUTION_SETTINGS,
             "reasoning": {"effort": "max"},
         }
         assert attempts[0].attempt_fingerprint != attempts[1].attempt_fingerprint
+        assert attempts[1].attempt_fingerprint != attempts[2].attempt_fingerprint
 
     assert domain.transition(old_request) == old_receipt.model_copy(
         update={"replayed": True}
