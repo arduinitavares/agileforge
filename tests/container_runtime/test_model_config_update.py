@@ -9,10 +9,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from git import Actor, Repo
+from google.adk.sessions import DatabaseSessionService
 
 from cli import production_model_config
 from cli.container_runtime import main
-from cli.production_state import initialize_production_state, load_production_state
+from cli.production_state import (
+    ProductionStateManifest,
+    ProductionStatePaths,
+    initialize_production_state,
+    load_production_state,
+)
 from utils.build_identity import BuildIdentity
 from utils.runtime_fence import runtime_fence
 
@@ -22,6 +29,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Linux installed runtime")
 _ERROR_EXIT = 2
 _FINAL_PUBLICATION = 4
+_PARTIAL_RECOVERY_BOUNDARY = 2
 
 
 def _uid() -> int:
@@ -49,6 +57,33 @@ def _profile(tmp_path: Path) -> tuple[Path, Path, Path]:
     build_file = tmp_path / "build.json"
     build_file.write_text(_build().model_dump_json(), encoding="utf-8")
     build_file.chmod(0o444)
+    return deployment, profile, build_file
+
+
+async def _profile_with_trace(tmp_path: Path) -> tuple[Path, Path, Path]:
+    deployment, profile, build_file = _profile(tmp_path)
+    trace = profile / "adk-trace.sqlite3"
+    service = DatabaseSessionService(db_url=f"sqlite+aiosqlite:///{trace.as_posix()}")
+    try:
+        session = await service.create_session(
+            app_name="model-maintenance-fixture",
+            user_id="fixture-user",
+            session_id="retained-session",
+            state={"retained": "trace evidence"},
+        )
+        assert session.id == "retained-session"
+    finally:
+        await service.close()
+    trace.chmod(0o600)
+    manifest = profile / "runtime.json"
+    state = ProductionStateManifest.model_validate_json(manifest.read_bytes())
+    updated = state.model_copy(update={"trace_database_present": True})
+    manifest.write_text(
+        updated.model_dump_json(indent=2) + "\n",
+        encoding="utf-8",
+    )
+    manifest.chmod(0o600)
+    assert load_production_state(profile, build=_build()).trace_database_present
     return deployment, profile, build_file
 
 
@@ -153,6 +188,74 @@ def test_update_and_recovery_preserve_literal_previous_pair(
     assert manifest_file.read_bytes() == old_manifest
     assert (profile / "business.sqlite3").read_bytes() == business
     assert artifact.read_bytes() == b"accepted artifact\n"
+
+
+@pytest.mark.asyncio
+async def test_populated_trace_survives_apply_interrupted_recovery_and_retry(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real ADK session and its manifest provenance survive every model write."""
+    deployment, profile, build_file = await _profile_with_trace(tmp_path)
+    trace = profile / "adk-trace.sqlite3"
+    before_trace = trace.read_bytes()
+    before_hash = hashlib.sha256(before_trace).hexdigest()
+    manifest = profile / "runtime.json"
+    before_manifest = manifest.read_bytes()
+    before_state = load_production_state(profile, build=_build())
+    assert before_state.trace_database_present is True
+    candidate = _candidate(tmp_path, profile)
+    recovery = deployment / "recovery"
+
+    code, _ = _call(
+        _update_arguments(candidate, recovery), deployment, build_file, capsys
+    )
+    assert code == 0
+    applied_state = load_production_state(profile, build=_build())
+    assert applied_state.trace_database_present is True
+    assert (
+        applied_state.model_copy(
+            update={"model_config_sha256": before_state.model_config_sha256}
+        )
+        == before_state
+    )
+    assert hashlib.sha256(trace.read_bytes()).hexdigest() == before_hash
+    assert trace.read_bytes() == before_trace
+
+    publish = production_model_config._publish_bytes
+    calls = 0
+
+    def interrupt(path: Path, payload: bytes) -> None:
+        nonlocal calls
+        publish(path, payload)
+        calls += 1
+        if calls == _PARTIAL_RECOVERY_BOUNDARY:
+            message = "interrupt after restoring old model bytes"
+            raise OSError(message)
+
+    monkeypatch.setattr(production_model_config, "_publish_bytes", interrupt)
+    code, _ = _call(_recover_arguments(recovery), deployment, build_file, capsys)
+    assert code == _ERROR_EXIT
+    assert calls == _PARTIAL_RECOVERY_BOUNDARY
+    assert hashlib.sha256(trace.read_bytes()).hexdigest() == before_hash
+    assert trace.read_bytes() == before_trace
+    assert (
+        _call(
+            ["info", "--profile", "default", "--json"], deployment, build_file, capsys
+        )[0]
+        == _ERROR_EXIT
+    )
+
+    monkeypatch.setattr(production_model_config, "_publish_bytes", publish)
+    code, _ = _call(_recover_arguments(recovery), deployment, build_file, capsys)
+    assert code == 0
+    assert manifest.read_bytes() == before_manifest
+    recovered_state = load_production_state(profile, build=_build())
+    assert recovered_state == before_state
+    assert recovered_state.trace_database_present is True
+    assert hashlib.sha256(trace.read_bytes()).hexdigest() == before_hash
+    assert trace.read_bytes() == before_trace
 
 
 @pytest.mark.parametrize("boundary", [1, 2, 3, 4])
@@ -399,8 +502,13 @@ def test_manifest_edit_during_preparation_cannot_become_recovery_baseline(
     original = (profile / "runtime.json").read_bytes()
     safe_destination = production_model_config._safe_destination
 
-    def edit_manifest(*args: object) -> Path:
-        target = safe_destination(*args)
+    def edit_manifest(
+        destination: Path,
+        paths: ProductionStatePaths,
+        deployment_root: Path,
+        owner_uid: int,
+    ) -> Path:
+        target = safe_destination(destination, paths, deployment_root, owner_uid)
         manifest = profile / "runtime.json"
         altered = json.loads(manifest.read_text(encoding="utf-8"))
         altered["created_at"] = "2026-09-17T00:00:00Z"
@@ -443,6 +551,48 @@ def test_recovery_directory_cannot_overlap_repository_or_external_git_root(
         assert code == _ERROR_EXIT
         assert "overlaps captured state" in str(payload["error"])
         assert not target.exists()
+
+
+def test_recovery_directory_refuses_real_linked_worktree_common_dir(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked worktree's external common Git directory cannot store recovery."""
+    deployment, profile, build_file = _profile(tmp_path)
+    candidate = _candidate(tmp_path, profile)
+    main_worktree = deployment / "main-worktree"
+    repository = Repo.init(main_worktree)
+    (main_worktree / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    repository.index.add(["tracked.txt"])
+    actor = Actor("Fixture", "fixture@example.invalid")
+    repository.index.commit("fixture", author=actor, committer=actor)
+    linked_worktree = deployment / "linked-worktree"
+    repository.git.worktree("add", "--detach", str(linked_worktree), "HEAD")
+
+    marker = linked_worktree / ".git"
+    assert marker.is_file()
+    pointer = marker.read_text(encoding="utf-8").strip()
+    assert pointer.startswith("gitdir: ")
+    gitdir = Path(pointer.removeprefix("gitdir: "))
+    assert gitdir.is_dir()
+    common_pointer = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+    common = (gitdir / common_pointer).resolve(strict=True)
+    assert common == main_worktree / ".git"
+
+    monkeypatch.setattr(
+        production_model_config,
+        "discover_registered_repositories",
+        lambda _database: (linked_worktree,),
+    )
+    target = common / "model-recovery"
+    code, payload = _call(
+        _update_arguments(candidate, target), deployment, build_file, capsys
+    )
+    assert code == _ERROR_EXIT
+    assert "overlaps captured state" in str(payload["error"])
+    assert not target.exists()
+    assert not (profile / "model-config-update.json").exists()
 
 
 def test_update_refuses_symlink_and_profile_tree_destination(
