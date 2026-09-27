@@ -88,6 +88,8 @@ _ISSUE_260_SPRINT_ID = 31
 _ISSUE_260_PREVIEW_CANCEL_COUNT = 2
 _ISSUE_260_PREVIEW_STALE_REFRESH_COUNT = 4
 _ISSUE_260_RETRY_REQUEST_COUNT = 2
+_ISSUE_285_MIN_VALUE_WIDTH = 180
+_ISSUE_285_DESKTOP_START = 1280
 _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
@@ -4855,6 +4857,191 @@ def _open_project_page(
         wait_until="networkidle",
     )
     return context, page
+
+
+def _capture_issue_285_vision_screenshot(
+    page: Page,
+    panel: Locator,
+    viewport: ViewportSize,
+    tmp_path: Path,
+) -> None:
+    if viewport["width"] not in {1536, 390}:
+        return
+    if viewport["width"] >= _ISSUE_285_DESKTOP_START:
+        page.locator("#stage-workbench").evaluate(
+            "element => { element.scrollTop = 0; }"
+        )
+    else:
+        panel.scroll_into_view_if_needed()
+    screenshot = tmp_path / f"issue-285-vision-{viewport['width']}.png"
+    page.screenshot(path=str(screenshot))
+
+
+@pytest.mark.parametrize(
+    "viewport",
+    [
+        {"width": 1280, "height": 646},
+        {"width": 1440, "height": 646},
+        {"width": 1536, "height": 646},
+        {"width": 1920, "height": 646},
+        {"width": 980, "height": 900},
+        {"width": 768, "height": 900},
+        _MOBILE_VIEWPORT,
+    ],
+    ids=[
+        "desktop-1280",
+        "desktop-1440",
+        "desktop-1536",
+        "desktop-1920",
+        "stacked-980",
+        "stacked-768",
+        "mobile-390",
+    ],
+)
+def test_issue_285_vision_review_remains_readable_and_navigable(
+    dashboard_harness: DashboardHarness,
+    viewport: ViewportSize,
+    tmp_path: Path,
+) -> None:
+    """Long Vision evidence must remain readable in the real inspector layout."""
+    prose = (
+        "Operators review the complete source evidence before choosing a "
+        "product direction for the next delivery cycle."
+    )
+    identifier = "VISION_COMPONENT_" + "long_identifier_segment_" * 9
+    fake = FakeLifecycle(repositories={})
+    fake.project = {
+        "project_id": _PROJECT_ID,
+        "name": "Vision layout fixture",
+        "description": "Synthetic review evidence for responsive layout checks.",
+        "user_stories_count": 0,
+        "sprint_count": 0,
+    }
+    fake.vision_candidate = {
+        "statement": "A clear product direction with traceable review evidence.",
+        "components": [
+            {
+                "name": "target_user",
+                "value": prose,
+                "source_kinds": ["human", "evidence"],
+            },
+            {
+                "name": "differentiator",
+                "value": identifier,
+                "source_kinds": ["inference"],
+            },
+        ],
+        "assumptions": [
+            {
+                "text": f"The first pilot team can review evidence {identifier}.",
+                "affected_components": ["target_user"],
+            }
+        ],
+        "conflicts": [
+            {
+                "text": "The source notes named two different pilot teams.",
+                "affected_components": ["target_user"],
+                "status": "resolved",
+                "resolution": (
+                    "The operator chose the team named in the latest interview "
+                    f"and retained {identifier} for traceability."
+                ),
+            }
+        ],
+        "questions": [],
+        "review_fingerprint": "sha256:hidden-vision-layout",
+    }
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        page.set_viewport_size(viewport)
+        _select_workspace_stage(page, 2)
+        panel = page.locator("#vision-panel")
+        expect(panel.get_by_text("Vision candidate", exact=True)).to_be_visible()
+        expect(panel).to_contain_text(prose)
+        expect(panel).to_contain_text(identifier)
+        expect(panel).to_contain_text("Human input")
+        expect(panel).to_contain_text("Project evidence")
+        expect(panel).to_contain_text("Inferred")
+        expect(panel).to_contain_text("The first pilot team")
+        expect(panel).to_contain_text("Resolution: The operator chose")
+
+        rows = panel.locator("dl > div")
+        expect(rows).to_have_count(2)
+        geometry = rows.evaluate_all("""rows => rows.map(row => {
+            const label = row.querySelector('dt').getBoundingClientRect();
+            const value = row.querySelector('dd').getBoundingClientRect();
+            const text = row.querySelector('dd p');
+            const box = row.getBoundingClientRect();
+            return {
+                valueWidth: value.width,
+                valueLeft: value.left,
+                labelRight: label.right,
+                labelBottom: label.bottom,
+                valueTop: value.top,
+                rowRight: box.right,
+                valueRight: value.right,
+                textOverflow: text.scrollWidth - text.clientWidth,
+            };
+        })""")
+        for row in geometry:
+            assert row["valueWidth"] >= _ISSUE_285_MIN_VALUE_WIDTH, (
+                viewport,
+                geometry,
+            )
+            assert row["textOverflow"] <= 1, (viewport, geometry)
+            assert row["valueRight"] <= row["rowRight"] + 1, (viewport, geometry)
+            assert (
+                row["labelRight"] <= row["valueLeft"] + 1
+                or row["labelBottom"] <= row["valueTop"] + 1
+            ), (viewport, geometry)
+        evidence_overflow = panel.locator(
+            "dl dd li, section > ul > li, section > ul > li p"
+        ).evaluate_all("""elements => elements.map(element => ({
+            overflow: element.scrollWidth - element.clientWidth,
+            right: element.getBoundingClientRect().right,
+            panelRight: document.querySelector('#vision-panel')
+                .getBoundingClientRect().right,
+        }))""")
+        assert evidence_overflow
+        assert all(
+            item["overflow"] <= 1 and item["right"] <= item["panelRight"] + 1
+            for item in evidence_overflow
+        ), (viewport, evidence_overflow)
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth + 1"
+        ), viewport
+
+        controls = panel.locator('[data-review-scope="vision"]')
+        expect(controls).to_have_count(3)
+        for decision in ("accepted", "feedback", "rejected"):
+            control = panel.locator(
+                f'[data-review-scope="vision"][data-review-decision="{decision}"]'
+            )
+            expect(control).to_be_enabled()
+            control.scroll_into_view_if_needed()
+            expect(control).to_be_in_viewport(ratio=0.99)
+            control.click(trial=True)
+        if viewport["width"] >= _ISSUE_285_DESKTOP_START:
+            assert page.locator("#stage-workbench").evaluate(
+                "element => element.scrollTop > 0"
+            )
+        else:
+            assert controls.last.evaluate("""element => {
+                for (let node = element; node; node = node.parentElement) {
+                    if (node.scrollTop > 0) return true;
+                }
+                return window.scrollY > 0;
+            }""")
+
+        _capture_issue_285_vision_screenshot(page, panel, viewport, tmp_path)
+
+        _select_workspace_stage(page, 3)
+        _select_workspace_stage(page, 2)
+        expect(panel).to_contain_text(prose)
+        expect(panel.locator('[data-review-scope="vision"]')).to_have_count(3)
+        assert fake.api_errors == []
+    finally:
+        context.close()
 
 
 def test_story_generation_rejects_stale_rendered_selector_and_retries_fresh(
