@@ -75,10 +75,15 @@ def _reject_cycles(
     nodes: tuple[ArtifactLineageNode, ...],
     by_id: dict[int, ArtifactLineageNode],
 ) -> None:
+    """Check each parent path once while retaining per-path cycle detection."""
+    acyclic: set[int] = set()
     for origin in nodes:
         visited: set[int] = set()
         current = origin
-        while current.supersedes_artifact_id is not None:
+        while (
+            current.supersedes_artifact_id is not None
+            and current.artifact_id not in acyclic
+        ):
             if current.artifact_id in visited:
                 raise PlanningLineageError(PlanningLineageCode.LINEAGE_CYCLE)
             visited.add(current.artifact_id)
@@ -86,6 +91,7 @@ def _reject_cycles(
             if parent is None:
                 break
             current = parent
+        acyclic.update(visited)
 
 
 def _validate_parent_graph(
@@ -115,7 +121,7 @@ def _reject_branches(nodes: tuple[ArtifactLineageNode, ...]) -> None:
 
 
 def validate_artifact_lineage(nodes: tuple[ArtifactLineageNode, ...]) -> None:
-    """Validate a complete closed chain set without choosing by maximum ID."""
+    """Validate a complete closed chain set in linear time, without ID ordering."""
     by_id = _validate_parent_graph(nodes)
     _reject_branches(nodes)
 
@@ -191,13 +197,19 @@ def _accepted_ancestor_ids(
     nodes: tuple[ArtifactLineageNode, ...],
     by_id: dict[int, ArtifactLineageNode],
 ) -> frozenset[int]:
+    """Visit each ancestor only once across all accepted descendants."""
     superseded: set[int] = set()
+    visited: set[int] = set()
     for descendant in nodes:
         if descendant.decision != "accepted":
             continue
         current = descendant
         while current.supersedes_artifact_id is not None:
-            parent = by_id[current.supersedes_artifact_id]
+            parent_id = current.supersedes_artifact_id
+            if parent_id in visited:
+                break
+            visited.add(parent_id)
+            parent = by_id[parent_id]
             if parent.decision == "accepted":
                 superseded.add(parent.artifact_id)
             current = parent
