@@ -265,6 +265,13 @@ records or scanning them once per Project. Counts exclude superseded Stories,
 include every Sprint status, and remain zero for Projects without matching rows.
 Each call reads current database state; no count cache or schema change is used.
 
+Artifact-lineage cycle checks and accepted-ancestor selection visit each parent
+at most once per pass, keeping long revision chains linear rather than quadratic.
+Traversal state is local to the call: no lineage facts or validation outcomes
+are cached between reads. Parent, branch, version, and cycle errors retain their
+existing precedence, and feedback or rejected descendants alone never supersede
+an accepted artifact.
+
 ### Reproducing measurements
 
 Retain the complete output in a new file for each run. Pytest reports every

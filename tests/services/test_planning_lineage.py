@@ -4,16 +4,76 @@ from __future__ import annotations
 
 import importlib
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 if TYPE_CHECKING:
     from types import ModuleType
 
+    from services.planning_lineage import ArtifactLineageNode
+
 
 def _lineage_module() -> ModuleType:
     """Import the Task 3 lineage service only when a test executes."""
     return importlib.import_module("services.planning_lineage")
+
+
+def _accepted_chain(length: int, *, reverse: bool) -> tuple[ArtifactLineageNode, ...]:
+    lineage = _lineage_module()
+    nodes = tuple(
+        lineage.ArtifactLineageNode(
+            artifact_id=version,
+            chain_key=("long-chain",),
+            version_number=version,
+            supersedes_artifact_id=version - 1 if version > 1 else None,
+            decision="accepted",
+        )
+        for version in range(1, length + 1)
+    )
+    return tuple(reversed(nodes)) if reverse else nodes
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["oldest-first", "newest-first"])
+def test_cycle_check_visits_each_parent_at_most_once(*, reverse: bool) -> None:
+    """Bound parent lookups independently of machine speed and input order."""
+    lineage = _lineage_module()
+    nodes = _accepted_chain(128, reverse=reverse)
+    by_id = Mock(wraps={node.artifact_id: node for node in nodes})
+
+    lineage._reject_cycles(nodes, by_id)
+
+    assert by_id.get.call_count <= len(nodes) - 1
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["oldest-first", "newest-first"])
+def test_accepted_ancestry_visits_each_parent_at_most_once(*, reverse: bool) -> None:
+    """Avoid rewalking accepted history already covered by another descendant."""
+    lineage = _lineage_module()
+    nodes = _accepted_chain(128, reverse=reverse)
+    by_id = MagicMock(spec_set=dict)
+    by_id.__getitem__.side_effect = {
+        node.artifact_id: node for node in nodes
+    }.__getitem__
+
+    superseded = lineage._accepted_ancestor_ids(nodes, by_id)
+
+    assert superseded == frozenset(range(1, len(nodes)))
+    assert by_id.__getitem__.call_count <= len(nodes) - 1
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["oldest-first", "newest-first"])
+def test_long_lineage_selection_remains_iterative(*, reverse: bool) -> None:
+    """Select beyond the recursion limit without depending on row order."""
+    lineage = _lineage_module()
+    nodes = _accepted_chain(2048, reverse=reverse)
+
+    selected = lineage.select_current_accepted_artifact(
+        nodes, chain_key=("long-chain",)
+    )
+
+    assert selected.artifact_id == len(nodes)
+    assert lineage.accepted_ancestor_ids(nodes) == frozenset(range(1, len(nodes)))
 
 
 def test_linear_chain_requires_first_version_and_immediate_prior_parent() -> None:
@@ -102,6 +162,42 @@ def test_lineage_rejects_cross_key_parent_cycle_and_branch() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("parents", "expected_code"),
+    [
+        ((99,), "LINEAGE_PARENT_MISSING"),
+        ((3,), "LINEAGE_CYCLE"),
+        ((4, 3), "LINEAGE_CYCLE"),
+        ((4, 5, 4), "LINEAGE_CYCLE"),
+    ],
+    ids=["missing-parent", "self-cycle", "two-node-cycle", "tail-into-cycle"],
+)
+def test_completed_parent_walk_does_not_hide_invalid_components(
+    parents: tuple[int, ...],
+    expected_code: str,
+) -> None:
+    """A previously checked chain must not suppress a later graph error."""
+    lineage = _lineage_module()
+    valid = _accepted_chain(2, reverse=False)
+    invalid = tuple(
+        lineage.ArtifactLineageNode(
+            artifact_id=artifact_id,
+            chain_key=("invalid-component",),
+            version_number=artifact_id,
+            supersedes_artifact_id=parent,
+            decision="accepted",
+        )
+        for artifact_id, parent in enumerate(parents, start=3)
+    )
+
+    with pytest.raises(lineage.PlanningLineageError) as raised:
+        lineage.select_current_accepted_artifact(
+            (*valid, *invalid), chain_key=("long-chain",)
+        )
+
+    assert raised.value.code == lineage.PlanningLineageCode(expected_code)
+
+
 def test_transitive_accepted_leaf_ignores_feedback_until_accepted_successor() -> None:
     """Feedback alone cannot displace A; accepted C through B does displace A."""
     lineage = _lineage_module()
@@ -177,6 +273,48 @@ def test_accepted_ancestor_ids_displace_only_accepted_history() -> None:
     assert lineage.accepted_ancestor_ids(
         (accepted_a, feedback_b, accepted_c)
     ) == frozenset({accepted_a.artifact_id})
+
+
+@pytest.mark.parametrize(
+    "reverse", [False, True], ids=["mixed-order", "reversed-order"]
+)
+def test_accepted_ancestry_preserves_separate_mixed_decision_chains(
+    *,
+    reverse: bool,
+) -> None:
+    """Only an accepted descendant displaces accepted transitive ancestors."""
+    lineage = _lineage_module()
+    rows = (
+        (1, "first", 1, None, "accepted"),
+        (2, "first", 2, 1, "feedback"),
+        (3, "first", 3, 2, "accepted"),
+        (4, "first", 4, 3, "rejected"),
+        (5, "first", 5, 4, None),
+        (6, "second", 1, None, "accepted"),
+        (7, "second", 2, 6, "feedback"),
+        (8, "third", 1, None, "feedback"),
+        (9, "third", 2, 8, "accepted"),
+        (10, "third", 3, 9, "accepted"),
+        (11, "third", 4, 10, None),
+    )
+    nodes = tuple(
+        lineage.ArtifactLineageNode(
+            artifact_id=artifact_id,
+            chain_key=(key,),
+            version_number=version,
+            supersedes_artifact_id=parent,
+            decision=decision,
+        )
+        for artifact_id, key, version, parent, decision in rows
+    )
+    nodes = nodes[::2] + nodes[1::2]
+    if reverse:
+        nodes = tuple(reversed(nodes))
+
+    assert lineage.accepted_ancestor_ids(nodes) == frozenset({1, 9})
+    for key, expected_id in (("first", 3), ("second", 6), ("third", 10)):
+        selected = lineage.select_current_accepted_artifact(nodes, chain_key=(key,))
+        assert selected.artifact_id == expected_id
 
 
 def test_accepted_leaf_selection_fails_for_zero_or_ambiguous_current_rows() -> None:
