@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import cast
 
@@ -240,23 +241,39 @@ def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
 def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> None:
     """Use uv lock checks and repository-owned quality/runtime entry points."""
     python_313 = _runs(_job(workflow, "python-313"))
-    frontend = _runs(_job(workflow, "frontend"))
 
     assert "uv lock --check" in python_313
     assert "./agileforge-dev check" in python_313
     assert "uv run --locked pyrepo-check" not in python_313
     assert "pyrepo-check --python" not in python_313
     assert "scripts/verify_distribution.py" not in python_313
-    assert (
-        "node --test tests/test_workflow_position_display.mjs "
-        "tests/test_lifecycle_workspace.mjs "
-        "tests/test_sprint_retry_dashboard.mjs "
-        "tests/test_dashboard_review_safety.mjs "
-        "tests/test_dashboard_bundle.mjs "
-        "tests/test_cockpit_action_synchronization.mjs "
-        "tests/test_create_project_modal_required_fields.mjs "
-        "tests/test_vision_interview_ui.mjs"
-    ) in " ".join(frontend.split())
+    frontend_commands = [
+        shlex.split(run)
+        for step in _steps(_job(workflow, "frontend"))
+        if isinstance((run := step.get("run")), str)
+    ]
+    frontend_tests = next(
+        (
+            arguments
+            for arguments in frontend_commands
+            if arguments[:2] == ["node", "--test"]
+        ),
+        None,
+    )
+    assert frontend_tests is not None
+    assert frontend_tests[:2] == ["node", "--test"]
+    required_suites = {
+        "tests/test_workflow_position_display.mjs",
+        "tests/test_lifecycle_workspace.mjs",
+        "tests/test_sprint_retry_dashboard.mjs",
+        "tests/test_dashboard_review_safety.mjs",
+        "tests/test_dashboard_bundle.mjs",
+        "tests/test_cockpit_action_synchronization.mjs",
+        "tests/test_create_project_modal_required_fields.mjs",
+        "tests/test_vision_interview_ui.mjs",
+        "tests/test_product_goal_interview_ui.mjs",
+    }
+    assert required_suites <= set(frontend_tests[2:])
 
 
 def test_linux_container_smoke_delegates_to_exact_repository_command(

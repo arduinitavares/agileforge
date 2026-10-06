@@ -913,14 +913,9 @@ function productGoalPanelMarkup(projection, actions = []) {
 
     const respondAction = findAction(actions, 'record_product_goal_interview_turn');
     if (respondAction) {
-        const questions = Array.isArray(projection?.latest_questions)
-            && projection.latest_questions.length > 0
-            ? projection.latest_questions
-            : [
-                'What valuable outcome should this Project achieve next?',
-                'What observable result will prove success?',
-                'What boundary keeps this Goal focused?',
-            ];
+        const questions = Array.isArray(projection?.effective_questions?.questions)
+            ? projection.effective_questions.questions
+            : [];
         const feedback = ['feedback', 'rejected'].includes(reviewState)
             ? `<p class="mb-5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"><strong>Review response:</strong> ${escapeWorkflowText(projection?.review?.rationale ?? 'Revise the Product Goal with the review in mind.')}</p>`
             : '';

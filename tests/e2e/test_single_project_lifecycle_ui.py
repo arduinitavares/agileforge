@@ -905,19 +905,39 @@ class FakeLifecycle:
             if self.goal_accepted
             else None
         )
+        last_turn = self.goal_transcript[-1] if self.goal_transcript else None
+        raw_questions = (
+            last_turn.get("questions") if isinstance(last_turn, dict) else None
+        )
         latest_questions: list[JsonValue] = (
-            ["What observable result proves the pilot succeeded?"]
-            if self.vision_accepted and self.goal_candidate is None
-            else []
+            raw_questions if isinstance(raw_questions, list) else []
         )
         review: JsonObject | None = (
             {"state": "pending"} if candidate is not None else None
         )
+        effective_questions: JsonObject | None = None
+        if accepted_vision is not None and active is None and candidate is None:
+            effective_questions = (
+                {"questions": latest_questions, "source": "generated"}
+                if latest_questions
+                else cast(
+                    "JsonObject",
+                    json.loads(
+                        (
+                            _PROJECT_ROOT
+                            / "tests"
+                            / "fixtures"
+                            / "product_goal_starter_questions.json"
+                        ).read_text(encoding="utf-8")
+                    ),
+                )
+            )
         return {
             "accepted_vision": accepted_vision,
             "active": active,
             "transcript": self.goal_transcript,
             "latest_questions": latest_questions,
+            "effective_questions": effective_questions,
             "candidate": candidate,
             "review": review,
             "outcome": None,

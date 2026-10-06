@@ -143,6 +143,11 @@ _JSON_OBJECT = TypeAdapter(JsonObject)
 _STRING_LIST = TypeAdapter(list[str])
 _JSON_VALUE_LIST = TypeAdapter(list[JsonValue])
 _SPECIFICATION_REVIEW_SCHEMA_VERSION = "agileforge.specification_review.v2"
+_PRODUCT_GOAL_STARTER_QUESTIONS: tuple[str, ...] = (
+    "What valuable outcome should this Project achieve next?",
+    "What observable result will prove success?",
+    "What boundary keeps this Goal focused?",
+)
 _VISION_COMPONENT_NAMES: tuple[str, ...] = (
     "project_name",
     "target_user",
@@ -2561,6 +2566,7 @@ class DurableReadProjectionService:
                     "active": None,
                     "transcript": [],
                     "latest_questions": [],
+                    "effective_questions": None,
                     "candidate": None,
                     "review": None,
                     "outcome": None,
@@ -2588,12 +2594,33 @@ class DurableReadProjectionService:
                     "active": None,
                     "transcript": [],
                     "latest_questions": [],
+                    "effective_questions": None,
                     "candidate": None,
                     "review": None,
                     "outcome": None,
                     "stale_reason": "PRODUCT_GOAL_FACT_CONFLICT",
                 }
             )
+        effective_questions: JsonObject | None = None
+        if (
+            accepted_vision is not None
+            and goal is None
+            and (
+                selection.candidate is None
+                or (
+                    selection.decision is not None
+                    and selection.decision.decision in {"feedback", "rejected"}
+                )
+            )
+        ):
+            effective_questions = {
+                "questions": (
+                    list(latest_questions)
+                    if latest_questions
+                    else list(_PRODUCT_GOAL_STARTER_QUESTIONS)
+                ),
+                "source": "generated" if latest_questions else "builtin_starter",
+            }
         resolved = _latest_resolved_goal(snapshot)
         active_data: JsonObject | None = (
             None
@@ -2614,6 +2641,7 @@ class DurableReadProjectionService:
             "active": active_data,
             "transcript": transcript,
             "latest_questions": latest_questions,
+            "effective_questions": effective_questions,
             "candidate": candidate_data,
             "review": _goal_review_data(
                 selection.decision,

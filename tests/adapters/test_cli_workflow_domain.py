@@ -4,8 +4,11 @@ import importlib
 import io
 import json
 import shlex
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -25,12 +28,22 @@ from services.application import (
     StoryReviewRequest,
     StorySetCorrectionRequest,
 )
+from services.read_projections import DurableReadProjectionService
 from services.vision_evidence import (
     VisionEvidenceCollectionError,
     VisionEvidenceErrorCode,
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
+from tests.adapters.sprint_retry_fixtures import durable_rows
 from tests.adapters.test_command_renderer import position_fixture
+from tests.services.test_durable_product_definition_projections import (
+    NOW,
+    _add_goal_turn,
+    _goal_components,
+    _GoalTurnSeed,
+    _seed_vision_candidate,
+    _seeded_int,
+)
 from workflow.contracts import (
     NodeCategory,
     NodeDecision,
@@ -42,6 +55,8 @@ from workflow.contracts import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+
     from services.application import (
         CompleteTaskRequest,
         PostSprintTriageRequest,
@@ -53,6 +68,8 @@ if TYPE_CHECKING:
 SPRINT_CAPACITY_POINTS = 8
 ARGUMENT_ERROR_EXIT_CODE = 2
 PROJECT_ID = 41
+
+
 _SEMANTIC_TEXT_COMMANDS = (
     (
         "vision respond --project-id 41 --text {value} "
@@ -111,6 +128,62 @@ _SEMANTIC_TEXT_COMMANDS = (
         "rationale",
     ),
 )
+
+
+@pytest.mark.parametrize("state", ["initial", "generated"])
+def test_goal_status_cli_preserves_effective_questions_projection(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+) -> None:
+    """CLI reads forward the durable question object without runtime composition."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = _seeded_int(seeded, "project_id")
+    questions = ("Which result proves the selected Goal?", "Which boundary applies?")
+    fixture = Path(__file__).parents[1] / "fixtures/product_goal_starter_questions.json"
+    expected = json.loads(fixture.read_text(encoding="utf-8"))
+    if state == "generated":
+        _add_goal_turn(
+            engine,
+            seeded,
+            _GoalTurnSeed(
+                components=_goal_components(complete=False),
+                statement="Make the selected Goal observable.",
+                is_complete=False,
+                questions=questions,
+                goal_number=1,
+                revision_number=1,
+                prior_turn_id=None,
+                recorded_at=NOW + timedelta(seconds=3),
+            ),
+        )
+        expected = {"questions": list(questions), "source": "generated"}
+    reads = DurableReadProjectionService(engine=engine)
+    application = SimpleNamespace(reads=reads)
+
+    def forbid_composition() -> None:
+        pytest.fail("Goal status must use the injected reads-only application")
+
+    monkeypatch.setattr(cli_main, "production_application", forbid_composition)
+    monkeypatch.setattr(cli_main, "runtime_access", lambda **_: nullcontext())
+    monkeypatch.setattr(cli_main, "configure_logging", lambda **_: None)
+    before = durable_rows(engine)
+    for _ in range(2):
+        assert (
+            main(
+                ["goal", "status", "--project-id", str(project_id)],
+                application=application,
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["data"]["effective_questions"] == expected
+        assert (
+            payload["data"] == reads.product_goal_status(project_id=project_id)["data"]
+        )
+    assert durable_rows(engine) == before
 
 
 @pytest.mark.parametrize(
