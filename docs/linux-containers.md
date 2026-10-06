@@ -449,12 +449,16 @@ the production container and its managed workspace/production-state volumes:
 
 ```sh
 docker compose --project-name "$project_name" create --no-recreate production
+docker compose --project-name "$project_name" stop production
+docker compose --project-name "$project_name" ps --status running --quiet production
 ```
 
-This creates a new stopped container without starting the app. `--no-recreate`
-preserves an existing container; production must remain stopped throughout the
-copy, ownership repair, and restore. Helpers must not create the volumes because
-they would lack Compose ownership labels. Use the same `project_name` for
+`create --no-recreate` does not stop an existing running container, so explicitly
+stop production before copy, ownership repair, and restore, which require
+exclusive access. Both `stop` and `ps` must succeed, with empty output from `ps`;
+otherwise stop and investigate before proceeding.
+Helpers must not create the volumes because they would lack Compose ownership
+labels. Use the same `project_name` for
 creation, helper mounts, restore, attach, and startup.
 
 Copy the bundle and the target clone into the `workspace` volume as

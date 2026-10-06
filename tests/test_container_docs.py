@@ -82,6 +82,50 @@ def test_promotion_restore_attach_and_startup_select_same_project() -> None:
         assert command[command.index("--project-name") + 1] == "$project_name"
 
 
+def test_promotion_stops_and_verifies_production_before_helpers() -> None:
+    """Volume writers must stop before promotion copy and ownership helpers."""
+    section = _section("### Promote a development profile into the packaged app")
+    commands = _commands(section)
+    creates = [
+        index
+        for index, command in enumerate(commands)
+        if command[:2] == ["docker", "compose"] and "create" in command
+    ]
+    stops = [
+        (index, command)
+        for index, command in enumerate(commands)
+        if command[:2] == ["docker", "compose"] and "stop" in command
+    ]
+    assert creates
+    assert stops, "Stop production explicitly; create does not stop a running service"
+    stop_index, stop = stops[0]
+    assert stop[stop.index("stop") + 1 :] == ["production"]
+    checks = [
+        (index, command)
+        for index, command in enumerate(commands)
+        if command[:2] == ["docker", "compose"] and "ps" in command
+    ]
+    assert checks, "Verify production has no running containers before helpers"
+    check_index, check = checks[0]
+    assert check[check.index("--status") + 1] == "running"
+    assert "--quiet" in check
+    assert check[-1] == "production"
+    for command in (stop, check):
+        assert "--project-name" in command
+        assert command[command.index("--project-name") + 1] == "$project_name"
+    assert creates[0] < stop_index < check_index
+    helpers = [
+        index
+        for index, command in enumerate(commands)
+        if command[:2] == ["docker", "run"] and "--mount" in command
+    ]
+    assert helpers
+    assert all(check_index < index for index in helpers)
+    before_copy = _commands(section.split("Copy the bundle", 1)[0])
+    assert stop in before_copy
+    assert check in before_copy
+
+
 @pytest.mark.parametrize("volume", ["workspace", "cache", "production-state"])
 def test_shipped_durable_volumes_remain_compose_managed(volume: str) -> None:
     """Fresh installs retain Compose ownership and project-scoped volume names."""
