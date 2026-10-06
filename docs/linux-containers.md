@@ -41,7 +41,7 @@ docker compose stop
 Open <http://localhost:8766/dashboard> after the readiness message appears in the
 logs. `Ctrl+C` exits log following; use `stop` to stop the background service.
 Run `up -d` again to start it. `docker compose down` removes the service and
-network but retains data; `docker compose down --volumes` deletes the named
+network but retains data; `docker compose down --volumes` deletes managed named
 volumes and their data. Do not use `--volumes` for an installation you want to keep.
 
 The default UI port is host-loopback only. Set `AGILEFORGE_PORT` to another host
@@ -52,7 +52,8 @@ and the standard Compose project selection controls resource names.
 
 Previously created volumes retain their existing names. Compose may warn that
 older volumes were not created by Compose; it reuses their contents. Do not
-delete them to silence the warning. Use a fresh project name for a trial run.
+delete them to silence the warning. For existing volumes, use the local
+configuration repair below. Use a fresh project name for a trial run.
 
 Provider-backed actions require an explicit runtime secret mount as described
 below. Startup itself does not load the host's credentials.
@@ -66,6 +67,66 @@ output and invalid payloads surface as `VISION_OUTPUT_INCOMPLETE` and
 `INVALID_VISION_PAYLOAD` with bounded diagnostic metadata. Other agentic roles
 retain their existing limits. The production launcher does not forward
 `VISION_INTERVIEWER_MAX_TOKENS`; the built-in default needs no override.
+
+### Repair ownership warnings for existing volumes
+
+This one-time configuration repair removes Compose ownership warnings for older
+durable volumes without changing their labels, names, or data. It does not copy,
+delete, or recreate volumes. Leave the shipped `compose.yaml` managed so fresh
+installations continue to receive Compose ownership labels.
+
+From the directory containing `compose.yaml`, select the same project name used
+by the existing installation (`agileforge` below is only the default). First
+inspect both volume names and labels; a successful inspection confirms existence:
+
+```sh
+project_name=agileforge
+docker volume inspect --format '{{ .Name }} labels={{ json .Labels }}' "${project_name}-workspace"
+docker volume inspect --format '{{ .Name }} labels={{ json .Labels }}' "${project_name}-production-state"
+```
+
+Use this repair only for affected, already-existing volumes whose missing Compose
+ownership labels explain the warning. If labels identify another project or
+volume, stop and investigate the namespace before proceeding. If inspection
+reports a missing volume, do not mark that volume external: Compose cannot create
+an external volume. For a partial case, mark only the affected existing volume
+external and omit the other entry below, leaving it managed. Never apply this
+override to an empty installation.
+
+Merge the following volume entries into any existing local `compose.override.yaml`
+beside `compose.yaml`; preserve all existing service, secret, and other override
+settings. If the file already has a `volumes` mapping, merge these entries into
+that mapping rather than adding a duplicate key. Create the file with this content
+only when no local override exists; do not overwrite an existing override:
+
+```yaml
+volumes:
+  workspace:
+    external: true
+  production-state:
+    external: true
+```
+
+The entries inherit the exact `name` values from `compose.yaml`, including the
+selected project namespace. Do not add replacement names or labels. Keep this
+local override installed for future Compose calls; removing it brings the
+ownership warnings back. With no explicit file selection, Compose automatically
+merges `compose.yaml` and `compose.override.yaml`. If you use `-f` or `COMPOSE_FILE`,
+include this override in that file list for every subsequent command, preserving
+any other required files. For the two-file setup, review the merged configuration
+locally before startup and confirm the selected names and `external: true` entries:
+
+```sh
+docker compose --project-name "$project_name" -f compose.yaml -f compose.override.yaml config
+docker compose --project-name "$project_name" -f compose.yaml -f compose.override.yaml up -d
+```
+
+Compose now uses those existing volumes without requiring Compose ownership
+labels. External volumes survive `docker compose down --volumes`; their lifecycle
+is outside Compose, so retain your backups and local override. Managed volumes
+still follow the usual cleanup behavior; do not use `--volumes` to test this repair.
+See Docker's [volume attributes](https://docs.docker.com/reference/compose-file/volumes/)
+and [file merge rules](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/).
 
 ## Paths, ownership, and scope
 
@@ -165,9 +226,19 @@ controller --project-name "$project_name" stop
 
 Build the separate test target from a clean committed checkout. Run the
 canonical repository gate inside that image against the Linux workspace volume.
+First complete the development bootstrap above, including `import-source`, so
+the development image and Linux checkout exist. Before mounting a volume in a
+plain Docker helper, let Compose create the development container and its
+managed workspace/cache volumes. Helpers must not create these volumes: they
+would lack Compose ownership labels and later Compose calls would warn about ownership.
+`create` leaves a new container stopped and does not populate a missing checkout;
+`--no-recreate` preserves an existing development container, including a running
+one.
 ```sh
 controller --checkout "$PWD" --project-name "$project_name" \
   build --target test --tag agileforge-test:local
+docker compose --project-name "$project_name" --profile development \
+  create --no-recreate development
 docker run --rm --platform linux/amd64 \
   --mount "type=volume,source=$project_name-workspace,target=/workspace" \
   --workdir /workspace/repos/agileforge agileforge-test:local \
@@ -373,6 +444,19 @@ refuses a missing target, a target for a Project without an active binding, a
 relative path, a duplicate Project, and a target that also appears as a bundled
 repository. Nothing is written to `/var/lib/agileforge` when validation fails.
 
+Before copying anything or mounting a volume in a helper, let Compose create
+the production container and its managed workspace/production-state volumes:
+
+```sh
+docker compose --project-name "$project_name" create --no-recreate production
+```
+
+This creates a new stopped container without starting the app. `--no-recreate`
+preserves an existing container; production must remain stopped throughout the
+copy, ownership repair, and restore. Helpers must not create the volumes because
+they would lack Compose ownership labels. Use the same `project_name` for
+creation, helper mounts, restore, attach, and startup.
+
 Copy the bundle and the target clone into the `workspace` volume as
 `10001:10001` before the restore. Use a throwaway helper container for the copy;
 the app itself never mounts host paths.
@@ -397,7 +481,7 @@ The fences are taken before the bundle is read, so a restore refused this way
 writes nothing except the lock inode `.agileforge-runtime.lock`, which stays.
 
 ```sh
-docker compose run --rm production restore --profile default \
+docker compose --project-name "$project_name" run --rm production restore --profile default \
   --bundle /workspace/transfer/"$bundle_name" --from-development \
   --bind-repository 1=/workspace/repos/targets/backend --json
 ```
@@ -409,10 +493,10 @@ to start and `cli` permits only the exact guarded attach for that Project and
 path. Run it once per bound Project, then start the app normally.
 
 ```sh
-docker compose run --rm production cli --profile default -- \
+docker compose --project-name "$project_name" run --rm production cli --profile default -- \
   repository attach --project-id 1 --path /workspace/repos/targets/backend \
   --idempotency-key "$attach_key" --actor "$operator"
-docker compose up -d
+docker compose --project-name "$project_name" up -d production
 ```
 
 `info --json` stays available while the relocation is pending. Product CLI
