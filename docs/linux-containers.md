@@ -77,10 +77,12 @@ installations continue to receive Compose ownership labels.
 
 From the directory containing `compose.yaml`, select the same project name used
 by the existing installation (`agileforge` below is only the default). First
-inspect both volume names and labels; a successful inspection confirms existence:
+inspect both volume names and labels; a successful inspection confirms existence.
+If an existing override uses custom names, inspect those names instead:
 
 ```sh
 project_name=agileforge
+legacy_override="compose.${project_name}.legacy.yaml"
 docker volume inspect --format '{{ .Name }} labels={{ json .Labels }}' "${project_name}-workspace"
 docker volume inspect --format '{{ .Name }} labels={{ json .Labels }}' "${project_name}-production-state"
 ```
@@ -93,38 +95,62 @@ an external volume. For a partial case, mark only the affected existing volume
 external and omit the other entry below, leaving it managed. Never apply this
 override to an empty installation.
 
-Merge the following volume entries into any existing local `compose.override.yaml`
-beside `compose.yaml`; preserve all existing service, secret, and other override
-settings. If the file already has a `volumes` mapping, merge these entries into
-that mapping rather than adding a duplicate key. Create the file with this content
-only when no local override exists; do not overwrite an existing override:
+Use a separately named, project-specific `$legacy_override` beside `compose.yaml`.
+If a local `compose.override.yaml` exists, first copy its settings into this file;
+preserve all service, secret, and other override settings. Do not overwrite an
+existing legacy file. Replace each affected volume's mapping with the complete
+entry below rather than just adding `external: true`: external volumes accept
+only `external` and `name`. Remove `driver`, `driver_opts`, `labels`, and every
+other attribute for those volumes from all selected override files, since
+Compose merges attributes from earlier files. Preserve the exact existing `name`;
+the values below match the shipped
+configuration. If the file already has a `volumes` mapping, update it rather than
+adding a duplicate key. For an installation without other overrides, create
+`$legacy_override` with this content:
 
 ```yaml
 volumes:
   workspace:
+    name: ${COMPOSE_PROJECT_NAME:-agileforge}-workspace
     external: true
   production-state:
+    name: ${COMPOSE_PROJECT_NAME:-agileforge}-production-state
     external: true
 ```
 
-The entries inherit the exact `name` values from `compose.yaml`, including the
-selected project namespace. Do not add replacement names or labels. Keep this
-local override installed for future Compose calls; removing it brings the
-ownership warnings back. With no explicit file selection, Compose automatically
-merges `compose.yaml` and `compose.override.yaml`. If you use `-f` or `COMPOSE_FILE`,
-include this override in that file list for every subsequent command, preserving
-any other required files. For the two-file setup, review the merged configuration
-locally before startup and confirm the selected names and `external: true` entries:
+The entries retain the exact `name` values from `compose.yaml`, including the
+selected project namespace. If an existing override sets custom names, inspect
+and retain those names instead. Do not add replacement names or labels. Select
+this file explicitly for every future Compose call for this repaired project;
+omitting it brings the ownership warnings back. Use `-f` as below, or set
+`COMPOSE_FILE` only in this project's shell or launcher, preserving other required
+files. Do not select the legacy file for another project or put the external
+entries in the auto-loaded `compose.override.yaml`: fresh project names need
+Compose-managed volumes. If an earlier repair used that shared override, copy it
+to the legacy file first, then remove only the repair's `external: true` flags
+from the shared file, preserving unrelated settings. For the two-file setup,
+review the merged configuration locally before startup and confirm the selected
+names and `external: true` entries:
 
 ```sh
-docker compose --project-name "$project_name" -f compose.yaml -f compose.override.yaml config
-docker compose --project-name "$project_name" -f compose.yaml -f compose.override.yaml up -d
+docker compose --project-name "$project_name" -f compose.yaml -f "$legacy_override" config
+docker compose --project-name "$project_name" -f compose.yaml -f "$legacy_override" up -d
 ```
 
-Compose now uses those existing volumes without requiring Compose ownership
-labels. External volumes survive `docker compose down --volumes`; their lifecycle
-is outside Compose, so retain your backups and local override. Managed volumes
-still follow the usual cleanup behavior; do not use `--volumes` to test this repair.
+For a fresh project, omit the legacy file and use a separate name. An explicit
+`-f compose.yaml` also overrides an inherited `COMPOSE_FILE`; add only overrides
+appropriate for that fresh project:
+
+```sh
+fresh_project_name=agileforge-fresh
+docker compose --project-name "$fresh_project_name" -f compose.yaml config
+```
+
+For the repaired project, Compose uses those existing volumes without requiring
+Compose ownership labels. External volumes survive `docker compose down --volumes`;
+their lifecycle is outside Compose, so retain your backups and local override.
+Managed volumes still follow the usual cleanup behavior; do not use `--volumes`
+to test this repair.
 See Docker's [volume attributes](https://docs.docker.com/reference/compose-file/volumes/)
 and [file merge rules](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/).
 
@@ -449,21 +475,34 @@ the production container and its managed workspace/production-state volumes:
 
 ```sh
 docker compose --project-name "$project_name" create --no-recreate production
-docker compose --project-name "$project_name" stop production
-docker compose --project-name "$project_name" ps --status running --quiet production
+docker compose --project-name "$project_name" --profile '*' stop
+production_container="$(docker ps -aq --filter "label=com.docker.compose.project=$project_name" --filter 'label=com.docker.compose.service=production' --filter 'label=com.docker.compose.oneoff=False')"
+test -n "$production_container"
+workspace_volume="$(docker inspect --format '{{ range .Mounts }}{{ if eq .Destination "/workspace" }}{{ .Name }}{{ end }}{{ end }}' "$production_container")"
+production_state_volume="$(docker inspect --format '{{ range .Mounts }}{{ if eq .Destination "/var/lib/agileforge" }}{{ .Name }}{{ end }}{{ end }}' "$production_container")"
+test -n "$workspace_volume"
+test -n "$production_state_volume"
+docker ps -q --filter "volume=$workspace_volume"
+docker ps -q --filter "volume=$production_state_volume"
 ```
 
-`create --no-recreate` does not stop an existing running container, so explicitly
-stop production before copy, ownership repair, and restore, which require
-exclusive access. Both `stop` and `ps` must succeed, with empty output from `ps`;
-otherwise stop and investigate before proceeding.
+`create --no-recreate` does not stop existing running containers. Stop every
+project service, including development, before copy, ownership repair, and
+restore, which require exclusive access. Resolve the actual volume names from
+the production mounts so overrides are respected. Every command above must
+succeed, and both `docker ps` queries must print nothing. The
+[volume filter](https://docs.docker.com/reference/cli/docker/container/ls/#volume)
+checks running consumers across the Docker daemon, including one-off containers
+and containers from other projects. If either query prints IDs, identify and
+stop those consumers before repeating the checks; do not proceed with helpers.
+Keep all consumers stopped and prevent new ones until restore and attach finish.
 Helpers must not create the volumes because they would lack Compose ownership
 labels. Use the same `project_name` for
 creation, helper mounts, restore, attach, and startup.
 
 Copy the bundle and the target clone into the `workspace` volume as
 `10001:10001` before the restore. Use a throwaway helper container for the copy;
-the app itself never mounts host paths.
+mount the resolved `$workspace_volume`. The app itself never mounts host paths.
 
 Docker gives a new volume the owner of the image directory it is first mounted
 on. The production image owns `/workspace` and `/var/lib/agileforge` as
@@ -475,8 +514,8 @@ trees, and confirm both before restoring:
 
 ```sh
 docker run --rm \
-  --mount "type=volume,source=$project_name-production-state,target=/var/lib/agileforge" \
-  --mount "type=volume,source=$project_name-workspace,target=/workspace" \
+  --mount "type=volume,source=$production_state_volume,target=/var/lib/agileforge" \
+  --mount "type=volume,source=$workspace_volume,target=/workspace" \
   alpine sh -c 'chown 10001:10001 /var/lib/agileforge /workspace \
     && ls -ldn /var/lib/agileforge /workspace'
 ```
