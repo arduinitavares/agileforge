@@ -2,6 +2,12 @@
 
 Follow the documentation-lookup workflow in the active user-level `AGENTS.md` when dependency behavior, configuration, setup, or versions need verification. Keep its procedure in the `find-docs` skill rather than duplicating it here.
 
+## Agent skills
+
+- Issue tracker: use GitHub Issues in `arduinitavares/agileforge`; read [the tracker conventions](docs/agents/issue-tracker.md).
+- Triage labels: use the configured category and state mappings in [triage-labels.md](docs/agents/triage-labels.md).
+- Domain docs: use the root `CONTEXT.md` and `docs/adr/`; read [the domain documentation rules](docs/agents/domain.md).
+
 ## Pull Request Reviews
 
 When reviewing a pull request, always fetch and consider the existing PR comments before writing the review.
