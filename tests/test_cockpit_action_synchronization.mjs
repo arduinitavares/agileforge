@@ -8,6 +8,8 @@ import { dashboardBundle } from './dashboard_bundle_fixture.mjs';
 
 const sourcePath = path.resolve('frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
+const workspaceSourcePath = path.resolve('frontend/lifecycle-workspace.js');
+const workspaceSource = fs.readFileSync(workspaceSourcePath, 'utf8');
 const html = fs.readFileSync(path.resolve('frontend/project.html'), 'utf8');
 
 function element(textContent = '') {
@@ -70,6 +72,7 @@ function harness(actions = []) {
             requests.push({ url, options, resolve, reject });
         }),
     });
+    vm.runInContext(workspaceSource, context, { filename: workspaceSourcePath });
     vm.runInContext(source, context, { filename: sourcePath });
     vm.runInContext(`selectedProjectId = 7; lifecycleState.actions = ${JSON.stringify(actions)};`, context);
     context.installInteractions();
@@ -225,13 +228,13 @@ test('real HTML field IDs retain correct data after renderTopCockpit', () => {
         h.elements[id] = element(initial);
     }
     h.elements['cockpit-progress-bar'].style.width = '70%';
-    h.state("lifecycleState.goal = { candidate: { statement: 'A real current goal.' } }; lifecycleState.vision = { accepted: { statement: 'An accepted vision.' } }; lifecycleState.sprintHistory = { items: [{}, {}] }; lifecycleState.position = { decisions: [{ node_id: 'vision.bootstrap', request_kind: 'generate_vision_bootstrap' }] };");
+    h.state("lifecycleDisplayRead = { kind: 'ready' }; lifecycleState.goal = { candidate: { statement: 'A real current goal.' } }; lifecycleState.vision = { current: { statement: 'An accepted vision.' } }; lifecycleState.sprintHistory = { items: [{}, {}] }; lifecycleState.position = { decisions: [{ node_id: 'vision.bootstrap', request_kind: 'generate_vision_bootstrap' }] };");
 
     h.context.renderTopCockpit();
 
     assert.equal(h.elements['cockpit-goal-statement'].textContent, 'A real current goal.');
     assert.equal(h.elements['cockpit-goal-status'].textContent, 'Review');
-    assert.equal(h.elements['cockpit-vision-anchor'].textContent, 'Vision: An accepted vision.');
+    assert.equal(h.elements['cockpit-vision-anchor'].textContent, 'Vision: Accepted · An accepted vision.');
     assert.equal(h.elements['cockpit-cycle-progress'].textContent, 'Cycle 3');
 });
 

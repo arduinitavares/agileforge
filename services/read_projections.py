@@ -3060,11 +3060,16 @@ class DurableReadProjectionService:
             return _success(
                 {
                     "project_id": project_id,
+                    "accepted_backlog": None,
                     "items": [],
                     "count": 0,
                     "pending_count": 0,
                 }
             )
+        accepted_backlog: JsonObject = {
+            "backlog_artifact_id": backlog.artifact_id,
+            "artifact_fingerprint": backlog.artifact_fingerprint,
+        }
         try:
             story_artifacts = _current_story_artifacts(
                 snapshot,
@@ -3126,6 +3131,7 @@ class DurableReadProjectionService:
         return _success(
             {
                 "project_id": project_id,
+                "accepted_backlog": accepted_backlog,
                 "items": items,
                 "count": len(items),
                 "pending_count": pending_count,

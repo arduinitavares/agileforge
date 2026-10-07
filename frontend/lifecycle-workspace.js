@@ -287,9 +287,9 @@ const AgileForgeWorkspace = (() => {
         };
     }
 
-    function mapMarkup({ position = {}, context = {}, view = createView(), lastConfirmedAt = null } = {}) {
-        const current = new Set(currentStageIds(position, context));
-        const primary = initialStageId(position, context);
+    function mapMarkup({ position = {}, context = {}, view = createView(), lastConfirmedAt = null, displayProgress = null } = {}) {
+        const current = new Set(displayProgress?.currentStageIds ?? currentStageIds(position, context));
+        const primary = displayProgress ? displayProgress.primaryStageId : initialStageId(position, context);
         const descriptions = [
             'Identity & repository', 'Direction & purpose', 'Outcome & success',
             'Requirements & sources', 'Scope & work items', 'Order & priorities',
@@ -328,7 +328,8 @@ const AgileForgeWorkspace = (() => {
     function mount(host, bridge = {}) {
         if (!host || typeof host.innerHTML !== 'string') return;
         const view = bridge.view || createView();
-        host.innerHTML = mapMarkup({ position: bridge.position, context: bridge.context, view, lastConfirmedAt: bridge.lastConfirmedAt });
+        const displayProgress = bridge.displayProgress;
+        host.innerHTML = mapMarkup({ position: bridge.position, context: bridge.context, view, lastConfirmedAt: bridge.lastConfirmedAt, displayProgress });
         const buttons = Array.from(host.querySelectorAll('[data-workspace-stage]'));
         buttons.forEach((button, index) => {
             button.addEventListener('click', () => {
@@ -348,7 +349,7 @@ const AgileForgeWorkspace = (() => {
             });
         });
         host.querySelector('[data-workspace-return-current]')?.addEventListener('click', () => {
-            const current = initialStageId(bridge.position, bridge.context);
+            const current = displayProgress ? displayProgress.primaryStageId : initialStageId(bridge.position, bridge.context);
             if (current !== null) bridge.onReturnToCurrent?.(current);
         });
     }

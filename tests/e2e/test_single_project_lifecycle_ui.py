@@ -1001,6 +1001,15 @@ class FakeLifecycle:
             else []
         )
         return {
+            "project_id": _PROJECT_ID,
+            "accepted_backlog": (
+                {
+                    "backlog_artifact_id": 41,
+                    "artifact_fingerprint": _fingerprint("b"),
+                }
+                if self.backlog_accepted
+                else None
+            ),
             "items": items,
             "count": len(items),
             "pending_count": len(items),
@@ -5158,6 +5167,11 @@ def _non_contiguous_story_position(
 
 def _non_contiguous_story_pending() -> JsonObject:
     return {
+        "project_id": _PROJECT_ID,
+        "accepted_backlog": {
+            "backlog_artifact_id": 41,
+            "artifact_fingerprint": _fingerprint("b"),
+        },
         "items": [
             {
                 "backlog_item_id": "PBI-000001",

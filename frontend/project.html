@@ -84,11 +84,11 @@
             <div class="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-3 shadow-xs">
                 <div class="flex items-center justify-between gap-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Governing Outcome</span>
-                    <span id="cockpit-goal-status" class="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">Active</span>
+                    <span id="cockpit-goal-status" class="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">Loading…</span>
                 </div>
                 <p id="cockpit-goal-statement" class="mt-1 line-clamp-2 text-xs font-medium text-slate-900 leading-snug">Loading Product Goal...</p>
                 <div class="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                    <span id="cockpit-vision-anchor" class="truncate text-slate-600">Vision: Loading...</span>
+                    <span id="cockpit-vision-anchor" class="truncate text-slate-600">Vision: Loading…</span>
                     <span id="cockpit-cycle-progress" class="font-mono text-slate-700 shrink-0 font-medium">Cycle 1</span>
                 </div>
             </div>
@@ -102,13 +102,13 @@
                 <div class="mt-1 space-y-1">
                     <div class="flex justify-between text-xs">
                         <span class="text-slate-600">Current Phase:</span>
-                        <span id="cockpit-active-stage-label" class="font-semibold text-slate-900">Sprint Planning</span>
+                        <span id="cockpit-active-stage-label" class="font-semibold text-slate-900">Loading…</span>
                     </div>
                     <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
                         <div id="cockpit-progress-bar" class="h-full rounded-full bg-blue-600 transition-all duration-300" style="width: 70%"></div>
                     </div>
                 </div>
-                <p id="cockpit-phase-detail" class="mt-1 text-[11px] text-slate-500 truncate">Delivery Loop Active</p>
+                <p id="cockpit-phase-detail" class="mt-1 text-[11px] text-slate-500 truncate">Loading…</p>
             </div>
 
             <!-- Tile 3: Blockers & Gaps -->
@@ -173,7 +173,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">visibility</span>
                             <span class="font-medium">Vision</span>
                         </span>
-                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Complete</span>
+                        <span id="nav-vision-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                     <button type="button" data-stage="Product Goal"
                         class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
@@ -181,7 +181,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">flag</span>
                             <span class="font-medium">Product Goal</span>
                         </span>
-                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Active</span>
+                        <span id="nav-goal-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                     <button type="button" data-stage="Specification"
                         class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
@@ -189,7 +189,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">description</span>
                             <span class="font-medium">Specification</span>
                         </span>
-                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                        <span id="nav-specification-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                     <button type="button" data-stage="Backlog"
                         class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
@@ -197,7 +197,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">list_alt</span>
                             <span class="font-medium">Backlog</span>
                         </span>
-                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                        <span id="nav-backlog-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                     <button type="button" data-stage="Roadmap"
                         class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
@@ -205,7 +205,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">alt_route</span>
                             <span class="font-medium">Roadmap</span>
                         </span>
-                        <span class="stage-status-badge text-[10px] font-mono text-slate-400">Accepted</span>
+                        <span id="nav-roadmap-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                 </div>
             </div>
@@ -231,7 +231,7 @@
                             <span class="material-symbols-outlined text-slate-400 stage-status-icon">timeline</span>
                             <span class="font-medium">Sprint Planning</span>
                         </span>
-                        <span id="nav-sprint-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Pending</span>
+                        <span id="nav-sprint-badge" class="stage-status-badge text-[10px] font-mono text-slate-400">Loading…</span>
                     </button>
                     <button type="button" data-stage="Execution"
                         class="stage-nav-btn w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left">
@@ -277,8 +277,8 @@
             <!-- Workbench Header & Active Stage Indicator -->
             <div class="workspace-inspector-heading">
                 <div class="min-w-0">
-                    <span id="workbench-stage-kicker" class="text-[11px] font-semibold uppercase tracking-wider text-blue-600">Active Workspace</span>
-                    <h2 id="workbench-stage-title" aria-live="polite">Delivery Workbench</h2>
+                    <span id="workbench-stage-kicker" class="text-[11px] font-semibold uppercase tracking-wider text-blue-600">Loading…</span>
+                    <h2 id="workbench-stage-title" aria-live="polite">Loading…</h2>
                 </div>
                 <div id="workbench-stage-actions" class="flex items-center gap-2 shrink-0"></div>
             </div>
@@ -357,8 +357,8 @@
         </form>
     </dialog>
 
-    <script src="/dashboard/lifecycle-workspace.js?v=20260914-layout4"></script>
-    <script src="/dashboard/project.js?v=20260927-vision-layout"></script>
+    <script src="/dashboard/lifecycle-workspace.js?v=20261007-confirmed-progress"></script>
+    <script src="/dashboard/project.js?v=20261007-lifecycle-summary"></script>
 </body>
 
 </html>

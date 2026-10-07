@@ -188,6 +188,71 @@ def _backlog_item(backlog_artifact_id: int, *, spec_item_id: str) -> BacklogItem
     )
 
 
+def test_story_pending_exposes_accepted_backlog_identity_without_items(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero coverage does not hide the selected accepted Backlog identity."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            _chain_backlog(102, "accepted", None).model_copy(
+                update={"version_number": 1}
+            ),
+        ),
+        backlog_items=(),
+        planning_artifacts=(),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    assert data["accepted_backlog"] == {
+        "backlog_artifact_id": 102,
+        "artifact_fingerprint": "sha256:backlog-102",
+    }
+    assert data["items"] == []
+    assert data["count"] == 0
+    assert data["pending_count"] == 0
+
+
+@pytest.mark.parametrize("status", [None, "pending_review", "feedback", "rejected"])
+def test_story_pending_exposes_null_without_accepted_backlog(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    status: Literal["pending_review", "feedback", "rejected"] | None,
+) -> None:
+    """Absent or unaccepted Backlog facts explicitly expose no accepted root."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            () if status is None else (_chain_backlog(101, status, None),)
+        ),
+        backlog_items=(),
+        planning_artifacts=(),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    assert data["accepted_backlog"] is None
+    assert data["items"] == []
+
+
 @pytest.mark.parametrize(
     "status",
     ["pending_review", "feedback", "rejected"],
@@ -252,7 +317,10 @@ def test_story_pending_keeps_accepted_story_current_across_review_descendants(
 
     accepted_artifact_id = 301
     snapshot = _story_pending_snapshot(
-        phase_artifacts=(_chain_backlog(101, "accepted", None),),
+        phase_artifacts=(
+            _chain_backlog(101, "accepted", None),
+            _chain_backlog(102, "feedback", 101),
+        ),
         backlog_items=(_backlog_item(101, spec_item_id="REQ.001"),),
         planning_artifacts=(
             _story_artifact(
@@ -277,6 +345,10 @@ def test_story_pending_keeps_accepted_story_current_across_review_descendants(
     assert result["ok"] is True
     data = result["data"]
     assert isinstance(data, dict)
+    assert data["accepted_backlog"] == {
+        "backlog_artifact_id": 101,
+        "artifact_fingerprint": "sha256:backlog-101",
+    }
     items = data["items"]
     assert isinstance(items, list)
     item = items[0]
@@ -299,6 +371,7 @@ def test_story_pending_selects_only_the_current_accepted_backlog_root(
         phase_artifacts=(
             _chain_backlog(101, "superseded", None),
             _chain_backlog(102, "accepted", 101),
+            _chain_backlog(103, "feedback", 102),
         ),
         backlog_items=(
             _backlog_item(101, spec_item_id="REQ.HISTORICAL"),
@@ -317,6 +390,10 @@ def test_story_pending_selects_only_the_current_accepted_backlog_root(
     assert result["ok"] is True
     data = result["data"]
     assert isinstance(data, dict)
+    assert data["accepted_backlog"] == {
+        "backlog_artifact_id": 102,
+        "artifact_fingerprint": "sha256:backlog-102",
+    }
     assert data["items"] == [
         {
             "backlog_item_id": "PBI-000001",
