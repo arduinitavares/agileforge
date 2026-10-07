@@ -4049,6 +4049,7 @@ function renderWorkspaceMap() {
         position: lifecycleState.position,
         context: lifecycleState,
         displayProgress: { currentStageIds: display.currentStageIds, primaryStageId: display.primaryStageId },
+        displayReadKind: lifecycleDisplayRead.kind,
         view: workspaceView,
         lastConfirmedAt: lastDashboardConfirmedAt,
         onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
@@ -4611,7 +4612,7 @@ function projectLifecycleDisplayProjection(state, readState) {
     const goal = state?.goal;
     const goalBadge = conflict(goal) ? badge('Unavailable', goal.stale_reason)
         : goal?.active ? badge('Active', goal.candidate ? reviewDetail(goal.review, 'Revision') : '')
-            : goal?.candidate ? badge(goal.review?.state === 'feedback' ? 'Feedback' : 'Review', reviewDetail(goal.review))
+            : goal?.candidate ? badge(['feedback', 'rejected'].includes(goal.review?.state) ? humanizeKey(goal.review.state) : 'Review', reviewDetail(goal.review))
                 : ['fulfilled', 'abandoned'].includes(goal?.outcome?.outcome)
                     ? badge(humanizeKey(goal.outcome.outcome), text(goal.outcome.rationale) ?? '')
                     : goal?.outcome ? badge('Unavailable') : badge('Not started');

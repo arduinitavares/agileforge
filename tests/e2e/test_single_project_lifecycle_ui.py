@@ -3181,7 +3181,9 @@ def _complete_vision_and_goal(
     page.locator('form[data-interview-scope="vision"] button[type="submit"]').click()
     expect(page.get_by_text("Vision candidate", exact=True)).to_be_visible()
     expect(
-        page.get_by_text("Give product teams a durable, reviewable lifecycle.")
+        page.locator("#vision-panel").get_by_text(
+            "Give product teams a durable, reviewable lifecycle.", exact=True
+        )
     ).to_be_visible()
     if replace_vision_during_review:
         page.locator(
@@ -3208,7 +3210,9 @@ def _complete_vision_and_goal(
         page.locator("#human-action-close").click()
         page.locator("#refresh-project").click()
         expect(
-            page.get_by_text("Give product teams a replacement lifecycle candidate.")
+            page.locator("#vision-panel").get_by_text(
+                "Give product teams a replacement lifecycle candidate.", exact=True
+            )
         ).to_be_visible()
     _accept_review(page, "vision")
     _select_workspace_stage(page, 3)
@@ -3626,6 +3630,7 @@ def test_issue_211_fails_closed_for_malformed_and_hostile_source_projections(
         wait_until="networkidle",
     )
     page.wait_for_function("typeof globalThis.specificationPanelMarkup === 'function'")
+    _select_workspace_stage(page, 4)
     registration_action: JsonObject = {
         "request_kind": "register_specification_source",
         "endpoint": "specifications/source",

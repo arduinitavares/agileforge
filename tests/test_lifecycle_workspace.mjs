@@ -231,6 +231,33 @@ test('map renders graph authority independently from viewing and exposes return 
     assert.match(markup, /Manual refresh required/);
 });
 
+test('map distinguishes unavailable reads from loading without replacing retained confirmation', () => {
+    const workspace = api();
+    const options = {
+        view: { ...workspace.createView(), stageId: 4 },
+        displayProgress: { currentStageIds: [], primaryStageId: null },
+    };
+    for (const displayReadKind of [undefined, 'loading']) {
+        const markup = workspace.mapMarkup({ ...options, displayReadKind });
+        assert.match(markup, /<p class="workspace-map-freshness">Loading lifecycle · Manual refresh required<\/p>/);
+        assert.match(markup, /<p class="workspace-route-note">Loading workflow position…<\/p>/);
+        assert.doesNotMatch(markup, /aria-current|Return to current work|<time/);
+    }
+    const unavailable = workspace.mapMarkup({ ...options, displayReadKind: 'unavailable' });
+    assert.match(unavailable, /<p class="workspace-map-freshness">Unavailable lifecycle · Manual refresh required<\/p>/);
+    assert.match(unavailable, /<p class="workspace-route-note">Workflow position unavailable\.<\/p>/);
+    assert.doesNotMatch(unavailable, /aria-current|Return to current work|<time/);
+
+    const confirmed = workspace.mapMarkup({
+        ...options, displayReadKind: 'ready', lastConfirmedAt: '2026-09-14T10:30:00Z',
+        displayProgress: { currentStageIds: [9], primaryStageId: 9 },
+    });
+    assert.match(confirmed, /data-workspace-stage="9"[^>]*aria-current="step"/);
+    assert.match(confirmed, /Return to current work/);
+    assert.match(confirmed, /<p class="workspace-map-freshness">Confirmed <time datetime="2026-09-14T10:30:00Z"/);
+    assert.match(confirmed, /<p class="workspace-route-note">Current work follows the confirmed workflow position\.<\/p>/);
+});
+
 test('confirmed display progress controls map markers without changing live action availability', () => {
     const workspace = api();
     const position = { decisions: [{ request_kind: 'complete_task', category: 'available', recommendation_kind: 'required' }] };

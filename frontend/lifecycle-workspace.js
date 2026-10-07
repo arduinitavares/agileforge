@@ -287,7 +287,7 @@ const AgileForgeWorkspace = (() => {
         };
     }
 
-    function mapMarkup({ position = {}, context = {}, view = createView(), lastConfirmedAt = null, displayProgress = null } = {}) {
+    function mapMarkup({ position = {}, context = {}, view = createView(), lastConfirmedAt = null, displayProgress = null, displayReadKind = null } = {}) {
         const current = new Set(displayProgress?.currentStageIds ?? currentStageIds(position, context));
         const primary = displayProgress ? displayProgress.primaryStageId : initialStageId(position, context);
         const descriptions = [
@@ -309,12 +309,12 @@ const AgileForgeWorkspace = (() => {
         const returnMarkup = primary !== null && view.stageId !== primary
             ? '<button type="button" class="workspace-return-current" data-workspace-return-current="true">Return to current work</button>'
             : '';
-        const routeNote = !lastConfirmedAt ? 'Loading workflow position…'
+        const routeNote = !lastConfirmedAt ? displayReadKind === 'unavailable' ? 'Workflow position unavailable.' : 'Loading workflow position…'
             : current.size ? 'Current work follows the confirmed workflow position.'
                 : 'No required stage is currently advertised by the workflow.';
         const freshness = lastConfirmedAt
             ? `Confirmed <time datetime="${escapeText(lastConfirmedAt)}" title="${escapeText(lastConfirmedAt)}">${escapeText(new Date(lastConfirmedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</time> · Manual refresh required`
-            : 'Loading lifecycle · Manual refresh required';
+            : displayReadKind === 'unavailable' ? 'Unavailable lifecycle · Manual refresh required' : 'Loading lifecycle · Manual refresh required';
         return `<section class="lifecycle-workspace" aria-label="Project lifecycle workspace">
             <div class="workspace-map-heading"><div><h2>Project lifecycle</h2><p>Select a stage to inspect its work.</p></div><div class="workspace-legend" aria-label="Map legend"><span><i class="workspace-legend-current" aria-hidden="true"></i>You are here</span><span><i class="workspace-legend-viewing" aria-hidden="true"></i>Viewing</span></div>${returnMarkup}</div>
             <p class="workspace-map-freshness">${freshness}</p>
@@ -329,7 +329,7 @@ const AgileForgeWorkspace = (() => {
         if (!host || typeof host.innerHTML !== 'string') return;
         const view = bridge.view || createView();
         const displayProgress = bridge.displayProgress;
-        host.innerHTML = mapMarkup({ position: bridge.position, context: bridge.context, view, lastConfirmedAt: bridge.lastConfirmedAt, displayProgress });
+        host.innerHTML = mapMarkup({ position: bridge.position, context: bridge.context, view, lastConfirmedAt: bridge.lastConfirmedAt, displayProgress, displayReadKind: bridge.displayReadKind });
         const buttons = Array.from(host.querySelectorAll('[data-workspace-stage]'));
         buttons.forEach((button, index) => {
             button.addEventListener('click', () => {

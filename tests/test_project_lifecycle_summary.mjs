@@ -340,7 +340,12 @@ test('first page load stays neutral while pending and becomes unavailable after 
     for (const id of lifecycleBadgeIds) assert.equal(h.elements[id].textContent, 'Loading…', id);
     assert.equal(h.elements['workbench-stage-title'].textContent, 'Loading…');
     assert.equal(h.elements['workbench-stage-kicker'].textContent, 'Loading…');
-    assert.equal(h.elements['workspace-map-host'].querySelector('[aria-current="step"]'), null);
+    const map = h.elements['workspace-map-host'];
+    assert.equal(map.querySelector('[aria-current="step"]'), null);
+    assert.equal(map.querySelector('.workspace-map-freshness').textContent, 'Loading lifecycle · Manual refresh required');
+    assert.equal(map.querySelector('.workspace-route-note').textContent, 'Loading workflow position…');
+    assert.equal(map.querySelector('[data-workspace-return-current]'), null);
+    assert.equal(map.querySelector('time'), null);
     resolveRead(dashboardResponse({ message: 'Initial lifecycle read failed.' }, 503));
     await loading;
     assert.equal(h.state('lifecycleDisplayRead.kind'), 'unavailable');
@@ -351,11 +356,24 @@ test('first page load stays neutral while pending and becomes unavailable after 
         assert.equal(h.elements[id].textContent, 'Unavailable', id);
         assert.equal(h.elements[id].getAttribute('title'), '', `${id} detail`);
     }
-    assert.equal(h.elements['workspace-map-host'].querySelector('[aria-current="step"]'), null);
+    assert.equal(map.querySelector('[aria-current="step"]'), null);
+    assert.equal(map.querySelector('.workspace-map-freshness').textContent, 'Unavailable lifecycle · Manual refresh required');
+    assert.equal(map.querySelector('.workspace-route-note').textContent, 'Workflow position unavailable.');
+    assert.equal(map.querySelector('[data-workspace-return-current]'), null);
+    assert.equal(map.querySelector('time'), null);
     assert.equal(h.elements['workbench-stage-title'].textContent, 'Unavailable');
     assert.equal(h.elements['workbench-stage-kicker'].textContent, 'Project lifecycle');
     assert.equal(h.elements['project-error'].textContent, 'Initial lifecycle read failed.');
     assert.match(h.elements['dashboard-refresh-time'].textContent, /Manual refresh required/);
+    assert.equal(h.elements['specification-panel'].hidden, true, 'An unavailable read does not select Specification');
+    await map.querySelector('[data-workspace-stage="4"]').click();
+    assert.equal(h.elements['specification-panel'].hidden, false);
+    assert.equal(h.elements['workbench-stage-title'].textContent, 'Specification');
+    assert.equal(h.elements['workbench-stage-kicker'].textContent, 'Viewing · Project Framing');
+    assert.equal(map.querySelector('[aria-current="step"]'), null);
+    assert.equal(map.querySelector('[data-workspace-return-current]'), null);
+    assert.equal(map.querySelector('.workspace-map-freshness').textContent, 'Unavailable lifecycle · Manual refresh required');
+    assert.equal(map.querySelector('time'), null);
 });
 
 test('initial failed load retains explicit historical delivery Viewing context', async () => {
@@ -474,14 +492,21 @@ for (const status of [503, 409]) {
         assert.equal(h.elements['nav-roadmap-badge'].getAttribute('title'), 'Successor review: Feedback · Clarify the Roadmap successor.');
         const lastLabels = renderedLifecycleLabels(h);
         const lastConfirmed = h.state('lastDashboardConfirmedAt');
+        const map = h.elements['workspace-map-host'];
+        const lastFreshness = map.querySelector('.workspace-map-freshness').textContent;
+        const lastRouteNote = map.querySelector('.workspace-route-note').textContent;
         const refreshing = h.context.loadDashboard();
         assert.deepEqual(renderedLifecycleLabels(h), lastLabels, 'Pending refresh keeps confirmed labels');
-        assert.match(h.elements['workspace-map-host'].textContent, /Manual refresh required/);
+        assert.equal(map.querySelector('.workspace-map-freshness').textContent, lastFreshness);
+        assert.equal(map.querySelector('time').getAttribute('datetime'), lastConfirmed);
         resolveRefresh(dashboardResponse({ message: 'Lifecycle refresh failed.' }, status));
         await assert.rejects(refreshing, /Lifecycle refresh failed\./);
         assert.deepEqual(renderedLifecycleLabels(h), lastLabels, 'Failed refresh keeps confirmed labels and detail');
         assert.equal(h.state('lastDashboardConfirmedAt'), lastConfirmed);
-        assert.match(h.elements['workspace-map-host'].textContent, /Manual refresh required/);
+        assert.equal(h.state('lifecycleDisplayRead.kind'), 'ready');
+        assert.equal(map.querySelector('.workspace-map-freshness').textContent, lastFreshness);
+        assert.equal(map.querySelector('.workspace-route-note').textContent, lastRouteNote);
+        assert.equal(map.querySelector('time').getAttribute('datetime'), lastConfirmed);
         assert.ok(h.elements['dashboard-refresh-time'].getAttribute('title').includes(lastConfirmed));
         if (status === 409) assert.deepEqual(Object.keys(h.state('lifecycleState.planningReviews.backlog')), [], 'Conflict still clears action review state');
     });
@@ -892,6 +917,59 @@ for (const outcome of ['fulfilled', 'abandoned']) {
         });
     }
 }
+
+for (const outcome of [null, 'fulfilled', 'abandoned']) {
+    test(`retained rejected Goal candidate renders rejection ${outcome ? `before prior ${outcome} outcome` : 'without a prior outcome'}`, async () => {
+        const bundle = sourceOnlyDashboardBundle();
+        bundle.data.goal.body.data = {
+            accepted_vision: { vision_artifact_id: 12, fingerprint: 'sha256:vision-12', statement: 'Accepted direction' },
+            active: null, transcript: [], latest_questions: [],
+            effective_questions: {
+                questions: ['What valuable outcome should this Project achieve next?', 'What observable result will prove success?', 'What boundary keeps this Goal focused?'],
+                source: 'builtin_starter',
+            },
+            candidate: {
+                product_goal_artifact_id: 22, vision_artifact_id: 12, vision_fingerprint: 'sha256:vision-12',
+                goal_number: outcome ? 2 : 1, revision_number: 1, fingerprint: 'sha256:goal-22',
+                statement: 'Retained rejected Goal candidate.', components: {},
+                supersedes_product_goal_artifact_id: null, source_interview_turn_id: 23,
+                created_by: 'test-operator', created_at: '2026-10-06T12:00:00Z',
+            },
+            review: {
+                state: 'rejected', product_goal_artifact_decision_id: 24, decision: 'rejected',
+                rationale: 'A clearer success measure is required.', reviewer: 'test-operator', decided_at: '2026-10-06T12:30:00Z',
+            },
+            outcome: outcome ? {
+                product_goal_artifact_id: 21, fingerprint: 'sha256:goal-21', statement: 'Prior Goal resolved.',
+                outcome, rationale: 'Prior outcome recorded.', decided_by: 'test-operator',
+            } : null,
+            stale_reason: outcome ? 'GOAL_RESOLVED' : 'GOAL_NOT_ACTIVE',
+        };
+        const h = projectLifecycleHarness({ template: true, bundle });
+        assert.equal(await h.context.loadDashboard(), true);
+        assert.equal(h.elements['cockpit-goal-statement'].textContent, 'Retained rejected Goal candidate.');
+        assert.equal(h.elements['cockpit-goal-status'].textContent, 'Rejected');
+        assert.equal(h.elements['nav-goal-badge'].textContent, 'Rejected');
+        assert.equal(h.elements['nav-goal-badge'].getAttribute('title'), 'Review: Rejected · A clearer success measure is required.');
+        assert.equal(h.display(h.state('lifecycleState')).badges['Product Goal'].detail, 'Review: Rejected · A clearer success measure is required.');
+    });
+}
+
+test('rejected Goal revision retains Active priority and conflict remains unavailable', () => {
+    const h = projectLifecycleHarness({ template: true });
+    const state = sourceOnlyLifecycleState();
+    state.goal.candidate = { product_goal_artifact_id: 22, fingerprint: 'sha256:goal-22', statement: 'Rejected Goal revision.' };
+    state.goal.review = { state: 'rejected', decision: 'rejected', rationale: 'Keep the accepted outcome.' };
+    h.setState(state); h.context.renderTopCockpit(); h.context.renderMasterStageNav();
+    assert.equal(h.elements['cockpit-goal-status'].textContent, 'Active');
+    assert.equal(h.elements['nav-goal-badge'].textContent, 'Active');
+    assert.equal(h.elements['nav-goal-badge'].getAttribute('title'), 'Revision: Rejected · Keep the accepted outcome.');
+    state.goal.stale_reason = 'PRODUCT_GOAL_FACT_CONFLICT';
+    h.setState(state); h.context.renderTopCockpit(); h.context.renderMasterStageNav();
+    assert.equal(h.elements['cockpit-goal-status'].textContent, 'Unavailable');
+    assert.equal(h.elements['nav-goal-badge'].textContent, 'Unavailable');
+    assert.equal(h.elements['nav-goal-badge'].getAttribute('title'), 'PRODUCT_GOAL_FACT_CONFLICT');
+});
 
 test('Specification review reports exact acceptance, source-only and conflict states', () => {
     const h = projectLifecycleHarness(); const state = acceptedLifecycleState();
