@@ -49,6 +49,9 @@ from services.specs.story_validation_service import (
     validate_story_with_specification_in_session,
 )
 from services.story_artifact_lineage import build_story_artifact_lineage_nodes
+from services.story_dependency_lifecycle import (
+    invalidate_story_dependents_for_replacement_in_session,
+)
 from services.story_rank import parse_story_rank
 from workflow.fingerprints import canonical_hash, canonical_json
 
@@ -629,6 +632,13 @@ def _materialize_story_rows(
         prior.is_superseded = True
         prior.updated_at = accepted_at
         session.add(prior)
+
+    invalidate_story_dependents_for_replacement_in_session(
+        session,
+        artifact=artifact,
+        superseded_stories=tuple(prior_rows),
+        accepted_at=accepted_at,
+    )
 
     rows: list[UserStory] = []
     for ordinal, envelope in enumerate(content.story_items, start=1):

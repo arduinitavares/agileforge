@@ -689,8 +689,18 @@ def test_external_prerequisite_blocks_until_complete_without_joining_scope(
     assert tuple(edge.dependency_id for edge in execution_scope.dependencies)
 
 
-def test_selected_dependency_closure_cycle_blocks_candidacy(engine: Engine) -> None:
-    """Reject a cycle that returns through one preserved external-dependent row."""
+@pytest.mark.parametrize(
+    ("external_status", "expected_safe"),
+    [
+        (StoryStatus.TO_DO, False),
+        (StoryStatus.DONE, True),
+        (StoryStatus.ACCEPTED, True),
+    ],
+)
+def test_selected_dependency_closure_cycle_blocks_candidacy(
+    engine: Engine, external_status: StoryStatus, expected_safe: bool
+) -> None:
+    """Block an actionable cycle and preserve history behind terminal authority."""
     with Session(engine) as session:
         project_id, selected_id, external_id, _unrelated_id = _story_set(
             session,
@@ -699,7 +709,7 @@ def test_selected_dependency_closure_cycle_blocks_candidacy(engine: Engine) -> N
     _validate(engine, selected_id)
     with Session(engine) as session:
         external = session.get_one(UserStory, external_id)
-        external.status = StoryStatus.DONE
+        external.status = external_status
         session.add(external)
         _select_for_sprint(session, story_id=selected_id)
         session.commit()
@@ -745,9 +755,15 @@ def test_selected_dependency_closure_cycle_blocks_candidacy(engine: Engine) -> N
     selected = next(
         story for story in snapshot.stories if story.story_id == selected_id
     )
-    assert selected.dependency_safe is False
-    assert selected.sprint_candidate is False
-    assert any("CYCLE" in blocker for blocker in selected.readiness_blockers)
+    assert selected.dependency_safe is expected_safe
+    assert selected.sprint_candidate is expected_safe
+    assert (
+        "STORY_DEPENDENCY_CYCLE" in selected.readiness_blockers
+    ) is not expected_safe
+    assert {
+        (edge.dependent_story_id, edge.prerequisite_story_id, edge.status)
+        for edge in snapshot.story_dependencies
+    } == {(selected_id, external_id, "active"), (external_id, selected_id, "active")}
 
 
 def test_unrelated_external_cycle_does_not_block_selected_scope(engine: Engine) -> None:

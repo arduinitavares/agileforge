@@ -347,7 +347,10 @@ def _dependency_fact_problem(
     for task in sorted(snapshot.tasks, key=lambda item: (item.sprint_id, item.task_id)):
         if task.sprint_id != sprint_id:
             continue
-        expected = not _dependency_blockers(task, stories, edges)
+        # A Done Task's dependency fact is signed into its accepted completion.
+        expected = task.status == "Done" or not _dependency_blockers(
+            task, stories, edges
+        )
         if task.dependencies_satisfied != expected:
             return RuleEvaluation(
                 RuleCategory.INVALID,
