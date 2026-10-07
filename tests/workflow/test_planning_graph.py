@@ -1030,6 +1030,114 @@ def test_dependency_cycle_fails_join_closed_as_invalid() -> None:
     assert sprint.reason_code == "STORY_DEPENDENCY_CYCLE"
 
 
+@pytest.mark.parametrize("history_status", ["active", "proposed", "rejected"])
+def test_only_active_unselected_terminal_cycles_block_sprint_planning(
+    history_status: Literal["active", "proposed", "rejected"],
+) -> None:
+    """Whole-Project execution safety excludes proposal and rejected history."""
+    selected = _story(1, "req-a")
+    history = tuple(
+        _story(story_id, requirement, candidate=False).model_copy(
+            update={"status": "Done"}
+        )
+        for story_id, requirement in ((2, "req-b"), (3, "req-c"))
+    )
+    dependencies = tuple(
+        StoryDependencyFact(
+            dependency_id=dependency_id,
+            dependent_story_id=dependent,
+            prerequisite_story_id=prerequisite,
+            status=history_status,
+            source="manual_review",
+            confidence="reviewed",
+            reason="Retained terminal history.",
+        )
+        for dependency_id, dependent, prerequisite in ((1, 2, 3), (2, 3, 2))
+    )
+    review = StoryDependencyReviewFact(
+        review_id=901,
+        selected_story_ids=(1,),
+        reviewed_edges=(),
+        source_fingerprint=story_dependency_source_fingerprint((selected,)),
+        dependency_fingerprint=dependency_review_fingerprint(()),
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b", "req-c"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+            _story_artifact(3, "req-c"),
+        ),
+        stories=(selected, *history),
+        dependencies=dependencies,
+        dependency_reviews=(review,),
+    )
+    sprint = _node(snapshot, "planning.sprint.plan")
+    assert sprint.category is (
+        NodeCategory.INVALID if history_status == "active" else NodeCategory.AVAILABLE
+    )
+    assert sprint.reason_code == (
+        "STORY_DEPENDENCY_CYCLE"
+        if history_status == "active"
+        else "SPRINT_PLANNING_REQUIRED"
+    )
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+@pytest.mark.parametrize("cyclic", [False, True])
+def test_terminal_active_history_cycle_check_does_not_require_review_reasons(
+    reason: str | None, cyclic: bool
+) -> None:
+    """Stored active endpoints remain valid without human-review reason text."""
+    selected = _story(1, "req-a")
+    snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b", "req-c"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+            _story_artifact(3, "req-c"),
+        ),
+        stories=(
+            selected,
+            _story(2, "req-b", candidate=False).model_copy(update={"status": "Done"}),
+            _story(3, "req-c", candidate=False).model_copy(update={"status": "Done"}),
+        ),
+    )
+    dependencies = (
+        StoryDependencyFact(
+            dependency_id=1,
+            dependent_story_id=2,
+            prerequisite_story_id=3,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason=reason,
+        ),
+    )
+    if cyclic:
+        dependencies += (
+            StoryDependencyFact(
+                dependency_id=2,
+                dependent_story_id=3,
+                prerequisite_story_id=2,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+                reason=reason,
+            ),
+        )
+    snapshot = snapshot.model_copy(update={"story_dependencies": dependencies})
+    sprint = _node(snapshot, "planning.sprint.plan")
+    assert sprint.category is (
+        NodeCategory.INVALID if cyclic else NodeCategory.AVAILABLE
+    )
+    assert sprint.reason_code == (
+        "STORY_DEPENDENCY_CYCLE" if cyclic else "SPRINT_PLANNING_REQUIRED"
+    )
+
+
 def test_selected_dependency_proposal_keeps_review_actionable() -> None:
     """Expose review for selected proposals while Sprint planning stays blocked."""
     stories = (_story(1, "req-a"), _story(2, "req-b"))
@@ -2186,6 +2294,56 @@ def test_story_change_makes_reviewed_sprint_plan_stale() -> None:
     start = _node(snapshot, "planning.sprint.start")
     assert start.category is NodeCategory.INVALID
     assert start.reason_code == "SPRINT_PLAN_STALE"
+
+
+def test_stale_accepted_planned_sprint_precedes_current_dependency_join() -> None:
+    """A stranded accepted plan reports stale facts while retaining its review lock."""
+    original = _story(1, "req-a")
+    task = _task(1)
+    plan = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-0123456789abcdef0123456789abcdef",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_set_fingerprint((original,), ()),
+    ).model_copy(
+        update={
+            "task_content_fingerprint": current_task_content_fingerprint(
+                (task,), sprint_id=601, story_ids=(1,)
+            )
+        }
+    )
+    changed = original.model_copy(
+        update={
+            "selected_scope_fingerprint": "sha256:" + "d" * 64,
+        }
+    )
+    assert original.selected_scope_fingerprint is not None
+    old_review = StoryDependencyReviewFact(
+        review_id=901,
+        selected_story_ids=(1,),
+        reviewed_edges=(),
+        source_fingerprint=original.selected_scope_fingerprint,
+        dependency_fingerprint=dependency_review_fingerprint(()),
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(_roadmap(), _story_artifact(1, "req-a"), plan),
+        stories=(changed,),
+        tasks=(task,),
+        dependency_reviews=(old_review,),
+        decisions=(
+            _decision("sprint", artifact_id=501, fingerprint=plan.artifact_fingerprint),
+        ),
+        sprints=(SprintFact(sprint_id=601, status="planned", completed_at=None),),
+    )
+    for node_id in ("planning.sprint.plan", "planning.sprint.start"):
+        decision = _node(snapshot, node_id)
+        assert decision.category is NodeCategory.INVALID
+        assert decision.reason_code == "SPRINT_PLAN_STALE"
+    locked = _node(snapshot, "planning.story_dependencies")
+    assert locked.category is NodeCategory.BLOCKED
+    assert locked.reason_code == "SPRINT_DEPENDENCY_REVIEW_LIFECYCLE_LOCKED"
 
 
 ALL_PLANNING_NODE_IDS = (

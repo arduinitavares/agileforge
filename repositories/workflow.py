@@ -16,7 +16,7 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, StoryStatus, WorkflowEventType
+from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.product_definition import (
     ProductGoalArtifact,
@@ -95,6 +95,12 @@ from services.story_dependencies import (
     SelectedScopeStory,
     selected_scope_fingerprint,
 )
+from services.story_dependency_lifecycle import (
+    StoryDependencyLifecycleIntegrityError,
+    infer_unrecorded_story_dependency_invalidations_in_session,
+    load_story_dependency_invalidations_in_session,
+    selected_scope_dependency_lifecycle_fingerprint,
+)
 from services.story_sprint_selection import (
     StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
@@ -168,12 +174,14 @@ from workflow.fingerprints import (
 )
 from workflow.planning_integrity import (
     active_dependency_review_edges,
+    current_dependency_closure,
     dependency_edges_are_canonical,
     dependency_edges_have_cycle,
     dependency_edges_payload,
     dependency_review_fingerprint,
+    is_terminal_external,
     planned_task_content_fingerprint,
-    selected_dependency_active_closure,
+    superseded_dependency_edges,
 )
 from workflow.requests import CreateProject, RecordRepositoryBinding, TransitionRequest
 
@@ -435,6 +443,7 @@ class WorkflowFactRepository:
             project_id,
             frozenset(item.sprint_id for item in sprints),
             stories,
+            story_dependencies,
             planning_load.facts,
         )
         sprint_starts = self._sprint_starts(
@@ -3254,7 +3263,14 @@ class WorkflowFactRepository:
             story_ids,
             spec_versions,
         )
-        blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
+        completed_story_ids = frozenset(
+            membership.story_id
+            for membership in memberships
+            if membership.sprint_id in completed_sprint_ids
+        )
+        blockers = self._story_readiness_blockers(
+            rows, dependencies, stories_by_id, completed_story_ids=completed_story_ids
+        )
         try:
             selection_by_story_id = story_sprint_selection_facts_in_session(
                 self._session,
@@ -3341,7 +3357,52 @@ class WorkflowFactRepository:
                     scope_fingerprint,
                 )
             )
-        return tuple(facts)
+        try:
+            persisted_anchors = load_story_dependency_invalidations_in_session(
+                self._session,
+                project_id=project_id,
+            )
+            selected_ids = tuple(entry.story_id for entry in selected_scope_entries)
+            implicit_anchors = (
+                infer_unrecorded_story_dependency_invalidations_in_session(
+                    self._session,
+                    project_id=project_id,
+                    root_story_ids=selected_ids,
+                )
+                if superseded_dependency_edges(
+                    stories=tuple(facts),
+                    dependencies=tuple(
+                        StoryDependencyFact.model_validate(
+                            row.model_dump(
+                                include={
+                                    "dependency_id",
+                                    "dependent_story_id",
+                                    "prerequisite_story_id",
+                                    "status",
+                                    "source",
+                                    "confidence",
+                                    "reason",
+                                }
+                            )
+                        )
+                        for row in dependencies
+                    ),
+                    root_story_ids=selected_ids,
+                    completed_story_ids=completed_story_ids,
+                )
+                else ()
+            )
+            final_fingerprint = selected_scope_dependency_lifecycle_fingerprint(
+                selected_scope_fingerprint=scope_fingerprint,
+                selected_story_ids=selected_ids,
+                invalidation_anchors=(*persisted_anchors, *implicit_anchors),
+            )
+        except (StoryDependencyLifecycleIntegrityError, ValueError) as error:
+            raise self._error(str(error)) from error
+        return tuple(
+            fact.model_copy(update={"selected_scope_fingerprint": final_fingerprint})
+            for fact in facts
+        )
 
     def _story_dependencies(
         self,
@@ -3479,6 +3540,11 @@ class WorkflowFactRepository:
         """Intersect current evidence, human selection, and dependency safety."""
         if not stories:
             return ()
+        completed_story_ids = frozenset(
+            story.story_id
+            for story in stories
+            if any(sprint_id in completed_sprint_ids for sprint_id in story.sprint_ids)
+        )
         selected = tuple(
             sorted(
                 (
@@ -3533,6 +3599,7 @@ class WorkflowFactRepository:
                     selected_id_set,
                     stories,
                     dependencies,
+                    completed_story_ids=completed_story_ids,
                 )
         facts: list[StoryFact] = []
         for story in stories:
@@ -3563,16 +3630,25 @@ class WorkflowFactRepository:
         selected_story_ids: set[int],
         stories: tuple[StoryFact, ...],
         dependencies: tuple[StoryDependencyFact, ...],
+        *,
+        completed_story_ids: frozenset[int],
     ) -> tuple[bool, tuple[str, ...]]:
         """Evaluate the dependency closure behind one reviewed selected scope."""
         stories_by_id = {story.story_id: story for story in stories}
         try:
-            closure_dependencies = selected_dependency_active_closure(
-                dependencies,
-                selected_story_ids,
-                project_story_ids=frozenset(stories_by_id),
+            closure_dependencies = current_dependency_closure(
+                stories=stories,
+                dependencies=dependencies,
+                root_story_ids=tuple(sorted(selected_story_ids)),
+                completed_story_ids=completed_story_ids,
             )
             closure_edges = active_dependency_review_edges(closure_dependencies)
+            obsolete_edges = superseded_dependency_edges(
+                stories=stories,
+                dependencies=dependencies,
+                root_story_ids=tuple(sorted(selected_story_ids)),
+                completed_story_ids=completed_story_ids,
+            )
         except (ValidationError, ValueError) as exc:
             message = "Current selected dependency closure is malformed."
             raise self._error(message) from exc
@@ -3585,13 +3661,14 @@ class WorkflowFactRepository:
             sorted(
                 story_id
                 for story_id in external_ids
-                if stories_by_id[story_id].status
-                not in {StoryStatus.DONE.value, StoryStatus.ACCEPTED.value}
+                if not stories_by_id[story_id].is_superseded
+                and not is_terminal_external(stories_by_id[story_id])
             )
         )
         closure_has_cycle = dependency_edges_have_cycle(closure_edges)
         blockers = (
             *(("STORY_DEPENDENCY_CYCLE",) if closure_has_cycle else ()),
+            *(("STORY_DEPENDENCY_SUPERSEDED_ENDPOINT",) if obsolete_edges else ()),
             *(
                 f"PREREQUISITE_STORY_{story_id}_INCOMPLETE"
                 for story_id in incomplete_external_ids
@@ -3604,6 +3681,7 @@ class WorkflowFactRepository:
         project_id: int,
         sprint_ids: frozenset[int],
         stories: tuple[StoryFact, ...],
+        story_dependencies: tuple[StoryDependencyFact, ...],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
     ) -> tuple[TaskFact, ...]:
         rows = self._session.exec(
@@ -3614,6 +3692,18 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         stories_by_id = {item.story_id: item for item in stories}
+        # Execution uses direct prerequisite completion, independently of current
+        # planning readiness or the selected scope's renewed review token.
+        incomplete_dependency_story_ids: frozenset[int] = frozenset(
+            edge.dependent_story_id
+            for edge in story_dependencies
+            if edge.status == "active"
+            and (
+                edge.prerequisite_story_id not in stories_by_id
+                or stories_by_id[edge.prerequisite_story_id].status
+                not in _DONE_STORY_STATUSES
+            )
+        )
         story_ids = frozenset(stories_by_id)
         memberships = (
             self._session.exec(
@@ -3678,7 +3768,7 @@ class WorkflowFactRepository:
                     f"task {task_id} has no sprint membership."
                 )
                 raise self._error(message)
-            story = stories_by_id[task.story_id]
+            # A Done Task's eligibility is part of its recorded completion hash.
             facts.append(
                 TaskFact(
                     task_id=task_id,
@@ -3687,7 +3777,10 @@ class WorkflowFactRepository:
                     description=task.description,
                     metadata_json=canonical_metadata,
                     status=task.status.value,
-                    dependencies_satisfied=not story.readiness_blockers,
+                    dependencies_satisfied=(
+                        task.status is TaskStatus.DONE
+                        or task.story_id not in incomplete_dependency_story_ids
+                    ),
                 )
             )
         return tuple(sorted(facts, key=lambda item: (item.sprint_id, item.task_id)))
@@ -4457,6 +4550,8 @@ class WorkflowFactRepository:
         stories: Iterable[UserStory],
         dependencies: Iterable[UserStoryDependency],
         stories_by_id: dict[int, UserStory],
+        *,
+        completed_story_ids: frozenset[int],
     ) -> dict[int, tuple[str, ...]]:
         blockers: dict[int, list[str]] = {story_id: [] for story_id in stories_by_id}
         for story in stories:
@@ -4470,10 +4565,23 @@ class WorkflowFactRepository:
             except StoryValidationReadinessError:
                 blockers[story_id].append("STORY_VALIDATION_REQUIRED")
         for dependency in dependencies:
-            if dependency.status != "active":
+            if dependency.status not in {"active", "proposed"}:
+                continue
+            dependent = stories_by_id[dependency.dependent_story_id]
+            if (
+                dependent.is_superseded
+                or is_terminal_external(dependent)
+                or dependency.dependent_story_id in completed_story_ids
+            ):
                 continue
             prerequisite = stories_by_id[dependency.prerequisite_story_id]
-            if prerequisite.status not in _DONE_STORY_STATUSES:
+            if prerequisite.is_superseded:
+                blockers[dependency.dependent_story_id].append(
+                    "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT"
+                )
+            elif dependency.status == "active" and not is_terminal_external(
+                prerequisite
+            ):
                 blockers[dependency.dependent_story_id].append(
                     f"PREREQUISITE_STORY_{dependency.prerequisite_story_id}_INCOMPLETE"
                 )

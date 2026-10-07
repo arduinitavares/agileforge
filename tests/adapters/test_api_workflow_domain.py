@@ -1155,7 +1155,7 @@ def _planning_review_headers(path: str) -> dict[str, str]:
             },
             {
                 "selected_story_ids": [7, 9],
-                "selected_scope_fingerprint": "sha256:" + ("a" * 64),
+                "source_fingerprint": "sha256:" + ("a" * 64),
                 "reviewed_edges": [
                     {
                         "dependent_story_id": 9,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import TypeAdapter, ValidationError
@@ -83,6 +83,7 @@ from services.sprint_ownership import (
     sprint_owner_projection,
 )
 from services.story_artifact_lineage import build_story_artifact_lineage_nodes
+from services.story_dependencies import DependencyGraphIssue
 from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
@@ -111,7 +112,11 @@ from workflow.fingerprints import (
     canonical_hash,
     canonical_json,
 )
-from workflow.planning_integrity import current_task_content_fingerprint
+from workflow.planning_integrity import (
+    current_task_content_fingerprint,
+    is_terminal_external,
+    superseded_dependency_edges,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -3372,7 +3377,7 @@ class DurableReadProjectionService:
         )
 
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
-        """Return durable dependency edges and reviewed sets."""
+        """Return retained graph history and actionable obsolete edges."""
         with self._session() as session:
             if (
                 self._bound_session is None
@@ -3471,6 +3476,47 @@ class DurableReadProjectionService:
             _validated(rev.model_dump(mode="json"))
             for rev in snapshot.story_dependency_reviews
         ]
+        completed_sprint_ids = {
+            sprint.sprint_id
+            for sprint in snapshot.sprints
+            if sprint.status == "completed"
+        }
+        completed_story_ids = frozenset(
+            story.story_id
+            for story in snapshot.stories
+            if any(sprint_id in completed_sprint_ids for sprint_id in story.sprint_ids)
+        )
+        root_story_ids = tuple(
+            story.story_id
+            for story in active_stories
+            if not is_terminal_external(story)
+            and story.story_id not in completed_story_ids
+        )
+        issues: list[JsonValue] = [
+            _validated(
+                asdict(
+                    DependencyGraphIssue(
+                        code="STORY_DEPENDENCY_SUPERSEDED_ENDPOINT",
+                        message=(
+                            f"Story {edge.dependent_story_id} depends on superseded "
+                            f"Story {edge.prerequisite_story_id}; human dependency "
+                            "review is required."
+                        ),
+                        story_ids=[edge.dependent_story_id, edge.prerequisite_story_id],
+                        edge_status=edge.status,
+                        dependency_id=edge.dependency_id,
+                        dependent_story_id=edge.dependent_story_id,
+                        prerequisite_story_id=edge.prerequisite_story_id,
+                    )
+                )
+            )
+            for edge in superseded_dependency_edges(
+                stories=snapshot.stories,
+                dependencies=snapshot.story_dependencies,
+                root_story_ids=root_story_ids,
+                completed_story_ids=completed_story_ids,
+            )
+        ]
         selected_story_ids: list[JsonValue] = [story.story_id for story in selected]
 
         return _success(
@@ -3478,6 +3524,7 @@ class DurableReadProjectionService:
                 "project_id": project_id,
                 "edges": edges,
                 "reviews": reviews,
+                "issues": issues,
                 "stories": serialized_stories,
                 "selected_story_ids": selected_story_ids,
                 "selected_scope_fingerprint": selected_scope_fingerprint,

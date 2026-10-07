@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from models.enums import TaskStatus
+from models.enums import StoryStatus, TaskStatus
 from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
 from workflow.facts import (
     StoryDependencyReviewEdgeFact,
@@ -14,11 +14,12 @@ from workflow.fingerprints import canonical_hash
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from models.core import UserStory
     from services.contracts.sprint import (
         SprintPlannerOutput,
     )
     from workflow.contracts import JsonObject
-    from workflow.facts import StoryDependencyFact, TaskFact
+    from workflow.facts import StoryDependencyFact, StoryFact, TaskFact
 
 
 def dependency_edge_payload(edge: StoryDependencyReviewEdgeFact) -> JsonObject:
@@ -73,7 +74,7 @@ def dependency_edges_are_canonical(
 
 
 def dependency_edges_have_cycle(
-    edges: Iterable[StoryDependencyReviewEdgeFact],
+    edges: Iterable[StoryDependencyReviewEdgeFact | StoryDependencyFact],
 ) -> bool:
     """Return whether directed dependency semantics contain a cycle."""
     graph: dict[int, set[int]] = {}
@@ -166,6 +167,113 @@ def selected_dependency_active_closure(
                 edge.dependency_id,
             ),
         )
+    )
+
+
+def is_terminal_external(story: StoryFact | UserStory) -> bool:
+    """Classify completed live authority independently of selection/membership."""
+    return not story.is_superseded and story.status in {
+        StoryStatus.DONE,
+        StoryStatus.ACCEPTED,
+    }
+
+
+def current_dependency_closure(
+    *,
+    stories: tuple[StoryFact, ...],
+    dependencies: tuple[StoryDependencyFact, ...],
+    root_story_ids: tuple[int, ...],
+    include_proposed: bool = False,
+    completed_story_ids: frozenset[int] = frozenset(),
+) -> tuple[StoryDependencyFact, ...]:
+    """Retain incoming authority while excluding completed outgoing history."""
+    stories_by_id = {story.story_id: story for story in stories}
+    if len(stories_by_id) != len(stories) or not set(root_story_ids).issubset(
+        stories_by_id
+    ):
+        message = "Current dependency closure references a missing or duplicate Story."
+        raise ValueError(message)
+    by_dependent: dict[int, list[StoryDependencyFact]] = {}
+    for edge in dependencies:
+        if edge.status == "active" or (include_proposed and edge.status == "proposed"):
+            by_dependent.setdefault(edge.dependent_story_id, []).append(edge)
+    visited: set[int] = set()
+    dependency_ids: set[int] = set()
+    endpoints: set[tuple[int, int]] = set()
+    closure: list[StoryDependencyFact] = []
+    pending = sorted(set(root_story_ids), reverse=True)
+    while pending:
+        dependent_id = pending.pop()
+        if dependent_id in visited:
+            continue
+        visited.add(dependent_id)
+        dependent = stories_by_id[dependent_id]
+        if (
+            dependent.is_superseded
+            or is_terminal_external(dependent)
+            or dependent_id in completed_story_ids
+        ):
+            continue
+        for edge in sorted(
+            by_dependent.get(dependent_id, ()),
+            key=lambda row: (
+                row.dependent_story_id,
+                row.prerequisite_story_id,
+                row.dependency_id,
+            ),
+        ):
+            endpoint = (edge.dependent_story_id, edge.prerequisite_story_id)
+            if (
+                edge.dependency_id <= 0
+                or edge.dependent_story_id == edge.prerequisite_story_id
+                or edge.dependency_id in dependency_ids
+                or endpoint in endpoints
+                or edge.prerequisite_story_id not in stories_by_id
+            ):
+                message = "Current dependency closure contains malformed endpoints."
+                raise ValueError(message)
+            dependency_ids.add(edge.dependency_id)
+            endpoints.add(endpoint)
+            closure.append(edge)
+            prerequisite = stories_by_id[edge.prerequisite_story_id]
+            if (
+                prerequisite.is_superseded
+                or is_terminal_external(prerequisite)
+                or prerequisite.story_id in completed_story_ids
+            ):
+                continue
+            pending.append(prerequisite.story_id)
+    return tuple(
+        sorted(
+            closure,
+            key=lambda row: (
+                row.dependent_story_id,
+                row.prerequisite_story_id,
+                row.dependency_id,
+            ),
+        )
+    )
+
+
+def superseded_dependency_edges(
+    *,
+    stories: tuple[StoryFact, ...],
+    dependencies: tuple[StoryDependencyFact, ...],
+    root_story_ids: tuple[int, ...],
+    completed_story_ids: frozenset[int] = frozenset(),
+) -> tuple[StoryDependencyFact, ...]:
+    """Find actionable obsolete endpoints across active and proposed authority."""
+    superseded_ids = {story.story_id for story in stories if story.is_superseded}
+    return tuple(
+        edge
+        for edge in current_dependency_closure(
+            stories=stories,
+            dependencies=dependencies,
+            root_story_ids=root_story_ids,
+            include_proposed=True,
+            completed_story_ids=completed_story_ids,
+        )
+        if edge.prerequisite_story_id in superseded_ids
     )
 
 

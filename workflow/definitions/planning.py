@@ -38,8 +38,11 @@ from workflow.graph import (
 )
 from workflow.planning_integrity import (
     active_dependency_review_edges,
+    current_dependency_closure,
     current_task_content_fingerprint,
+    dependency_edges_have_cycle,
     dependency_review_fingerprint,
+    is_terminal_external,
     selected_dependency_active_closure,
 )
 from workflow.sprint_lineage import (
@@ -821,14 +824,22 @@ def _dependency_review_evaluation(  # noqa: PLR0911
     proposals_actionable: bool = False,
 ) -> RuleEvaluation:
     source = story_dependency_source_fingerprint(stories)
+    completed_story_ids = frozenset(
+        story.story_id
+        for story in snapshot.stories
+        if not _is_current_planning_story(snapshot, story)
+    )
     dependency_problem = _dependency_problem(
         stories,
         snapshot.stories,
         snapshot.story_dependencies,
+        completed_story_ids=completed_story_ids,
     )
     if dependency_problem is not None:
         category, reason = dependency_problem
-        if proposals_actionable and reason == "STORY_DEPENDENCIES_UNREVIEWED":
+        if reason == "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT" or (
+            proposals_actionable and reason == "STORY_DEPENDENCIES_UNREVIEWED"
+        ):
             return _dependency_review_required(
                 snapshot,
                 source,
@@ -836,7 +847,10 @@ def _dependency_review_evaluation(  # noqa: PLR0911
                     Blocker(
                         code=reason,
                         message=(
-                            "Selected Story scope contains proposed dependencies "
+                            "Selected Story scope retains a superseded prerequisite "
+                            "that requires human reconciliation."
+                            if reason == "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT"
+                            else "Selected Story scope contains proposed dependencies "
                             "that require approval or exclusion."
                         ),
                     ),
@@ -948,43 +962,37 @@ def _dependency_problem(
     stories: tuple[StoryFact, ...],
     all_stories: tuple[StoryFact, ...],
     dependencies: tuple[StoryDependencyFact, ...],
+    *,
+    completed_story_ids: frozenset[int],
 ) -> tuple[RuleCategory, str] | None:
-    story_ids = {item.story_id for item in stories}
-    all_story_ids = {item.story_id for item in all_stories}
-    relevant = tuple(
-        item
-        for item in dependencies
-        if item.dependent_story_id in story_ids
-        and item.status in {"active", "proposed"}
+    roots = tuple(
+        item.story_id
+        for item in stories
+        if not item.is_superseded and not is_terminal_external(item)
     )
-    if any(
-        item.prerequisite_story_id not in all_story_ids
-        or item.dependent_story_id == item.prerequisite_story_id
-        for item in relevant
-    ):
+    try:
+        relevant = current_dependency_closure(
+            stories=all_stories,
+            dependencies=dependencies,
+            root_story_ids=roots,
+            include_proposed=True,
+            completed_story_ids=completed_story_ids,
+        )
+        active = current_dependency_closure(
+            stories=all_stories,
+            dependencies=dependencies,
+            root_story_ids=roots,
+            completed_story_ids=completed_story_ids,
+        )
+        active_edges = active_dependency_review_edges(active)
+    except ValueError:
         return RuleCategory.INVALID, "STORY_DEPENDENCY_INVALID"
+    superseded_ids = {item.story_id for item in all_stories if item.is_superseded}
+    if any(item.prerequisite_story_id in superseded_ids for item in relevant):
+        return RuleCategory.BLOCKED, "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT"
     if any(item.status == "proposed" for item in relevant):
         return RuleCategory.BLOCKED, "STORY_DEPENDENCIES_UNREVIEWED"
-    edges: dict[int, set[int]] = {}
-    for item in dependencies:
-        if item.status != "active":
-            continue
-        edges.setdefault(item.dependent_story_id, set()).add(item.prerequisite_story_id)
-    active: set[int] = set()
-    visited: set[int] = set()
-
-    def visit(story_id: int) -> bool:
-        if story_id in active:
-            return True
-        if story_id in visited:
-            return False
-        visited.add(story_id)
-        active.add(story_id)
-        found = any(visit(parent) for parent in sorted(edges.get(story_id, set())))
-        active.remove(story_id)
-        return found
-
-    if any(visit(story_id) for story_id in sorted(story_ids)):
+    if dependency_edges_have_cycle(active_edges):
         return RuleCategory.INVALID, "STORY_DEPENDENCY_CYCLE"
     return None
 
@@ -1110,9 +1118,35 @@ def _sprint_candidate_problem(
     return None
 
 
+def _project_dependency_problem(
+    snapshot: WorkflowFactSnapshot,
+) -> RuleEvaluation | None:
+    """Match execution's full active graph without changing readiness scope."""
+    # Execution validates every active Project edge, including terminal history.
+    # Keep this barrier separate from current readiness and human review scope.
+    project_edges = (
+        edge for edge in snapshot.story_dependencies if edge.status == "active"
+    )
+    if dependency_edges_have_cycle(project_edges):
+        return RuleEvaluation(
+            RuleCategory.INVALID,
+            "STORY_DEPENDENCY_CYCLE",
+            blockers=(
+                Blocker(
+                    code="STORY_DEPENDENCY_CYCLE",
+                    message="The Project's active Story dependency graph has a cycle.",
+                ),
+            ),
+        )
+    return None
+
+
 def _sprint_join(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[StoryFact, ...] | RuleEvaluation:
+    project_problem = _project_dependency_problem(snapshot)
+    if project_problem is not None:
+        return project_problem
     selected = selected_scope_stories(snapshot)
     if not selected:
         selected_intent = _selected_intent_stories(snapshot)
@@ -1150,11 +1184,18 @@ def _sprint_join(  # noqa: PLR0911
     if candidate_problem is not None:
         return candidate_problem
     dependency_review = _dependency_review_evaluation(snapshot, selected)
-    if dependency_review.category is RuleCategory.INVALID:
+    if dependency_review.category in {RuleCategory.INVALID, RuleCategory.BLOCKED}:
         return dependency_review
     if dependency_review.category is not RuleCategory.SATISFIED:
-        if dependency_review.category is RuleCategory.BLOCKED:
-            return dependency_review
+        if any(
+            blocker.code == "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT"
+            for blocker in dependency_review.blockers
+        ):
+            return RuleEvaluation(
+                RuleCategory.BLOCKED,
+                "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT",
+                blockers=dependency_review.blockers,
+            )
         return RuleEvaluation(
             RuleCategory.BLOCKED,
             "STORY_DEPENDENCIES_UNREVIEWED",
@@ -1332,6 +1373,16 @@ def _sprint_plan_rule(
         and not lifecycle_is_quiescent(snapshot)
     ):
         return _existing_sprint_plan_evaluation(snapshot, cycle_head, ())
+    if (
+        cycle_head is not None
+        and cycle_head.status == "accepted"
+        and not _plan_has_matching_sprint_start(snapshot, cycle_head)
+        and _sprint_plan_freshness_reason(
+            snapshot, cycle_head, selected_scope_stories(snapshot), review=False
+        )
+        == "SPRINT_PLAN_STALE"
+    ):
+        return (RuleEvaluation(RuleCategory.INVALID, "SPRINT_PLAN_STALE"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
         return (joined,)
@@ -1358,6 +1409,8 @@ def _sprint_review_rule(
         return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_REVIEW_NOT_PENDING"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
+        if joined.reason_code == "STORY_DEPENDENCY_CYCLE":
+            return (joined,)
         return (
             RuleEvaluation(
                 RuleCategory.INVALID,
@@ -1490,7 +1543,7 @@ def _sprint_start_lifecycle_state(
     return "unstarted"
 
 
-def _sprint_start_rule(
+def _sprint_start_rule(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
@@ -1526,6 +1579,13 @@ def _sprint_start_rule(
         or plan.spec_hash != specification.spec_hash
     ):
         return (RuleEvaluation(RuleCategory.INVALID, "STALE_SPECIFICATION"),)
+    if (
+        _sprint_plan_freshness_reason(
+            snapshot, plan, selected_scope_stories(snapshot), review=False
+        )
+        == "SPRINT_PLAN_STALE"
+    ):
+        return (RuleEvaluation(RuleCategory.INVALID, "SPRINT_PLAN_STALE"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
         return (joined,)

@@ -884,11 +884,16 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
     engine: Engine,
 ) -> None:
     """Omit historical rows without disguising a retained stale dependency."""
-    project_id, source_story_ids, _replacement_story_ids = (
+    project_id, source_story_ids, replacement_story_ids = (
         _accepted_replacement_story_project(engine)
     )
     historical_story_id = source_story_ids[0]
-    active_story_id = 5
+    with Session(engine) as session:
+        active_story_id = next(
+            story.story_id
+            for story in WorkflowFactRepository(session).load(project_id).stories
+            if not story.is_superseded and story.story_id not in replacement_story_ids
+        )
     reviewed_edge = StoryDependencyReviewEdgeFact(
         dependent_story_id=active_story_id,
         prerequisite_story_id=historical_story_id,
@@ -896,31 +901,34 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
     )
     source_fingerprint = "sha256:" + "e" * 64
     with Session(engine) as session:
-        session.add(
-            UserStoryDependency(
-                project_id=project_id,
-                dependent_story_id=active_story_id,
-                prerequisite_story_id=historical_story_id,
-                status="active",
-                source="manual_review",
-                confidence="reviewed",
-                reason=reviewed_edge.reason,
-            )
+        edge_row = UserStoryDependency(
+            project_id=project_id,
+            dependent_story_id=active_story_id,
+            prerequisite_story_id=historical_story_id,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason=reviewed_edge.reason,
         )
-        session.add(
-            StoryDependencyReview(
-                project_id=project_id,
-                selected_story_ids_json=canonical_json([active_story_id]),
-                reviewed_edges_json=canonical_json(
-                    [reviewed_edge.model_dump(mode="json")]
-                ),
-                source_fingerprint=source_fingerprint,
-                dependency_fingerprint=dependency_review_fingerprint((reviewed_edge,)),
-                reviewed_by="issue-228-boundary-reviewer",
-                reviewed_at=NOW,
-            )
+        review_row = StoryDependencyReview(
+            project_id=project_id,
+            selected_story_ids_json=canonical_json([active_story_id]),
+            reviewed_edges_json=canonical_json([reviewed_edge.model_dump(mode="json")]),
+            source_fingerprint=source_fingerprint,
+            dependency_fingerprint=dependency_review_fingerprint((reviewed_edge,)),
+            reviewed_by="issue-228-boundary-reviewer",
+            reviewed_at=NOW,
         )
+        session.add(edge_row)
+        session.add(review_row)
         session.commit()
+        edge_id = edge_row.dependency_id
+        review_id = review_row.story_dependency_review_id
+        retained_rows = (
+            edge_row.model_dump(mode="json"),
+            review_row.model_dump(mode="json"),
+        )
+        snapshot = WorkflowFactRepository(session).load(project_id)
 
     data = _data(
         DurableReadProjectionService(engine=engine).story_dependencies_inspect(
@@ -945,6 +953,45 @@ def test_story_dependencies_inspect_retains_issue_188_stale_edge_evidence(
     assert [
         review["selected_story_ids"] for review in reviews if isinstance(review, dict)
     ] == [[active_story_id]]
+    assert any(
+        edge["dependency_id"] == edge_id for edge in edges if isinstance(edge, dict)
+    )
+    assert any(
+        review["review_id"] == review_id
+        and review["source_fingerprint"] == source_fingerprint
+        for review in reviews
+        if isinstance(review, dict)
+    )
+    issues = data["issues"]
+    assert isinstance(issues, list)
+    assert len(issues) == 1
+    issue = issues[0]
+    assert isinstance(issue, dict)
+    assert set(issue) == {
+        "code",
+        "message",
+        "story_ids",
+        "edge_status",
+        "dependency_id",
+        "dependent_story_id",
+        "prerequisite_story_id",
+    }
+    assert issue["code"] == "STORY_DEPENDENCY_SUPERSEDED_ENDPOINT"
+    assert issue["story_ids"] == [active_story_id, historical_story_id]
+    assert issue["edge_status"] == "active"
+    assert issue["dependency_id"] == edge_id
+    assert issue["dependent_story_id"] == active_story_id
+    assert issue["prerequisite_story_id"] == historical_story_id
+    assert isinstance(issue["message"], str)
+    assert issue["message"]
+    assert {story.selected_scope_fingerprint for story in snapshot.stories} == {
+        data["selected_scope_fingerprint"]
+    }
+    with Session(engine) as session:
+        assert (
+            session.get_one(UserStoryDependency, edge_id).model_dump(mode="json"),
+            session.get_one(StoryDependencyReview, review_id).model_dump(mode="json"),
+        ) == retained_rows
 
 
 def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(

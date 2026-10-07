@@ -53,6 +53,14 @@ class BlockedCommand(TypedDict):
     message: str
 
 
+class InvalidNodeReason(TypedDict):
+    """One invalid typed decision's existing diagnostic identity."""
+
+    node_id: str
+    instance_key: str | None
+    reason_code: str
+
+
 class WorkflowNextPayload(TypedDict):
     """Workflow-next CLI response."""
 
@@ -64,6 +72,7 @@ class WorkflowNextPayload(TypedDict):
     waiting_nodes: list[str]
     blocked_nodes: list[str]
     invalid_nodes: list[str]
+    invalid_node_reasons: list[InvalidNodeReason]
 
 
 type CommandRender = Callable[[WorkflowPosition, NodeDecision], tuple[str, ...]]
@@ -534,6 +543,15 @@ def render_workflow_next(
         "waiting_nodes": list(position.waiting_nodes),
         "blocked_nodes": list(position.blocked_nodes),
         "invalid_nodes": list(position.invalid_nodes),
+        "invalid_node_reasons": [
+            {
+                "node_id": decision.node_id,
+                "instance_key": decision.instance_key,
+                "reason_code": decision.reason_code,
+            }
+            for decision in position.decisions
+            if decision.category is NodeCategory.INVALID
+        ],
     }
 
 

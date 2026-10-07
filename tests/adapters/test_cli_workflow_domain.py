@@ -1700,6 +1700,61 @@ def test_workflow_next_reads_position_once() -> None:
     ]
 
 
+def test_workflow_next_preserves_invalid_decision_reasons_and_instances() -> None:
+    """Expose typed invalid diagnostics without changing command selection."""
+    baseline = position_fixture()
+    invalid = (
+        NodeDecision(
+            node_id="planning.sprint.plan",
+            child_graph_id="planning",
+            request_kind="record_sprint_plan",
+            instance_key="sprint:73",
+            category=NodeCategory.INVALID,
+            recommendation_kind=RecommendationKind.RECOVERY,
+            reason_code="SPRINT_PLAN_STALE",
+            decision_fingerprint="stale-plan-diagnostic",
+        ),
+        NodeDecision(
+            node_id="execution.task.complete",
+            child_graph_id="execution",
+            request_kind="complete_task",
+            instance_key="task:91",
+            category=NodeCategory.INVALID,
+            recommendation_kind=RecommendationKind.RECOVERY,
+            reason_code="TASK_EXECUTION_INTEGRITY_INVALID",
+            decision_fingerprint="task-integrity-diagnostic",
+        ),
+    )
+    position = baseline.model_copy(
+        update={
+            "invalid_nodes": tuple(item.node_id for item in invalid),
+            "decisions": (*baseline.decisions, *invalid),
+        }
+    )
+    application = _FakeApplication(position)
+
+    payload = workflow_next(application=application, project_id=position.project_id)
+
+    assert application.position_calls == [position.project_id]
+    assert payload["invalid_node_reasons"] == [
+        {
+            "node_id": item.node_id,
+            "instance_key": item.instance_key,
+            "reason_code": item.reason_code,
+        }
+        for item in invalid
+    ]
+    assert payload["invalid_nodes"] == list(position.invalid_nodes)
+    assert payload["waiting_nodes"] == list(baseline.waiting_nodes)
+    assert payload["blocked_nodes"] == list(baseline.blocked_nodes)
+    assert (
+        payload["commands"]
+        == workflow_next(
+            application=_FakeApplication(baseline), project_id=baseline.project_id
+        )["commands"]
+    )
+
+
 def test_workflow_next_advertises_retry_and_exact_retry_start_binding() -> None:
     """Expose optional retry and its distinct retry-bound start command exactly."""
     retry = NodeDecision(

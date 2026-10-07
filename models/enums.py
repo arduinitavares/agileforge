@@ -72,6 +72,7 @@ class WorkflowEventType(StrEnum):
     STORY_DEPENDENCIES_PROPOSED = "story_dependencies_proposed"
     STORY_DEPENDENCIES_APPLIED = "story_dependencies_applied"
     STORY_SELECTION_CHANGED = "story_selection_changed"
+    STORY_DEPENDENCY_STALE = "story_dependency_stale"
     SPRINT_PLAN_DRAFT = "sprint_plan_draft"
     SPRINT_PLAN_REVIEW = "sprint_plan_review"
     SPRINT_PLAN_SAVED = "sprint_plan_saved"

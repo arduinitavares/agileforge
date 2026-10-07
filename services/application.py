@@ -3534,7 +3534,7 @@ class AgileForgeApplication:
             request=request,
             operator_input={
                 "selected_story_ids": list(selected_story_ids),
-                "selected_scope_fingerprint": request.selected_scope_fingerprint,
+                "source_fingerprint": request.selected_scope_fingerprint,
                 "reviewed_edges": [
                     item.model_dump(mode="json") for item in reviewed_edges
                 ],

@@ -1,17 +1,25 @@
 """Story dependency graph loading and diagnostics."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from sqlmodel import Session, col, select
 
-from models.core import UserStory, UserStoryDependency
-from models.enums import WorkflowEventType
+from models.core import Sprint, SprintStory, UserStory, UserStoryDependency
+from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.sprint_retry import SprintRetryAttempt
 from models.workflow import StoryDependencyReview
 from services.agent_workbench.story_phase import (
     load_story_correction_target_in_session,
+)
+from services.story_dependency_lifecycle import (
+    StoryDependencyLifecycleIntegrityError,
+    adopt_story_dependency_invalidations_in_session,
+    infer_unrecorded_story_dependency_invalidations_in_session,
+    load_story_dependency_invalidations_in_session,
+    validate_reviewed_dependency_lifecycle_in_session,
 )
 from workflow.execution_scope import retry_blocks_planning
 from workflow.facts import StoryDependencyReviewEdgeFact
@@ -21,6 +29,7 @@ from workflow.planning_integrity import (
     dependency_edges_have_duplicate_endpoints,
     dependency_edges_payload,
     dependency_review_fingerprint,
+    is_terminal_external,
 )
 
 
@@ -299,6 +308,73 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
     existing_rows = session.exec(
         select(UserStoryDependency).where(UserStoryDependency.project_id == project_id)
     ).all()
+    try:
+        load_story_dependency_invalidations_in_session(session, project_id=project_id)
+        project_stories = session.exec(
+            select(UserStory).where(UserStory.project_id == project_id)
+        ).all()
+        completed_story_ids = frozenset(
+            session.exec(
+                select(SprintStory.story_id)
+                .join(Sprint, col(Sprint.sprint_id) == col(SprintStory.sprint_id))
+                .where(
+                    col(Sprint.project_id) == project_id,
+                    col(Sprint.status) == SprintStatus.COMPLETED,
+                )
+            ).all()
+        )
+        prospective_cycles = _prospective_dependency_cycles(
+            stories=project_stories,
+            dependencies=existing_rows,
+            selected_story_ids=selected,
+            reviewed_pairs=pairs,
+            completed_story_ids=completed_story_ids,
+        )
+        if prospective_cycles:
+            raise StoryDependencyGraphError(
+                [
+                    DependencyGraphIssue(
+                        code="STORY_DEPENDENCY_CYCLE",
+                        message="Prospective active Story dependency graph is cyclic.",
+                        story_ids=cycle,
+                        edge_status="active",
+                    )
+                    for cycle in prospective_cycles
+                ]
+            )
+        try:
+            validate_reviewed_dependency_lifecycle_in_session(
+                session,
+                project_id=project_id,
+                selected_story_ids=selected_story_ids,
+                reviewed_edges=reviewed_edges,
+            )
+        except ValueError as error:
+            raise StoryDependencyGraphError(
+                [
+                    DependencyGraphIssue(
+                        code="STORY_DEPENDENCY_SUPERSEDED_ENDPOINT",
+                        message=str(error),
+                        story_ids=sorted(selected),
+                    )
+                ]
+            ) from error
+        implicit = infer_unrecorded_story_dependency_invalidations_in_session(
+            session, project_id=project_id, root_story_ids=selected_story_ids
+        )
+        adopt_story_dependency_invalidations_in_session(
+            session, project_id=project_id, anchors=implicit, reviewed_at=reviewed_at
+        )
+    except StoryDependencyLifecycleIntegrityError as error:
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_INVALID",
+                    message=str(error),
+                    story_ids=sorted(selected),
+                )
+            ]
+        ) from error
     existing_by_pair = {
         (row.dependent_story_id, row.prerequisite_story_id): row
         for row in existing_rows
@@ -362,6 +438,89 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
     )
     session.flush()
     return review
+
+
+def _prospective_dependency_cycles(
+    *,
+    stories: Sequence[UserStory],
+    dependencies: Sequence[UserStoryDependency],
+    selected_story_ids: set[int],
+    reviewed_pairs: tuple[tuple[int, int], ...],
+    completed_story_ids: frozenset[int],
+) -> list[list[int]]:
+    """Check current closure and submitted cycles across all active history."""
+    stories_by_id = {story.story_id: story for story in stories}
+    if any(
+        row.dependent_story_id not in stories_by_id
+        or row.prerequisite_story_id not in stories_by_id
+        for row in dependencies
+    ):
+        message = "Stored dependency references a foreign or missing Project Story."
+        raise StoryDependencyLifecycleIntegrityError(message)
+    pairs = (
+        *(
+            (row.dependent_story_id, row.prerequisite_story_id)
+            for row in dependencies
+            if row.status == "active"
+            and row.dependent_story_id not in selected_story_ids
+        ),
+        *reviewed_pairs,
+    )
+    adjacency: dict[int, set[int]] = {}
+    for dependent_id, prerequisite_id in pairs:
+        adjacency.setdefault(dependent_id, set()).add(prerequisite_id)
+    current: dict[int, set[int]] = {}
+    pending = list(selected_story_ids)
+    visited: set[int] = set()
+    while pending:
+        story_id = pending.pop()
+        if story_id in visited:
+            continue
+        visited.add(story_id)
+        story = stories_by_id[story_id]
+        if (
+            story.is_superseded
+            or is_terminal_external(story)
+            or story_id in completed_story_ids
+        ):
+            continue
+        prerequisites = adjacency.get(story_id, set())
+        current[story_id] = prerequisites
+        pending.extend(prerequisites)
+    cycles = detect_dependency_cycles(current)
+    seen = {_canonical_cycle_key(cycle) for cycle in cycles}
+    for cycle in _reviewed_pair_cycles(adjacency, reviewed_pairs):
+        key = _canonical_cycle_key(cycle)
+        if key not in seen:
+            seen.add(key)
+            cycles.append(cycle)
+    return cycles
+
+
+def _reviewed_pair_cycles(
+    adjacency: dict[int, set[int]],
+    reviewed_pairs: tuple[tuple[int, int], ...],
+) -> list[list[int]]:
+    """Find a return path for each reviewed edge, including terminal history."""
+    cycles: list[list[int]] = []
+    for dependent_id, prerequisite_id in sorted(reviewed_pairs):
+        parents: dict[int, int | None] = {prerequisite_id: None}
+        pending = [prerequisite_id]
+        while pending:
+            story_id = pending.pop()
+            if story_id == dependent_id:
+                reverse_path = [dependent_id]
+                parent_id = parents[dependent_id]
+                while parent_id is not None:
+                    reverse_path.append(parent_id)
+                    parent_id = parents[parent_id]
+                cycles.append([dependent_id, *reversed(reverse_path)])
+                break
+            for next_id in sorted(adjacency.get(story_id, ()), reverse=True):
+                if next_id not in parents:
+                    parents[next_id] = story_id
+                    pending.append(next_id)
+    return cycles
 
 
 def _canonical_cycle_key(cycle_path: list[int]) -> tuple[int, ...]:
