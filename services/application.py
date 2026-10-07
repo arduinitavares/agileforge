@@ -5097,6 +5097,11 @@ class AgileForgeApplication:
             return TransitionResult(
                 ok=False,
                 position=position,
+                output=(
+                    {"repository_recovery": error.recovery.model_dump(mode="json")}
+                    if error.recovery is not None
+                    else {}
+                ),
                 error=WorkflowError(
                     code=_source_registration_workflow_error_code(error.code),
                     message=str(error),

@@ -37,6 +37,7 @@ from services.vision_evidence import (
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
 from tests.adapters.test_command_renderer import position_fixture
+from tests.services import test_specification_source_application as source_fixtures
 from tests.services.test_durable_product_definition_projections import (
     NOW,
     _add_goal_turn,
@@ -45,6 +46,13 @@ from tests.services.test_durable_product_definition_projections import (
     _seed_vision_candidate,
     _seeded_int,
 )
+from tests.services.test_specification_source_application import (
+    _block_source_capture,
+    _expected_stale_recovery,
+    _registered_source_fixture,
+)
+from tests.workflow.test_specification_rebinding import _accepted_rows
+from utils import runtime_ownership
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -70,6 +78,18 @@ if TYPE_CHECKING:
 SPRINT_CAPACITY_POINTS = 8
 ARGUMENT_ERROR_EXIT_CODE = 2
 PROJECT_ID = 41
+source_recovery_engine = source_fixtures.source_recovery_engine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_runtime_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise real runtime locking only within this test's disposable root."""
+    monkeypatch.setattr(
+        runtime_ownership, "runtime_roots", lambda: (tmp_path.resolve(),)
+    )
 
 
 _SEMANTIC_TEXT_COMMANDS = (
@@ -349,6 +369,47 @@ def test_specification_source_register_cli_sends_only_human_paths_and_metadata(
     ):
         assert not hasattr(request, hidden)
     assert '"ok": true' in capsys.readouterr().out
+
+
+def test_cli_stale_registration_serializes_recovery(
+    source_recovery_engine: "Engine",
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The existing injected CLI emits failure output without refreshing or writing."""
+    engine = source_recovery_engine
+    fixture = _registered_source_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    (fixture.repository / "SPECIFICATION.md").write_text("Changed source\n")
+    _block_source_capture(monkeypatch)
+    exit_code = cli_main.main(
+        [
+            "specification",
+            "source",
+            "register",
+            "--project-id",
+            str(fixture.project_id),
+            "--source-path",
+            "SPECIFICATION.md",
+            "--preparation-capability",
+            "grill-with-docs",
+            "--idempotency-key",
+            "stale-cli-registration",
+            "--actor",
+            "operator",
+        ],
+        application=fixture.application,
+    )
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "REPOSITORY_PROVENANCE_STALE"
+    assert payload["output"] == {
+        "repository_recovery": _expected_stale_recovery(fixture.binding_id)
+    }
+    assert fixture.probe.calls == 1
+    assert _accepted_rows(engine) == original_rows
 
 
 def test_specification_structure_cli_sends_only_transport_metadata(

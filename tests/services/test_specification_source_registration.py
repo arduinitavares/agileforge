@@ -7,21 +7,23 @@ import hashlib
 import os
 import shutil
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Never
 
 import pytest
 from git import Repo
 from pydantic import ValidationError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 import services.specification_source_registration as registration_module
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
+from models.product_definition import SpecificationSource
 from models.repository import RepositoryBinding
 from services.contracts.specification_source import source_bundle_fingerprint
 from services.repository_probe import (
     RepositoryProbeError,
     RepositoryProbeErrorCode,
+    RepositoryStatusEntry,
 )
 from services.specification_source_registration import (
     MAX_SPECIFICATION_SOURCE_ADR_COUNT,
@@ -41,10 +43,11 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
-    from services.repository_probe import RepositoryProbeResult
+    from services.repository_probe import RepositoryProbe, RepositoryProbeResult
 
 _EXPECTED_PROBE_CALLS = 3
 _MIDDLE_PROBE_CALL = 2
+_EXPECTED_STALE_GUARD_PROBE_CALLS = 2
 _COMPLETE_PACKAGE_ADR_COUNT = 14
 _COMPLETE_PACKAGE_BYTES = 125_432
 
@@ -193,6 +196,285 @@ def _raw_sha256(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
+def _source_and_binding_snapshot(
+    engine: Engine,
+) -> tuple[tuple[dict[str, object], ...], ...]:
+    """Keep complete saved rows for a stale attempt's no-write assertion."""
+    with Session(engine) as session:
+        return (
+            tuple(
+                source.model_dump(mode="json")
+                for source in session.exec(select(SpecificationSource)).all()
+            ),
+            tuple(
+                binding.model_dump(mode="json")
+                for binding in session.exec(select(RepositoryBinding)).all()
+            ),
+            tuple(
+                project.model_dump(mode="json")
+                for project in session.exec(select(Project)).all()
+            ),
+        )
+
+
+def _reject_stale_before_capture(
+    engine: Engine,
+    probe: RepositoryProbe,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SpecificationSourceRegistrationError:
+    """Exercise the real guard and detect any document capture or saved-row change."""
+    before = _source_and_binding_snapshot(engine)
+    capture_calls: list[dict[str, object]] = []
+
+    def capture_spy(**kwargs: object) -> Never:
+        capture_calls.append(kwargs)
+        message = "A stale repository must be rejected before document capture"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(registration_module, "_capture_selected_documents", capture_spy)
+    with pytest.raises(SpecificationSourceRegistrationError) as caught:
+        SpecificationSourceRegistrationService(
+            engine=engine, repository_probe=probe
+        ).prepare(_request())
+
+    error = caught.value
+    assert (
+        error.code
+        is SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE
+    )
+    assert capture_calls == []
+    assert _source_and_binding_snapshot(engine) == before
+    return error
+
+
+def test_stale_worktree_recovery_prevents_capture(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clean-to-dirty drift reports saved/check status without reading source bytes."""
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    (repository / "private-filename-sentinel.md").write_bytes(
+        b"private source sentinel"
+    )
+    probe = _CountingProbe()
+
+    error = _reject_stale_before_capture(engine, probe, monkeypatch)
+
+    recovery = getattr(error, "recovery", None)
+    assert recovery is not None
+    assert isinstance(recovery, registration_module.RepositoryBindingRecovery)
+    assert recovery.model_dump(mode="json") == {
+        "reason_code": "REPOSITORY_PROVENANCE_STALE",
+        "cause": "WORKTREE_CHANGED",
+        "recorded_binding_id": 1,
+        "recorded_dirty": False,
+        "observed_dirty": True,
+        "changed_fields": ["working_tree_status"],
+        "action": "refresh_repository_binding",
+    }
+    assert probe.calls == 1
+
+
+def test_dirty_to_dirty_recovery_reports_status_drift(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another changed filename remains stale even when both observations are dirty."""
+    repository = _git_repository(tmp_path)
+    (repository / "first-private-sentinel.md").write_bytes(b"First untracked file")
+    _seed_lineage_and_binding(engine, repository)
+    (repository / "second-private-sentinel.md").write_bytes(b"Second untracked file")
+    probe = _CountingProbe()
+
+    error = _reject_stale_before_capture(engine, probe, monkeypatch)
+
+    recovery = getattr(error, "recovery", None)
+    assert recovery is not None
+    assert recovery.model_dump(mode="json") == {
+        "reason_code": "REPOSITORY_PROVENANCE_STALE",
+        "cause": "WORKTREE_CHANGED",
+        "recorded_binding_id": 1,
+        "recorded_dirty": True,
+        "observed_dirty": True,
+        "changed_fields": ["working_tree_status"],
+        "action": "refresh_repository_binding",
+    }
+    assert probe.calls == 1
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        ("worktree_path", "/private/worktree-sentinel", ["worktree"]),
+        ("common_git_dir", "/private/git-directory-sentinel", ["git_directory"]),
+        ("head_sha", "f" * 40, ["head"]),
+        ("branch_name", "private-branch-sentinel", ["branch"]),
+        ("detached_head", True, ["detached_head"]),
+        ("remotes", ("https://private-remote-sentinel.test/source.git",), ["remotes"]),
+    ],
+)
+def test_identity_drift_recovery_remains_locked(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: tuple[str, object, list[str]],
+) -> None:
+    """Every identity field independently blocks capture and source capability."""
+    field, changed_value, expected_changed_fields = drift
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    observed = (
+        GitPythonRepositoryProbe()
+        .inspect(repository)
+        .model_copy(update={field: changed_value})
+    )
+
+    class _IdentityDriftProbe:
+        calls = 0
+
+        def inspect(self, path: Path | str) -> RepositoryProbeResult:
+            del path
+            self.calls += 1
+            return observed
+
+    probe = _IdentityDriftProbe()
+    error = _reject_stale_before_capture(engine, probe, monkeypatch)
+
+    recovery = getattr(error, "recovery", None)
+    assert recovery is not None
+    assert recovery.model_dump(mode="json") == {
+        "reason_code": "REPOSITORY_PROVENANCE_STALE",
+        "cause": "REPOSITORY_IDENTITY_CHANGED",
+        "recorded_binding_id": 1,
+        "recorded_dirty": False,
+        "observed_dirty": False,
+        "changed_fields": expected_changed_fields,
+        "action": "refresh_repository_binding",
+    }
+    with pytest.raises(SpecificationSourceRegistrationError) as locked:
+        SpecificationSourceRegistrationService(
+            engine=engine, repository_probe=probe
+        ).capability(1)
+    assert locked.value.code is error.code
+    assert locked.value.recovery == recovery
+    assert probe.calls == _EXPECTED_STALE_GUARD_PROBE_CALLS
+
+
+def test_uninspectable_repository_recovery_is_sanitized(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspection failure exposes no unknown status or private probe path."""
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    probe = _RaisingProbe(fail_on_call=1, delegate=GitPythonRepositoryProbe())
+
+    error = _reject_stale_before_capture(engine, probe, monkeypatch)
+
+    recovery = getattr(error, "recovery", None)
+    assert recovery is not None
+    assert recovery.model_dump(mode="json") == {
+        "reason_code": "REPOSITORY_PROVENANCE_STALE",
+        "cause": "INSPECTION_UNAVAILABLE",
+        "recorded_binding_id": 1,
+        "recorded_dirty": False,
+        "observed_dirty": None,
+        "changed_fields": [],
+        "action": "refresh_repository_binding",
+    }
+    assert str(repository) not in recovery.model_dump_json()
+    assert probe.calls == 1
+
+
+def test_repository_recovery_only_contains_allowlisted_categories(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Combined drift prioritizes identity and cannot serialize private probe values."""
+    repository = _git_repository(tmp_path)
+    _seed_lineage_and_binding(engine, repository)
+    observed = (
+        GitPythonRepositoryProbe()
+        .inspect(repository)
+        .model_copy(
+            update={
+                "worktree_path": "/private/worktree-sentinel",
+                "common_git_dir": "/private/git-directory-sentinel",
+                "head_sha": "e" * 40,
+                "branch_name": "private-branch-sentinel",
+                "detached_head": True,
+                "dirty": True,
+                "status_fingerprint": "private-fingerprint-sentinel",
+                "status_entries": (
+                    RepositoryStatusEntry(
+                        area="untracked",
+                        change="added",
+                        path="private-filename-sentinel",
+                    ),
+                ),
+                "remotes": ("https://private-remote-sentinel.test/source.git",),
+            }
+        )
+    )
+
+    class _PrivateValueProbe:
+        def inspect(self, path: Path | str) -> RepositoryProbeResult:
+            del path
+            return observed
+
+    error = _reject_stale_before_capture(engine, _PrivateValueProbe(), monkeypatch)
+
+    recovery = getattr(error, "recovery", None)
+    assert recovery is not None
+    assert recovery.model_dump(mode="json") == {
+        "reason_code": "REPOSITORY_PROVENANCE_STALE",
+        "cause": "REPOSITORY_IDENTITY_CHANGED",
+        "recorded_binding_id": 1,
+        "recorded_dirty": False,
+        "observed_dirty": True,
+        "changed_fields": [
+            "worktree",
+            "git_directory",
+            "head",
+            "branch",
+            "detached_head",
+            "working_tree_status",
+            "remotes",
+        ],
+        "action": "refresh_repository_binding",
+    }
+    serialized = recovery.model_dump_json()
+    for private_value in (
+        str(repository),
+        "/private/worktree-sentinel",
+        "/private/git-directory-sentinel",
+        "e" * 40,
+        "private-branch-sentinel",
+        "private-fingerprint-sentinel",
+        "private-filename-sentinel",
+        "https://private-remote-sentinel.test/source.git",
+        "operator@example.test",
+        "private source sentinel",
+    ):
+        assert private_value not in serialized
+    payload = recovery.model_dump(mode="json")
+    for unsafe_field, unsafe_value in (
+        ("cause", "private-cause-sentinel"),
+        ("changed_fields", ["private-filename-sentinel"]),
+        ("action", "https://private-action-sentinel.test/refresh"),
+        ("worktree_path", "/private/worktree-sentinel"),
+    ):
+        with pytest.raises(ValidationError):
+            type(recovery).model_validate({**payload, unsafe_field: unsafe_value})
+    with pytest.raises(ValidationError):
+        recovery.recorded_dirty = True
+
+
 def test_prepare_preserves_exact_utf8_bytes_and_canonicalizes_adrs(
     engine: Engine,
     tmp_path: Path,
@@ -254,9 +536,7 @@ def test_prepare_requires_the_exact_package_checked_by_preview(
 
     assert prepared.source_fingerprint == preview.source_fingerprint
     with pytest.raises(SpecificationSourceRegistrationError) as caught:
-        service.prepare(
-            _request(expected_source_fingerprint="sha256:" + ("0" * 64))
-        )
+        service.prepare(_request(expected_source_fingerprint="sha256:" + ("0" * 64)))
     assert (
         caught.value.code
         is SpecificationSourceRegistrationErrorCode.SOURCE_PREVIEW_STALE
@@ -535,8 +815,7 @@ def test_prepare_stops_capturing_adrs_when_the_aggregate_limit_is_reached(
         )
 
     assert (
-        caught.value.code
-        is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
+        caught.value.code is SpecificationSourceRegistrationErrorCode.SOURCE_TOO_LARGE
     )
     assert (
         MAX_SPECIFICATION_SOURCE_TOTAL_BYTES

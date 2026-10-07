@@ -10,9 +10,15 @@ from git import Repo
 from sqlmodel import Session, select
 
 from models.core import Project
-from models.product_definition import SpecificationSource
+from models.product_definition import (
+    SpecificationCandidate,
+    SpecificationDecision,
+    SpecificationSource,
+)
 from models.repository import RepositoryBinding, repository_binding_fingerprint
+from models.specs import SpecRegistry
 from repositories.workflow import WorkflowFactRepository
+from services.read_projections import DurableReadProjectionService
 from services.specification_source_registration import (
     SpecificationSourceRegistrationError,
     SpecificationSourceRegistrationErrorCode,
@@ -28,7 +34,7 @@ from tests.workflow.test_product_discovery_transitions import (
     _repository,
     _structure,
 )
-from workflow.contracts import RecommendationKind
+from workflow.contracts import JsonObject, RecommendationKind
 from workflow.definitions.product_discovery import (
     accepted_current_spec,
     current_specification_source,
@@ -178,6 +184,98 @@ def _commit_implementation(worktree: Path) -> None:
     with Repo(worktree) as implementation:
         implementation.index.add(["implementation.txt"])
         implementation.index.commit("deliver Sprint")
+
+
+def _projection_data(result: JsonObject) -> JsonObject:
+    """Read the successful durable projection data without hiding typed failures."""
+    assert result["ok"] is True, result
+    data = result["data"]
+    assert isinstance(data, dict)
+    return data
+
+
+def _accepted_rows(engine: Engine) -> dict[str, list[dict[str, object]]]:
+    """Capture exact persisted bytes and identities of the accepted chain."""
+    with Session(engine) as session:
+        return {
+            "sources": [
+                item.model_dump()
+                for item in session.exec(select(SpecificationSource)).all()
+            ],
+            "candidates": [
+                item.model_dump()
+                for item in session.exec(select(SpecificationCandidate)).all()
+            ],
+            "decisions": [
+                item.model_dump()
+                for item in session.exec(select(SpecificationDecision)).all()
+            ],
+            "registry": [
+                item.model_dump() for item in session.exec(select(SpecRegistry)).all()
+            ],
+        }
+
+
+def test_rebound_review_preserves_exact_accepted_context(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A real binding preserves acceptance while removing source eligibility."""
+    project_id, _, _, _, _, repository, probe = _ready_project(
+        engine, tmp_path, name="accepted-review-rebinding"
+    )
+    domain = _domain(engine)
+    structured = _structure(
+        engine, domain, project_id=project_id, payload=_payload(), key="initial"
+    )
+    assert structured.ok
+    domain = _domain(engine, at=NOW + timedelta(seconds=1))
+    accepted = domain.transition(
+        _accept_request(domain, project_id=project_id, key="accept")
+    )
+    assert accepted.ok
+    reads = DurableReadProjectionService(engine=engine)
+    before_status = _projection_data(reads.specification_status(project_id=project_id))
+    before_review = _projection_data(reads.specification_review(project_id=project_id))
+    accepted_current = before_status["current"]
+    assert isinstance(accepted_current, dict)
+    assert before_review["current"] == accepted_current
+    source = before_status["source"]
+    assert isinstance(source, dict)
+    source_repository = source["repository"]
+    assert isinstance(source_repository, dict)
+    original_rows = _accepted_rows(engine)
+    original_source_bytes = (repository / "SPECIFICATION.md").read_bytes()
+
+    other = _repository(tmp_path, name="accepted-review-replacement")
+    _attach(engine, domain, project_id, other, probe)
+
+    after_status = _projection_data(reads.specification_status(project_id=project_id))
+    after_review = _projection_data(reads.specification_review(project_id=project_id))
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert after_review["current"] == after_status["current"] == accepted_current
+    assert after_review["source"] is None
+    assert after_review["candidate"] is None
+    assert after_review["review"] is None
+    assert after_review["stale_reason"] == "SPECIFICATION_SOURCE_NOT_REGISTERED"
+    assert after_review["source_binding"] == {
+        "state": "different_binding",
+        "active_repository_binding_id": snapshot.project.active_repository_binding_id,
+        "accepted_source": {
+            "specification_source_id": source["specification_source_id"],
+            "source_fingerprint": source["source_fingerprint"],
+            "repository_binding_id": source_repository["repository_binding_id"],
+        },
+    }
+    assert after_status["source_binding"] == after_review["source_binding"]
+    assert _accepted_rows(engine) == original_rows
+    assert (repository / "SPECIFICATION.md").read_bytes() == original_source_bytes
+    spec_id = accepted_current["spec_version_id"]
+    assert isinstance(spec_id, int)
+    _assert_accepted_rebinding(
+        engine, domain, project_id, spec_id, original_rows["sources"]
+    )
 
 
 def _assert_accepted_rebinding(
