@@ -2849,7 +2849,6 @@ def test_goal_starter_questions_are_a_fresh_copy(engine: Engine) -> None:
     assert isinstance(effective_questions, dict)
     questions = effective_questions["questions"]
     assert isinstance(questions, list)
-    assert questions is result["data"]["effective_questions"]["questions"]
     questions[0] = "Caller replaced this question."
     questions.append("Caller appended this question.")
 

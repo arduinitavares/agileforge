@@ -163,7 +163,9 @@ def test_goal_status_cli_preserves_effective_questions_projection(
     application = SimpleNamespace(reads=reads)
 
     def forbid_composition() -> None:
-        pytest.fail("Goal status must use the injected reads-only application")
+        pytest.fail(
+            "Goal status must use the injected reads-only application"  # ty: ignore[invalid-argument-type]
+        )
 
     monkeypatch.setattr(cli_main, "production_application", forbid_composition)
     monkeypatch.setattr(cli_main, "runtime_access", lambda **_: nullcontext())
