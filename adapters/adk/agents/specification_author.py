@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
-from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 from pydantic_core import from_json
 
@@ -17,6 +16,7 @@ from adapters.adk.errors import (
 from adapters.adk.prompts.specification_author import (
     SPECIFICATION_STRUCTURER_INSTRUCTIONS,
 )
+from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from adapters.adk.specification_output import (
     build_specification_output_diagnostic,
     validate_specification_response,
@@ -50,8 +50,8 @@ _INCOMPLETE_OUTPUT_CODE: str = "SPECIFICATION_OUTPUT_INCOMPLETE"
 _model_id: str = get_model_id("specification_structurer")
 
 
-model: LiteLlm = LiteLlm(
-    model=_model_id,
+model: LiteLlm = create_openrouter_model(
+    model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),

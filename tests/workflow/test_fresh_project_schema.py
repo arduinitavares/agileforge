@@ -371,6 +371,57 @@ def test_issue_210_fresh_metadata_matches_independent_structural_manifest() -> N
     _assert_current_business_schema(fresh)
 
 
+def test_provider_events_open_existing_enum_storage_without_schema_changes() -> None:
+    """New vocabulary fits the captured VARCHAR(27), with no enum CHECK rewrite."""
+    from models.enums import WorkflowEventType  # noqa: PLC0415
+
+    existing = _complete_current_schema()
+    with existing.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE workflow_events")
+        connection.exec_driver_sql(
+            "CREATE TABLE workflow_events ("
+            "event_id INTEGER NOT NULL PRIMARY KEY, "
+            "event_type VARCHAR(27) NOT NULL, "
+            "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, "
+            "duration_seconds FLOAT, turn_count INTEGER, project_id INTEGER, "
+            "sprint_id INTEGER, event_metadata TEXT, "
+            "FOREIGN KEY(project_id) REFERENCES projects(project_id), "
+            "FOREIGN KEY(sprint_id) REFERENCES sprints(sprint_id))"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_workflow_events_event_type ON workflow_events(event_type)"
+        )
+        schema_before = connection.exec_driver_sql(
+            "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL "
+            "ORDER BY type, name"
+        ).all()
+    try:
+        ensure_business_db_ready(existing)
+        with existing.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO workflow_events (event_type) VALUES (?), (?)",
+                (
+                    WorkflowEventType.PROVIDER_TRY_STARTED.name,
+                    WorkflowEventType.PROVIDER_TRY_FINISHED.name,
+                ),
+            )
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL "
+                    "ORDER BY type, name"
+                ).all()
+                == schema_before
+            )
+        assert inspect(existing).get_check_constraints("workflow_events") == []
+        assert (
+            str(inspect(existing).get_columns("workflow_events")[1]["type"])
+            == "VARCHAR(27)"
+        )
+        _assert_current_business_schema(existing)
+    finally:
+        existing.dispose()
+
+
 def test_issue_210_missing_required_partial_unique_is_rejected() -> None:
     """Current-Specification cardinality is structural, not an index-name hint."""
     mixed = _complete_current_schema()

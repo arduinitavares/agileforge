@@ -3,18 +3,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from adapters.adk.provider_models import create_openrouter_model
+from adapters.adk.provider_retry import RetryingOpenRouterClient
 from models.core import UserStory
+from models.events import WorkflowEvent
+from services.contracts.provider_retry import ProviderAuditError, ProviderRetryConfig
 from services.contracts.specification_validation import (
     StorySpecificationFinding,
     StorySpecificationReviewInput,
@@ -27,6 +32,8 @@ from services.specs.story_validation_service import (
     require_story_ready_for_sprint,
 )
 from tests.test_story_validation_service import _accepted_story, _validate
+from tools import spec_tools
+from utils import adk_runner, runtime_config
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -366,3 +373,192 @@ def test_direct_service_and_tool_exports_have_no_authority_compatibility_name() 
     assert "validate_story_with_specification" in service_package.__all__
     assert "validate_story_with_spec_authority" not in tool_module.__all__
     assert "validate_story_with_spec_authority" not in service_package.__all__
+
+
+class _HybridClock:
+    """Keep the helper deadline and retry clock in the same deterministic origin."""
+
+    def __init__(self) -> None:
+        self.elapsed: float = 0.0
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def utc_now(self) -> datetime:
+        return datetime(2026, 10, 7, tzinfo=UTC) + timedelta(seconds=self.elapsed)
+
+    async def sleep(self, seconds: float) -> None:
+        self.elapsed += seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running_loop", [False, True])
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_hybrid_uses_shared_retry_and_preserves_evidence_on_exhaustion(  # noqa: PLR0915
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    running_loop: bool,
+    exhausted: bool,
+) -> None:
+    """Losing context in either bridge must prevent this audited provider call."""
+    from litellm.exceptions import RateLimitError  # noqa: PLC0415
+
+    story_id = _accepted_story(engine)
+    _validate(engine, story_id)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        prior = story.validation_evidence
+        project_id = story.project_id
+    clock = _HybridClock()
+    sends: list[dict[str, object]] = []
+    review_json = canonical_json(
+        {
+            "schema_version": "agileforge.story-specification-review.v1",
+            "compliant": True,
+            "complete": True,
+            "findings": [],
+        }
+    )
+
+    async def completion(**kwargs: object) -> object:
+        sends.append(kwargs)
+        if exhausted or len(sends) == 1:
+            raise RateLimitError(
+                message="secret raw upstream body",
+                llm_provider="openrouter",
+                model="synthetic/review",
+            )
+        return review_json
+
+    model = create_openrouter_model(model_id="openrouter/synthetic/review")
+    model.llm_client = RetryingOpenRouterClient(
+        completion=completion, clock=clock, uniform=lambda _low, _high: 1.0
+    )
+    monkeypatch.setattr(adk_runner, "monotonic", clock.monotonic, raising=False)
+    monkeypatch.setattr(
+        runtime_config,
+        "get_provider_retry_config",
+        lambda: ProviderRetryConfig(max_attempts=2),
+    )
+    monkeypatch.setattr(story_validation_service, "get_engine", lambda: engine)
+
+    def forbidden_engine() -> None:
+        message = "Hybrid resolved its already selected engine again"
+        raise AssertionError(message)
+
+    from models import db  # noqa: PLC0415
+
+    monkeypatch.setattr(db, "get_engine", forbidden_engine)
+
+    def review(_payload: StorySpecificationReviewInput) -> str:
+        response = spec_tools._run_async(
+            model.llm_client.acompletion(
+                model="openrouter/synthetic/review",
+                messages=[{"role": "user", "content": "Synthetic review"}],
+                tools=None,
+            )
+        )
+        assert isinstance(response, str)
+        return response
+
+    def invoke() -> dict[str, Any]:
+        return spec_tools.validate_story_with_specification(
+            {"story_id": story_id, "mode": "hybrid"}, semantic_review=review
+        )
+
+    result = invoke() if running_loop else await asyncio.to_thread(invoke)
+    assert len(sends) == 2, result  # noqa: PLR2004
+    with Session(engine) as session:
+        events = list(session.exec(select(WorkflowEvent)))
+        audit_records = [
+            json.loads(event.event_metadata)
+            for event in events
+            if event.event_metadata is not None
+            and json.loads(event.event_metadata).get("provider") == "openrouter"
+        ]
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        if exhausted:
+            assert result["success"] is False
+            assert result["ready_for_sprint"] is False
+            assert result["error"]["code"] == "EXTERNAL_PROVIDER_TEMPORARY"
+            assert result["provider_failure"]["attempts"] == 2  # noqa: PLR2004
+            assert result["provider_failure"]["manual_retry_requires_new_key"] is False
+            assert "Retry this action later." in result["error"]["message"]
+            assert "secret raw upstream body" not in json.dumps(result)
+            assert story.validation_evidence == prior
+        else:
+            assert result["success"] is True
+            assert result["semantic_review_state"] == "valid"
+            assert result["ready_for_sprint"] is True
+            assert story.validation_evidence != prior
+        assert len(audit_records) == 4  # noqa: PLR2004
+        assert {record["project_id"] for record in audit_records} == {project_id}
+        assert len({record["action_id"] for record in audit_records}) == 1
+        assert len({record["call_id"] for record in audit_records}) == 1
+
+
+@pytest.mark.parametrize("unsupported_binding", [False, True])
+def test_hybrid_audit_failure_preserves_prior_evidence(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    unsupported_binding: bool,
+) -> None:
+    """A local audit failure must not be saved as fresh semantic-invalid evidence."""
+    story_id = _accepted_story(engine)
+    _validate(engine, story_id)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        prior = story.validation_evidence
+    calls = 0
+
+    def review(_payload: StorySpecificationReviewInput) -> str:
+        nonlocal calls
+        calls += 1
+        raise ProviderAuditError()
+
+    with engine.connect() as connection:
+        monkeypatch.setattr(
+            story_validation_service,
+            "get_engine",
+            lambda: connection if unsupported_binding else engine,
+        )
+        result = story_validation_service.validate_story_with_specification(
+            {"story_id": story_id, "mode": "hybrid"}, semantic_review=review
+        )
+    assert calls == (0 if unsupported_binding else 1)
+    assert result["success"] is False
+    assert result["ready_for_sprint"] is False
+    error = result["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "EXTERNAL_EXECUTION_FAILED"
+    assert error["message"] == (
+        "Provider request audit could not be recorded. No new result was saved."
+    )
+    assert "provider_failure" not in result
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        assert story.validation_evidence == prior
+
+
+def test_structural_mode_skips_provider_policy_and_semantic_callback(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structural action must stay provider-free even with a callback supplied."""
+    story_id = _accepted_story(engine)
+
+    def forbidden(*_args: object) -> str:
+        message = "Structural validation reached provider setup"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(runtime_config, "get_provider_retry_config", forbidden)
+    monkeypatch.setattr(story_validation_service, "get_engine", lambda: engine)
+    result = spec_tools.validate_story_with_specification(
+        {"story_id": story_id}, semantic_review=forbidden
+    )
+    assert result["success"] is True
+    assert result["semantic_review_state"] == "not_requested"

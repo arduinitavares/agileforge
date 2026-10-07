@@ -5188,6 +5188,9 @@ function checkedResponsePayload(payload, status, ok) {
             ?? payload?.detail?.errors?.[0]?.code
             ?? payload?.code
             ?? null;
+        if (error.code === 'EXTERNAL_PROVIDER_TEMPORARY') {
+            error.output = payload?.detail?.output ?? payload?.output;
+        }
         throw error;
     }
     return payload;

@@ -15,6 +15,7 @@ from sqlmodel import Session, col, select
 
 import api as api_module
 import services.application as application_module
+from adapters.adk.runner import AdkRunGuards
 from api import (
     CreateProjectRequest,
     SprintPlanningApiRequest,
@@ -79,6 +80,12 @@ from services.specification_source_registration import (
 from services.sprint_ownership import ResolvedSprintOwner
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.adapters.test_adk_workflow_runner import (
+    ProviderGraphClock,
+    _backlog_recipe_input,
+    _decision,
+    _provider_graph_system,
+)
 from tests.adapters.test_command_renderer import position_fixture
 from tests.services.test_durable_product_definition_projections import (
     NOW,
@@ -5997,6 +6004,33 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
             self.requests.append(request)
             return prior_result
 
+        def replay_provider_attempt(
+            self, request: StartNodeAttempt
+        ) -> TransitionResult:
+            self.requests.append(request)
+            return prior_result
+
+        def provider_attempt_audit(self) -> None:
+            pytest.fail(
+                "replay unexpectedly opened provider audit"  # ty: ignore[invalid-argument-type]
+            )
+
+        def check_provider_attempt(
+            self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+        ) -> WorkflowError | None:
+            pytest.fail(
+                "replay unexpectedly checked provider attempt "
+                f"{project_id}:{attempt_id}:{attempt_fingerprint}"  # ty: ignore[invalid-argument-type]
+            )
+
+        def provider_attempt_lease_remaining_seconds(
+            self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+        ) -> float:
+            pytest.fail(
+                "replay unexpectedly checked provider lease "
+                f"{project_id}:{attempt_id}:{attempt_fingerprint}"  # ty: ignore[invalid-argument-type]
+            )
+
         def load_persisted_attempt_input(
             self,
             *,
@@ -6426,6 +6460,78 @@ def test_vision_bootstrap_api_preserves_precise_output_failure(
     assert response.status_code == HTTPStatus.CONFLICT
     assert failure.error is not None
     assert response.json()["detail"]["error"] == failure.error.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "state"),
+    [(429, "rate_limited", "rate-limited"), (503, "unavailable", "unavailable")],
+)
+def test_provider_exhaustion_api_preserves_terminal_failure_on_replay(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    reason: str,
+    state: str,
+) -> None:
+    """Retain the frozen terminal result while preserving the replay flag."""
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[status] * 3, clock=ProviderGraphClock()
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+
+    class ProviderApplication:
+        def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult:
+            return runner.run(
+                decision,
+                _backlog_recipe_input(lineage),
+                guards=AdkRunGuards(
+                    position=position,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                ),
+            )
+
+    monkeypatch.setattr(api_module, "_application", ProviderApplication)
+    client = TestClient(api_module.app)
+    responses = [
+        client.post(
+            f"/api/projects/{lineage.project_id}/backlog/generate",
+            json={"idempotency_key": "provider-api", "actor": "operator"},
+        )
+        for _ in range(2)
+    ]
+    assert all(response.status_code == HTTPStatus.CONFLICT for response in responses)
+    assert all("Retry-After" not in response.headers for response in responses)
+    first, replay = [response.json()["detail"] for response in responses]
+    assert first["error"] == {
+        "code": "EXTERNAL_PROVIDER_TEMPORARY",
+        "message": (
+            f"OpenRouter is temporarily {state}. Automatic retries stopped. "
+            "Retry this action with a new idempotency key."
+        ),
+        "blockers": [],
+    }
+    summary = first["output"]["provider_failure"]
+    assert summary == {
+        "schema_version": "agileforge.provider-failure.v1",
+        "provider": "openrouter",
+        "category": "external_temporary",
+        "retryable": True,
+        "reason": reason,
+        "termination_reason": "attempts_exhausted",
+        "http_status": status,
+        "call_id": summary["call_id"],
+        "attempts": 3,
+        "max_attempts": 3,
+        "retry_after_seconds": None,
+        "manual_retry_requires_new_key": True,
+    }
+    assert isinstance(summary["call_id"], str)
+    assert summary["call_id"]
+    assert first["replayed"] is False
+    assert replay == {**first, "replayed": True}
+    assert len(sends) == summary["attempts"]
 
 
 def test_retired_specification_author_endpoint_is_not_registered() -> None:

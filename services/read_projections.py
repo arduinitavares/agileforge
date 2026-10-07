@@ -32,9 +32,14 @@ from models.workflow import (
     StoryArtifactDecision,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.backlog import BacklogOutput
+from services.contracts.provider_retry import (
+    ProviderFailureSummary,
+    provider_failure_message,
+)
 from services.contracts.specification_source import (
     SpecificationSourceBundle,
     SpecificationSourceDocument,
@@ -86,7 +91,12 @@ from services.story_artifact_lineage import build_story_artifact_lineage_nodes
 from services.story_dependencies import DependencyGraphIssue
 from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
-from workflow.contracts import JsonObject, JsonValue
+from workflow.contracts import (
+    JsonObject,
+    JsonValue,
+    TransitionResult,
+    WorkflowErrorCode,
+)
 from workflow.definitions.backlog import current_backlog_lineage
 from workflow.definitions.planning import (
     candidate_set_fingerprint,
@@ -127,6 +137,7 @@ if TYPE_CHECKING:
     from services.contracts.backlog import BacklogItem
     from services.contracts.roadmap import RoadmapBuilderOutput
     from workflow.facts import (
+        NodeAttemptFact,
         PlanningArtifactFact,
         ProductGoalArtifactDecisionFact,
         ProductGoalArtifactFact,
@@ -2538,15 +2549,70 @@ class DurableReadProjectionService:
                 current_attempts, key=lambda attempt: attempt.attempt_id, default=None
             )
             if latest_attempt is not None and latest_attempt.outcome == "failure":
-                code = latest_attempt.failure_code
-                message = _VISION_FAILURE_MESSAGES.get(code or "")
-                if message is not None:
-                    data["last_failure"] = {
-                        "code": code,
-                        "message": message,
-                        "attempt_id": latest_attempt.attempt_id,
-                    }
+                failure = self._vision_attempt_failure(
+                    project_id=project_id, attempt=latest_attempt
+                )
+                if failure is not None:
+                    data["last_failure"] = failure
         return _success(data)
+
+    def _vision_attempt_failure(
+        self, *, project_id: int, attempt: NodeAttemptFact
+    ) -> JsonObject | None:
+        """Project bounded legacy copy or safe frozen temporary provider facts."""
+        if attempt.failure_code != WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY:
+            message = _VISION_FAILURE_MESSAGES.get(attempt.failure_code or "")
+            return (
+                None
+                if message is None
+                else {
+                    "code": attempt.failure_code,
+                    "message": message,
+                    "attempt_id": attempt.attempt_id,
+                }
+            )
+        with self._session() as session:
+            receipt = session.exec(
+                select(WorkflowTransitionReceipt)
+                .join(
+                    WorkflowNodeAttempt,
+                    col(WorkflowNodeAttempt.idempotency_key)
+                    == col(WorkflowTransitionReceipt.idempotency_key),
+                )
+                .where(
+                    col(WorkflowNodeAttempt.project_id) == project_id,
+                    col(WorkflowNodeAttempt.workflow_node_attempt_id)
+                    == attempt.attempt_id,
+                    col(WorkflowNodeAttempt.attempt_fingerprint)
+                    == attempt.attempt_fingerprint,
+                    col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+                    col(WorkflowTransitionReceipt.completed_at).is_not(None),
+                )
+            ).one_or_none()
+            if receipt is None or receipt.result_json is None:
+                return None
+            try:
+                result = TransitionResult.model_validate_json(receipt.result_json)
+                if (
+                    result.ok
+                    or result.error is None
+                    or result.error.code
+                    is not WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY
+                ):
+                    return None
+                summary = ProviderFailureSummary.model_validate(
+                    result.model_dump(mode="json")["output"].get("provider_failure")
+                )
+            except ValidationError:
+                return None
+            if result.error.message != provider_failure_message(summary):
+                return None
+            return {
+                "code": result.error.code.value,
+                "message": result.error.message,
+                "attempt_id": attempt.attempt_id,
+                "provider_failure": summary.model_dump(mode="json"),
+            }
 
     def product_goal_status(self, *, project_id: int) -> JsonObject:
         """Project Goal review, interview, accepted Vision, and outcome state."""

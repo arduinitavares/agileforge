@@ -7,7 +7,8 @@ import concurrent.futures
 import hashlib
 import json
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -24,6 +25,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
 from google.adk.workflow import START, node
 from google.genai import types
+from litellm.exceptions import APIError
 from openai import OpenAIError
 from pydantic import Field, TypeAdapter
 from sqlmodel import Session, col, select
@@ -40,6 +42,7 @@ from adapters.adk.agents.story import (
 )
 from adapters.adk.errors import VisionAgenticPreflightError
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from adapters.adk.provider_retry import RetryingOpenRouterClient
 from adapters.adk.recipes import (
     AGENTIC_NODE_IDS,
     AdkRecipe,
@@ -56,8 +59,11 @@ from adapters.adk.runner import (
     AdkRunGuards,
     AdkRunRequest,
     AdkWorkflowRunner,
+    SpecificationSourceCheck,
 )
 from models.core import Project, UserStory
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalInterviewTurn,
@@ -87,6 +93,11 @@ from services.contracts.backlog import (
 from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
+)
+from services.contracts.provider_retry import (
+    ProviderFailureSummary,
+    ProviderRetryConfig,
+    ProviderTryAuditRecord,
 )
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
 from services.contracts.sprint import (
@@ -136,7 +147,7 @@ from workflow.requests import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
@@ -146,6 +157,13 @@ LEASE_SECONDS = 60
 EXPECTED_RECOVERY_ATTEMPT_COUNT = 2
 NEXT_GOAL_NUMBER = 2
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
+EXPECTED_PROVIDER_RETRY: JsonObject = {
+    "max_attempts": 3,
+    "base_delay_seconds": 1.0,
+    "max_delay_seconds": 8.0,
+    "max_elapsed_seconds": 60.0,
+    "min_remaining_seconds": 1.0,
+}
 JSON_OBJECT = TypeAdapter(JsonObject)
 GOLD_SPECIFICATION_PATH = (
     Path(__file__).parents[1]
@@ -207,6 +225,63 @@ class MutableClock:
     def now(self) -> datetime:
         """Return the controlled current time."""
         return self.now_value
+
+
+@dataclass
+class ProviderGraphClock:
+    """Advance both retry and domain time without a real wait."""
+
+    now_value: datetime = EVALUATED_AT
+    ticks: float = field(default_factory=time.monotonic)
+    on_sleep: Callable[[], None] | None = None
+    waits: list[float] = field(default_factory=list)
+
+    def now(self) -> datetime:
+        """Return the domain's evaluation time."""
+        return self.now_value
+
+    def utc_now(self) -> datetime:
+        """Return the same wall time for safe audit records."""
+        return self.now_value
+
+    def monotonic(self) -> float:
+        """Return the controlled monotonic time."""
+        return self.ticks
+
+    async def sleep(self, seconds: float) -> None:
+        """Advance virtual time and apply a deliberate host mutation."""
+        self.waits.append(seconds)
+        self.ticks += seconds
+        self.now_value += timedelta(seconds=seconds)
+        if self.on_sleep is not None:
+            self.on_sleep()
+
+
+class ProviderRetryGraphLeaf(BaseAgent):
+    """Exercise the real retry boundary beneath the retained Backlog recipe."""
+
+    client: object
+    response: object
+    request_timeout: float = 5.0
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        client = cast("RetryingOpenRouterClient", self.client)
+        await client.acompletion(
+            model="openrouter/test-model",
+            messages=[{"role": "user", "content": "synthetic graph request"}],
+            tools=None,
+            timeout=self.request_timeout,
+        )
+        yield Event(author=self.name, output=self.response)
+
+
+class GraphProviderResponseError(APIError):
+    """Script a same-try confirmed provider response at the test transport seam."""
+
+    agileforge_response_status: int
 
 
 class FakeLeafAgent(BaseAgent):
@@ -1305,9 +1380,7 @@ async def test_production_story_recipe_repairs_statement_sentinel_with_paths_onl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep provider Story values out of the production repair request."""
-    sentinel_output = _story_provider_output(
-        title="Private provider draft marker 9f4c"
-    )
+    sentinel_output = _story_provider_output(title="Private provider draft marker 9f4c")
     sentinel_items = sentinel_output["user_stories"]
     assert isinstance(sentinel_items, list)
     sentinel_item = sentinel_items[0]
@@ -2326,8 +2399,7 @@ def test_story_runner_wrapped_partial_sentinel_persists_paths_only(
 ) -> None:
     """Sanitize one truncated embedded Story object on the live runner path."""
     raw_output = (
-        'private-prefix {"user_stories":[{"story_title":"placeholder"}]} '
-        "private-suffix"
+        'private-prefix {"user_stories":[{"story_title":"placeholder"}]} private-suffix'
     )
     leaf = SequenceLeafAgent(
         name="double_wrapped_sentinel_story",
@@ -2357,14 +2429,14 @@ def test_story_runner_wrapped_partial_sentinel_persists_paths_only(
     ("raw_output", "private_marker"),
     [
         (
-            "prefix {\"user_stories\": []} actual "
-            "{\"user_stories\":[{\"story_title\":\"placeholder\","
-            "\"statement\":\"PRIVATE_DURABLE_229\"}]}",
+            'prefix {"user_stories": []} actual '
+            '{"user_stories":[{"story_title":"placeholder",'
+            '"statement":"PRIVATE_DURABLE_229"}]}',
             "private_durable_229",
         ),
         (
-            "{\"user_stories\":[{\"story_title\":\"placeholder\","
-            "\"statement\":\"PRIVATE_TRUNCATED_229\"}]",
+            '{"user_stories":[{"story_title":"placeholder",'
+            '"statement":"PRIVATE_TRUNCATED_229"}]',
             "private_truncated_229",
         ),
     ],
@@ -3915,9 +3987,7 @@ def test_backlog_correction_runner_commits_successor_without_leak(
         assert successor.supersedes_backlog_artifact_id == source.backlog_artifact_id
         assert successor.content_fingerprint != source.content_fingerprint
     new_pos = domain.position(project_id)
-    review_dec = next(
-        d for d in new_pos.decisions if d.node_id == "backlog.review"
-    )
+    review_dec = next(d for d in new_pos.decisions if d.node_id == "backlog.review")
     assert review_dec.category is NodeCategory.WAITING
     assert review_dec.reason_code == "BACKLOG_REVIEW_REQUIRED"
 
@@ -4163,6 +4233,7 @@ def test_backlog_correction_runner_unchanged_output_fails_fact_conflict(
 
 def test_application_correct_backlog_dispatch_boundary_replay_and_conflict_detection(  # noqa: PLR0915
     engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Direct AgileForgeApplication.correct_backlog dispatch and replay."""
     project_id = _seed_accepted_backlog(engine)
@@ -4199,6 +4270,24 @@ def test_application_correct_backlog_dispatch_boundary_replay_and_conflict_detec
         leaf=leaf,
         sessions=TrackingSessionService(),
     )
+    from adapters.adk import runner as runner_module  # noqa: PLC0415
+
+    def isolated_runner(
+        *,
+        domain: WorkflowDomain,
+        registry: AdkRecipeRegistry,
+        config: AdkExecutionConfig,
+        specification_source_check: SpecificationSourceCheck | None = None,
+    ) -> AdkWorkflowRunner:
+        return AdkWorkflowRunner(
+            domain=domain,
+            registry=registry,
+            config=config,
+            specification_source_check=specification_source_check,
+            session_service=InMemorySessionService(),
+        )
+
+    monkeypatch.setattr(runner_module, "AdkWorkflowRunner", isolated_runner)
     app = AgileForgeApplication(
         workflow_domain=domain,
         recipe_registry=runner._registry,
@@ -4437,3 +4526,722 @@ def test_backlog_correction_remints_out_of_order_items(engine: Engine) -> None:
         assert items[1]["priority"] == 2  # noqa: PLR2004
         assert items[1]["backlog_item_id"] == "PBI-000002"
         assert items[1]["requirement"] == "Second priority requirement: export audit."
+
+
+def _provider_graph_system(
+    engine: Engine,
+    *,
+    statuses: list[int],
+    clock: ProviderGraphClock,
+    before_send: Callable[[], None] | None = None,
+) -> tuple[AdkWorkflowRunner, WorkflowDomain, _BacklogLineage, list[JsonObject]]:
+    """Run real graph/recipe/audit code with only transport replaced."""
+    lineage = _seed(engine)
+    sends: list[JsonObject] = []
+
+    async def completion(**kwargs: object) -> object:
+        if before_send is not None:
+            before_send()
+        sends.append(JSON_OBJECT.validate_python(kwargs))
+        if statuses:
+            status = statuses.pop(0)
+            error = GraphProviderResponseError(
+                status, "synthetic", "openrouter", "test-model"
+            )
+            error.agileforge_response_status = status
+            raise error
+        return object()
+
+    client = RetryingOpenRouterClient(
+        completion=completion, clock=clock, uniform=lambda _low, _high: 1.0
+    )
+    leaf = ProviderRetryGraphLeaf(
+        name="retry_graph_backlog", client=client, response=_backlog_response()
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+        clock=cast("MutableClock", clock),
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=AdkRecipeRegistry(
+            (
+                AdkRecipe(
+                    node_id="backlog.generate",
+                    workflow=build_backlog_generation_workflow(
+                        leaf_agent=leaf,
+                        execution_settings={**EXECUTION_SETTINGS, "max_attempts": 2},
+                    ),
+                    output_adapter=_adapter,
+                ),
+            )
+        ),
+        config=AdkExecutionConfig(
+            project_id=lineage.project_id,
+            model_id="fake/model",
+            execution_settings={**EXECUTION_SETTINGS, "max_attempts": 2},
+            lease_seconds=LEASE_SECONDS,
+            actor="operator",
+        ),
+        session_service=TrackingSessionService(),
+        provider_clock=clock,
+    )
+    return runner, domain, lineage, sends
+
+
+def _provider_audits(session: Session) -> list[JsonObject]:
+    """Read only durable physical-try records from the disposable engine."""
+    rows = session.exec(
+        select(WorkflowEvent)
+        .where(
+            col(WorkflowEvent.event_type).in_(
+                [
+                    WorkflowEventType.PROVIDER_TRY_STARTED,
+                    WorkflowEventType.PROVIDER_TRY_FINISHED,
+                ]
+            )
+        )
+        .order_by(col(WorkflowEvent.event_id))
+    ).all()
+    return [
+        JSON_OBJECT.validate_json(row.event_metadata)
+        for row in rows
+        if row.event_metadata is not None
+    ]
+
+
+@pytest.mark.parametrize("statuses", [[500], [429, 429, 429]])
+def test_graph_provider_retry_has_one_durable_action_and_exact_replay(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, statuses: list[int]
+) -> None:
+    """A transport loop must not multiply attempts, publish on exhaustion, or replay."""
+    exhausted = len(statuses) == 3  # noqa: PLR2004
+    clock = ProviderGraphClock()
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=list(statuses), clock=clock
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    guards = AdkRunGuards(
+        position=position, idempotency_key="provider-graph", actor="operator"
+    )
+    payload = _backlog_recipe_input(lineage)
+    result = runner.run(decision, payload, guards=guards)
+    assert result.ok is not exhausted
+    assert len(sends) == (3 if exhausted else 2)
+    bodies = [
+        {key: value for key, value in send.items() if key != "timeout"}
+        for send in sends
+    ]
+    assert all(body == bodies[0] for body in bodies)
+    assert all(
+        isinstance(send["timeout"], float) and 0 < send["timeout"] <= 5.0  # noqa: PLR2004
+        for send in sends
+    )
+    with Session(engine) as session:
+        attempts = _node_attempts(session, "backlog.generate")
+        outcomes = _node_outcomes(session, "backlog.generate")
+        audits = _provider_audits(session)
+        assert len(attempts) == len(outcomes) == 1
+        assert len(session.exec(select(BacklogArtifact)).all()) == (
+            0 if exhausted else 1
+        )
+        assert len(audits) == len(sends) * 2
+        assert {row["workflow_node_attempt_id"] for row in audits} == {
+            attempts[0].workflow_node_attempt_id
+        }
+        assert {row["idempotency_key_digest"] for row in audits} == {
+            hashlib.sha256(b"provider-graph").hexdigest()
+        }
+        assert len({row["call_id"] for row in audits}) == 1
+        assert json.loads(attempts[0].execution_settings_json)["provider_retry"] == (
+            EXPECTED_PROVIDER_RETRY
+        )
+        if exhausted:
+            assert result.error is not None
+            assert result.error.code.value == "EXTERNAL_PROVIDER_TEMPORARY"
+            summary = JSON_OBJECT.validate_python(result.output["provider_failure"])
+            assert summary["attempts"] == summary["max_attempts"] == 3  # noqa: PLR2004
+            assert summary["http_status"] == 429  # noqa: PLR2004
+            assert summary["manual_retry_requires_new_key"] is True
+            assert outcomes[0].output_json is None
+            assert outcomes[0].failure_message == result.error.message
+    previous_waits = list(clock.waits)
+    monkeypatch.setenv("OPENROUTER_RETRY_MAX_ATTEMPTS", "invalid")
+    from utils.runtime_config import clear_runtime_config_cache  # noqa: PLC0415
+
+    clear_runtime_config_cache()
+    replay = runner.run(decision, payload, guards=guards)
+    assert replay == result.model_copy(update={"replayed": True})
+    assert len(sends) == (3 if exhausted else 2)
+    assert clock.waits == previous_waits
+    with Session(engine) as session:
+        assert _provider_audits(session) == audits
+
+
+@pytest.mark.parametrize("mutation", ["lease", "business", "input"])
+def test_graph_provider_retry_rechecks_host_after_wait(
+    engine: Engine, mutation: str
+) -> None:
+    """Lease/fact/input drift during backoff prevents the next physical send."""
+    clock = ProviderGraphClock()
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[500], clock=clock
+    )
+
+    def mutate() -> None:
+        with Session(engine) as session:
+            if mutation == "business":
+                project = session.get(Project, lineage.project_id)
+                assert project is not None
+                project.description = "changed during backoff"
+                session.add(project)
+            else:
+                attempt = _node_attempts(session, "backlog.generate")[0]
+                if mutation == "lease":
+                    clock.now_value += timedelta(seconds=LEASE_SECONDS)
+                    clock.ticks += LEASE_SECONDS
+                else:
+                    attempt.normalized_input_json = "{}"
+                    session.add(attempt)
+            session.commit()
+
+    clock.on_sleep = mutate
+    result = runner.run(
+        _decision(domain, lineage.project_id), _backlog_recipe_input(lineage)
+    )
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    assert len(sends) == 1
+    assert clock.waits == [1.0]
+    with Session(engine) as session:
+        assert _node_outcomes(session, "backlog.generate")[0].status == "obsolete"
+        assert not session.exec(select(BacklogArtifact)).all()
+        assert len(_provider_audits(session)) == 2  # noqa: PLR2004
+
+
+def test_completed_runner_replays_before_live_settings_and_rejects_exact_caller_changes(
+    engine: Engine,
+) -> None:
+    """Host settings may drift while every caller field must match exactly."""
+    lineage = _seed(engine)
+    leaf = FakeLeafAgent(name="exact_replay_backlog", response=_backlog_response())
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    request = AdkRunRequest(
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        node_id=decision.node_id,
+        instance_key=decision.instance_key,
+        input_payload=_backlog_recipe_input(lineage),
+        idempotency_key="exact-replay",
+        actor="operator",
+        correlation_id="correlation",
+    )
+    first = runner.run_request(request)
+    assert first.ok
+    changed_host = AdkWorkflowRunner(
+        domain=domain,
+        registry=runner._registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=lineage.project_id,
+            model_id="fake/model",
+            execution_settings={
+                "timeout_seconds": 119.0,
+                "provider_retry": {"invalid": True},
+            },
+            lease_seconds=300,
+            actor="unused",
+        ),
+    )
+    assert changed_host.run_request(request) == first.model_copy(
+        update={"replayed": True}
+    )
+    from dataclasses import replace  # noqa: PLC0415
+
+    for mutation in (
+        {"input_payload": {}},
+        {"actor": "other"},
+        {"correlation_id": None},
+        {"graph_version": "other"},
+        {"fact_fingerprint": "other"},
+        {"decision_fingerprint": "other"},
+        {"node_id": "roadmap.generate"},
+        {"instance_key": "other"},
+    ):
+        conflict = changed_host.run_request(replace(request, **mutation))
+        assert conflict.error is not None
+        assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    different_model = AdkWorkflowRunner(
+        domain=domain,
+        registry=runner._registry,
+        session_service=TrackingSessionService(),
+        config=replace(changed_host._config, model_id="different/model"),
+    )
+    conflict = different_model.run_request(request)
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+@pytest.mark.parametrize("phase", ["start", "finish", "cross_check"])
+def test_graph_provider_audit_failure_never_publishes_or_claims_temporary(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """Independent audit failures take precedence over provider/business publication."""
+    from repositories.provider_attempts import (  # noqa: PLC0415
+        ProviderAttemptAuditRepository,
+    )
+    from services.contracts.provider_retry import ProviderAuditError  # noqa: PLC0415
+
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[429, 429, 429], clock=ProviderGraphClock()
+    )
+    original_terminal = ProviderAttemptAuditRepository.terminal_failure
+    checks = 0
+
+    def fail_append(
+        self: ProviderAttemptAuditRepository, record: ProviderTryAuditRecord
+    ) -> None:
+        del self, record
+        raise ProviderAuditError
+
+    def fail_terminal(
+        self: ProviderAttemptAuditRepository,
+        *,
+        project_id: int,
+        action_id: str,
+        call_id: str,
+        expected_summary: ProviderFailureSummary | None = None,
+    ) -> ProviderFailureSummary | None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:  # noqa: PLR2004
+            raise ProviderAuditError
+        return original_terminal(
+            self,
+            project_id=project_id,
+            action_id=action_id,
+            call_id=call_id,
+            expected_summary=expected_summary,
+        )
+
+    method = {
+        "start": "append_started",
+        "finish": "append_finished",
+        "cross_check": "terminal_failure",
+    }[phase]
+    monkeypatch.setattr(
+        ProviderAttemptAuditRepository,
+        method,
+        fail_terminal if phase == "cross_check" else fail_append,
+    )
+    result = runner.run(
+        _decision(domain, lineage.project_id), _backlog_recipe_input(lineage)
+    )
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert "provider_failure" not in result.output
+    assert len(sends) == {"start": 0, "finish": 1, "cross_check": 3}[phase]
+    with Session(engine) as session:
+        assert not session.exec(select(BacklogArtifact)).all()
+        assert (
+            _node_outcomes(session, "backlog.generate")[0].failure_code
+            == "ADK_EXECUTION_FAILED"
+        )
+
+
+def test_concurrent_graph_duplicate_owns_one_provider_retry_loop(
+    engine: Engine,
+) -> None:
+    """A duplicate arriving during a send replays the in-flight durable Start."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def before_send() -> None:
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5.0)
+
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[500], clock=ProviderGraphClock(), before_send=before_send
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    guards = AdkRunGuards(
+        position=position, idempotency_key="concurrent-retry", actor="operator"
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            runner.run, decision, _backlog_recipe_input(lineage), guards=guards
+        )
+        try:
+            assert entered.wait(5.0)
+            duplicate = runner.run(
+                decision, _backlog_recipe_input(lineage), guards=guards
+            )
+            assert duplicate.ok
+            assert duplicate.replayed
+        finally:
+            release.set()
+        result = future.result(timeout=10.0)
+    assert result.ok
+    assert len(sends) == 2  # noqa: PLR2004
+    with Session(engine) as session:
+        assert len(_node_attempts(session, "backlog.generate")) == 1
+        assert len(_node_outcomes(session, "backlog.generate")) == 1
+        assert len(session.exec(select(BacklogArtifact)).all()) == 1
+        assert len(_provider_audits(session)) == 4  # noqa: PLR2004
+
+
+def test_completed_application_replays_before_any_live_configuration(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed direct commands replay even when all live setting preparation fails."""
+    from services import application as application_module  # noqa: PLC0415
+    from services.application import AgenticActionRequest  # noqa: PLC0415
+    from utils.runtime_config import clear_runtime_config_cache  # noqa: PLC0415
+
+    lineage = _seed(engine)
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=FakeLeafAgent(
+            name="application_replay_backlog", response=_backlog_response()
+        ),
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    request = AgenticActionRequest(
+        project_id=lineage.project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        node_id=decision.node_id,
+        instance_key=decision.instance_key,
+        input_payload=_backlog_recipe_input(lineage),
+        model_id="fake/model",
+        idempotency_key="application-replay",
+        actor="operator",
+    )
+    first = runner.run_request(
+        AdkRunRequest(
+            graph_version=request.graph_version,
+            fact_fingerprint=request.fact_fingerprint,
+            decision_fingerprint=request.decision_fingerprint,
+            node_id=request.node_id,
+            instance_key=request.instance_key,
+            input_payload=request.input_payload,
+            idempotency_key=request.idempotency_key,
+            actor=request.actor,
+        )
+    )
+    assert first.ok
+
+    def fail_live_settings(*args: object, **kwargs: object) -> JsonObject:
+        del args, kwargs
+        msg = "Completed replay parsed live configuration."
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        application_module, "_agentic_execution_settings", fail_live_settings
+    )
+    monkeypatch.setenv("OPENROUTER_RETRY_MAX_ATTEMPTS", "invalid")
+    clear_runtime_config_cache()
+    application = AgileForgeApplication(workflow_domain=domain)
+    assert application.run_agentic_action(request) == first.model_copy(
+        update={"replayed": True}
+    )
+    conflict = application.run_agentic_action(
+        request.model_copy(update={"model_id": "other/model"})
+    )
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+def test_provider_stop_preserves_terminal_outcome_recorded_during_wait(
+    engine: Engine,
+) -> None:
+    """Return an existing terminal failure when a late provider worker stops."""
+    from workflow.requests import FailNodeAttempt  # noqa: PLC0415
+
+    clock = ProviderGraphClock()
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[500], clock=clock
+    )
+    terminal: list[TransitionResult] = []
+
+    def finish_elsewhere() -> None:
+        with Session(engine) as session:
+            attempt = _node_attempts(session, "backlog.generate")[0]
+            assert attempt.workflow_node_attempt_id is not None
+            attempt_id = attempt.workflow_node_attempt_id
+            fingerprint = attempt.attempt_fingerprint
+        domain.transition(
+            FailNodeAttempt(
+                project_id=lineage.project_id,
+                attempt_id=attempt_id,
+                attempt_fingerprint=fingerprint,
+                failure_code="ADK_EXECUTION_FAILED",
+                failure_message="Earlier recorded failure.",
+                idempotency_key="earlier-terminal",
+                actor="operator",
+            )
+        )
+        with Session(engine) as session:
+            receipt = session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == "preserve-terminal",
+                )
+            ).one()
+            assert receipt.result_json is not None
+            terminal.append(TransitionResult.model_validate_json(receipt.result_json))
+
+    clock.on_sleep = finish_elsewhere
+    guards = AdkRunGuards(
+        position=domain.position(lineage.project_id),
+        idempotency_key="preserve-terminal",
+        actor="operator",
+    )
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        _backlog_recipe_input(lineage),
+        guards=guards,
+    )
+    assert result == terminal[0].model_copy(update={"replayed": True})
+    assert len(sends) == 1
+    with Session(engine) as session:
+        outcome = _node_outcomes(session, "backlog.generate")[0]
+        assert outcome.status == "failure"
+        assert outcome.failure_message == "Earlier recorded failure."
+        assert not session.exec(select(BacklogArtifact)).all()
+
+
+def test_runner_reads_legacy_completed_receipt_without_backfilling_policy(
+    engine: Engine,
+) -> None:
+    """Legacy hashes replay unchanged and gain no invented provider facts."""
+    from workflow.requests import FailNodeAttempt  # noqa: PLC0415
+
+    lineage = _seed(engine)
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=FakeLeafAgent(name="legacy_receipt_backlog", response=_backlog_response()),
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    start = StartNodeAttempt(
+        project_id=lineage.project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        target_node_id=decision.node_id,
+        target_instance_key=decision.instance_key,
+        normalized_input=_backlog_recipe_input(lineage),
+        model_id="fake/model",
+        execution_settings=EXECUTION_SETTINGS,
+        lease_seconds=LEASE_SECONDS,
+        idempotency_key="legacy-direct",
+        actor="operator",
+    )
+    started = domain.transition(start)
+    domain.transition(
+        FailNodeAttempt(
+            project_id=lineage.project_id,
+            attempt_id=cast("int", started.output["attempt_id"]),
+            attempt_fingerprint=cast("str", started.output["attempt_fingerprint"]),
+            failure_code="ADK_EXECUTION_FAILED",
+            failure_message="Legacy failure.",
+            idempotency_key="legacy-direct:failure",
+            actor="operator",
+        )
+    )
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key) == "legacy-direct",
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+            )
+        ).one()
+        before = (
+            receipt.request_json,
+            receipt.request_fingerprint,
+            receipt.result_json,
+        )
+    replay = runner.run_request(
+        AdkRunRequest(
+            graph_version=start.graph_version,
+            fact_fingerprint=start.fact_fingerprint,
+            decision_fingerprint=start.decision_fingerprint,
+            node_id=start.target_node_id,
+            instance_key=start.target_instance_key,
+            input_payload=start.normalized_input,
+            idempotency_key=start.idempotency_key,
+            actor=start.actor,
+        )
+    )
+    assert replay.replayed
+    assert "provider_failure" not in replay.output
+    with Session(engine) as session:
+        assert _provider_audits(session) == []
+        after = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key) == "legacy-direct",
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+            )
+        ).one()
+        assert (
+            after.request_json,
+            after.request_fingerprint,
+            after.result_json,
+        ) == before
+
+
+@pytest.mark.parametrize("vision", [False, True])
+def test_graph_provider_clock_caps_general_and_vision_deadlines(
+    engine: Engine, vision: bool
+) -> None:
+    """Retain general and Vision bounds on the injected monotonic origin."""
+    from tests.adapters.test_vision_recipe import _bootstrap_input  # noqa: PLC0415
+
+    clock = ProviderGraphClock(ticks=100.0)
+    timeouts: list[float] = []
+
+    async def completion(**kwargs: object) -> object:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, float)
+        timeouts.append(timeout)
+        error = GraphProviderResponseError(503, "synthetic", "openrouter", "test-model")
+        error.agileforge_response_status = 503
+        raise error
+
+    client = RetryingOpenRouterClient(
+        completion=completion, clock=clock, uniform=lambda _low, _high: 0.0
+    )
+    leaf = ProviderRetryGraphLeaf(
+        name="clock_cap_graph", client=client, response={}, request_timeout=1000.0
+    )
+    if vision:
+        with Session(engine) as session:
+            project = Project(name="Vision bounded clock")
+            session.add(project)
+            session.commit()
+            assert project.project_id is not None
+            project_id = project.project_id
+        registry = _goal_registry(_unused_leaf("clock_unused_goal"), vision_leaf=leaf)
+        payload = _bootstrap_input()
+        node_id = "vision.bootstrap"
+    else:
+        lineage = _seed(engine)
+        project_id = lineage.project_id
+        registry = AdkRecipeRegistry(
+            (
+                AdkRecipe(
+                    node_id="backlog.generate",
+                    workflow=build_backlog_generation_workflow(
+                        leaf_agent=leaf,
+                        execution_settings=EXECUTION_SETTINGS,
+                    ),
+                    output_adapter=_adapter,
+                ),
+            )
+        )
+        payload = _backlog_recipe_input(lineage)
+        node_id = "backlog.generate"
+    domain = WorkflowDomain(
+        engine=engine, graph=ROOT_GRAPH, clock=clock, adk_recipe_registry=registry
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        provider_clock=clock,
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/model",
+            actor="operator",
+            execution_settings={
+                "timeout_seconds": 600.0 if vision else 120.0,
+                "max_attempts": 2,
+            },
+            lease_seconds=660 if vision else 300,
+        ),
+    )
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == node_id
+    )
+    result = runner.run(decision, payload)
+    assert result.error is not None
+    assert result.error.code.value == "EXTERNAL_PROVIDER_TEMPORARY"
+    assert timeouts == ([598.0, 60.0, 60.0] if vision else [118.0, 60.0, 60.0])
+    assert clock.waits == [0.0, 0.0]
+
+
+def test_graph_budget_stop_after_scheduled_finish_is_verified_and_replayed(
+    engine: Engine,
+) -> None:
+    """Oversleep terminates with audited actual sends and no invented reservation."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    clock = ProviderGraphClock(ticks=100.0)
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[500], clock=clock
+    )
+    settings: JsonObject = {
+        "timeout_seconds": 120.0,
+        "max_attempts": 2,
+        "provider_retry": ProviderRetryConfig(max_elapsed_seconds=120.0).model_dump(
+            mode="json"
+        ),
+    }
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=runner._registry,
+        session_service=TrackingSessionService(),
+        provider_clock=clock,
+        config=replace(runner._config, execution_settings=settings, lease_seconds=300),
+    )
+
+    def oversleep() -> None:
+        clock.ticks += 118.0
+        clock.now_value += timedelta(seconds=118)
+
+    clock.on_sleep = oversleep
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+    guards = AdkRunGuards(
+        position=position, idempotency_key="scheduled-budget", actor="operator"
+    )
+    result = runner.run(decision, _backlog_recipe_input(lineage), guards=guards)
+    assert result.error is not None
+    assert result.error.code.value == "EXTERNAL_PROVIDER_TEMPORARY"
+    summary = JSON_OBJECT.validate_python(result.output["provider_failure"])
+    assert summary["termination_reason"] == "retry_budget_exhausted"
+    assert summary["attempts"] == 1
+    assert len(sends) == 1
+    assert clock.waits == [1.0]
+    with Session(engine) as session:
+        audits = _provider_audits(session)
+        assert len(audits) == 2  # noqa: PLR2004
+        assert audits[-1]["disposition"] == "retry_scheduled"
+        assert not session.exec(select(BacklogArtifact)).all()
+    assert runner.run(
+        decision, _backlog_recipe_input(lineage), guards=guards
+    ) == result.model_copy(update={"replayed": True})

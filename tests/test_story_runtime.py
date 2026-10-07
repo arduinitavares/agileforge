@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+from adapters.adk import provider_retry
 from services import story_runtime
 from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
 from utils import failure_artifacts
@@ -66,6 +67,51 @@ GOLD_ITEM_IDS = {
 }
 EXPECTED_REPAIR_CALL_COUNT = 2
 TARGET_STORY_ID = 42
+
+
+@pytest.mark.asyncio
+async def test_story_helper_keeps_one_host_context_across_schema_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing outer binding would lose action identity between repair calls."""
+    contexts: list[provider_retry.ProviderActionContext] = []
+
+    async def invoke(_payload: UserStoryWriterInput) -> str:
+        accessor = getattr(provider_retry, "get_provider_action_context", lambda: None)
+        context = accessor()
+        assert context is not None, "Story helper must bind its host action"
+        contexts.append(context)
+        return "{}" if len(contexts) == 1 else _valid_output()
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", invoke)
+    result = await story_runtime.run_story_agent_from_state(
+        _state(), project_id=1, user_input=None
+    )
+    assert result["success"] is True
+    assert len(contexts) == EXPECTED_REPAIR_CALL_COUNT
+    assert contexts[0] is contexts[1]
+    assert contexts[0].project_id == 1
+    assert contexts[0].lease_deadline is None
+    assert provider_retry.get_provider_action_context() is None
+
+
+@pytest.mark.asyncio
+async def test_story_rejects_invalid_input_before_provider_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Input rejection must not resolve a provider policy or database."""
+    from models import db  # noqa: PLC0415
+    from utils import runtime_config  # noqa: PLC0415
+
+    def forbidden() -> None:
+        message = "Invalid input reached provider setup"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(db, "get_engine", forbidden)
+    monkeypatch.setattr(runtime_config, "get_provider_retry_config", forbidden)
+    monkeypatch.setattr(story_runtime, "_failure", _fake_failure)
+    result = await story_runtime.run_story_agent_request({}, project_id=1)
+    assert result["failure_stage"] == "input_validation"
 
 
 def _state() -> dict[str, Any]:
@@ -366,9 +412,7 @@ async def test_story_runtime_reference_failure_uses_paths_without_provider_ids(
     assert artifact["exception_type"] is None
     assert artifact["exception_message"] is None
     assert artifact["traceback"] is None
-    assert artifact["extra"] == {
-        "invalid_fields": ["story_items[0].spec_item_ids"]
-    }
+    assert artifact["extra"] == {"invalid_fields": ["story_items[0].spec_item_ids"]}
 
 
 @pytest.mark.asyncio
@@ -460,9 +504,7 @@ async def test_story_runtime_redacts_sentinel_from_wrapped_partial_agent_output(
     tmp_path: Path,
 ) -> None:
     """Pre-scan an incomplete embedded object before retaining partial output."""
-    raw_output = (
-        'prefix {"user_stories":[{"story_title":"placeholder"}]} suffix'
-    )
+    raw_output = 'prefix {"user_stories":[{"story_title":"placeholder"}]} suffix'
     error_message = "Story agent invocation failed after partial output"
 
     async def fake_invoke(_payload: UserStoryWriterInput) -> str:
@@ -497,14 +539,14 @@ async def test_story_runtime_redacts_sentinel_from_wrapped_partial_agent_output(
     ("raw_output", "private_marker"),
     [
         (
-            "prefix {\"user_stories\": []} actual "
-            "{\"user_stories\":[{\"story_title\":\"placeholder\","
-            "\"statement\":\"PRIVATE_RUNTIME_229\"}]}",
+            'prefix {"user_stories": []} actual '
+            '{"user_stories":[{"story_title":"placeholder",'
+            '"statement":"PRIVATE_RUNTIME_229"}]}',
             "private_runtime_229",
         ),
         (
-            "{\"user_stories\":[{\"story_title\":\"placeholder\","
-            "\"statement\":\"PRIVATE_RUNTIME_TRUNCATED_229\"}]",
+            '{"user_stories":[{"story_title":"placeholder",'
+            '"statement":"PRIVATE_RUNTIME_TRUNCATED_229"}]',
             "private_runtime_truncated_229",
         ),
     ],

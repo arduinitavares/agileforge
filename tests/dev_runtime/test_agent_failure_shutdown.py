@@ -58,14 +58,26 @@ _ISSUE_200_INCOMPLETE_MESSAGE: str = (
     "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can return "
     "the complete structured payload, then retry Structure Specification."
 )
-_MODEL_IMPORT: str = "from google.adk.models.lite_llm import LiteLlm\n"
-_MODEL_DEFINITION: str = """model: LiteLlm = LiteLlm(
-    model=_model_id,
+_MODEL_IMPORT: str = (
+    "from adapters.adk.provider_models import LiteLlm, create_openrouter_model\n"
+)
+_MODEL_DEFINITION: str = """model: LiteLlm = create_openrouter_model(
+    model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),
 )
 """
+_RUNTIME_SNAPSHOT_ROOTS: tuple[str, ...] = (
+    "adapters",
+    "cli",
+    "models",
+    "repositories",
+    "services",
+    "utils",
+    "workflow",
+)
+_RUNTIME_SNAPSHOT_FILES: tuple[str, ...] = ("api.py",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +151,12 @@ def _install_provider_free_model(checkout: Path) -> None:
 @pytest.fixture(scope="module")
 def launcher_checkout(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Commit one disposable checkout whose only test double is the model leaf."""
+    for directory in _RUNTIME_SNAPSHOT_ROOTS:
+        assert (_SOURCE_ROOT / directory).is_dir(), directory
+    for filename in _RUNTIME_SNAPSHOT_FILES:
+        source_path = _SOURCE_ROOT / filename
+        assert source_path.is_file(), filename
+        assert not source_path.is_symlink()
     root = tmp_path_factory.mktemp("issue-201-launcher")
     checkout = root / "checkout"
     _run(
@@ -147,10 +165,16 @@ def launcher_checkout(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     _git(checkout, "config", "user.name", "Issue 201 Launcher Test")
     _git(checkout, "config", "user.email", "issue-201@example.invalid")
-    shutil.copy2(
-        _SOURCE_ROOT / "adapters" / "adk" / "runner.py",
-        checkout / "adapters" / "adk" / "runner.py",
-    )
+    # The clone is HEAD. Copy current runtime owners, including uncommitted
+    # boundary dependencies, before rewriting the current Specification leaf.
+    for directory in _RUNTIME_SNAPSHOT_ROOTS:
+        for source_path in (_SOURCE_ROOT / directory).rglob("*.py"):
+            assert not source_path.is_symlink()
+            target_path = checkout / source_path.relative_to(_SOURCE_ROOT)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+    for filename in _RUNTIME_SNAPSHOT_FILES:
+        shutil.copy2(_SOURCE_ROOT / filename, checkout / filename)
     shutil.copy2(
         _SOURCE_ROOT / "tests" / "issue_201_launcher_model.py",
         checkout / "tests" / "issue_201_launcher_model.py",
@@ -159,8 +183,8 @@ def launcher_checkout(tmp_path_factory: pytest.TempPathFactory) -> Path:
     _git(
         checkout,
         "add",
-        "adapters/adk/agents/specification_author.py",
-        "adapters/adk/runner.py",
+        *_RUNTIME_SNAPSHOT_ROOTS,
+        *_RUNTIME_SNAPSHOT_FILES,
         "tests/issue_201_launcher_model.py",
     )
     _git(checkout, "commit", "-m", "test: install issue 201 provider-free leaf")
@@ -331,8 +355,7 @@ def _assert_durable_single_failure(
         outcomes = session.exec(
             select(WorkflowNodeAttemptOutcome).where(
                 col(WorkflowNodeAttemptOutcome.project_id) == project_id,
-                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id)
-                == attempt_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id,
             )
         ).all()
         candidates = session.exec(
@@ -521,9 +544,9 @@ def test_launcher_exits_after_durable_specification_failure(
     assert replay_result["replayed"] is True
     assert replay_result["error"] == error_payload
     assert not _process_group_exists(replay.pid)
-    assert (
-        paths.logs / "issue-201-provider-calls"
-    ).read_text(encoding="utf-8").splitlines() == [str(call_pid)]
+    assert (paths.logs / "issue-201-provider-calls").read_text(
+        encoding="utf-8"
+    ).splitlines() == [str(call_pid)]
     _assert_durable_single_failure(
         engine,
         project_id=project_id,

@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
+import pytest
+
+from adapters.adk.provider_retry import ProviderAttemptStopped
+from services.contracts.provider_retry import (
+    ProviderAuditError,
+    ProviderFailureSummary,
+    ProviderTransientFailure,
+)
+from utils import adk_runner
 from utils.adk_runner import parse_json_payload
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 STORY_OUTPUT_KEYS = {
     "parent_requirement",
@@ -93,3 +107,47 @@ def test_parse_json_payload_preserves_fenced_json_behavior() -> None:
 ```"""
 
     assert parse_json_payload(raw_text) == {"ok": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["temporary", "audit", "stopped"])
+async def test_invocation_preserves_exact_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """A provider boundary failure must not become a schema-repair exception."""
+    failure: Exception = (
+        ProviderTransientFailure(
+            ProviderFailureSummary(
+                reason="rate_limited",
+                termination_reason="attempts_exhausted",
+                http_status=429,
+                call_id="synthetic-call",
+                attempts=3,
+                max_attempts=3,
+                manual_retry_requires_new_key=False,
+            )
+        )
+        if kind == "temporary"
+        else ProviderAuditError()
+        if kind == "audit"
+        else ProviderAttemptStopped()
+    )
+
+    class FailingRunner:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def run_async(self, **_kwargs: object) -> AsyncIterator[object]:
+            raise failure
+            yield  # pragma: no cover
+
+    monkeypatch.setattr(adk_runner, "Runner", FailingRunner)
+    with pytest.raises(type(failure)) as caught:
+        await adk_runner.invoke_agent_to_text(
+            agent=object(),
+            runner_identity=SimpleNamespace(app_name="synthetic", user_id="host"),
+            payload_json="{}",
+            no_text_error="No response.",
+        )
+    assert caught.value is failure

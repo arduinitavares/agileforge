@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from adapters.adk.runner import AdkRunGuards
 from cli import main as cli_main
 from cli.main import (
     _invest_assessment_lines,
@@ -25,6 +26,7 @@ from cli.main import (
 from cli.workflow_commands import workflow_next
 from services.application import (
     BacklogCorrectionRequest,
+    DeliveryActionRequest,
     ExpectedPlanningReviewBinding,
     StoryReviewRequest,
     StorySetCorrectionRequest,
@@ -36,6 +38,12 @@ from services.vision_evidence import (
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.adapters.test_adk_workflow_runner import (
+    ProviderGraphClock,
+    _backlog_recipe_input,
+    _decision,
+    _provider_graph_system,
+)
 from tests.adapters.test_command_renderer import position_fixture
 from tests.services.test_durable_product_definition_projections import (
     NOW,
@@ -456,6 +464,74 @@ def test_vision_bootstrap_cli_preserves_precise_output_failure(
     payload = json.loads(capsys.readouterr().out)
     assert failure.error is not None
     assert payload["error"] == failure.error.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("statuses", [[429, 429, 429], [503, 503, 503], [503]])
+def test_provider_retry_cli_keeps_stdout_json_and_exit_conventions(
+    engine: "Engine",
+    capsys: pytest.CaptureFixture[str],
+    statuses: list[int],
+) -> None:
+    """Exhaustion exits one; a successful automatic retry exits zero."""
+    exhausted = len(statuses) == 3  # noqa: PLR2004
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=list(statuses), clock=ProviderGraphClock()
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+
+    class ProviderApplication:
+        def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult:
+            return runner.run(
+                decision,
+                _backlog_recipe_input(lineage),
+                guards=AdkRunGuards(
+                    position=position,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                ),
+            )
+
+    arguments = [
+        "backlog",
+        "generate",
+        "--project-id",
+        str(lineage.project_id),
+        "--idempotency-key",
+        "provider-cli",
+        "--actor",
+        "operator",
+    ]
+    payloads = []
+    for _ in range(2):
+        assert main(arguments, application=cast("Any", ProviderApplication())) == (
+            1 if exhausted else 0
+        )
+        captured = capsys.readouterr()
+        payloads.append(json.loads(captured.out))
+        assert captured.err == ""
+    first, replay = payloads
+    assert first["ok"] is not exhausted
+    assert first["replayed"] is False
+    assert replay == {**first, "replayed": True}
+    if exhausted:
+        state = "rate-limited" if statuses[0] == 429 else "unavailable"  # noqa: PLR2004
+        assert first["error"] == {
+            "code": "EXTERNAL_PROVIDER_TEMPORARY",
+            "message": (
+                f"OpenRouter is temporarily {state}. Automatic retries stopped. "
+                "Retry this action with a new idempotency key."
+            ),
+            "blockers": [],
+        }
+        summary = first["output"]["provider_failure"]
+        assert summary["http_status"] == statuses[0]
+        assert summary["attempts"] == summary["max_attempts"] == len(sends)
+        assert summary["manual_retry_requires_new_key"] is True
+    else:
+        assert first["error"] is None
+        assert "provider_failure" not in first["output"]
+        assert len(sends) == len(statuses) + 1
 
 
 def test_retired_specification_author_command_is_not_parseable() -> None:

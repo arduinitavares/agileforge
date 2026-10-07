@@ -1,3 +1,4 @@
+# utils/runtime_config.py
 """Centralized runtime configuration and identities."""
 
 from __future__ import annotations
@@ -8,7 +9,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
+from services.contracts.provider_retry import ProviderRetryConfig
 from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
@@ -268,6 +271,36 @@ def get_openrouter_api_key() -> str | None:
 
 
 @lru_cache(maxsize=1)
+def get_provider_retry_config() -> ProviderRetryConfig:
+    """Parse and capture the validated non-secret provider retry policy."""
+    env_fields: dict[str, str] = {
+        "max_attempts": "OPENROUTER_RETRY_MAX_ATTEMPTS",
+        "base_delay_seconds": "OPENROUTER_RETRY_BASE_DELAY_SECONDS",
+        "max_delay_seconds": "OPENROUTER_RETRY_MAX_DELAY_SECONDS",
+        "max_elapsed_seconds": "OPENROUTER_RETRY_MAX_ELAPSED_SECONDS",
+        "min_remaining_seconds": "OPENROUTER_RETRY_MIN_REMAINING_SECONDS",
+    }
+    values: dict[str, int | float] = {}
+    for field_name, env_name in env_fields.items():
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        try:
+            values[field_name] = (
+                int(raw) if field_name == "max_attempts" else float(raw)
+            )
+        except ValueError:
+            message = f"Invalid provider retry configuration: {env_name}."
+            raise RuntimeConfigError(message) from None
+    try:
+        return ProviderRetryConfig.model_validate(values)
+    except ValidationError as error:
+        field_name = str(error.errors()[0]["loc"][0])
+        message = f"Invalid provider retry configuration: {env_fields[field_name]}."
+        raise RuntimeConfigError(message) from None
+
+
+@lru_cache(maxsize=1)
 def get_database_echo() -> bool:
     """Return whether SQLAlchemy echo logging is enabled."""
     return get_bool_env("AGILEFORGE_DB_ECHO", default=False)
@@ -358,3 +391,4 @@ def clear_runtime_config_cache() -> None:
     get_business_db_target.cache_clear()
     get_adk_execution_trace_db_target.cache_clear()
     get_database_echo.cache_clear()
+    get_provider_retry_config.cache_clear()
