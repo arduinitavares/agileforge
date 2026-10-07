@@ -3349,7 +3349,7 @@ class DurableReadProjectionService:
         )
 
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
-        """Return retained graph history and actionable obsolete authority."""
+        """Return retained graph history and actionable obsolete edges."""
         with self._session() as session:
             if (
                 self._bound_session is None
