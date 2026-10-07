@@ -18,8 +18,11 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import api as api_module
 from models.core import Project
+from models.product_definition import SpecificationCandidate
+from models.workflow import BacklogArtifact
 from repositories.workflow import WorkflowFactRepository
 from services import dashboard_reads
+from services.agent_workbench.backlog_phase import record_backlog_decision_in_session
 from services.application import (
     AgileForgeApplication,
     DeliveryReviewSelectionService,
@@ -34,6 +37,8 @@ from tests.services.test_durable_product_definition_projections import (
     _goal_components,
     _GoalTurnSeed,
     _seed_goal_candidate,
+    _seed_lineage,
+    _seed_task_7_backlog,
     _seed_vision_candidate,
     _seeded_int,
 )
@@ -219,6 +224,82 @@ def test_dashboard_goal_questions_match_standalone_status(
     assert goal == {"status": standalone.status_code, "body": standalone.json()}
     assert loads == 1
     assert evaluations == 1
+    assert durable_rows(engine) == before
+
+
+@pytest.mark.parametrize("state", ["source_only", "accepted_backlog"])
+def test_dashboard_story_pending_preserves_accepted_backlog_without_roadmap(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """Backlog identity remains explicit on one snapshot without any Roadmap."""
+    accepted_backlog: dict[str, int | str] | None = None
+    if state == "accepted_backlog":
+        project_id, backlog_id, fingerprint, _spec_version_id = _seed_task_7_backlog(
+            engine
+        )
+        with Session(engine) as session:
+            backlog = session.get(BacklogArtifact, backlog_id)
+            assert backlog is not None
+            record_backlog_decision_in_session(
+                session,
+                artifact=backlog,
+                decision="accepted",
+                rationale="Accept the dashboard projection parent.",
+                reviewer="operator",
+                idempotency_key="dashboard-backlog-identity",
+                decided_at=NOW + timedelta(days=1),
+            )
+            session.commit()
+        accepted_backlog = {
+            "backlog_artifact_id": backlog_id,
+            "artifact_fingerprint": fingerprint,
+        }
+    else:
+        seeded = _seed_lineage(engine)
+        project_id = _seeded_int(seeded, "project_id")
+        with Session(engine) as session:
+            candidate = session.get(
+                SpecificationCandidate, _seeded_int(seeded, "candidate_id")
+            )
+            assert candidate is not None
+            session.delete(candidate)
+            session.commit()
+
+    application = _application(engine)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+    before = durable_rows(engine)
+    path = f"/api/projects/{project_id}"
+    standalone = client.get(f"{path}/story/pending")
+    loads = 0
+    original_load = WorkflowFactRepository.load
+
+    def counted_load(self: WorkflowFactRepository, current_id: int) -> object:
+        nonlocal loads
+        loads += 1
+        return original_load(self, current_id)
+
+    monkeypatch.setattr(WorkflowFactRepository, "load", counted_load)
+
+    response = client.get(f"{path}/dashboard")
+
+    assert standalone.status_code == HTTPStatus.OK
+    assert response.status_code == HTTPStatus.OK
+    slots = response.json()["data"]
+    assert slots["storyPending"] == {
+        "status": standalone.status_code,
+        "body": standalone.json(),
+    }
+    assert slots["storyPending"]["body"]["data"]["accepted_backlog"] == accepted_backlog
+    assert slots["acceptedRoadmap"]["body"]["data"]["state"] == "absent"
+    if state == "source_only":
+        specification = slots["specification"]["body"]["data"]
+        assert isinstance(specification["source"], dict)
+        assert specification["candidate"] is None
+        assert specification["review"] is None
+    assert loads == 1
     assert durable_rows(engine) == before
 
 

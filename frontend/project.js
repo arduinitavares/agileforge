@@ -155,6 +155,7 @@ let activeCockpitAction = null;
 let activeDeliveryUnreconciled = false;
 let sprintStartRetry = null;
 let backlogFeedbackFocusIntent = false;
+let lifecycleDisplayRead = { kind: 'loading' };
 let lifecycleState = {
     project: {},
     position: {},
@@ -4043,9 +4044,12 @@ function renderWorkspaceMap() {
     const host = document.getElementById('workspace-map-host');
     if (!host) return;
     ensureWorkspaceView();
+    const display = currentLifecycleDisplay();
     AgileForgeWorkspace.mount(host, {
         position: lifecycleState.position,
         context: lifecycleState,
+        displayProgress: { currentStageIds: display.currentStageIds, primaryStageId: display.primaryStageId },
+        displayReadKind: lifecycleDisplayRead.kind,
         view: workspaceView,
         lastConfirmedAt: lastDashboardConfirmedAt,
         onStageSelect: (stageId) => selectWorkspaceStage(stageId, { pushHistory: true, scroll: false }),
@@ -4552,15 +4556,141 @@ async function submitWorkspaceScopedAction(form) {
     }
 }
 
-function resolveActiveWorkflowStage(position, actions = []) {
-    const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
-    const sorted = [...decisions].sort((a, b) => compareLifecycleDecisions(a, b, actions));
-    const primary = sorted[0];
-    if (primary) {
-        const stage = decisionStage(primary);
-        if (stage) return stage;
+function projectLifecycleDisplayProjection(state, readState) {
+    const badge = (label, detail = '') => ({ label, detail });
+    const names = ['Vision', 'Product Goal', 'Specification', 'Backlog', 'Roadmap', 'Sprint'];
+    if (readState?.kind !== 'ready') {
+        const label = readState?.kind === 'loading' ? 'Loading…' : 'Unavailable';
+        return {
+            currentStageIds: [], primaryStageId: null, phaseLabel: label,
+            visionLabel: `Vision: ${label}`,
+            badges: Object.fromEntries(names.map((name) => [name, badge(label)])),
+        };
     }
-    return 'Stories';
+
+    const workspaceAvailable = typeof AgileForgeWorkspace !== 'undefined'
+        && typeof AgileForgeWorkspace.currentStageIds === 'function'
+        && typeof AgileForgeWorkspace.initialStageId === 'function'
+        && typeof AgileForgeWorkspace.stages === 'function';
+    const currentStageIds = workspaceAvailable
+        ? AgileForgeWorkspace.currentStageIds(state?.position, state) : [];
+    const primaryStageId = workspaceAvailable
+        ? AgileForgeWorkspace.initialStageId(state?.position, state) : null;
+    const phaseLabel = !workspaceAvailable ? 'Unavailable'
+        : primaryStageId !== null
+            ? AgileForgeWorkspace.stages().find((stage) => stage.id === primaryStageId)?.label ?? 'Unavailable'
+            : currentStageIds.length > 1 ? 'Multiple current stages' : 'No current stage';
+
+    const text = (value) => typeof value === 'string' && value.trim() ? value.trim() : null;
+    const conflict = (projection) => text(projection?.stale_reason)?.endsWith('_CONFLICT');
+    const reviewDetail = (review, prefix = 'Review') => {
+        const status = text(review?.state);
+        return status ? `${prefix}: ${humanizeKey(status)}${text(review.rationale) ? ` · ${review.rationale}` : ''}` : '';
+    };
+    const pendingReview = (projection) => projection?.review ?? projection?.continuation?.review ?? null;
+    const blockedBadge = (stage) => {
+        const reasons = (Array.isArray(state?.position?.decisions) ? state.position.decisions : [])
+            .filter((decision) => decisionStage(decision) === stage && decision.category === 'blocked')
+            .map((decision) => text(decision.reason_code)).filter(Boolean);
+        return reasons.length ? badge('Blocked', [...new Set(reasons)].join(' · ')) : badge('Not started');
+    };
+    const successorDetail = (packet) => ['pending', 'feedback', 'rejected'].includes(packet?.review?.state)
+        ? reviewDetail(packet.review, 'Successor review') : '';
+
+    const vision = state?.vision;
+    const currentVision = text(vision?.current?.statement);
+    const draftVision = text(vision?.candidate?.statement) ?? text(vision?.draft?.statement);
+    const snippet = (statement) => statement.length > 80 ? `${statement.slice(0, 80)}…` : statement;
+    const visionLabel = conflict(vision) ? 'Vision: Unavailable'
+        : currentVision ? `Vision: Accepted · ${snippet(currentVision)}`
+            : draftVision ? `Vision: Draft · ${snippet(draftVision)}` : 'Vision: Direction pending';
+    const visionBadge = conflict(vision) ? badge('Unavailable', vision.stale_reason)
+        : currentVision ? badge('Complete', vision?.candidate || vision?.draft
+            ? reviewDetail(vision.review, 'Revision') || 'Revision in progress' : '')
+            : draftVision ? badge('Draft', reviewDetail(vision?.review)) : badge('Not started');
+
+    const goal = state?.goal;
+    const goalBadge = conflict(goal) ? badge('Unavailable', goal.stale_reason)
+        : goal?.active ? badge('Active', goal.candidate ? reviewDetail(goal.review, 'Revision') : '')
+            : goal?.candidate ? badge(['feedback', 'rejected'].includes(goal.review?.state) ? humanizeKey(goal.review.state) : 'Review', reviewDetail(goal.review))
+                : ['fulfilled', 'abandoned'].includes(goal?.outcome?.outcome)
+                    ? badge(humanizeKey(goal.outcome.outcome), text(goal.outcome.rationale) ?? '')
+                    : goal?.outcome ? badge('Unavailable') : badge('Not started');
+
+    const specification = state?.specification;
+    let specificationBadge;
+    if (conflict(specification)) {
+        specificationBadge = badge('Unavailable', specification.stale_reason);
+    } else if (!specification?.source) {
+        specificationBadge = badge('Source not current', text(specification?.stale_reason) ?? 'Current source unavailable');
+    } else if (!positiveInteger(specification.source.specification_source_id)
+        || !text(specification.source.source_fingerprint)) {
+        specificationBadge = badge('Unavailable', 'Current source identity unavailable');
+    } else if (!specification.candidate) {
+        specificationBadge = badge('Source registered', 'Awaiting structuring');
+    } else {
+        const candidate = specification.candidate;
+        const exactCandidate = positiveInteger(candidate.specification_candidate_id)
+            && text(candidate.candidate_fingerprint)
+            && candidate.specification_source_id === specification.source.specification_source_id
+            && candidate.registered_source_fingerprint === specification.source.source_fingerprint;
+        const reviewState = specification.review?.state;
+        specificationBadge = exactCandidate && ['accepted', 'pending', 'feedback', 'rejected'].includes(reviewState)
+            ? badge(reviewState === 'pending' ? 'Review' : humanizeKey(reviewState), reviewDetail(specification.review))
+            : badge('Unavailable', text(specification.stale_reason) ?? 'Current Specification review unavailable');
+    }
+
+    const projectId = state?.project?.id ?? state?.position?.project_id;
+    const coverage = state?.storyPending;
+    const acceptedBacklog = coverage?.accepted_backlog;
+    const backlogReview = pendingReview(state?.planningReviews?.backlog);
+    let backlogBadge;
+    if (!positiveInteger(projectId) || coverage?.project_id !== projectId
+        || !Object.prototype.hasOwnProperty.call(coverage, 'accepted_backlog')
+        || (acceptedBacklog !== null && (!positiveInteger(acceptedBacklog?.backlog_artifact_id)
+            || !text(acceptedBacklog?.artifact_fingerprint)))) {
+        backlogBadge = badge('Unavailable', 'Accepted Backlog identity unavailable');
+    } else if (acceptedBacklog !== null) {
+        backlogBadge = badge('Accepted', successorDetail(backlogReview));
+    } else if (['pending', 'feedback', 'rejected'].includes(backlogReview?.review?.state)) {
+        backlogBadge = badge(backlogReview.review.state === 'pending' ? 'Review' : humanizeKey(backlogReview.review.state), reviewDetail(backlogReview.review));
+    } else {
+        backlogBadge = blockedBadge('Backlog');
+    }
+
+    const roadmap = state?.acceptedRoadmap;
+    const roadmapReview = pendingReview(state?.planningReviews?.roadmap);
+    const roadmapBadge = roadmap?.kind !== 'ready'
+        ? badge('Unavailable', text(roadmap?.message) ?? 'Accepted Roadmap read unavailable')
+        : roadmap.data?.state === 'accepted' ? badge('Accepted', successorDetail(roadmapReview))
+            : roadmap.data?.state !== 'absent' ? badge('Unavailable', 'Accepted Roadmap state unavailable')
+                : ['pending', 'feedback', 'rejected'].includes(roadmapReview?.review?.state)
+                    ? badge(roadmapReview.review.state === 'pending' ? 'Review' : humanizeKey(roadmapReview.review.state), reviewDetail(roadmapReview.review))
+                    : blockedBadge('Roadmap');
+
+    const sprint = state?.sprintStatus;
+    const sprintStatus = sprint?.data?.effective_status ?? sprint?.data?.sprint?.status;
+    const sprintBadge = sprint?.kind === 'absent' ? badge('Not started')
+        : sprint?.kind === 'ready' && positiveInteger(projectId)
+            && sprint.data?.project_id === projectId
+            && positiveInteger(sprint.data?.sprint?.sprint_id)
+            && ['planned', 'active', 'completed'].includes(sprintStatus)
+            ? badge(humanizeKey(sprintStatus))
+            : badge('Unavailable', text(sprint?.message) ?? 'Sprint status unavailable');
+
+    return {
+        currentStageIds, primaryStageId, phaseLabel, visionLabel,
+        badges: { Vision: visionBadge, 'Product Goal': goalBadge, Specification: specificationBadge, Backlog: backlogBadge, Roadmap: roadmapBadge, Sprint: sprintBadge },
+    };
+}
+
+function currentLifecycleDisplay(position = lifecycleState?.position) {
+    return lifecycleDisplayRead.confirmed
+        ?? projectLifecycleDisplayProjection({ ...lifecycleState, position }, lifecycleDisplayRead);
+}
+
+function resolveActiveWorkflowStage(position) {
+    return currentLifecycleDisplay(position).phaseLabel;
 }
 
 function findPrimaryWorkflowAction(actions = [], position = {}) {
@@ -4695,7 +4825,7 @@ function handlePrimaryCockpitAction(primaryAction) {
 function renderTopCockpit() {
     const project = lifecycleState.project ?? {};
     const goal = lifecycleState.goal ?? {};
-    const vision = lifecycleState.vision ?? {};
+    const display = currentLifecycleDisplay();
     const repository = lifecycleState.repository?.repository ?? {};
     const position = lifecycleState.position ?? {};
     const actions = Array.isArray(lifecycleState.actions) ? lifecycleState.actions : [];
@@ -4717,14 +4847,12 @@ function renderTopCockpit() {
         ?? goal.outcome?.statement
         ?? 'No active Product Goal';
     setText('cockpit-goal-statement', activeGoalStatement);
-    const goalStatusLabel = goal.active ? 'Active' : (goal.candidate ? 'Review' : (goal.outcome?.fulfilled ? 'Fulfilled' : 'Draft'));
-    setText('cockpit-goal-status', goalStatusLabel);
-    const visionSnippet = vision.accepted?.statement ?? vision.candidate?.statement ?? 'Direction pending';
-    setText('cockpit-vision-anchor', `Vision: ${visionSnippet.length > 28 ? visionSnippet.slice(0, 28) + '...' : visionSnippet}`);
+    setText('cockpit-goal-status', display.badges['Product Goal'].label);
+    setText('cockpit-vision-anchor', display.visionLabel);
     const completedSprints = Array.isArray(lifecycleState.sprintHistory?.items) ? lifecycleState.sprintHistory.items.length : 0;
     setText('cockpit-cycle-progress', `Cycle ${completedSprints + 1}`);
 
-    const activeStage = resolveActiveWorkflowStage(position, actions);
+    const activeStage = display.phaseLabel;
     setText('cockpit-active-stage-label', activeStage);
     const isFramingComplete = Boolean(lifecycleState.specification?.accepted || lifecycleState.specification?.active);
     setText('cockpit-radar-badge', isFramingComplete ? 'Framing: 100%' : 'Framing in Progress');
@@ -4732,8 +4860,9 @@ function renderTopCockpit() {
     if (progressBar) {
         let progressPct = 30;
         if (isFramingComplete) progressPct = 60;
-        if (activeStage === 'Sprint' || activeStage === 'Execution') progressPct = 80;
-        if (activeStage === 'Review') progressPct = 95;
+        if (display.primaryStageId === workspaceStageForLegacy('Sprint')
+            || display.primaryStageId === workspaceStageForLegacy('Execution')) progressPct = 80;
+        if (display.primaryStageId === workspaceStageForLegacy('Review')) progressPct = 95;
         progressBar.style.width = `${progressPct}%`;
     }
     setText('cockpit-phase-detail', isFramingComplete ? `Delivery Loop: ${activeStage}` : 'Project Framing Phase');
@@ -4819,18 +4948,25 @@ function renderTopCockpit() {
 }
 
 function renderMasterStageNav() {
-    const position = lifecycleState.position ?? {};
-    const actions = Array.isArray(lifecycleState.actions) ? lifecycleState.actions : [];
-    const activeStage = resolveActiveWorkflowStage(position, actions);
+    const display = currentLifecycleDisplay();
+    const badgeIds = {
+        Vision: 'nav-vision-badge',
+        'Product Goal': 'nav-goal-badge',
+        Specification: 'nav-specification-badge',
+        Backlog: 'nav-backlog-badge',
+        Roadmap: 'nav-roadmap-badge',
+        Sprint: 'nav-sprint-badge',
+    };
+    for (const [stage, id] of Object.entries(badgeIds)) {
+        const element = document.getElementById(id);
+        if (!element) continue;
+        element.textContent = display.badges[stage].label;
+        element.setAttribute('title', display.badges[stage].detail);
+    }
 
-    const stories = Array.isArray(lifecycleState.storyDependencies?.stories) ? lifecycleState.storyDependencies.stories : [];
+    const stories = Array.isArray(lifecycleState?.storyDependencies?.stories) ? lifecycleState.storyDependencies.stories : [];
     const activeStories = stories.filter((s) => !isStoryCompleted(s));
     setText('nav-stories-count', String(activeStories.length));
-
-    const sprintStatus = lifecycleState?.sprintStatus?.data?.sprint?.status;
-    if (sprintStatus) {
-        setText('nav-sprint-badge', humanizeKey(sprintStatus));
-    }
 }
 
 function updateStageView(shouldScroll = false) {
@@ -4872,7 +5008,11 @@ function updateStageView(shouldScroll = false) {
 
     setText('workbench-stage-title', currentStage);
     const framingStages = ['Create Project', 'Repository', 'Vision', 'Product Goal', 'Specification', 'Backlog', 'Roadmap'];
-    setText('workbench-stage-kicker', framingStages.includes(currentStage) ? 'Project Framing' : 'Delivery Loop');
+    const stageResolved = workspaceStageLabel(workspaceStage) !== null || workspaceStageForLegacy(currentStage) !== null;
+    const phase = framingStages.includes(currentStage) ? 'Project Framing' : stageResolved ? 'Delivery Loop' : 'Project lifecycle';
+    const currentStageIds = currentLifecycleDisplay().currentStageIds;
+    const viewing = Number.isInteger(workspaceStage) && !currentStageIds.includes(workspaceStage);
+    setText('workbench-stage-kicker', `${viewing ? 'Viewing · ' : ''}${phase}`);
 
     const panelMap = {
         'Vision': 'vision-panel',
@@ -4989,6 +5129,10 @@ function renderDashboard() {
     workspaceRenderScope = workspaceRenderKey();
     restoreWorkspaceTaskFocusIntent();
     updateContextInspector();
+    if (lifecycleDisplayRead.kind === 'ready' && lastDashboardConfirmedAt) {
+        setText('dashboard-refresh-time', `Confirmed ${new Date(lastDashboardConfirmedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Manual refresh`);
+        document.getElementById('dashboard-refresh-time')?.setAttribute('title', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
+    }
     const sprintId = currentWorkspaceSprintId();
     if (workspaceView?.stageId === 9 && positiveInteger(sprintId)
         && workspaceTaskInventory?.sprintId !== sprintId) {
@@ -5227,6 +5371,11 @@ async function loadDashboard() {
                     }),
             sprintHistory: sprintHistory.data ?? {},
         };
+        lifecycleDisplayRead = {
+            kind: 'ready',
+            confirmed: projectLifecycleDisplayProjection(lifecycleState, { kind: 'ready' }),
+        };
+        lastDashboardConfirmedAt = new Date().toISOString();
         const backlogFocusMutation = reconcileBacklogCorrectionMutation(
             backlogCorrectionMutationAtStart,
         );
@@ -5257,9 +5406,6 @@ async function loadDashboard() {
             completeSprintRetryReconciliation(activeSprintRetryMutation.token);
         }
         lastSuccessfulDashboardLoadSequence = sequence;
-        lastDashboardConfirmedAt = new Date().toISOString();
-        setText('dashboard-refresh-time', `Confirmed ${new Date(lastDashboardConfirmedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Manual refresh`);
-        document.getElementById('dashboard-refresh-time')?.setAttribute('title', `Last confirmed ${lastDashboardConfirmedAt}; manual refresh required`);
         await refreshWorkspaceInventoryProjection();
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         reconcileWorkspaceSelection();
@@ -5288,6 +5434,11 @@ async function loadDashboard() {
         return true;
     } catch (error) {
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
+        const firstFailure = lifecycleDisplayRead.kind !== 'ready';
+        if (firstFailure) {
+            lifecycleDisplayRead = { kind: 'unavailable' };
+            setText('dashboard-refresh-time', 'Unavailable · Manual refresh required');
+        }
         if (error.status === 409) {
             lifecycleState = {
                 ...lifecycleState,
@@ -5298,9 +5449,9 @@ async function loadDashboard() {
                     sprintPlan: {},
                 },
             };
-            renderDashboard();
-            setProjectError(error.message);
         }
+        if (firstFailure || error.status === 409) renderDashboard();
+        if (error.status === 409) setProjectError(error.message);
         throw error;
     } finally {
         if (activeDashboardLoadController === controller) {

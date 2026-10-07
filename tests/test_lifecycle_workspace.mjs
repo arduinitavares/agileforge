@@ -231,6 +231,73 @@ test('map renders graph authority independently from viewing and exposes return 
     assert.match(markup, /Manual refresh required/);
 });
 
+test('map distinguishes unavailable reads from loading without replacing retained confirmation', () => {
+    const workspace = api();
+    const options = {
+        view: { ...workspace.createView(), stageId: 4 },
+        displayProgress: { currentStageIds: [], primaryStageId: null },
+    };
+    for (const displayReadKind of [undefined, 'loading']) {
+        const markup = workspace.mapMarkup({ ...options, displayReadKind });
+        assert.match(markup, /<p class="workspace-map-freshness">Loading lifecycle · Manual refresh required<\/p>/);
+        assert.match(markup, /<p class="workspace-route-note">Loading workflow position…<\/p>/);
+        assert.doesNotMatch(markup, /aria-current|Return to current work|<time/);
+    }
+    const unavailable = workspace.mapMarkup({ ...options, displayReadKind: 'unavailable' });
+    assert.match(unavailable, /<p class="workspace-map-freshness">Unavailable lifecycle · Manual refresh required<\/p>/);
+    assert.match(unavailable, /<p class="workspace-route-note">Workflow position unavailable\.<\/p>/);
+    assert.doesNotMatch(unavailable, /aria-current|Return to current work|<time/);
+
+    const confirmed = workspace.mapMarkup({
+        ...options, displayReadKind: 'ready', lastConfirmedAt: '2026-09-14T10:30:00Z',
+        displayProgress: { currentStageIds: [9], primaryStageId: 9 },
+    });
+    assert.match(confirmed, /data-workspace-stage="9"[^>]*aria-current="step"/);
+    assert.match(confirmed, /Return to current work/);
+    assert.match(confirmed, /<p class="workspace-map-freshness">Confirmed <time datetime="2026-09-14T10:30:00Z"/);
+    assert.match(confirmed, /<p class="workspace-route-note">Current work follows the confirmed workflow position\.<\/p>/);
+});
+
+test('confirmed display progress controls map markers without changing live action availability', () => {
+    const workspace = api();
+    const position = { decisions: [{ request_kind: 'complete_task', category: 'available', recommendation_kind: 'required' }] };
+    const markup = workspace.mapMarkup({
+        position, view: { ...workspace.createView(), stageId: 13 },
+        displayProgress: { currentStageIds: [8], primaryStageId: 8 },
+    });
+    assert.match(markup, /data-workspace-stage="8"[^>]*aria-current="step"/);
+    assert.doesNotMatch(markup, /data-workspace-stage="9"[^>]*aria-current/);
+    assert.match(markup, /workspace-stage-9[\s\S]*?<span class="workspace-stage-action">Action available<\/span>/);
+    assert.match(markup, /Return to current work/);
+    const unknown = workspace.mapMarkup({
+        position, view: { ...workspace.createView(), stageId: 13 },
+        displayProgress: { currentStageIds: [], primaryStageId: null },
+    });
+    assert.doesNotMatch(unknown, /aria-current|Return to current work/);
+    assert.deepEqual(Array.from(workspace.currentStageIds(position)), [9], 'Display metadata does not alter live derivation');
+});
+
+test('mounted Return uses confirmed display primary rather than live action stage', () => {
+    let onReturn;
+    const host = {
+        innerHTML: '',
+        querySelectorAll() { return []; },
+        querySelector(selector) {
+            assert.equal(selector, '[data-workspace-return-current]');
+            return { addEventListener(type, listener) { assert.equal(type, 'click'); onReturn = listener; } };
+        },
+    };
+    const returned = [];
+    api().mount(host, {
+        position: { decisions: [{ request_kind: 'complete_task', category: 'available', recommendation_kind: 'required' }] },
+        view: { stageId: 13 }, displayProgress: { currentStageIds: [8], primaryStageId: 8 },
+        onReturnToCurrent: (stageId) => returned.push(stageId),
+    });
+    assert.match(host.innerHTML, /data-workspace-stage="8"[^>]*aria-current="step"/);
+    onReturn();
+    assert.deepEqual(returned, [8]);
+});
+
 
 test('controller clears old detail when the current Task becomes unavailable', async () => {
     let request = 0;

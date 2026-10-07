@@ -16,12 +16,31 @@ from cli.main import main
 from models.core import Project
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.read_projections import DurableReadProjectionService
+from utils import logging_config, runtime_ownership
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
     from workflow.contracts import JsonObject
+
+
+@pytest.fixture(autouse=True)
+def _isolate_read_transport_runtime_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep read-transport fencing and diagnostic logs in per-test state."""
+    runtime_root = tmp_path.resolve()
+    logs_root = runtime_root / "logs"
+
+    def isolated_runtime_roots() -> tuple[Path, ...]:
+        return (runtime_root,)
+
+    monkeypatch.setattr(runtime_ownership, "runtime_roots", isolated_runtime_roots)
+    monkeypatch.setattr(logging_config, "LOGS_DIR", logs_root)
+    monkeypatch.setattr(logging_config, "APP_LOG_PATH", logs_root / "app.log")
+    monkeypatch.setattr(logging_config, "ERROR_LOG_PATH", logs_root / "error.log")
 
 
 def _read_result(marker: str) -> JsonObject:
@@ -38,6 +57,7 @@ class _FakeReadApplication:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, JsonObject]] = []
+        self.accepted_backlog: JsonObject | None = None
 
     @property
     def reads(self) -> _FakeReadApplication:
@@ -77,7 +97,18 @@ class _FakeReadApplication:
 
     def story_pending(self, *, project_id: int) -> JsonObject:
         self.calls.append(("story_pending", {"project_id": project_id}))
-        return _read_result("story-pending")
+        return {
+            "ok": True,
+            "data": {
+                "marker": "story-pending",
+                "accepted_backlog": self.accepted_backlog,
+                "items": [],
+                "count": 0,
+                "pending_count": 0,
+            },
+            "warnings": [],
+            "errors": [],
+        }
 
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         self.calls.append(("story_dependencies_inspect", {"project_id": project_id}))
@@ -351,6 +382,39 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
             {"project_id": 41, "sprint_id": 7, "task_id": 13, "flavor": "compact"},
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    "accepted_backlog",
+    [
+        None,
+        {"backlog_artifact_id": 102, "artifact_fingerprint": "sha256:backlog-102"},
+    ],
+)
+def test_api_and_cli_preserve_story_pending_accepted_backlog_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    accepted_backlog: JsonObject | None,
+) -> None:
+    """Both read transports preserve explicit identity or null at zero coverage."""
+    application = _FakeReadApplication()
+    application.accepted_backlog = accepted_backlog
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    response = TestClient(api_module.app).get("/api/projects/41/story/pending")
+
+    exit_code = main(
+        ["story", "pending", "--project-id", "41"], application=application
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert exit_code == 0
+    cli_payload = json.loads(capsys.readouterr().out)
+    api_payload = response.json()
+    assert api_payload["status"] == "success"
+    assert api_payload["data"] == cli_payload["data"]
+    assert cli_payload["ok"] is True
+    assert cli_payload["data"]["accepted_backlog"] == accepted_backlog
+    assert cli_payload["data"]["items"] == []
 
 
 @pytest.mark.parametrize(

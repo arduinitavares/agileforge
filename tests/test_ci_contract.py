@@ -272,6 +272,7 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
         "tests/test_create_project_modal_required_fields.mjs",
         "tests/test_vision_interview_ui.mjs",
         "tests/test_product_goal_interview_ui.mjs",
+        "tests/test_project_lifecycle_summary.mjs",
     }
     assert required_suites <= set(frontend_tests[2:])
 
