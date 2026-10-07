@@ -19,6 +19,24 @@ TASK_METADATA_VERSION = "task_metadata.v2"
 TaskKind = Literal["implementation", "test", "documentation", "research"]
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _STREAM_PATTERN = r"^SPS-[0-9a-f]{32}$"
+_CHECKLIST_DISPLAY_ITEMS: int = 20
+_CHECKLIST_DISPLAY_CHARACTERS: int = 160
+
+
+def format_checklist_items(checklist_items: tuple[str, ...]) -> str:
+    """Format bounded, numbered checklist text in its persisted order."""
+    lines: list[str] = []
+    for index, item in enumerate(checklist_items[:_CHECKLIST_DISPLAY_ITEMS], start=1):
+        displayed = (
+            item
+            if len(item) <= _CHECKLIST_DISPLAY_CHARACTERS
+            else item[: _CHECKLIST_DISPLAY_CHARACTERS - 1] + "…"
+        )
+        lines.append(f"{index}. {displayed}")
+    omitted = len(checklist_items) - _CHECKLIST_DISPLAY_ITEMS
+    if omitted > 0:
+        lines.append(f"… and {omitted} more")
+    return "\n".join(lines)
 
 
 def _require_ordered_unique_nonblank(
@@ -139,6 +157,7 @@ def hash_task_metadata(metadata: TaskMetadata) -> str:
 __all__ = [
     "TASK_METADATA_VERSION",
     "TaskMetadata",
+    "format_checklist_items",
     "hash_task_metadata",
     "metadata_from_structured_task",
     "parse_task_metadata",

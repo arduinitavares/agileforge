@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -69,11 +70,13 @@ from utils.platform_support import (
 )
 from utils.runtime_fence import FenceError
 from utils.runtime_ownership import runtime_access
+from utils.task_metadata import format_checklist_items, parse_task_metadata
 from workflow.contracts import (
     JsonObject,
     TransitionResult,
     WorkflowPosition,
 )
+from workflow.execution_identity import parse_execution_instance_key
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 
@@ -316,10 +319,16 @@ class _CliParseError(ValueError):
     """Raised when command arguments are invalid."""
 
 
+class _ChecklistArgumentError(_CliParseError):
+    """Checklist item syntax failures eligible for optional read diagnostics."""
+
+
 class _ArgumentParser(argparse.ArgumentParser):
     """Argument parser that leaves JSON error rendering to the transport."""
 
     def error(self, message: str) -> NoReturn:
+        if message.startswith("argument --checklist-item:"):
+            raise _ChecklistArgumentError(message)
         raise _CliParseError(message)
 
 
@@ -438,7 +447,109 @@ def _read_checklist_file(path_value: str) -> dict[str, str]:
     return checklist_result
 
 
-def _task_checklist_result(args: argparse.Namespace) -> dict[str, str]:
+def _task_checklist_items(
+    args: argparse.Namespace, application: _Application
+) -> tuple[str, ...]:
+    """Read exact canonical checklist text through the selected project's projection."""
+    identity = parse_execution_instance_key(args.instance_key)
+    if identity.kind != "task":
+        raise ValueError("Checklist context requires a Task instance key.")
+    result = application.reads.sprint_task_show(
+        project_id=args.project_id, task_id=identity.entity_id
+    )
+    if result.get("ok") is not True:
+        error = result.get("error")
+        detail = error.get("message") if isinstance(error, dict) else None
+        raise ValueError(
+            detail
+            if isinstance(detail, str)
+            else "Task checklist context is unavailable."
+        )
+    data = result.get("data")
+    task = data.get("task") if isinstance(data, dict) else None
+    metadata_json = task.get("metadata_json") if isinstance(task, dict) else None
+    if not isinstance(metadata_json, str):
+        raise ValueError("Task metadata is invalid.")
+    return parse_task_metadata(metadata_json).checklist_items
+
+
+def _inline_checklist_result(checklist_items: list[tuple[str, str]]) -> dict[str, str]:
+    checklist_result = dict(checklist_items)
+    if len(checklist_result) != len(checklist_items):
+        raise _ChecklistArgumentError("--checklist-item keys must be unique.")
+    return checklist_result
+
+
+def _resolve_checklist_entries(
+    entries: tuple[tuple[str, str], ...], checklist_items: tuple[str, ...]
+) -> dict[str, str]:
+    """Preserve complete literal coverage and reject conflicting index readings."""
+    literal_result = dict(entries)
+    indexed_items = {
+        str(index): item for index, item in enumerate(checklist_items, start=1)
+    }
+    indexed_result = (
+        {indexed_items[key]: result for key, result in entries}
+        if all(key in indexed_items for key, _result in entries)
+        else None
+    )
+    required_keys = set(checklist_items)
+    if literal_result.keys() == required_keys:
+        if (
+            indexed_result is not None
+            and indexed_result.keys() == required_keys
+            and indexed_result != literal_result
+        ):
+            raise ValueError(
+                "Checklist literal and index readings differ; use --checklist-file."
+            )
+        return literal_result
+    if indexed_result is None:
+        raise ValueError(
+            "Checklist indexes must be canonical 1-based item numbers within bounds; "
+            "do not mix text and indexes. Use --checklist-file for exact keys."
+        )
+    if any(key in required_keys and key != indexed_items[key] for key, _ in entries):
+        raise ValueError(
+            "Checklist index collides with a different literal item; "
+            "use --checklist-file."
+        )
+    return indexed_result
+
+
+def _checklist_error_context(argv: list[str] | None) -> argparse.Namespace:
+    """Recover only explicit selectors after checklist parsing has already failed."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:3] != ["sprint", "task", "complete"]:
+        raise ValueError("Checklist syntax context is unavailable.")
+    parser = _ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--project-id", type=int, required=True)
+    parser.add_argument("--instance-key", required=True)
+    args, _unknown = parser.parse_known_args(arguments[3:])
+    return args
+
+
+def _checklist_argument_message(
+    error: _ChecklistArgumentError,
+    *,
+    args: argparse.Namespace | None,
+    argv: list[str] | None,
+    application: object | None,
+) -> str:
+    """Enrich syntax only when an injected scoped read safely succeeds."""
+    if application is None:
+        return str(error)
+    try:
+        context = args if args is not None else _checklist_error_context(argv)
+        items = _task_checklist_items(context, cast("_Application", application))
+    except Exception:  # noqa: BLE001 - Optional diagnostics never replace syntax errors.
+        return str(error)
+    return f"{error}\nValid checklist items:\n{format_checklist_items(items)}"
+
+
+def _task_checklist_result(
+    args: argparse.Namespace, application: _Application
+) -> dict[str, str]:
     """Select exactly one semantic checklist input source."""
     checklist_files = cast("list[str] | None", args.checklist_files)
     if checklist_files is not None:
@@ -448,10 +559,30 @@ def _task_checklist_result(args: argparse.Namespace) -> dict[str, str]:
         return _read_checklist_file(checklist_files[0])
 
     checklist_items = cast("list[tuple[str, str]]", args.checklist_items)
-    checklist_result = dict(checklist_items)
-    if len(checklist_result) != len(checklist_items):
-        message = "--checklist-item keys must be unique."
-        raise ValueError(message)
+    try:
+        checklist_result = _inline_checklist_result(checklist_items)
+    except _ChecklistArgumentError as error:
+        raise _ChecklistArgumentError(
+            _checklist_argument_message(
+                error, args=args, argv=None, application=application
+            )
+        ) from error
+    if any(
+        re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", key) is not None
+        for key in checklist_result
+    ):
+        try:
+            items = _task_checklist_items(args, application)
+        except Exception as error:
+            message = f"Task checklist context could not be read: {error}"
+            raise ValueError(message) from error
+        try:
+            return _resolve_checklist_entries(tuple(checklist_items), items)
+        except ValueError as error:
+            message = (
+                f"{error}\nValid checklist items:\n{format_checklist_items(items)}"
+            )
+            raise ValueError(message) from error
     return checklist_result
 
 
@@ -724,8 +855,10 @@ def _install_execution_action_mutations(
         type=_parse_checklist_item,
         metavar="KEY=VALUE",
         help=(
-            "Repeat for each result; the first '=' separates the key and values "
-            "may contain '='. Use --checklist-file when a key contains '='."
+            "Repeat exact text or stored 1-based indexes for each result; the first "
+            "'=' separates the key and values may contain '='. Complete literal "
+            "coverage is preserved unless a full index reading differs. "
+            "Use --checklist-file for keys containing '=' or numeric collisions."
         ),
     )
     checklist_source.add_argument(
@@ -763,7 +896,21 @@ def _install_execution_action_mutations(
         choices=("none", "backlog", "specification"),
         required=True,
     )
-    triage.add_argument("--file", required=True)
+    triage_source = triage.add_mutually_exclusive_group(required=True)
+    triage_source.add_argument(
+        "--file",
+        dest="triage_files",
+        action="append",
+        metavar="PATH",
+        help="Read one JSON object; supply --file exactly once.",
+    )
+    triage_source.add_argument(
+        "--summary",
+        dest="triage_summaries",
+        action="append",
+        metavar="TEXT",
+        help="Record one nonblank summary with --impact none; preserves exact text.",
+    )
 
 
 def _install_specification_mutations(
@@ -2257,7 +2404,7 @@ def _sprint_retry(args: argparse.Namespace, application: _Application) -> int:
 
 
 def _task_complete(args: argparse.Namespace, application: _Application) -> int:
-    checklist_result = _task_checklist_result(args)
+    checklist_result = _task_checklist_result(args, application)
     acceptance_result = cast(
         "Literal['partially_met', 'fully_met']",
         args.acceptance_result,
@@ -2325,6 +2472,28 @@ def _sprint_close(args: argparse.Namespace, application: _Application) -> int:
     )
 
 
+def _triage_payload(args: argparse.Namespace) -> JsonObject:
+    """Normalize one source without changing existing file payload semantics."""
+    files = cast("list[str] | None", args.triage_files)
+    summaries = cast("list[str] | None", args.triage_summaries)
+    if files is not None:
+        if len(files) != 1:
+            message = "Supply --file exactly once."
+            raise ValueError(message)
+        return _read_json_object(files[0])
+    if summaries is None or len(summaries) != 1:
+        message = "Supply --summary exactly once."
+        raise ValueError(message)
+    if args.impact != "none":
+        message = "--summary requires --impact none; use --file for downstream impact."
+        raise ValueError(message)
+    summary = summaries[0]
+    if not summary.strip():
+        message = "--summary must be nonblank."
+        raise ValueError(message)
+    return {"summary": summary}
+
+
 def _sprint_triage(args: argparse.Namespace, application: _Application) -> int:
     impact = cast("Literal['none', 'backlog', 'specification']", args.impact)
     return _emit_result(
@@ -2333,7 +2502,7 @@ def _sprint_triage(args: argparse.Namespace, application: _Application) -> int:
                 project_id=args.project_id,
                 instance_key=args.instance_key,
                 impact=impact,
-                canonical_payload=_read_json_object(args.file),
+                canonical_payload=_triage_payload(args),
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
@@ -2371,9 +2540,12 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
         _write_json({"ok": False, "error": str(error)})
         return UNSUPPORTED_PLATFORM_EXIT_CODE
     parser = build_parser()
+    args: argparse.Namespace | None = None
     try:
         args = parser.parse_args(argv)
         handler = cast("CommandHandler", args.command_handler)
+        if handler is _task_complete and args.checklist_items is not None:
+            _inline_checklist_result(args.checklist_items)
         attachment = (
             (args.project_id, Path(args.path))
             if handler is _repository_attach
@@ -2383,6 +2555,16 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
             configure_logging(console=False)
             selected = cast("_Application", application or production_application())
             return handler(args, selected)
+    except _ChecklistArgumentError as error:
+        _write_json(
+            {
+                "ok": False,
+                "error": _checklist_argument_message(
+                    error, args=args, argv=argv, application=application
+                ),
+            }
+        )
+        return 2
     except (
         OSError,
         TypeError,

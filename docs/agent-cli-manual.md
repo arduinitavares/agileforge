@@ -196,8 +196,35 @@ run for the current facts.
 Use exactly one checklist source when recording Task completion. For ordinary
 entries, repeat `--checklist-item KEY=VALUE`; only the first `=` separates the
 key from its result, so `check=expected=actual` records `check` with result
-`expected=actual`. Values may contain `=` in this legacy form. Use
-`--checklist-file PATH` when a checklist key contains `=`:
+`expected=actual`. Results are arbitrary nonblank strings, including `met` and
+`failed`; a result word does not determine Task acceptance.
+
+You can also use explicit 1-based indexes in the Task's stored checklist order.
+For checklist `("Run focused tests", "Confirm A=B=C")`, this source records the
+exact keys with results `met` and `observed=A=B=C`:
+
+```sh
+--checklist-item 1=met --checklist-item 2=observed=A=B=C
+```
+
+Indexes must be canonical ASCII positive decimals within the checklist's bounds.
+Zero, signs, leading zeros, decimal points, Unicode digits, duplicate indexes,
+and mixed text/index shorthand are rejected. An omitted valid index is passed
+to the completion service, which rejects incomplete coverage; the CLI never
+fills missing results.
+
+Complete exact-text coverage retains literal semantics even when checklist names
+look numeric. If the same complete input also has a full index reading and the
+resolved dictionaries differ, it is ambiguous and rejected. For checklist
+`("2", "1")`, `1=a,2=b` is ambiguous; equal results produce the same dictionary
+and are accepted. Checklist `("1", "2")` has identical literal and index
+readings. For `("Run tests", "1")`, `1=met,2=met` collides with the literal
+item `"1"` and is rejected, while complete literal input
+`"Run tests=failed", "1=met"` remains supported. Partial literal coverage never
+falls back from a collision to another reading.
+
+Use `--checklist-file PATH` for numeric collisions or when a checklist key
+contains `=`. File keys always mean exact text, including numeric keys:
 
 ```json
 {
@@ -225,9 +252,61 @@ whitespace-normalized duplicates, are rejected. Do not mix the file option with
 `--checklist-item` or repeat `--checklist-file`. Include one result for every
 required Task checklist item and verify each item before submitting. Replay the
 identical completion with the same idempotency key and the same checklist
-payload; do not change, omit, or add checklist entries on replay. If a payload
-is rejected, correct it and use a fresh idempotency key because rejected
-receipts are durable.
+payload. Exact-text, index, and file input with the same resolved dictionary
+replay under the same key when all other fields, actor, and correlation ID stay
+the same. Retained Task metadata allows indexed replay after completion, a
+closed Sprint, or a later active Sprint. Changed results or other semantic
+fields conflict; do not change, omit, or add entries on replay.
+
+If a payload is rejected, correct it and use a fresh idempotency key because
+rejected receipts are durable. In particular, an indexed attempt rejected by
+an older CLI stored literal keys such as `{"1": "met"}`. Retrying through the
+new index normalization with that same key conflicts instead of replaying;
+use a fresh key for the corrected completion.
+
+Checklist coverage errors list the accepted Task items with 1-based numbers in
+their stored order. Malformed `--checklist-item` pairs and duplicate normalized
+keys can include the same list when an injected application's scoped Task read
+is available; otherwise the original argument error is preserved. Diagnostics
+show at most 20 items and 160 characters per item, using `…` for truncated text
+and `… and N more` for omitted items. Copy the exact required text, including
+internal spacing, when correcting a payload. These diagnostics do not relax
+coverage validation: argument and index errors exit 2 without recording
+completion, while coverage errors exit 1 and retain the existing durable
+rejection receipt. Numeric inline sources require the selected Task's scoped
+metadata read; failed reads return an error without guessing checklist names.
+
+### Post-Sprint triage payloads
+
+Use exactly one payload source when recording triage for the advertised Sprint
+instance. For `--impact none`, inline input is equivalent to a file containing
+`{"summary": "No downstream change."}`:
+
+```sh
+./agileforge-dev cli --profile local -- sprint triage \
+  --project-id 41 --instance-key sprint:31 --impact none \
+  --summary "No downstream change." \
+  --idempotency-key triage-41-1 --actor operator
+
+./agileforge-dev cli --profile local -- sprint triage \
+  --project-id 41 --instance-key sprint:31 --impact none \
+  --file triage.json \
+  --idempotency-key triage-41-1 --actor operator
+```
+
+The inline summary must be nonblank. Accepted text retains surrounding
+whitespace, Unicode, quotes, newlines, and `=` exactly. The payload contains
+only the `summary` field. `backlog` and `specification` impacts require
+`--file`; file input retains its existing JSON-object validation and contents
+for every impact, without an added summary requirement.
+
+Neither source, both sources, or repeated occurrences of either option exit 2
+before triage dispatch. Repeated `--file` is now intentionally rejected rather
+than silently using the final path. File and inline input with the same object
+replay under the same idempotency key when project, instance, impact, actor,
+and correlation ID also remain identical. Changed text or metadata conflicts
+under that key. Reusing the same payload with a fresh key remains a rejected
+correction attempt rather than a replay.
 
 ## Read Surfaces
 

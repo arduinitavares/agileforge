@@ -5,11 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from agile_sqlmodel import TaskAcceptanceResult, TaskStatus
+from models.core import Task
 from services.task_execution_service import (
     TaskExecutionServiceError,
+    _completion_metadata,
     get_task_execution_history,
     record_task_execution,
 )
+from utils.task_metadata import TaskMetadata, serialize_task_metadata
 
 
 def test_get_task_execution_history_skips_logs_without_primary_key() -> None:
@@ -151,3 +154,27 @@ def test_record_task_execution_normalizes_artifact_refs_and_returns_history() ->
     assert persisted["changed_by"] == "manual-ui"
     assert payload["current_status"] == TaskStatus.DONE
     assert payload["latest_entry"].artifact_refs == ["file1.txt", "file2.txt"]
+
+
+def test_completion_coverage_error_preserves_text_and_stored_order() -> None:
+    """A coverage rejection lists canonical text without normalizing its spacing."""
+    metadata = TaskMetadata(
+        spec_version_id=7,
+        spec_hash="sha256:" + "a" * 64,
+        sprint_plan_stream_id="SPS-" + "b" * 32,
+        sprint_plan_artifact_id=11,
+        sprint_plan_fingerprint="sha256:" + "c" * 64,
+        relevant_spec_item_ids=("REQ.coverage",),
+        task_kind="test",
+        artifact_targets=(),
+        workstream_tags=(),
+        checklist_items=("Zulu criterion", "Confirm  A=B=C ✅"),
+    )
+    task = Task(story_id=11, metadata_json=serialize_task_metadata(metadata))
+    with pytest.raises(TaskExecutionServiceError) as rejected:
+        _completion_metadata(task, {"Zulu criterion": "met", "Confirm A=B=C ✅": "met"})
+    assert rejected.value.status_code == 409  # noqa: PLR2004
+    assert rejected.value.detail == (
+        "Checklist result must cover every executable checklist item.\n"
+        "Valid checklist items:\n1. Zulu criterion\n2. Confirm  A=B=C ✅"
+    )
