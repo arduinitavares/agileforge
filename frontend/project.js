@@ -147,6 +147,7 @@ function isDashboardReconciled(requiredSequence) {
 let activeStoryMutation = null;
 let activeDependencyMutation = null;
 let activeSpecificationMutation = null;
+const specificationSourceRecoveries = new Map();
 let activeBacklogCorrectionMutation = null;
 let activeSprintMutation = null;
 let activeSprintRetryMutation = null;
@@ -952,27 +953,115 @@ function specificationSourceSubmission(actions, sourcePath, preparationCapabilit
     };
 }
 
+function repositoryBindingRecoveryDisplay(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const fields = ['reason_code', 'cause', 'recorded_binding_id', 'recorded_dirty', 'observed_dirty', 'changed_fields', 'action'];
+    const changedFields = ['worktree', 'git_directory', 'head', 'branch', 'detached_head', 'working_tree_status', 'remotes'];
+    if (Object.keys(value).length !== fields.length || Object.keys(value).some((key) => !fields.includes(key))
+        || value.reason_code !== 'REPOSITORY_PROVENANCE_STALE'
+        || !['WORKTREE_CHANGED', 'REPOSITORY_IDENTITY_CHANGED', 'INSPECTION_UNAVAILABLE'].includes(value.cause)
+        || !positiveInteger(value.recorded_binding_id)
+        || typeof value.recorded_dirty !== 'boolean'
+        || (value.observed_dirty !== null && typeof value.observed_dirty !== 'boolean')
+        || value.action !== 'refresh_repository_binding'
+        || !Array.isArray(value.changed_fields)
+        || value.changed_fields.some((field) => !changedFields.includes(field))
+        || new Set(value.changed_fields).size !== value.changed_fields.length
+        || value.changed_fields.some((field, index) => index > 0 && changedFields.indexOf(field) <= changedFields.indexOf(value.changed_fields[index - 1]))
+        || (value.cause === 'INSPECTION_UNAVAILABLE' && (value.observed_dirty !== null || value.changed_fields.length !== 0))) return null;
+    return { ...value, changed_fields: [...value.changed_fields] };
+}
+
+function repositoryBindingRecoveryMarkup(recovery, context) {
+    const display = repositoryBindingRecoveryDisplay(recovery);
+    if (!display || !['locked', 'preview', 'registration'].includes(context)) return '';
+    const outcome = {
+        locked: 'Specification source registration is locked because the repository observation is stale.',
+        preview: 'The source package could not be checked because the repository observation is stale. Nothing was registered.',
+        registration: 'Specification source registration failed. No source was registered by this attempt.',
+    }[context];
+    const locationChanged = display.changed_fields.some((field) => ['worktree', 'git_directory', 'remotes'].includes(field));
+    const cause = display.cause === 'WORKTREE_CHANGED'
+        ? 'The working tree changed since the saved repository inspection.'
+        : (display.cause === 'INSPECTION_UNAVAILABLE'
+            ? 'The repository could not be inspected at the failed check.'
+            : (locationChanged ? 'The repository location or details changed since the saved inspection.' : 'The repository revision changed since the saved inspection.'));
+    const currentSource = lifecycleState.specification?.source_binding?.state === 'current';
+    return `<section data-repository-binding-recovery="${context}" data-recorded-binding-id="${display.recorded_binding_id}" role="alert" class="max-w-3xl space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+        <p data-repository-recovery-outcome="true" class="font-semibold">${outcome}</p>
+        <p data-repository-recovery-cause="true">${cause}</p>
+        <p data-repository-recovery-recorded="true">Recorded working tree: ${display.recorded_dirty ? 'Dirty' : 'Clean'}</p>
+        ${display.observed_dirty === null ? '' : `<p data-repository-recovery-observed="true">At the failed check: ${display.observed_dirty ? 'Dirty' : 'Clean'}</p>`}
+        <p>Refresh the repository binding, check the selected package again, then retry registration. Your entered fields are retained.</p>
+        ${currentSource ? '<p data-repository-recovery-current-source="true">Refreshing records a new repository observation. The current registered source will stop being current until a source is registered for the new binding.</p>' : ''}
+        <button type="button" data-repository-recovery-action="refresh" class="${BUTTON_SECONDARY}"><span>Refresh repository binding</span></button>
+        <p data-repository-recovery-feedback="true" role="status" aria-live="polite" aria-atomic="true"></p>
+    </section>`;
+}
+
+function sourceRegistrationRecoveryFromError(error) {
+    return error?.status >= 400 && error.status <= 599 && error.code === 'REPOSITORY_PROVENANCE_STALE'
+        ? repositoryBindingRecoveryDisplay(error.repositoryRecovery) : null;
+}
+
+function specificationSourceRecoveryNotice() {
+    const repository = lifecycleState.repository?.repository;
+    const stored = specificationSourceRecoveries.get(selectedProjectId);
+    const storedMatchesBinding = stored && stored.recovery.recorded_binding_id === repository?.repository_binding_id && stored.worktreePath === repository?.worktree_path;
+    if (storedMatchesBinding && stored.dashboardGeneration === lastSuccessfulDashboardLoadSequence) return stored;
+    if (stored) specificationSourceRecoveries.delete(selectedProjectId);
+    const action = findAction(lifecycleState.actions, 'register_specification_source');
+    const recovery = action?.availability === 'locked' ? repositoryBindingRecoveryDisplay(action.repository_recovery) : null;
+    if (!recovery || recovery.recorded_binding_id !== repository?.repository_binding_id) return null;
+    const notice = {
+        recovery, context: 'locked', worktreePath: repository.worktree_path, feedback: '',
+        dashboardGeneration: lastSuccessfulDashboardLoadSequence,
+    };
+    if (storedMatchesBinding && stored.feedbackError && stored.feedback === 'Repository binding refresh failed. Your entered fields are retained. Try refreshing again.') {
+        notice.feedback = stored.feedback;
+        notice.feedbackError = true;
+        specificationSourceRecoveries.set(selectedProjectId, notice);
+    }
+    return notice;
+}
+
+function showSpecificationSourceRecovery(recovery, context) {
+    specificationSourceRecoveries.set(selectedProjectId, {
+        recovery, context, worktreePath: lifecycleState.repository?.repository?.worktree_path, feedback: '',
+        dashboardGeneration: lastSuccessfulDashboardLoadSequence,
+    });
+    renderDashboard();
+}
+
+function clearSpecificationSourceRecovery() {
+    specificationSourceRecoveries.delete(selectedProjectId);
+    const region = document.querySelector('[data-repository-binding-recovery]');
+    if (region) region.hidden = true;
+}
+
 function specificationSourceRegistrationMarkup(actions) {
     const action = findAction(actions, 'register_specification_source');
-    if (action?.availability === 'locked') {
+    const staleLocked = action?.availability === 'locked' && repositoryBindingRecoveryDisplay(action.repository_recovery);
+    if (action?.availability === 'locked' && !staleLocked) {
         return `<p role="alert" class="text-sm text-red-700">${escapeWorkflowText(lockedActionReason(action))}</p>`;
     }
+    const disabled = staleLocked ? ' disabled aria-disabled="true"' : '';
     return action
         ? `<form data-specification-source-form="true" class="max-w-3xl space-y-4">
                 <p class="text-sm leading-6 text-slate-600">Register the repository document that contains the external Specification source.</p>
                 <div>
                     <label for="specification-source-path" class="text-sm font-semibold">Source path</label>
-                    <input id="specification-source-path" name="source_path" type="text" required autocomplete="off" placeholder="specification.md" class="mt-1.5 w-full rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent" />
+                    <input id="specification-source-path" name="source_path" type="text" required autocomplete="off" placeholder="specification.md"${disabled} class="mt-1.5 w-full rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent" />
                     <p class="mt-1 text-xs leading-5 text-slate-500">Use a repository-relative path.</p>
                 </div>
                 <div>
                     <label for="specification-adr-paths" class="text-sm font-semibold">Applicable ADR paths <span class="font-normal text-slate-500">(optional)</span></label>
-                    <textarea id="specification-adr-paths" name="adr_paths" rows="3" placeholder="docs/adr/0001-decision.md" class="mt-1.5 w-full resize-y rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent"></textarea>
+                    <textarea id="specification-adr-paths" name="adr_paths" rows="3" placeholder="docs/adr/0001-decision.md"${disabled} class="mt-1.5 w-full resize-y rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent"></textarea>
                     <p class="mt-1 text-xs leading-5 text-slate-500">Enter one repository-relative ADR path per line.</p>
                 </div>
                 <div>
                     <label for="specification-preparation-capability" class="text-sm font-semibold">Preparation capability</label>
-                    <select id="specification-preparation-capability" name="preparation_capability" required class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent">
+                    <select id="specification-preparation-capability" name="preparation_capability" required${disabled} class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent">
                         <option value="">Select the capability that prepared this source</option>
                         <option value="grill-with-docs">grill-with-docs</option>
                     </select>
@@ -984,8 +1073,8 @@ function specificationSourceRegistrationMarkup(actions) {
                 </div>
                 <p data-specification-source-status="true" role="status" aria-live="polite" aria-atomic="true" class="text-sm text-slate-700">Check the selected package to show its exact captured sizes before registration.</p>
                 <div class="flex flex-wrap gap-3">
-                    <button type="button" data-specification-source-preview="true" class="${BUTTON_SECONDARY}"><span>Check selected package</span></button>
-                    <button type="submit" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
+                    <button type="button" data-specification-source-preview="true"${disabled} class="${BUTTON_SECONDARY}"><span>Check selected package</span></button>
+                    <button type="submit"${disabled} class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
                 </div>
             </form>`
         : '';
@@ -1019,12 +1108,15 @@ function currentSpecificationSourceMarkup(source, display = currentSpecification
     </section>`;
 }
 
-function specificationRevisionRegistrationMarkup(registration) {
+function specificationRevisionRegistrationMarkup(registration, sourceBindingState) {
     if (!registration) return '';
+    const guidance = sourceBindingState === 'different_binding'
+        ? 'Check and register a source for the active repository binding, even when the external Specification source itself has not changed.'
+        : 'Choose this path only when the external Specification source itself changed.';
     return `<details data-specification-revision-registration="true" class="max-w-3xl rounded-lg border border-slate-200 bg-white p-4">
         <summary class="cursor-pointer text-sm font-semibold text-slate-800">Register a revised source</summary>
         <div class="mt-4 border-t border-slate-200 pt-4">
-            <p class="mb-4 text-sm leading-6 text-slate-600">Choose this path only when the external Specification source itself changed.</p>
+            <p class="mb-4 text-sm leading-6 text-slate-600">${guidance}</p>
             ${registration}
         </div>
     </details>`;
@@ -1226,12 +1318,15 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
         ? ''
         : specificationSourceRegistrationMarkup(actions);
     const currentSource = currentSpecificationSourceMarkup(source, sourceDisplay);
-    const revisedRegistration = hasValidCurrentSource
-        ? specificationRevisionRegistrationMarkup(registration)
+    const revisedRegistration = hasValidCurrentSource || projection?.current
+        ? specificationRevisionRegistrationMarkup(registration, projection?.source_binding?.state)
         : registration;
-    const withSourceState = (markup) => hasCurrentSource
-        ? `<div data-specification-source-state="true" class="space-y-5">${markup}</div>`
-        : markup;
+    const notice = specificationSourceRecoveryNotice();
+    const recovery = notice ? repositoryBindingRecoveryMarkup(notice.recovery, notice.context) : '';
+    const withSourceState = (markup) => {
+        const content = [recovery, markup].filter(Boolean).join('');
+        return hasCurrentSource ? `<div data-specification-source-state="true" class="space-y-5">${content}</div>` : content;
+    };
     if (!candidate) {
         const structureBinding = hasValidCurrentSource
             ? captureSpecificationStructuringBinding({
@@ -1250,7 +1345,17 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
                 )}
             </div>`
             : '';
-        const current = acceptedSpecificationMarkup(projection?.current);
+        const accepted = acceptedSpecificationMarkup(projection?.current);
+        const acceptedSource = projection?.source_binding?.accepted_source;
+        const rebound = accepted && projection?.source_binding?.state === 'different_binding'
+            && positiveInteger(acceptedSource?.specification_source_id)
+            && isSha256Fingerprint(acceptedSource?.source_fingerprint)
+            && positiveInteger(acceptedSource?.repository_binding_id)
+            && positiveInteger(projection.source_binding.active_repository_binding_id);
+        const current = rebound
+            ? `<section data-accepted-specification-context="true" data-specification-source-id="${acceptedSource.specification_source_id}" data-source-fingerprint="${escapeWorkflowText(acceptedSource.source_fingerprint)}" data-repository-binding-id="${acceptedSource.repository_binding_id}" data-active-repository-binding-id="${projection.source_binding.active_repository_binding_id}" class="space-y-3">
+                <p class="max-w-3xl text-sm leading-6 text-slate-700">The accepted Specification remains available. Its source was registered under an earlier repository binding and is not the current source for this binding.</p>${accepted}
+            </section>` : accepted;
         if (revisedSource) {
             return withSourceState([
                 current,
@@ -1328,7 +1433,7 @@ function repositoryPanelMarkup(projection) {
             ${repository.detached_head ? '' : `<p class="mt-1 font-mono text-xs text-slate-500">${escapeWorkflowText(shortSha)}</p>`}
         </div>
         <div class="min-w-0">
-            <p class="text-xs font-semibold uppercase text-slate-500">Working tree</p>
+            <p class="text-xs font-semibold uppercase text-slate-500">Recorded working tree</p>
             <p class="mt-1 text-sm font-semibold ${repository.dirty ? 'text-amber-800' : 'text-emerald-700'}">${repository.dirty ? 'Dirty' : 'Clean'}</p>
         </div>
         <div class="min-w-0">
@@ -3902,6 +4007,7 @@ let workspaceSprintStatus = null;
 let workspaceTaskInventory = null;
 let workspaceReadGeneration = 0;
 let workspaceRenderScope = null;
+let workspaceRenderedRepositoryPath = null;
 let workspaceFocusedStageId = null;
 let workspaceTaskFocusIntent = null;
 let workspaceInventoryConfirmedAt = null;
@@ -3962,31 +4068,40 @@ function captureWorkspaceRenderState() {
         fields[key] = field.type === 'checkbox' ? Boolean(field.checked) : field.value;
     });
     const disclosures = {};
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure]').forEach((detail) => {
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure], details[data-specification-revision-registration]').forEach((detail) => {
         const key = workspaceRenderDisclosureKey(detail);
         if (key) disclosures[key] = detail.open;
     });
     const active = document.activeElement;
     const activeKey = active && workbench.contains(active) && workspaceOwnsFocus(active)
         ? active.id : null;
-    workspaceRenderMemory.set(workspaceRenderScope, { fields, disclosures, activeKey, scrollTop: workbench.scrollTop });
+    workspaceRenderMemory.set(workspaceRenderScope, { fields, disclosures, activeKey, scrollTop: workbench.scrollTop, sourceWorktreePath: workspaceRenderedRepositoryPath });
 }
 
 function restoreWorkspaceRenderState() {
     const workbench = document.getElementById('stage-workbench');
     const memory = workspaceRenderMemory.get(workspaceRenderKey());
     if (!workbench || !memory) return;
+    const sourceWorktreeChanged = memory.sourceWorktreePath !== (lifecycleState.repository?.repository?.worktree_path ?? null);
     workbench.querySelectorAll('input, textarea, select').forEach((field) => {
         const key = workspaceRenderFieldKey(field);
         if (!key || !(key in memory.fields)) return;
+        if (sourceWorktreeChanged && field.closest?.('[data-specification-source-form="true"]')) {
+            field.value = '';
+            return;
+        }
         if (field.type === 'checkbox') field.checked = Boolean(memory.fields[key]);
         else field.value = memory.fields[key];
     });
-    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure]').forEach((detail) => {
+    workbench.querySelectorAll('details[data-workspace-task-completion-disclosure], details[data-workspace-scoped-action-disclosure], details[data-workspace-roadmap-milestone-disclosure], details[data-specification-revision-registration]').forEach((detail) => {
         const key = workspaceRenderDisclosureKey(detail);
         if (Object.prototype.hasOwnProperty.call(memory.disclosures ?? {}, key)) detail.open = memory.disclosures[key];
     });
     workbench.scrollTop = memory.scrollTop;
+    if (sourceWorktreeChanged) {
+        const form = workbench.querySelector('[data-specification-source-form="true"]');
+        if (form) setSpecificationSourceRegistrationStatus(form, 'The repository worktree changed. Select and check the source package for this worktree again.', true);
+    }
     const active = document.activeElement;
     const focusIsAvailable = !active || active === document.body || workbench.contains(active);
     if (memory.activeKey && focusIsAvailable) {
@@ -4008,6 +4123,7 @@ function workspaceRenderDisclosureKey(detail) {
     return detail?.dataset?.workspaceTaskCompletionDisclosure
         ?? detail?.dataset?.workspaceScopedActionDisclosure
         ?? detail?.dataset?.workspaceRoadmapMilestoneDisclosure
+        ?? (detail?.dataset?.specificationRevisionRegistration === 'true' ? 'specification-revision-registration' : null)
         ?? null;
 }
 
@@ -4137,6 +4253,7 @@ function renderWorkspaceTaskDetail(snapshot) {
     setMarkup('workspace-task-detail', workspaceTaskInspectorMarkup(snapshot));
     restoreWorkspaceRenderState();
     workspaceRenderScope = workspaceRenderKey();
+    workspaceRenderedRepositoryPath = lifecycleState.repository?.repository?.worktree_path ?? null;
 }
 
 function workspaceTaskDescriptionPreview(description) {
@@ -5127,6 +5244,8 @@ function renderDashboard() {
     updateStageView();
     restoreWorkspaceRenderState();
     workspaceRenderScope = workspaceRenderKey();
+    workspaceRenderedRepositoryPath = lifecycleState.repository?.repository?.worktree_path ?? null;
+    reapplySpecificationSourceRecoveryFeedback();
     restoreWorkspaceTaskFocusIntent();
     updateContextInspector();
     if (lifecycleDisplayRead.kind === 'ready' && lastDashboardConfirmedAt) {
@@ -5188,6 +5307,10 @@ function checkedResponsePayload(payload, status, ok) {
             ?? payload?.detail?.errors?.[0]?.code
             ?? payload?.code
             ?? null;
+        error.repositoryRecovery = error.code === 'REPOSITORY_PROVENANCE_STALE'
+            ? repositoryBindingRecoveryDisplay(payload?.detail?.output?.repository_recovery) : null;
+        error.previewRepositoryRecovery = error.code === 'REPOSITORY_PROVENANCE_STALE'
+            ? repositoryBindingRecoveryDisplay(payload?.detail?.repository_recovery) : null;
         throw error;
     }
     return payload;
@@ -6753,7 +6876,7 @@ async function runSprintStart(binding, button) {
     }
 }
 
-async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
+async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}, outcomeHooks = null) {
     if (button.disabled || activeCockpitAction || activeDeliveryUnreconciled) return false;
     const projectedAction = findAction(lifecycleState.actions, requestKind);
     if (projectedAction?.availability === 'locked') {
@@ -6890,6 +7013,10 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
                 );
             }
         }
+        if (outcomeHooks) {
+            if (refreshed || isDashboardReconciled(loadSequence)) outcomeHooks.onReconciled?.();
+            else outcomeHooks.onFailure?.({ mutationCompleted, reconciled: false });
+        }
     } catch (error) {
         if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
             activeDeliveryUnreconciled = true;
@@ -6948,7 +7075,8 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null, fie
                 (control) => setDeliveryActionStatus(control, localMessage),
             );
         } else {
-            setProjectError(error.message);
+            if (outcomeHooks) outcomeHooks.onFailure?.({ mutationCompleted, reconciled: isDashboardReconciled(loadSequence), error });
+            else setProjectError(error.message);
             return true;
         }
     } finally {
@@ -7138,9 +7266,66 @@ function setSpecificationSourceRegistrationBusy(form, busy) {
         '[data-specification-source-form="true"] button, [data-specification-source-form="true"] input, [data-specification-source-form="true"] textarea, [data-specification-source-form="true"] select, [data-direct-action="structure_specification"]',
     ) ?? [];
     Array.from(controls).forEach((control) => {
-        control.disabled = busy;
-        control.toggleAttribute('aria-disabled', busy);
+        const registrationLocked = control.closest?.('[data-specification-source-form="true"]')
+            && findAction(lifecycleState.actions, 'register_specification_source')?.availability === 'locked';
+        control.disabled = busy || Boolean(registrationLocked);
+        control.toggleAttribute?.('aria-disabled', control.disabled);
     });
+}
+
+function reapplySpecificationSourceRecoveryFeedback() {
+    const notice = specificationSourceRecoveryNotice();
+    const region = document.querySelector('[data-repository-binding-recovery]');
+    const feedback = region?.querySelector('[data-repository-recovery-feedback]');
+    if (feedback && notice?.feedback) {
+        feedback.textContent = notice.feedback;
+        feedback.setAttribute('role', notice.feedbackError ? 'alert' : 'status');
+    }
+    const button = region?.querySelector('[data-repository-recovery-action="refresh"]');
+    if (button) button.disabled = Boolean(activeSpecificationMutation || activeCockpitAction || activeDeliveryUnreconciled);
+}
+
+function setSpecificationSourceRecoveryFeedback(message, isError = false) {
+    const notice = specificationSourceRecoveryNotice();
+    if (!notice) return;
+    specificationSourceRecoveries.set(selectedProjectId, { ...notice, feedback: message, feedbackError: isError });
+    reapplySpecificationSourceRecoveryFeedback();
+}
+
+async function refreshSpecificationSourceRecovery(button) {
+    const notice = specificationSourceRecoveryNotice();
+    if (!notice || button.disabled || activeSpecificationMutation || activeCockpitAction || activeDeliveryUnreconciled) return;
+    const projectId = selectedProjectId;
+    captureWorkspaceRenderState();
+    document.querySelectorAll('[data-specification-source-form="true"]').forEach((form) => {
+        delete form.dataset.previewKey;
+        delete form.dataset.previewFingerprint;
+    });
+    setSpecificationSourceRecoveryFeedback('Refreshing the repository binding. Your entered fields are retained.');
+    const reconciled = () => {
+        if (projectId !== selectedProjectId) return;
+        specificationSourceRecoveries.delete(projectId);
+        const form = document.querySelector('[data-specification-source-form="true"]');
+        if (form) setSpecificationSourceRegistrationStatus(form, 'Repository binding refreshed. Check the selected package again, then retry registration. Your entered fields are retained.');
+        const revision = document.querySelector('[data-specification-revision-registration="true"]');
+        if (revision) {
+            revision.open = true;
+            captureWorkspaceRenderState();
+        }
+    };
+    await runDirectAction('refresh_repository_binding', button, 'repository/refresh', {}, {
+        onReconciled: reconciled,
+        onFailure: ({ mutationCompleted, reconciled: confirmed }) => {
+            if (projectId !== selectedProjectId) return;
+            if (mutationCompleted && confirmed) { reconciled(); return; }
+            const message = mutationCompleted
+                ? 'Repository binding refresh completed, but the dashboard could not reload. Reload before checking or registering the source.'
+                : 'Repository binding refresh failed. Your entered fields are retained. Try refreshing again.';
+            setSpecificationSourceRecoveryFeedback(message, true);
+            setProjectError(message);
+        },
+    });
+    if (projectId === selectedProjectId) reapplySpecificationSourceRecoveryFeedback();
 }
 
 function setSpecificationSourceRegistrationStatus(form, message, isError = false) {
@@ -7192,7 +7377,9 @@ function installInteractions() {
         );
         if (!previewButton) return;
         const form = previewButton.closest?.('form[data-specification-source-form="true"]');
-        if (!form || form.dataset.previewing === 'true') return;
+        if (!form || previewButton.disabled || form.dataset.previewing === 'true' || form.dataset.submitting === 'true'
+            || activeSpecificationMutation || activeCockpitAction || activeDeliveryUnreconciled
+            || !captureSpecificationSourceRegistrationBinding(lifecycleState)) return;
         const sourcePath = form.querySelector('[name="source_path"]')?.value ?? '';
         const preparationCapability = form.querySelector('[name="preparation_capability"]')?.value ?? '';
         const adrPaths = form.querySelector('[name="adr_paths"]')?.value ?? '';
@@ -7211,6 +7398,7 @@ function installInteractions() {
             return;
         }
         form.dataset.previewing = 'true';
+        clearSpecificationSourceRecovery();
         previewButton.disabled = true;
         setSpecificationSourceRegistrationStatus(
             form,
@@ -7237,10 +7425,13 @@ function installInteractions() {
         } catch (error) {
             delete form.dataset.previewKey;
             delete form.dataset.previewFingerprint;
-            setSpecificationSourceRegistrationStatus(form, error.message, true);
+            const recovery = error.code === 'REPOSITORY_PROVENANCE_STALE'
+                ? repositoryBindingRecoveryDisplay(error.previewRepositoryRecovery) : null;
+            if (recovery) showSpecificationSourceRecovery(recovery, 'preview');
+            else setSpecificationSourceRegistrationStatus(form, error.message, true);
         } finally {
             delete form.dataset.previewing;
-            previewButton.disabled = false;
+            previewButton.disabled = findAction(lifecycleState.actions, 'register_specification_source')?.availability === 'locked';
         }
     });
     document.addEventListener('submit', async (event) => {
@@ -7314,7 +7505,10 @@ function installInteractions() {
                 return;
             }
             const submit = form.querySelector('button[type="submit"]');
+            const registrationProjectId = selectedProjectId;
+            const registrationRenderScope = workspaceRenderKey();
             form.dataset.submitting = 'true';
+            clearSpecificationSourceRecovery();
             const specificationMutationToken = crypto.randomUUID();
             activeSpecificationMutation = {
                 token: specificationMutationToken,
@@ -7356,12 +7550,24 @@ function installInteractions() {
                     activeDeliveryUnreconciled = true;
                     if (loadError) throw loadError;
                 }
+                if ((refreshed || isDashboardReconciled(loadSequence)) && selectedProjectId === registrationProjectId) {
+                    const revision = document.querySelector('[data-specification-revision-registration="true"]');
+                    if (revision) revision.open = false;
+                    for (const scope of new Set([registrationRenderScope, workspaceRenderKey()])) {
+                        const memory = workspaceRenderMemory.get(scope);
+                        if (memory) memory.disclosures = { ...memory.disclosures, 'specification-revision-registration': false };
+                    }
+                }
             } catch (error) {
                 if (mutationCompleted && !isDashboardReconciled(loadSequence)) {
                     activeDeliveryUnreconciled = true;
                 }
-                setProjectError(error.message);
-                setSpecificationSourceRegistrationStatus(form, error.message, true);
+                const recovery = !mutationCompleted ? sourceRegistrationRecoveryFromError(error) : null;
+                if (recovery) showSpecificationSourceRecovery(recovery, 'registration');
+                else {
+                    setProjectError(error.message);
+                    setSpecificationSourceRegistrationStatus(form, error.message, true);
+                }
             } finally {
                 if (activeSpecificationMutation?.token === specificationMutationToken) {
                     activeSpecificationMutation = null;
@@ -7375,13 +7581,14 @@ function installInteractions() {
                     if (submit) submit.disabled = true;
                 } else {
                     setSpecificationSourceRegistrationBusy(currentForm, false);
-                    if (submit && currentForm === form) submit.disabled = false;
+                    if (submit && currentForm === form) submit.disabled = findAction(lifecycleState.actions, 'register_specification_source')?.availability === 'locked';
                 }
                 setCockpitActionBusy(
                     false,
                     'register_specification_source',
                     { token: specificationMutationToken },
                 );
+                reapplySpecificationSourceRecoveryFeedback();
             }
             return;
         }
@@ -7570,6 +7777,10 @@ function installInteractions() {
         }
         if (button.dataset.repositoryAction === 'refresh') {
             runDirectAction('refresh_repository_binding', button, 'repository/refresh');
+            return;
+        }
+        if (button.dataset.repositoryRecoveryAction === 'refresh') {
+            await refreshSpecificationSourceRecovery(button);
             return;
         }
         if (button.dataset.directAction === 'record_story_draft') {

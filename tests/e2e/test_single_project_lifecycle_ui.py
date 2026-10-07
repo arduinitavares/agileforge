@@ -27,6 +27,10 @@ from cli.dev_server import (
     stop_ui,
     wait_for_readiness,
 )
+from services.contracts.specification_source import (
+    SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
+    SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
+)
 from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
@@ -84,6 +88,8 @@ _EXPECTED_RETRIED_DEPENDENCY_REQUESTS = 2
 _CORRECTED_SUPERSEDED_STORY_COUNT = 4
 _CORRECTED_ACTIVE_STORY_COUNT = 11
 _CORRECTED_REPLACEMENT_FIRST_STORY_ID = 12
+_SOURCE_RECOVERY_BINDING_ID = 61
+_REFRESHED_SOURCE_BINDING_ID = _SOURCE_RECOVERY_BINDING_ID + 1
 _ISSUE_260_SPRINT_ID = 31
 _ISSUE_260_PREVIEW_CANCEL_COUNT = 2
 _ISSUE_260_PREVIEW_STALE_REFRESH_COUNT = 4
@@ -1541,6 +1547,207 @@ class FakeLifecycle:
             "data": projection,
             "actions": actions,
         }
+
+
+@dataclass
+class RepositoryRecoveryLifecycle(FakeLifecycle):
+    """Model saved binding observations and source capture independently."""
+
+    observation_stale: bool = False
+    refresh_failure_status: int | None = None
+    source_preview_requests: list[JsonObject] = field(default_factory=list)
+    source_registration_attempts: list[JsonObject] = field(default_factory=list)
+    source_registration_headers: list[dict[str, str]] = field(default_factory=list)
+    refresh_attempts: int = 0
+    source_capture_count: int = 0
+    accepted_specification: JsonObject | None = None
+    accepted_source_identity: JsonObject | None = None
+
+    def _binding_id(self) -> int:
+        assert self.repository is not None
+        binding_id = self.repository["repository_binding_id"]
+        assert isinstance(binding_id, int)
+        return binding_id
+
+    def _source_is_current(self) -> bool:
+        return self.specification_source is not None and (
+            self.specification_source.get("repository_binding_id") == self._binding_id()
+        )
+
+    def _recovery(self) -> JsonObject:
+        assert self.repository is not None
+        return {
+            "reason_code": "REPOSITORY_PROVENANCE_STALE",
+            "cause": "WORKTREE_CHANGED",
+            "recorded_binding_id": self._binding_id(),
+            "recorded_dirty": self.repository["dirty"],
+            "observed_dirty": True,
+            "changed_fields": ["working_tree_status"],
+            "action": "refresh_repository_binding",
+        }
+
+    def _preview_fingerprint(self, body: JsonObject) -> str:
+        package = {
+            key: body[key]
+            for key in ("source_path", "preparation_capability", "adr_paths")
+        }
+        checked = json.dumps([self._binding_id(), package], sort_keys=True)
+        return f"sha256:{sha256(checked.encode()).hexdigest()}"
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        if suffix == "/repository/refresh":
+            self._assert_fields(body, set())
+            self.refresh_attempts += 1
+            if self.refresh_failure_status is not None:
+                return self.refresh_failure_status, {
+                    "detail": {"message": "Private fixture inspection diagnostic."}
+                }
+            self._refresh_repository(body)
+            return _HTTP_OK, self._mutation_result()
+        if suffix == "/specifications/source/preview":
+            return self._source_preview_response(body, headers)
+        if suffix == "/specifications/source":
+            return self._source_registration_response(body, headers)
+        return super()._mutate(suffix, body, headers)
+
+    def _source_preview_response(
+        self, body: JsonObject, headers: dict[str, str]
+    ) -> tuple[int, JsonObject]:
+        self.source_preview_requests.append(dict(body))
+        if self.observation_stale:
+            return 422, {
+                "detail": {
+                    "error": {
+                        "code": "REPOSITORY_PROVENANCE_STALE",
+                        "message": "The saved repository observation is stale.",
+                    },
+                    "limits": {
+                        "document_limit_bytes": SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
+                        "package_limit_bytes": SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
+                    },
+                    "repository_recovery": self._recovery(),
+                    "provider_run_performed": False,
+                }
+            }
+        status, payload = super()._mutate(
+            "/specifications/source/preview", body, headers
+        )
+        preview = payload["data"]
+        assert isinstance(preview, dict)
+        preview["source_fingerprint"] = self._preview_fingerprint(body)
+        return status, payload
+
+    def _source_registration_response(
+        self, body: JsonObject, headers: dict[str, str]
+    ) -> tuple[int, JsonObject]:
+        self._assert_fields(
+            body, {"source_path", "preparation_capability", "adr_paths"}
+        )
+        self.source_registration_attempts.append(dict(body))
+        self.source_registration_headers.append(dict(headers))
+        if self.observation_stale:
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "error": {
+                        "code": "REPOSITORY_PROVENANCE_STALE",
+                        "message": "The saved repository observation is stale.",
+                    },
+                    "output": {"repository_recovery": self._recovery()},
+                }
+            }
+        if headers.get("x-agileforge-expected-source") != self._preview_fingerprint(
+            body
+        ):
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "error": {
+                        "code": "STALE_SPECIFICATION_INPUT",
+                        "message": "Check the package under the new binding.",
+                    }
+                }
+            }
+        self._register_specification_source(body)
+        assert self.specification_source is not None
+        self.specification_source.update(
+            {
+                "specification_source_id": (
+                    31 + len(self.specification_source_registrations)
+                ),
+                "repository_binding_id": self._binding_id(),
+                "source_fingerprint": self._preview_fingerprint(body),
+            }
+        )
+        self.source_capture_count += 1
+        self.specification = None
+        return _HTTP_OK, self._mutation_result()
+
+    def _refresh_repository(self, body: JsonObject) -> None:
+        super()._refresh_repository(body)
+        assert self.repository is not None
+        self.repository = {
+            **self.repository,
+            "repository_binding_id": self._binding_id() + 1,
+            "dirty": self.observation_stale or self.repository["dirty"],
+            "inspected_at": "2026-10-07T12:01:00Z",
+        }
+        self.observation_stale = False
+
+    def _phase_action(self) -> str:
+        if not self._source_is_current():
+            return "register_specification_source"
+        return super()._phase_action()
+
+    def _specification_projection(self) -> JsonObject:
+        projection = super()._specification_projection()
+        current = self._source_is_current()
+        state = "current" if current else "not_registered"
+        if not current:
+            projection.update({"source": None, "candidate": None, "review": None})
+            if self.accepted_source_identity is not None:
+                state = "different_binding"
+                projection["stale_reason"] = "SPECIFICATION_SOURCE_NOT_REGISTERED"
+        return {
+            **projection,
+            "schema_version": "agileforge.specification_review.v2",
+            "project_id": _PROJECT_ID,
+            "current": self.accepted_specification,
+            "source_binding": {
+                "state": state,
+                "active_repository_binding_id": self._binding_id(),
+                "accepted_source": self.accepted_source_identity,
+            },
+        }
+
+    def _position_projection(self) -> JsonObject:
+        projection = super()._position_projection()
+        decisions = projection["decisions"]
+        actions = projection["_actions"]
+        assert isinstance(decisions, list)
+        assert isinstance(actions, list)
+        for decision in decisions:
+            if (
+                isinstance(decision, dict)
+                and decision["request_kind"] == "register_specification_source"
+                and self.accepted_specification is not None
+            ):
+                decision["recommendation_kind"] = "optional_reentry"
+        for action in actions:
+            if (
+                isinstance(action, dict)
+                and action["request_kind"] == "register_specification_source"
+            ):
+                action["availability"] = (
+                    "locked" if self.observation_stale else "available"
+                )
+                if self.observation_stale:
+                    action["reason_code"] = "REPOSITORY_PROVENANCE_STALE"
+                    action["repository_recovery"] = self._recovery()
+        return projection
 
 
 @dataclass
@@ -3241,13 +3448,15 @@ def _record_and_review_definition(page: Page) -> None:
     _accept_review(page, "specification")
 
 
-def _submit_specification_source(
+def _check_specification_source(
     page: Page,
     source_path: str,
     adr_path: str,
-) -> None:
+) -> Locator:
     _select_workspace_stage(page, 4)
-    form = page.locator('form[data-specification-source-form="true"]')
+    form = page.locator("#specification-panel").locator(
+        'form[data-specification-source-form="true"]'
+    )
     form.locator('[name="source_path"]').fill(source_path)
     form.locator('[name="adr_paths"]').fill(adr_path)
     form.locator('[name="preparation_capability"]').select_option("grill-with-docs")
@@ -3255,6 +3464,15 @@ def _submit_specification_source(
     expect(form.locator('[data-specification-source-status="true"]')).to_contain_text(
         "Checked"
     )
+    return form
+
+
+def _submit_specification_source(
+    page: Page,
+    source_path: str,
+    adr_path: str,
+) -> None:
+    form = _check_specification_source(page, source_path, adr_path)
     form.evaluate("form => form.requestSubmit()")
 
 
@@ -3367,7 +3585,9 @@ def _attach_and_refresh_repository(
         page.locator("#repository-panel").get_by_text(str(repository_path))
     ).to_be_visible()
     stage_before_refresh = page.locator("#lifecycle-stage-strip").inner_text()
-    page.locator('[data-repository-action="refresh"]').click()
+    page.locator("#repository-panel").locator(
+        '[data-repository-action="refresh"]'
+    ).click()
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert fake.refresh_count == 1
     assert page.locator("#lifecycle-stage-strip").inner_text() == stage_before_refresh
@@ -3407,6 +3627,7 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
         wait_until="networkidle",
     )
+    _select_workspace_stage(page, 4)
     page.evaluate(
         """() => {
             const originalFetch = window.fetch.bind(window);
@@ -3489,7 +3710,6 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
     _assert_issue_204_failure_restores_source_controls(page)
     assert page.evaluate("window.issue204Requests.length") == 1
 
-    button = page.locator('[data-direct-action="structure_specification"]')
     button.click()
     page.wait_for_function("window.resolveIssue204Structure !== null")
     expect(button).to_be_disabled()
@@ -3742,6 +3962,350 @@ def test_issue_211_fails_closed_for_malformed_and_hostile_source_projections(
     context.close()
 
 
+def _source_recovery_fake(
+    repository_path: Path,
+    *,
+    accepted: bool = False,
+) -> RepositoryRecoveryLifecycle:
+    repository: JsonObject = {
+        **_repository_fixture(repository_path, dirty=False),
+        "repository_binding_id": _SOURCE_RECOVERY_BINDING_ID,
+    }
+    fake = RepositoryRecoveryLifecycle(
+        repositories={str(repository_path): repository},
+        repository=repository,
+        project={
+            "project_id": _PROJECT_ID,
+            "name": "Repository source recovery",
+            "description": "Retained source package and accepted lineage.",
+        },
+        vision_candidate={"statement": "Accepted Vision"},
+        vision_accepted=True,
+        goal_candidate={"statement": "Accepted Product Goal"},
+        goal_accepted=True,
+    )
+    if accepted:
+        fake.specification_source = {
+            "specification_source_id": 31,
+            "source_fingerprint": _fingerprint("a"),
+            "repository_binding_id": _SOURCE_RECOVERY_BINDING_ID,
+            "producer_capability": "to-spec",
+            "preparation_capability": "grill-with-docs",
+            "source": {"relative_path": "specs/accepted-source.md"},
+            "context": {"state": "absent", "document": None},
+            "adrs": [{"relative_path": "docs/adr/0001-accepted.md"}],
+        }
+        fake.specification = {
+            "rendered_markdown": (
+                "# Accepted Specification content\n\nKeep exact lineage."
+            )
+        }
+        fake.specification_accepted = True
+        fake.accepted_specification = {
+            "spec_version_id": 71,
+            "candidate": fake._specification_projection()["candidate"],
+            "acceptance": {"decision": "accepted", "rationale": "Keep exact lineage."},
+        }
+        fake.accepted_source_identity = {
+            "specification_source_id": 31,
+            "source_fingerprint": _fingerprint("a"),
+            "repository_binding_id": _SOURCE_RECOVERY_BINDING_ID,
+        }
+    return fake
+
+
+def _assert_retained_source_fields(
+    form: Locator,
+    source_path: str,
+    adr_paths: str,
+) -> None:
+    expect(form.locator('[name="source_path"]')).to_have_value(source_path)
+    expect(form.locator('[name="adr_paths"]')).to_have_value(adr_paths)
+    expect(form.locator('[name="preparation_capability"]')).to_have_value(
+        "grill-with-docs"
+    )
+
+
+def test_stale_source_registration_recovers_with_retained_fields(  # noqa: PLR0915
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Require an explicit refresh, a fresh package check, and a manual retry."""
+    fake = _source_recovery_fake(tmp_path / "registration-recovery")
+    context, page = _open_project_page(dashboard_harness, fake)
+    source_path = "  specs/retained-source.md  "
+    adr_paths = " docs/adr/0001-first.md \n\ndocs/adr/0002-second.md "
+    form = _check_specification_source(page, source_path, adr_paths)
+    checked_fingerprint = form.get_attribute("data-preview-fingerprint")
+    assert checked_fingerprint is not None
+    assert fake.specification_source is None
+
+    fake.observation_stale = True
+    form.evaluate("form => form.requestSubmit()")
+    panel = page.locator("#specification-panel")
+    recovery = panel.locator('[data-repository-binding-recovery="registration"]')
+    expect(recovery).to_be_visible()
+    expect(recovery.locator("[data-repository-recovery-outcome]")).to_have_text(
+        "Specification source registration failed. "
+        "No source was registered by this attempt."
+    )
+    expect(recovery.locator("[data-repository-recovery-recorded]")).to_have_text(
+        "Recorded working tree: Clean"
+    )
+    expect(recovery.locator("[data-repository-recovery-observed]")).to_have_text(
+        "At the failed check: Dirty"
+    )
+    expect(recovery.locator("[data-repository-recovery-cause]")).to_have_text(
+        "The working tree changed since the saved repository inspection."
+    )
+    _assert_retained_source_fields(form, source_path, adr_paths)
+    assert fake.source_capture_count == 0
+    assert fake.specification_source_registrations == []
+    assert fake.specification_source is None
+    assert fake.refresh_attempts == 0
+
+    refresh = recovery.locator('[data-repository-recovery-action="refresh"]')
+    expect(refresh).to_be_enabled()
+    expect(refresh).not_to_have_attribute("data-repository-action", "refresh")
+    refresh.click()
+    expect(form.locator('[data-specification-source-status="true"]')).to_contain_text(
+        "Repository binding refreshed. Check the selected package again"
+    )
+    _assert_retained_source_fields(form, source_path, adr_paths)
+    assert fake._binding_id() == _REFRESHED_SOURCE_BINDING_ID
+    assert fake.refresh_count == 1
+    assert fake.source_capture_count == 0
+    expected_package: JsonObject = {
+        "source_path": "specs/retained-source.md",
+        "preparation_capability": "grill-with-docs",
+        "adr_paths": ["docs/adr/0001-first.md", "docs/adr/0002-second.md"],
+    }
+    assert fake.source_preview_requests == [expected_package]
+    assert form.get_attribute("data-preview-key") is None
+    assert form.get_attribute("data-preview-fingerprint") is None
+    form.evaluate("form => form.requestSubmit()")
+    expect(form.locator('[data-specification-source-status="true"]')).to_contain_text(
+        "Check the selected package before registration"
+    )
+    assert len(fake.source_registration_attempts) == 1
+
+    form.locator('[data-specification-source-preview="true"]').click()
+    expect(form.locator('[data-specification-source-status="true"]')).to_contain_text(
+        "Checked"
+    )
+    fresh_fingerprint = form.get_attribute("data-preview-fingerprint")
+    assert fresh_fingerprint is not None
+    assert fresh_fingerprint != checked_fingerprint
+    assert fake.source_preview_requests == [expected_package, expected_package]
+    assert fake.source_capture_count == 0
+    form.evaluate("form => form.requestSubmit()")
+    current = panel.locator('[data-current-specification-source="true"]')
+    expect(current).to_be_visible()
+    expect(current).to_contain_text("specs/retained-source.md")
+    expect(current).to_contain_text("docs/adr/0002-second.md")
+    expect(
+        panel.locator('[data-direct-action="structure_specification"]')
+    ).to_be_enabled()
+    expect(
+        panel.locator('[data-direct-action="structure_specification"]')
+    ).to_contain_text("Structure Specification")
+    assert fake.source_capture_count == 1
+    assert len(fake.specification_source_registrations) == 1
+    assert fake.specification_source is not None
+    assert (
+        fake.specification_source["repository_binding_id"]
+        == _REFRESHED_SOURCE_BINDING_ID
+    )
+    assert fake.specification_source["source_fingerprint"] == fresh_fingerprint
+    assert [
+        headers["x-agileforge-expected-source"]
+        for headers in fake.source_registration_headers
+    ] == [checked_fingerprint, fresh_fingerprint]
+    expect(panel.locator("[data-repository-binding-recovery]")).to_have_count(0)
+    assert fake.api_errors == []
+    context.close()
+
+
+@pytest.mark.parametrize("refresh_failure_status", [_HTTP_CONFLICT, 500])
+def test_source_binding_refresh_failure_keeps_registration_selection(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+    refresh_failure_status: int,
+) -> None:
+    """A failed explicit refresh retains the draft and its visible recovery."""
+    fake = _source_recovery_fake(tmp_path / "refresh-failure")
+    context, page = _open_project_page(dashboard_harness, fake)
+    source_path = "  specs/keep-selection.md  "
+    adr_paths = "docs/adr/0001-keep.md\n docs/adr/0002-keep.md "
+    form = _check_specification_source(page, source_path, adr_paths)
+    fake.observation_stale = True
+    form.evaluate("form => form.requestSubmit()")
+    panel = page.locator("#specification-panel")
+    expect(form).to_have_count(1)
+    recovery = panel.locator("[data-repository-binding-recovery]")
+    expect(recovery).to_have_count(1)
+    expect(recovery).to_have_attribute(
+        "data-repository-binding-recovery", "registration"
+    )
+    expect(recovery).to_be_visible()
+    fake.refresh_failure_status = refresh_failure_status
+    recovery.locator('[data-repository-recovery-action="refresh"]').click()
+    feedback = recovery.locator("[data-repository-recovery-feedback]")
+    expect(feedback).to_have_count(1)
+    expect(feedback).to_have_text(
+        "Repository binding refresh failed. Your entered fields are retained. "
+        "Try refreshing again."
+    )
+    expect(feedback).to_have_attribute("role", "alert")
+    expect(recovery).not_to_contain_text("Private fixture inspection diagnostic.")
+    expect(
+        recovery.locator('[data-repository-recovery-action="refresh"]')
+    ).to_be_enabled()
+    _assert_retained_source_fields(form, source_path, adr_paths)
+    assert form.get_attribute("data-preview-fingerprint") is None
+    assert fake._binding_id() == _SOURCE_RECOVERY_BINDING_ID
+    assert fake.refresh_attempts == 1
+    assert fake.refresh_count == 0
+    assert fake.source_capture_count == 0
+    assert fake.specification_source_registrations == []
+
+    page.locator("#refresh-project").click()
+    expect(recovery).to_have_attribute("data-repository-binding-recovery", "locked")
+    expect(recovery.locator("[data-repository-recovery-outcome]")).to_have_text(
+        "Specification source registration is locked because "
+        "the repository observation is stale."
+    )
+    expect(form.locator('[data-specification-source-preview="true"]')).to_be_disabled()
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    expect(recovery).to_be_visible()
+    expect(feedback).to_have_text(
+        "Repository binding refresh failed. Your entered fields are retained. "
+        "Try refreshing again."
+    )
+    _assert_retained_source_fields(form, source_path, adr_paths)
+    form.locator('[data-specification-source-preview="true"]').evaluate(
+        "button => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))"
+    )
+    form.evaluate("form => form.requestSubmit()")
+    assert len(fake.source_preview_requests) == 1
+    assert len(fake.source_registration_attempts) == 1
+    assert fake.refresh_attempts == 1
+    assert fake.refresh_count == 0
+    assert fake.source_capture_count == 0
+    assert fake.specification_source_registrations == []
+    assert fake.api_errors == []
+    context.close()
+
+
+def test_rebound_accepted_specification_exposes_locked_source_recovery(  # noqa: PLR0915
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Keep accepted context visible and expose reconciled inline refresh success."""
+    fake = _source_recovery_fake(tmp_path / "accepted-rebinding", accepted=True)
+    accepted_snapshot = json.dumps(fake.accepted_specification, sort_keys=True)
+    source_snapshot = json.dumps(fake.specification_source, sort_keys=True)
+    context, page = _open_project_page(dashboard_harness, fake)
+    _select_workspace_stage(page, 1)
+    repository_card = page.locator("#repository-panel")
+    expect(repository_card.get_by_text("Clean", exact=True)).to_be_visible()
+    expect(
+        repository_card.get_by_text("Recorded working tree", exact=True)
+    ).to_be_visible()
+    repository_card.locator('[data-repository-action="refresh"]').click()
+    _select_workspace_stage(page, 4)
+    expect(page.locator("#nav-specification-badge")).to_have_text("Source not current")
+    assert fake.refresh_count == 1
+    assert fake._binding_id() == _REFRESHED_SOURCE_BINDING_ID
+    fake.observation_stale = True
+    page.locator("#refresh-project").click()
+    _select_workspace_stage(page, 4)
+
+    panel = page.locator("#specification-panel")
+    accepted = panel.locator('[data-accepted-specification-context="true"]')
+    expect(accepted).to_have_count(1)
+    expect(accepted).to_be_visible()
+    expect(accepted.get_by_text("Accepted Specification", exact=True)).to_be_visible()
+    expect(accepted.locator("pre")).to_have_text(
+        "# Accepted Specification content\n\nKeep exact lineage."
+    )
+    expect(accepted).to_contain_text(
+        "Its source was registered under an earlier repository binding "
+        "and is not the current source for this binding."
+    )
+    expect(accepted).to_have_attribute("data-specification-source-id", "31")
+    expect(accepted).to_have_attribute("data-source-fingerprint", _fingerprint("a"))
+    expect(accepted).to_have_attribute("data-repository-binding-id", "61")
+    expect(accepted).to_have_attribute("data-active-repository-binding-id", "62")
+    expect(accepted.locator("[data-review-decision]")).to_have_count(0)
+    expect(page.locator("#nav-specification-badge")).to_have_text("Source not current")
+
+    revision = panel.locator('[data-specification-revision-registration="true"]')
+    expect(revision).to_have_count(1)
+    expect(revision).to_be_visible()
+    expect(revision).not_to_have_attribute("open", "")
+    form = revision.locator('form[data-specification-source-form="true"]')
+    expect(form).to_have_count(1)
+    expect(form).not_to_be_visible()
+    for field_name in ("source_path", "adr_paths", "preparation_capability"):
+        control = form.locator(f'[name="{field_name}"]')
+        expect(control).to_have_count(1)
+        expect(control).to_be_disabled()
+    preview = form.locator('[data-specification-source-preview="true"]')
+    expect(preview).to_be_disabled()
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    recovery = panel.locator('[data-repository-binding-recovery="locked"]')
+    expect(recovery).to_be_visible()
+    expect(recovery.locator("[data-repository-recovery-outcome]")).to_have_text(
+        "Specification source registration is locked because "
+        "the repository observation is stale."
+    )
+    expect(recovery).to_have_attribute("data-recorded-binding-id", "62")
+    refresh = recovery.locator('[data-repository-recovery-action="refresh"]')
+    expect(refresh).to_have_count(1)
+    expect(refresh).to_be_enabled()
+    expect(revision.locator("[data-repository-binding-recovery]")).to_have_count(0)
+    expect(panel.locator('[data-current-specification-source="true"]')).to_have_count(0)
+    preview.evaluate(
+        "button => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))"
+    )
+    form.evaluate("form => form.requestSubmit()")
+    assert fake.source_preview_requests == []
+    assert fake.source_registration_attempts == []
+    assert fake.source_capture_count == 0
+
+    expected_refresh_count: int = 2
+    refresh.click()
+    expect(revision).to_have_attribute("open", "")
+    expect(form).to_be_visible()
+    confirmation = form.locator('[data-specification-source-status="true"]')
+    expect(confirmation).to_have_count(1)
+    expect(confirmation).to_have_attribute("role", "status")
+    expect(confirmation).to_be_visible()
+    expect(confirmation).to_contain_text(
+        "Repository binding refreshed. Check the selected package again"
+    )
+    expect(panel.locator("[data-repository-binding-recovery]")).to_have_count(0)
+    expect(accepted).to_be_visible()
+    expect(accepted).to_have_attribute("data-specification-source-id", "31")
+    expect(accepted).to_have_attribute("data-source-fingerprint", _fingerprint("a"))
+    expect(accepted).to_have_attribute("data-repository-binding-id", "61")
+    expect(accepted).to_have_attribute("data-active-repository-binding-id", "63")
+    assert fake.refresh_count == expected_refresh_count
+    assert fake._binding_id() == _REFRESHED_SOURCE_BINDING_ID + 1
+    assert fake.source_preview_requests == []
+    assert fake.source_registration_attempts == []
+    assert fake.source_capture_count == 0
+    assert json.dumps(fake.accepted_specification, sort_keys=True) == accepted_snapshot
+    assert json.dumps(fake.specification_source, sort_keys=True) == source_snapshot
+    projection = fake._specification_projection()
+    assert projection["source"] is None
+    assert projection["candidate"] is None
+    assert projection["review"] is None
+    assert fake.api_errors == []
+    context.close()
+
+
 def test_desktop_human_single_lifecycle(
     dashboard_harness: DashboardHarness,
     tmp_path: Path,
@@ -3803,7 +4367,8 @@ def test_mobile_dirty_repository_wraps_without_overflow(
     )
     expect(page.get_by_role("button", name="Generate Vision draft")).to_be_visible()
     _select_workspace_stage(page, 1)
-    expect(page.get_by_text("Dirty", exact=True)).to_be_visible()
+    repository_card = page.locator("#repository-panel")
+    expect(repository_card.get_by_text("Dirty", exact=True)).to_be_visible()
     warning = page.get_by_text(
         "Working tree has uncommitted changes in a deliberately long nested "
         "source path that must wrap on narrow screens."
@@ -3813,7 +4378,7 @@ def test_mobile_dirty_repository_wraps_without_overflow(
         page.locator("#repository-panel").get_by_text(str(repository_path))
     ).to_be_visible()
     stage_before_refresh = page.locator("#lifecycle-stage-strip").inner_text()
-    page.locator('[data-repository-action="refresh"]').click()
+    repository_card.locator('[data-repository-action="refresh"]').click()
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert fake.refresh_count == 1
     assert page.locator("#lifecycle-stage-strip").inner_text() == stage_before_refresh

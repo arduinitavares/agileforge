@@ -3556,6 +3556,268 @@ def test_registered_source_status_precedes_structured_candidate(
     assert "content_base64" not in json.dumps(source)
 
 
+def _accept_projection_specification(
+    engine: Engine,
+    seeded: dict[str, object],
+) -> int:
+    """Persist exact acceptance evidence for the seeded review candidate."""
+    project_id = _seeded_int(seeded, "project_id")
+    candidate_id = _seeded_int(seeded, "candidate_id")
+    with Session(engine) as session:
+        candidate = session.get(SpecificationCandidate, candidate_id)
+        assert candidate is not None
+        decision = SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=candidate_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            decision="accepted",
+            rationale="Keep exact accepted context.",
+            reviewer="operator",
+            idempotency_key="projection-source-binding-acceptance",
+            decided_at=NOW + timedelta(seconds=8),
+        )
+        session.add(decision)
+        session.flush()
+        assert decision.specification_decision_id is not None
+        registry = SpecRegistry(
+            project_id=project_id,
+            spec_hash=candidate.payload_fingerprint,
+            status="approved",
+            approved_at=NOW + timedelta(seconds=8),
+            approved_by="operator",
+            source_specification_decision_id=decision.specification_decision_id,
+            source_specification_candidate_id=candidate_id,
+            source_specification_candidate_fingerprint=candidate.candidate_fingerprint,
+            source_vision_artifact_id=candidate.vision_artifact_id,
+            source_vision_fingerprint=candidate.vision_fingerprint,
+            source_product_goal_artifact_id=candidate.product_goal_artifact_id,
+            source_product_goal_fingerprint=candidate.product_goal_fingerprint,
+        )
+        session.add(registry)
+        session.commit()
+        session.refresh(registry)
+        assert registry.spec_version_id is not None
+        return registry.spec_version_id
+
+
+def _append_projection_binding(engine: Engine, seeded: dict[str, object]) -> int:
+    """Append a different durable binding without changing captured source rows."""
+    with Session(engine) as session:
+        project = session.get(Project, _seeded_int(seeded, "project_id"))
+        binding = session.get(
+            RepositoryBinding, _seeded_int(seeded, "repository_binding_id")
+        )
+        assert project is not None
+        assert binding is not None
+        replacement = RepositoryBinding(
+            **binding.model_dump(exclude={"repository_binding_id"})
+        )
+        replacement.worktree_path = "/projection/rebound-repository"
+        replacement.common_git_dir = "/projection/rebound-repository/.git"
+        replacement.head_sha = "b" * 40
+        replacement.supersedes_repository_binding_id = binding.repository_binding_id
+        replacement.inspected_at = NOW + timedelta(seconds=9)
+        session.add(replacement)
+        session.flush()
+        assert replacement.repository_binding_id is not None
+        project.active_repository_binding_id = replacement.repository_binding_id
+        session.add(project)
+        session.commit()
+        return replacement.repository_binding_id
+
+
+def _configure_projection_source_binding(  # noqa: PLR0915
+    engine: Engine,
+    seeded: dict[str, object],
+    scenario: str,
+) -> tuple[int | None, int | None]:
+    """Arrange binding and source evidence without rewriting the accepted chain."""
+    project_id = _seeded_int(seeded, "project_id")
+    original_binding_id = _seeded_int(seeded, "repository_binding_id")
+    active_binding_id: int | None = original_binding_id
+    replacement_source_id: int | None = None
+    replacement_binding_id: int | None = None
+    if scenario in {"rebound", "registered_replacement", "accepted_not_registered"}:
+        active_binding_id = _append_projection_binding(engine, seeded)
+        replacement_binding_id = active_binding_id
+        if scenario == "accepted_not_registered":
+            active_binding_id = original_binding_id
+    if scenario == "missing_lineage":
+        _resolve_goal(engine, seeded)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        source = session.get(SpecificationSource, _seeded_int(seeded, "source_id"))
+        candidate = session.get(
+            SpecificationCandidate, _seeded_int(seeded, "candidate_id")
+        )
+        assert project is not None
+        assert source is not None
+        assert candidate is not None
+        if scenario == "missing_binding":
+            active_binding_id = None
+            project.active_repository_binding_id = None
+            session.add(project)
+        if scenario == "accepted_not_registered":
+            project.active_repository_binding_id = original_binding_id
+            session.add(project)
+        if scenario == "absent_source":
+            session.delete(candidate)
+            session.delete(source)
+        if scenario in {
+            "conflicting_sources",
+            "registered_replacement",
+            "accepted_not_registered",
+        }:
+            replacement = SpecificationSource(
+                **source.model_dump(exclude={"specification_source_id"})
+            )
+            assert active_binding_id is not None
+            replacement.repository_binding_id = active_binding_id
+            replacement.registered_at = NOW + timedelta(seconds=10)
+            if scenario in {"registered_replacement", "accepted_not_registered"}:
+                assert replacement_binding_id is not None
+                replacement.repository_binding_id = replacement_binding_id
+                binding = session.get(RepositoryBinding, replacement_binding_id)
+                assert binding is not None
+                bundle = SpecificationSourceBundle.model_validate_json(
+                    source.source_bundle_json
+                )
+                bundle = bundle.model_copy(
+                    update={
+                        "repository_revision": bundle.repository_revision.model_copy(
+                            update={"head_sha": binding.head_sha}
+                        )
+                    }
+                )
+                replacement.source_bundle_json = canonical_json(
+                    bundle.model_dump(mode="json")
+                )
+                replacement.source_fingerprint = source_bundle_fingerprint(bundle)
+                replacement.repository_head_sha = binding.head_sha
+                replacement.supersedes_specification_source_id = (
+                    source.specification_source_id
+                )
+                replacement.supersedes_source_fingerprint = source.source_fingerprint
+            session.add(replacement)
+            session.flush()
+            replacement_source_id = replacement.specification_source_id
+        session.commit()
+    return active_binding_id, replacement_source_id
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_state"),
+    [
+        ("no_acceptance", "current"),
+        ("same_binding", "current"),
+        ("rebound", "different_binding"),
+        ("missing_binding", "not_ready"),
+        ("missing_lineage", "not_ready"),
+        ("absent_source", "not_registered"),
+        ("conflicting_sources", "conflict"),
+        ("registered_replacement", "current"),
+        ("accepted_not_registered", "not_registered"),
+    ],
+)
+def test_source_binding_projection_distinguishes_history_from_current_source(
+    engine: Engine,
+    scenario: str,
+    expected_state: str,
+) -> None:
+    """Historical acceptance never fills the eligible source or enables authoring."""
+    seeded = _seed_lineage(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    original_binding_id = _seeded_int(seeded, "repository_binding_id")
+    accepted = scenario not in {"no_acceptance", "absent_source"}
+    registry_id = _accept_projection_specification(engine, seeded) if accepted else None
+    reads = DurableReadProjectionService(engine=engine)
+    before_current = _data(reads.specification_status(project_id=project_id))["current"]
+    active_binding_id, replacement_source_id = _configure_projection_source_binding(
+        engine, seeded, scenario
+    )
+
+    status = _data(reads.specification_status(project_id=project_id))
+    review = _data(reads.specification_review(project_id=project_id))
+    accepted_source = (
+        {
+            "specification_source_id": seeded["source_id"],
+            "source_fingerprint": seeded["source_fingerprint"],
+            "repository_binding_id": original_binding_id,
+        }
+        if accepted and scenario != "missing_lineage"
+        else None
+    )
+    expected_binding = {
+        "state": expected_state,
+        "active_repository_binding_id": active_binding_id,
+        "accepted_source": accepted_source,
+    }
+    assert status["source_binding"] == expected_binding
+    assert review["source_binding"] == expected_binding
+    assert review["current"] == status["current"]
+    assert (
+        status["schema_version"]
+        == review["schema_version"]
+        == "agileforge.specification_review.v2"
+    )
+    if expected_state != "current":
+        assert status["source"] is None
+        assert review["source"] is None
+    if scenario in {
+        "rebound",
+        "missing_binding",
+        "registered_replacement",
+        "accepted_not_registered",
+    }:
+        assert status["current"] == before_current
+        assert _json_object(review["current"])["spec_version_id"] == registry_id
+        assert status["candidate"] is None
+        assert review["candidate"] is None
+        assert review["review"] is None
+    if scenario == "registered_replacement":
+        assert (
+            _json_object(status["source"])["specification_source_id"]
+            == replacement_source_id
+        )
+        assert replacement_source_id != seeded["source_id"]
+    if scenario in {"no_acceptance", "missing_lineage", "absent_source"}:
+        assert status["current"] is None
+
+
+@pytest.mark.parametrize("corruption", ["missing", "fingerprint"])
+def test_accepted_source_identity_failure_is_a_typed_read_error(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """An accepted candidate cannot borrow a missing or differently captured source."""
+    seeded = _seed_lineage(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    _accept_projection_specification(engine, seeded)
+    _append_projection_binding(engine, seeded)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    source = snapshot.specification_sources[0]
+    sources = (
+        ()
+        if corruption == "missing"
+        else (
+            source.model_copy(
+                update={"source_fingerprint": canonical_hash({"different": "capture"})}
+            ),
+        )
+    )
+    incomplete_snapshot = snapshot.model_copy(update={"specification_sources": sources})
+    reads = DurableReadProjectionService(engine=engine, snapshot=incomplete_snapshot)
+    assert (
+        _error_code(reads.specification_status(project_id=project_id))
+        == "SPECIFICATION_CANDIDATE_UNAVAILABLE"
+    )
+    assert (
+        _error_code(reads.specification_review(project_id=project_id))
+        == "SPECIFICATION_CANDIDATE_UNAVAILABLE"
+    )
+
+
 def test_successor_source_retains_current_accepted_spec_before_amendment(
     engine: Engine,
 ) -> None:
@@ -3941,6 +4203,7 @@ def test_pending_amendment_review_projects_the_exact_amendment_candidate(  # noq
     assert status["candidate"] == review["candidate"]
     assert status["review"] == {"state": "pending"}
     assert status["current"] is None
+    assert review["current"] is None
     assert review["review"] == {"state": "pending"}
     assert candidate["specification_candidate_id"] == amendment_candidate_id
     assert candidate["candidate_kind"] == "amendment"
@@ -4015,6 +4278,7 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     review = _data(reads.specification_review(project_id=project_id))
 
     current = status["current"]
+    assert review["current"] == current
     if registry is None:
         assert current is None
         assert status["stale_reason"] == "SPECIFICATION_NOT_APPROVED"
@@ -4112,6 +4376,12 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
     assert review == {
         "schema_version": "agileforge.specification_review.v2",
         "source": None,
+        "current": None,
+        "source_binding": {
+            "state": "not_registered",
+            "active_repository_binding_id": seeded["repository_binding_id"],
+            "accepted_source": None,
+        },
         "candidate": candidate,
         "review": {"state": "pending"},
         "stale_reason": None,
