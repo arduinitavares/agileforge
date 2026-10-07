@@ -96,3 +96,4 @@ jobs:
           tests/test_cockpit_action_synchronization.mjs
           tests/test_create_project_modal_required_fields.mjs
           tests/test_vision_interview_ui.mjs
+          tests/test_product_goal_interview_ui.mjs

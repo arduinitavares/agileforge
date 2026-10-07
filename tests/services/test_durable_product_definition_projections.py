@@ -41,6 +41,7 @@ from models.workflow import (
     WorkflowNodeAttempt,
 )
 from repositories.workflow import WorkflowFactRepository
+from services import read_projections as read_projections_module
 from services.contracts.specification_authoring import (
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
     SPECIFICATION_STRUCTURER_PROMPT_VERSION,
@@ -79,6 +80,7 @@ from services.specs.candidate_contract import (
     canonical_candidate_json,
     render_candidate_review_markdown,
 )
+from tests.adapters.sprint_retry_fixtures import durable_rows
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.contracts import (
     GRAPH_VERSION,
@@ -2439,6 +2441,12 @@ def _root_position(engine: Engine, project_id: int) -> WorkflowPosition:
     return ROOT_GRAPH.evaluate(snapshot, NOW)
 
 
+def _goal_starter_questions() -> JsonObject:
+    """Load the starter object shared with the browser renderer tests."""
+    fixture = Path(__file__).parents[1] / "fixtures/product_goal_starter_questions.json"
+    return _json_object(json.loads(fixture.read_text(encoding="utf-8")))
+
+
 def test_new_project_has_empty_durable_interview_reads(engine: Engine) -> None:
     """A Project with no interview facts exposes an empty, stable contract."""
     with Session(engine) as session:
@@ -2465,6 +2473,7 @@ def test_new_project_has_empty_durable_interview_reads(engine: Engine) -> None:
         "active": None,
         "transcript": [],
         "latest_questions": [],
+        "effective_questions": None,
         "candidate": None,
         "review": None,
         "outcome": None,
@@ -2760,6 +2769,10 @@ def test_incomplete_goal_exposes_accepted_vision_transcript_and_questions(
         }
     ]
     assert data["latest_questions"] == list(questions)
+    assert data["effective_questions"] == {
+        "questions": list(questions),
+        "source": "generated",
+    }
     assert data["candidate"] is None
     assert data["review"] is None
 
@@ -2797,13 +2810,197 @@ def test_pending_goal_exposes_exact_candidate_and_pending_review(
     assert isinstance(transcript, list)
     assert len(transcript) == 1
     assert data["latest_questions"] == []
+    assert data["effective_questions"] is None
 
 
-def test_goal_feedback_keeps_candidate_separate_from_revision_chain(
+def test_accepted_vision_without_goal_turns_exposes_starter_questions_read_only(
     engine: Engine,
 ) -> None:
-    """A rejected Goal remains review context while revision turns advance."""
-    seeded = _seed_goal_candidate(engine, decision="feedback")
+    """Initial questions are displayed without inventing or persisting a turn."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = _seeded_int(seeded, "project_id")
+    reads = DurableReadProjectionService(engine=engine)
+    before = durable_rows(engine)
+
+    first = reads.product_goal_status(project_id=project_id)
+    second = reads.product_goal_status(project_id=project_id)
+
+    assert first == second
+    data = _data(first)
+    assert data["effective_questions"] == _goal_starter_questions()
+    assert data["transcript"] == []
+    assert data["latest_questions"] == []
+    assert data["active"] is None
+    assert data["candidate"] is None
+    assert durable_rows(engine) == before
+
+
+def test_goal_starter_questions_are_a_fresh_copy(engine: Engine) -> None:
+    """Caller changes to returned starters cannot alter later projections."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = _seeded_int(seeded, "project_id")
+    reads = DurableReadProjectionService(engine=engine)
+    expected = _goal_starter_questions()
+    result = reads.product_goal_status(project_id=project_id)
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    effective_questions = data["effective_questions"]
+    assert isinstance(effective_questions, dict)
+    questions = effective_questions["questions"]
+    assert isinstance(questions, list)
+    questions[0] = "Caller replaced this question."
+    questions.append("Caller appended this question.")
+
+    assert (
+        _data(reads.product_goal_status(project_id=project_id))["effective_questions"]
+        == expected
+    )
+    assert _goal_starter_questions() == expected
+
+
+def test_generated_goal_questions_take_precedence_over_starters(engine: Engine) -> None:
+    """Only the final selected turn supplies generated questions, in order."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    first_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=_goal_components(complete=False),
+            statement="Define the first valuable outcome.",
+            is_complete=False,
+            questions=("Which first outcome matters?",),
+            goal_number=1,
+            revision_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    questions = (
+        "Which observable result proves this outcome?",
+        "Which boundary should constrain this outcome?",
+    )
+    last_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=_goal_components(complete=False),
+            statement="Make the selected outcome measurable.",
+            is_complete=False,
+            questions=questions,
+            goal_number=1,
+            revision_number=1,
+            prior_turn_id=first_id,
+            recorded_at=NOW + timedelta(seconds=4),
+        ),
+    )
+    before = durable_rows(engine)
+    reads = DurableReadProjectionService(engine=engine)
+    data = _data(
+        reads.product_goal_status(project_id=_seeded_int(seeded, "project_id"))
+    )
+
+    assert data["latest_questions"] == list(questions)
+    assert data["effective_questions"] == {
+        "questions": list(questions),
+        "source": "generated",
+    }
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert [
+        _json_object(turn)["product_goal_interview_turn_id"] for turn in transcript
+    ] == [first_id, last_id]
+    assert durable_rows(engine) == before
+
+
+def test_goal_starters_preserve_invalid_history_with_empty_latest_questions(
+    engine: Engine,
+) -> None:
+    """The fallback does not fabricate a question in an invalid persisted turn."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=_goal_components(complete=False),
+            statement="Invalid historical incomplete output without followups.",
+            is_complete=False,
+            questions=(),
+            goal_number=1,
+            revision_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    before = durable_rows(engine)
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=_seeded_int(seeded, "project_id")
+        )
+    )
+
+    assert data["effective_questions"] == _goal_starter_questions()
+    assert data["latest_questions"] == []
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert len(transcript) == 1
+    assert _json_object(transcript[0])["product_goal_interview_turn_id"] == turn_id
+    assert _json_object(transcript[0])["clarifying_questions"] == []
+    assert durable_rows(engine) == before
+
+
+@pytest.mark.parametrize("state", ["missing_vision", "active", "pending_review"])
+def test_non_interview_goal_states_have_no_effective_questions(
+    engine: Engine,
+    state: str,
+) -> None:
+    """No accepted Vision, active Goals, and pending reviews offer no questions."""
+    if state == "missing_vision":
+        seeded = _seed_vision_candidate(engine)
+    else:
+        seeded = _seed_goal_candidate(
+            engine, decision="accepted" if state == "active" else None
+        )
+    before = durable_rows(engine)
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=_seeded_int(seeded, "project_id")
+        )
+    )
+
+    assert data["effective_questions"] is None
+    if state == "missing_vision":
+        assert data["accepted_vision"] is None
+    elif state == "active":
+        assert (
+            _json_object(data["active"])["product_goal_artifact_id"]
+            == seeded["goal_id"]
+        )
+    else:
+        assert data["review"] == {"state": "pending"}
+    assert durable_rows(engine) == before
+
+
+@pytest.mark.parametrize("prior_state", ["feedback", "rejected", "resolved"])
+def test_reopened_goal_interview_exposes_starters_until_generated_followups(
+    engine: Engine,
+    prior_state: str,
+) -> None:
+    """Revision and next-Goal chains start with starters, then their own questions."""
+    resolved = prior_state == "resolved"
+    seeded = _seed_goal_candidate(
+        engine, decision="accepted" if resolved else prior_state
+    )
+    if resolved:
+        _resolve_goal(engine, seeded)
+    project_id = _seeded_int(seeded, "project_id")
+    reads = DurableReadProjectionService(engine=engine)
+    before = durable_rows(engine)
+    initial = _data(reads.product_goal_status(project_id=project_id))
+    assert initial["effective_questions"] == _goal_starter_questions()
+    assert initial["transcript"] == []
+    assert initial["latest_questions"] == []
+    assert durable_rows(engine) == before
     components = _goal_components(complete=False)
     questions = ("Which boundary should the revision add?",)
     revision_turn_id = _add_goal_turn(
@@ -2814,98 +3011,74 @@ def test_goal_feedback_keeps_candidate_separate_from_revision_chain(
             statement="Make durable reviews narrower and measurable.",
             is_complete=False,
             questions=questions,
-            goal_number=1,
-            revision_number=2,
+            goal_number=2 if resolved else 1,
+            revision_number=1 if resolved else 2,
             prior_turn_id=None,
-            recorded_at=NOW + timedelta(seconds=6),
+            recorded_at=NOW + timedelta(seconds=9),
         ),
     )
-    project_id = seeded["project_id"]
-    assert isinstance(project_id, int)
+    before = durable_rows(engine)
+    data = _data(reads.product_goal_status(project_id=project_id))
 
-    data = _data(
-        DurableReadProjectionService(engine=engine).product_goal_status(
-            project_id=project_id
+    assert data["active"] is None
+    if resolved:
+        assert data["candidate"] is None
+        assert data["review"] is None
+        assert (
+            _json_object(data["outcome"])["product_goal_artifact_id"]
+            == seeded["goal_id"]
         )
-    )
-
-    candidate = _json_object(data["candidate"])
-    assert candidate["product_goal_artifact_id"] == seeded["goal_id"]
-    assert data["review"] == {
-        "state": "feedback",
-        "product_goal_artifact_decision_id": 1,
-        "decision": "feedback",
-        "rationale": "Goal feedback rationale.",
-        "reviewer": "goal-reviewer",
-        "decided_at": _stored_iso(NOW + timedelta(seconds=5)),
-    }
+        assert data["stale_reason"] == "GOAL_RESOLVED"
+    else:
+        candidate = _json_object(data["candidate"])
+        assert candidate["product_goal_artifact_id"] == seeded["goal_id"]
+        assert data["review"] == {
+            "state": prior_state,
+            "product_goal_artifact_decision_id": 1,
+            "decision": prior_state,
+            "rationale": f"Goal {prior_state} rationale.",
+            "reviewer": "goal-reviewer",
+            "decided_at": _stored_iso(NOW + timedelta(seconds=5)),
+        }
     transcript = data["transcript"]
     assert isinstance(transcript, list)
     assert [
         _json_object(item)["product_goal_interview_turn_id"] for item in transcript
     ] == [revision_turn_id]
     assert data["latest_questions"] == list(questions)
+    assert data["effective_questions"] == {
+        "questions": list(questions),
+        "source": "generated",
+    }
+    assert durable_rows(engine) == before
 
 
-def test_resolved_goal_followed_by_new_interview_excludes_old_candidate(
+def test_goal_candidate_projection_failure_has_no_effective_questions(
     engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The next Goal transcript does not revive the resolved Goal candidate."""
-    seeded = _seed_goal_candidate(engine, decision="accepted")
-    project_id = seeded["project_id"]
-    goal_id = seeded["goal_id"]
-    goal_fingerprint = seeded["goal_fingerprint"]
-    assert isinstance(project_id, int)
-    assert isinstance(goal_id, int)
-    assert isinstance(goal_fingerprint, str)
-    with Session(engine) as session:
-        session.add(
-            ProductGoalOutcome(
-                project_id=project_id,
-                product_goal_artifact_id=goal_id,
-                artifact_fingerprint=goal_fingerprint,
-                outcome="fulfilled",
-                rationale="The first durable review Goal was fulfilled.",
-                decided_by="goal-owner",
-                idempotency_key="goal-one-fulfilled",
-                decided_at=NOW + timedelta(seconds=6),
-            )
-        )
-        session.commit()
-    components = _goal_components(complete=False)
-    questions = ("What should the next measurable outcome be?",)
-    new_turn_id = _add_goal_turn(
-        engine,
-        seeded,
-        _GoalTurnSeed(
-            components=components,
-            statement="Define the next durable product outcome.",
-            is_complete=False,
-            questions=questions,
-            goal_number=2,
-            revision_number=1,
-            prior_turn_id=None,
-            recorded_at=NOW + timedelta(seconds=7),
-        ),
+    """Candidate serialization must validate before interview fallback selection."""
+    seeded = _seed_goal_candidate(engine, decision="feedback")
+    project_id = _seeded_int(seeded, "project_id")
+    reads = DurableReadProjectionService(engine=engine)
+    valid = _data(reads.product_goal_status(project_id=project_id))
+    assert valid["candidate"] is not None
+    assert valid["review"] is not None
+    assert valid["stale_reason"] == "GOAL_NOT_ACTIVE"
+    before = durable_rows(engine)
+    monkeypatch.setattr(
+        read_projections_module, "_goal_candidate_data", lambda *_: None
     )
 
-    data = _data(
-        DurableReadProjectionService(engine=engine).product_goal_status(
-            project_id=project_id
-        )
-    )
+    data = _data(reads.product_goal_status(project_id=project_id))
 
-    assert data["active"] is None
+    assert data["effective_questions"] is None
+    assert data["transcript"] == []
+    assert data["latest_questions"] == []
     assert data["candidate"] is None
     assert data["review"] is None
-    transcript = data["transcript"]
-    assert isinstance(transcript, list)
-    assert [
-        _json_object(item)["product_goal_interview_turn_id"] for item in transcript
-    ] == [new_turn_id]
-    outcome = _json_object(data["outcome"])
-    assert outcome["product_goal_artifact_id"] == goal_id
-    assert data["stale_reason"] == "GOAL_RESOLVED"
+    assert data["stale_reason"] == "PRODUCT_GOAL_FACT_CONFLICT"
+    assert durable_rows(engine) == before
 
 
 @pytest.mark.parametrize("prior_state", ["feedback", "resolved"])
@@ -2938,6 +3111,7 @@ def test_detached_goal_revision_fails_closed_in_projection(
         "active": None,
         "transcript": [],
         "latest_questions": [],
+        "effective_questions": None,
         "candidate": None,
         "review": None,
         "outcome": None,
@@ -2973,7 +3147,7 @@ def test_detached_goal_revision_invalidates_graph_review(
     )
 
 
-def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
+def test_ambiguous_vision_leaf_fails_closed_for_vision_and_goal_with_typed_stale_reason(
     engine: Engine,
 ) -> None:
     """Two immutable Vision leaves never degrade to latest-row selection."""
@@ -3032,6 +3206,24 @@ def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
         "review": None,
         "stale_reason": "VISION_FACT_CONFLICT",
     }
+    before = durable_rows(engine)
+    goal = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+    assert goal == {
+        "accepted_vision": None,
+        "active": None,
+        "transcript": [],
+        "latest_questions": [],
+        "effective_questions": None,
+        "candidate": None,
+        "review": None,
+        "outcome": None,
+        "stale_reason": "PRODUCT_GOAL_FACT_CONFLICT",
+    }
+    assert durable_rows(engine) == before
 
 
 def _resolve_goal(engine: Engine, seeded: dict[str, object]) -> None:
@@ -3755,6 +3947,7 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
         "active": None,
         "transcript": [],
         "latest_questions": [],
+        "effective_questions": _goal_starter_questions(),
         "candidate": None,
         "review": None,
         "outcome": {
@@ -3778,6 +3971,7 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
     review = _data(reads.specification_review(project_id=project_id))
     assert vision["current"] is not None
     active_goal = _json_object(active["active"])
+    assert active["effective_questions"] is None
     assert active_goal["statement"] == "Goal 2: transparent decisions."
     assert active_goal["product_goal_artifact_id"] != goal_id
     assert specification["schema_version"] == "agileforge.specification_review.v2"
@@ -4162,9 +4356,9 @@ def test_accepted_roadmap_qualifies_tampered_story_item_without_mutating_artifac
         project_id = story.project_id
         decisions_before = tuple(
             session.exec(
-                    select(StoryArtifactDecision)
-                    .where(StoryArtifactDecision.project_id == project_id)
-                    .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
+                select(StoryArtifactDecision)
+                .where(StoryArtifactDecision.project_id == project_id)
+                .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
             ).all()
         )
         roadmap = session.get(RoadmapArtifact, roadmap_id)
@@ -4202,8 +4396,8 @@ def test_accepted_roadmap_qualifies_tampered_story_item_without_mutating_artifac
         decisions_after = tuple(
             session.exec(
                 select(StoryArtifactDecision)
-                    .where(StoryArtifactDecision.project_id == project_id)
-                    .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
+                .where(StoryArtifactDecision.project_id == project_id)
+                .order_by(col(StoryArtifactDecision.story_artifact_decision_id))
             ).all()
         )
     assert immutable_before == (
@@ -4338,9 +4532,7 @@ def test_accepted_roadmap_selector_keeps_accepted_ancestor_until_successor_accep
     reads = DurableReadProjectionService(engine=engine)
     with Session(engine) as session:
         initial = session.exec(
-            select(RoadmapArtifact).where(
-                RoadmapArtifact.project_id == project_id
-            )
+            select(RoadmapArtifact).where(RoadmapArtifact.project_id == project_id)
         ).one()
         initial_id = initial.roadmap_artifact_id
         record_roadmap_decision_in_session(
@@ -4416,12 +4608,18 @@ def test_accepted_roadmap_selector_keeps_accepted_ancestor_until_successor_accep
         )
         session.commit()
 
-    assert _json_object(
-        _data(reads.accepted_roadmap(project_id=project_id))["roadmap"]
-    )["roadmap_artifact_id"] == successor_id
-    assert _json_object(
-        _data(reads.accepted_roadmap(project_id=other_project_id))["roadmap"]
-    )["roadmap_artifact_id"] == other_roadmap_id
+    assert (
+        _json_object(_data(reads.accepted_roadmap(project_id=project_id))["roadmap"])[
+            "roadmap_artifact_id"
+        ]
+        == successor_id
+    )
+    assert (
+        _json_object(
+            _data(reads.accepted_roadmap(project_id=other_project_id))["roadmap"]
+        )["roadmap_artifact_id"]
+        == other_roadmap_id
+    )
 
 
 def test_backlog_review_uses_historical_superseded_specification(

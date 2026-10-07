@@ -181,7 +181,7 @@ The current fixed request kinds map to these prefixes:
 | Area | Command prefixes |
 | --- | --- |
 | Vision | `vision bootstrap`, `vision respond`, `vision status`, `vision review`, `vision revision` |
-| Product Goal | `goal respond`, `goal review`, `goal complete`, `goal abandon` |
+| Product Goal | `goal status`, `goal respond`, `goal review`, `goal complete`, `goal abandon` |
 | Specification | `specification source register`, `specification structure`, `specification status`, `specification review` |
 | Backlog | `backlog generate`, `backlog decide` |
 | Roadmap | `roadmap generate`, `roadmap decide` |
@@ -242,6 +242,32 @@ Reads never advance the workflow:
 ```
 
 A read result is evidence, not permission to mutate.
+
+### Product Goal interview questions
+
+`goal status --project-id 41` returns `data.effective_questions` through CLI JSON,
+the Goal status HTTP endpoint, and the dashboard Goal slot. When an accepted
+Vision has a healthy Goal interview context, this object contains an ordered
+`questions` list and a `source` from the closed set `{builtin_starter, generated}`.
+
+`generated` preserves the selected durable interview chain's latest questions.
+`builtin_starter` supplies these questions when that chain has no questions yet,
+including a reopened Goal after feedback or rejection and the next Goal after
+resolution:
+
+1. What valuable outcome should this Project achieve next?
+2. What observable result will prove success?
+3. What boundary keeps this Goal focused?
+
+The field is `null` when there is no accepted Vision, a Goal is active, a
+candidate awaits review, or selected facts or candidate projection conflict.
+Workflow-advertised actions still determine whether a response form is available.
+
+Status reads do not call a provider, save questions, or fabricate transcript
+turns. `latest_questions` continues to expose only the last selected persisted
+turn's questions, or `[]` for a chain without turns. Starters can coexist with a
+nonempty transcript only for invalid history whose latest questions are empty;
+the fallback preserves the display behavior without repairing that history.
 
 ## Sprint Retry
 

@@ -80,6 +80,14 @@ from services.sprint_ownership import ResolvedSprintOwner
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
 from tests.adapters.test_command_renderer import position_fixture
+from tests.services.test_durable_product_definition_projections import (
+    NOW,
+    _add_goal_turn,
+    _goal_components,
+    _GoalTurnSeed,
+    _seed_vision_candidate,
+    _seeded_int,
+)
 from tests.test_create_user_story import (
     _intermediate_story_content,
     _record_accepted_legacy_story,
@@ -226,11 +234,58 @@ def test_vision_and_goal_status_endpoints_expose_durable_interview_contract(
         "active": None,
         "transcript": [],
         "latest_questions": [],
+        "effective_questions": None,
         "candidate": None,
         "review": None,
         "outcome": None,
         "stale_reason": "GOAL_NOT_ACTIVE",
     }
+
+
+@pytest.mark.parametrize("state", ["initial", "generated"])
+def test_goal_status_endpoint_exposes_starter_and_generated_question_provenance(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """HTTP preserves question content, provenance, and the full durable data."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = _seeded_int(seeded, "project_id")
+    questions = ("Which result proves the selected Goal?", "Which boundary applies?")
+    fixture = Path(__file__).parents[1] / "fixtures/product_goal_starter_questions.json"
+    expected = json.loads(fixture.read_text(encoding="utf-8"))
+    if state == "generated":
+        _add_goal_turn(
+            engine,
+            seeded,
+            _GoalTurnSeed(
+                components=_goal_components(complete=False),
+                statement="Make the selected Goal observable.",
+                is_complete=False,
+                questions=questions,
+                goal_number=1,
+                revision_number=1,
+                prior_turn_id=None,
+                recorded_at=NOW + timedelta(seconds=3),
+            ),
+        )
+        expected = {"questions": list(questions), "source": "generated"}
+    application = _StatusReadApplication(
+        reads=DurableReadProjectionService(engine=engine)
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+    before = durable_rows(engine)
+
+    for _ in range(2):
+        response = client.get(f"/api/projects/{project_id}/goals/status")
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()["data"]
+        assert data["effective_questions"] == expected
+        assert (
+            data == application.reads.product_goal_status(project_id=project_id)["data"]
+        )
+    assert durable_rows(engine) == before
 
 
 def test_create_project_request_accepts_only_semantic_fields() -> None:

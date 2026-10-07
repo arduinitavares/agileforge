@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
+from pathlib import Path
 from threading import Barrier, Event, Timer
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -25,6 +27,16 @@ from services.application import (
 from services.dashboard_reads import dashboard_read_view
 from services.read_projections import DurableReadProjectionService
 from services.vision_evidence_reader import RepositoryEvidenceCapability
+from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.services.test_durable_product_definition_projections import (
+    NOW,
+    _add_goal_turn,
+    _goal_components,
+    _GoalTurnSeed,
+    _seed_goal_candidate,
+    _seed_vision_candidate,
+    _seeded_int,
+)
 from tests.workflow.execution_fixtures import seed_started_execution
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, RecommendationKind
@@ -39,8 +51,6 @@ from workflow.graph import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.engine import Engine
 
     from services.application import WorkflowDomainPort
@@ -135,6 +145,81 @@ def test_dashboard_bundle_matches_standalone_reads_and_loads_facts_once(
     application.position(project_id=project_id)
     assert loads == expected_next_count
     assert evaluations == expected_next_count
+
+
+@pytest.mark.parametrize("state", ["initial", "generated", "pending_review"])
+def test_dashboard_goal_questions_match_standalone_status(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """The bundled Goal slot preserves effective questions on one snapshot."""
+    seeded = (
+        _seed_goal_candidate(engine)
+        if state == "pending_review"
+        else _seed_vision_candidate(engine, decision="accepted")
+    )
+    project_id = _seeded_int(seeded, "project_id")
+    questions = ("Which result proves the selected Goal?", "Which boundary applies?")
+    fixture = Path(__file__).parents[1] / "fixtures/product_goal_starter_questions.json"
+    expected = json.loads(fixture.read_text(encoding="utf-8"))
+    if state == "generated":
+        _add_goal_turn(
+            engine,
+            seeded,
+            _GoalTurnSeed(
+                components=_goal_components(complete=False),
+                statement="Make the selected Goal observable.",
+                is_complete=False,
+                questions=questions,
+                goal_number=1,
+                revision_number=1,
+                prior_turn_id=None,
+                recorded_at=NOW + timedelta(seconds=3),
+            ),
+        )
+        expected = {"questions": list(questions), "source": "generated"}
+    elif state == "pending_review":
+        expected = None
+    application = _application(engine)
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+    path = f"/api/projects/{project_id}"
+    before = durable_rows(engine)
+    standalone = client.get(f"{path}/goals/status")
+    loads = 0
+    evaluations = 0
+    original_load = WorkflowFactRepository.load
+    original_evaluate = WorkflowGraph.evaluate
+
+    def counted_load(self: WorkflowFactRepository, current_id: int) -> object:
+        nonlocal loads
+        loads += 1
+        return original_load(self, current_id)
+
+    def counted_evaluate(
+        self: WorkflowGraph,
+        snapshot: WorkflowFactSnapshot,
+        evaluated_at: datetime,
+    ) -> WorkflowPosition:
+        nonlocal evaluations
+        evaluations += 1
+        return original_evaluate(self, snapshot, evaluated_at)
+
+    monkeypatch.setattr(WorkflowFactRepository, "load", counted_load)
+    monkeypatch.setattr(WorkflowGraph, "evaluate", counted_evaluate)
+    response = client.get(f"{path}/dashboard")
+
+    assert standalone.status_code == HTTPStatus.OK
+    assert response.status_code == HTTPStatus.OK
+    goal = response.json()["data"]["goal"]
+    assert goal["body"]["data"]["effective_questions"] == expected
+    if state == "pending_review":
+        assert goal["body"]["data"]["effective_questions"] is None
+    assert goal == {"status": standalone.status_code, "body": standalone.json()}
+    assert loads == 1
+    assert evaluations == 1
+    assert durable_rows(engine) == before
 
 
 def test_dashboard_bundle_refreshes_between_requests(
