@@ -29,7 +29,7 @@ from models.sprint_retry import (
 from models.workflow import TaskCompletionEvidence
 from repositories.workflow import WorkflowFactRepository
 from utils.api_schemas import TaskExecutionLogEntry
-from utils.task_metadata import TaskMetadata
+from utils.task_metadata import TaskMetadata, format_checklist_items
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     TaskEvidencePayload,
@@ -350,7 +350,11 @@ def _completion_metadata(
     if not metadata.checklist_items:
         raise TaskExecutionServiceError.task_not_executable()
     if set(checklist_result) != set(metadata.checklist_items):
-        message = "Checklist result must cover every executable checklist item."
+        message = (
+            "Checklist result must cover every executable checklist item.\n"
+            "Valid checklist items:\n"
+            f"{format_checklist_items(metadata.checklist_items)}"
+        )
         raise TaskExecutionServiceError(message, status_code=409)
     return metadata
 

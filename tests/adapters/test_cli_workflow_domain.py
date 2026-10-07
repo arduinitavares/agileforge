@@ -1,5 +1,6 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
+import argparse
 import importlib
 import io
 import json
@@ -45,6 +46,7 @@ from tests.services.test_durable_product_definition_projections import (
     _seeded_int,
 )
 from workflow.contracts import (
+    JsonObject,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -1116,6 +1118,42 @@ class _ExecutionActionApplication:
         return capture
 
 
+class _UnavailableChecklistReads:
+    """Expose only the optional context read and deliberately fail it."""
+
+    def sprint_task_show(self, *, project_id: int, task_id: int) -> JsonObject:
+        """Fail even for syntactically valid selectors without disclosing text."""
+        message = f"Unavailable context for project {project_id}, task {task_id}."
+        raise RuntimeError(message)
+
+
+class _UnavailableChecklistApplication(_ExecutionActionApplication):
+    """Supply a narrowly typed read that cannot enrich syntax errors."""
+
+    reads: _UnavailableChecklistReads = _UnavailableChecklistReads()
+
+
+class _ChecklistContextReads:
+    """Return an explicitly scoped read response for context-failure tests."""
+
+    def __init__(self, response: JsonObject) -> None:
+        self.response = response
+        self.selectors: list[tuple[int, int]] = []
+
+    def sprint_task_show(self, *, project_id: int, task_id: int) -> JsonObject:
+        """Record only the requested project/Task pair and return supplied evidence."""
+        self.selectors.append((project_id, task_id))
+        return self.response
+
+
+class _ChecklistContextApplication(_ExecutionActionApplication):
+    """Capture dispatch and context selection independently."""
+
+    def __init__(self, response: JsonObject) -> None:
+        super().__init__()
+        self.reads = _ChecklistContextReads(response)
+
+
 def _complete_task_arguments(*checklist_source: str) -> list[str]:
     """Build the fixed semantic completion command around one checklist source."""
     return [
@@ -1278,6 +1316,240 @@ def test_post_sprint_triage_cli_reads_only_semantic_payload(
     assert '"ok": true' in capsys.readouterr().out
 
 
+def _triage_arguments(source: list[str], *, impact: str = "none") -> list[str]:
+    """Use every transport metadata field when comparing payload sources."""
+    return [
+        "sprint",
+        "triage",
+        "--project-id",
+        "41",
+        "--instance-key",
+        "sprint:31",
+        "--impact",
+        impact,
+        *source,
+        "--idempotency-key",
+        "triage-41",
+        "--actor",
+        "operator",
+        "--correlation-id",
+        "correlation-triage-41",
+    ]
+
+
+def test_post_sprint_triage_cli_summary_and_file_construct_identical_requests(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Input convenience changes neither typed request nor its metadata."""
+    summary = "No downstream change."
+    payload_path = tmp_path / "triage.json"
+    payload_path.write_text(json.dumps({"summary": summary}), encoding="utf-8")
+    application = _ExecutionActionApplication()
+
+    for source in (["--file", str(payload_path)], ["--summary", summary]):
+        assert cli_main.main(_triage_arguments(source), application=application) == 0
+        assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    file_request, summary_request = (
+        cast("PostSprintTriageRequest", request) for request in application.requests
+    )
+    assert summary_request.model_dump(mode="json") == file_request.model_dump(
+        mode="json"
+    )
+    assert summary_request.model_dump(mode="json") == {
+        "project_id": PROJECT_ID,
+        "instance_key": "sprint:31",
+        "impact": "none",
+        "canonical_payload": {"summary": summary},
+        "idempotency_key": "triage-41",
+        "actor": "operator",
+        "correlation_id": "correlation-triage-41",
+    }
+
+
+def test_post_sprint_triage_cli_summary_preserves_exact_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only blank detection trims; accepted payload text stays byte-equivalent."""
+    summary = ' \tRésumé "ação"\nA=B=C 🌱\n '
+    application = _ExecutionActionApplication()
+
+    assert (
+        cli_main.main(
+            _triage_arguments(["--summary", summary]), application=application
+        )
+        == 0
+    )
+    request = cast("PostSprintTriageRequest", application.requests[0])
+    assert request.canonical_payload == {"summary": summary}
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("source_order", ["neither", "file-first", "summary-first"])
+def test_post_sprint_triage_cli_requires_exactly_one_payload_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source_order: str,
+) -> None:
+    """Absent or competing sources are argument errors before application dispatch."""
+    payload_path = tmp_path / "triage.json"
+    payload_path.write_text('{"summary":"No change."}', encoding="utf-8")
+    sources = {
+        "neither": [],
+        "file-first": ["--file", str(payload_path), "--summary", "No change."],
+        "summary-first": ["--summary", "No change.", "--file", str(payload_path)],
+    }
+    application = _ExecutionActionApplication()
+
+    assert (
+        cli_main.main(_triage_arguments(sources[source_order]), application=application)
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+@pytest.mark.parametrize("flag", ["--file", "--summary"])
+@pytest.mark.parametrize("same_value", [True, False])
+def test_post_sprint_triage_cli_rejects_repeated_payload_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    same_value: bool,
+) -> None:
+    """Repeats cannot silently replace an earlier file or summary."""
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"summary":"First."}', encoding="utf-8")
+    second.write_text('{"summary":"Second."}', encoding="utf-8")
+    first_value, second_value = (
+        (str(first), str(second)) if flag == "--file" else ("First.", "Second.")
+    )
+    application = _ExecutionActionApplication()
+    source = [flag, first_value, flag, first_value if same_value else second_value]
+
+    assert (
+        cli_main.main(_triage_arguments(source), application=application)
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+@pytest.mark.parametrize("impact", ["backlog", "specification"])
+def test_post_sprint_triage_cli_rejects_summary_for_downstream_impact(
+    capsys: pytest.CaptureFixture[str],
+    impact: str,
+) -> None:
+    """Inline convenience stays limited to no-impact triage."""
+    application = _ExecutionActionApplication()
+    assert (
+        cli_main.main(
+            _triage_arguments(["--summary", "Follow-up."], impact=impact),
+            application=application,
+        )
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+@pytest.mark.parametrize("summary", ["", " ", "\t\r\n", "\u2003\u00a0"])
+def test_post_sprint_triage_cli_rejects_blank_summary(
+    capsys: pytest.CaptureFixture[str], summary: str
+) -> None:
+    """Empty and Unicode whitespace summaries never reach the application."""
+    application = _ExecutionActionApplication()
+    assert (
+        cli_main.main(
+            _triage_arguments(["--summary", summary]), application=application
+        )
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+@pytest.mark.parametrize("impact", ["none", "backlog", "specification"])
+@pytest.mark.parametrize(
+    "payload", [{}, {"summary": "  "}, {"nested": {"items": [1, None, "A=B"]}}]
+)
+def test_post_sprint_triage_cli_file_preserves_payload_for_every_impact(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    impact: str,
+    payload: JsonObject,
+) -> None:
+    """Existing file objects retain all fields and do not gain summary rules."""
+    payload_path = tmp_path / "triage.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    application = _ExecutionActionApplication()
+    assert (
+        cli_main.main(
+            _triage_arguments(["--file", str(payload_path)], impact=impact),
+            application=application,
+        )
+        == 0
+    )
+    request = cast("PostSprintTriageRequest", application.requests[0])
+    assert request.impact == impact
+    assert request.canonical_payload == payload
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("contents", ["{", "[]", "null", '"text"', None])
+def test_post_sprint_triage_cli_rejects_invalid_file_without_dispatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    contents: str | None,
+) -> None:
+    """Malformed, non-object, and unreadable files retain loader error behavior."""
+    payload_path = tmp_path / "triage.json"
+    if contents is not None:
+        payload_path.write_text(contents, encoding="utf-8")
+    application = _ExecutionActionApplication()
+    assert (
+        cli_main.main(
+            _triage_arguments(["--file", str(payload_path)]), application=application
+        )
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_post_sprint_triage_parser_collects_exclusive_sources() -> None:
+    """Check parser structure directly rather than matching rendered help prose."""
+    triage = build_parser().parse_args(_triage_arguments(["--summary", "No change."]))
+    assert triage.triage_summaries == ["No change."]
+    assert triage.triage_files is None
+    parser = next(
+        action.choices["sprint"]
+        for action in build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    triage_parser = next(
+        action.choices["triage"]
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    group = next(
+        group
+        for group in triage_parser._mutually_exclusive_groups
+        if {action.dest for action in group._group_actions}
+        == {"triage_files", "triage_summaries"}
+    )
+    assert group.required is True
+    assert {tuple(action.option_strings) for action in group._group_actions} == {
+        ("--file",),
+        ("--summary",),
+    }
+    assert all(
+        isinstance(action, argparse._AppendAction) for action in group._group_actions
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -1374,6 +1646,56 @@ def test_complete_task_cli_rejects_invalid_checklist_map(
     assert '"ok": false' in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("application_kind", ["absent", "no_reads", "failed_read"])
+@pytest.mark.parametrize(
+    ("items", "error_fragment"),
+    [
+        (("missing-separator",), "nonblank KEY=VALUE pair"),
+        ((" =passed",), "nonblank KEY=VALUE pair"),
+        (("check= ",), "nonblank KEY=VALUE pair"),
+        (("check=passed", " check =failed"), "keys must be unique"),
+    ],
+)
+def test_cli_malformed_checklist_syntax_wins_when_application_or_read_unavailable(
+    application_kind: str,
+    items: tuple[str, ...],
+    error_fragment: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Optional diagnostics must never start runtime or mask syntax failures."""
+
+    def forbidden_runtime(**_kwargs: object) -> None:
+        message = "Malformed checklist input accessed product runtime."
+        raise AssertionError(message)
+
+    def forbidden_factory() -> None:
+        message = "Malformed checklist input created a production application."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(cli_main, "runtime_access", forbidden_runtime)
+    monkeypatch.setattr(cli_main, "production_application", forbidden_factory)
+    application = (
+        None
+        if application_kind == "absent"
+        else (
+            _UnavailableChecklistApplication()
+            if application_kind == "failed_read"
+            else _ExecutionActionApplication()
+        )
+    )
+    arguments = _complete_task_arguments(
+        *(part for item in items for part in ("--checklist-item", item))
+    )
+    assert cli_main.main(arguments, application=application) == ARGUMENT_ERROR_EXIT_CODE
+    if application is not None:
+        assert application.requests == []
+    output = json.loads(capsys.readouterr().out)
+    assert error_fragment in output["error"]
+    assert "Valid checklist items" not in output["error"]
+    assert "Unavailable context" not in output["error"]
+
+
 def test_complete_task_cli_reads_lossless_checklist_file(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1418,20 +1740,121 @@ def test_complete_task_cli_keeps_legacy_first_equals_split(
     assert '"ok": true' in capsys.readouterr().out
 
 
-def test_complete_task_help_explains_checklist_input_sources(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Describe the lossless file option and the legacy first-equals shorthand."""
-    with pytest.raises(SystemExit):
-        cli_main.build_parser().parse_args(["sprint", "task", "complete", "--help"])
+def test_complete_task_parser_declares_typed_exclusive_checklist_sources() -> None:
+    """Register typed repeated items and a required mutually exclusive file source."""
+    parser = cli_main.build_parser()
+    for name in ("sprint", "task", "complete"):
+        branches = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        parser = branches.choices[name]
+    actions = {
+        option: action for action in parser._actions for option in action.option_strings
+    }
+    item = actions["--checklist-item"]
+    file = actions["--checklist-file"]
+    assert isinstance(item, argparse._AppendAction)
+    assert item.dest == "checklist_items"
+    assert item.type is cli_main._parse_checklist_item
+    assert isinstance(file, argparse._AppendAction)
+    assert file.dest == "checklist_files"
+    group = next(
+        group
+        for group in parser._mutually_exclusive_groups
+        if item in group._group_actions
+    )
+    assert group.required is True
+    assert file in group._group_actions
+    parsed = cli_main.build_parser().parse_args(
+        _complete_task_arguments("--checklist-item", " 1 = expected=actual ")
+    )
+    assert parsed.checklist_items == [("1", "expected=actual")]
+    assert parsed.checklist_files is None
+    with pytest.raises(cli_main._CliParseError):
+        cli_main.build_parser().parse_args(_complete_task_arguments())
 
-    output = capsys.readouterr().out
-    normalized_help = " ".join(output.split())
-    assert "--checklist-item KEY=VALUE" in output
-    assert "first '=' separates the key" in normalized_help
-    assert "--checklist-file PATH" in output
-    assert "UTF-8 JSON object" in output
-    assert "exactly one checklist source" in output
+
+@pytest.mark.parametrize("item", ["Version 1", "1e2", "1 2", "1-2", "Ⅳ"])
+def test_cli_nonnumeric_checklist_text_does_not_require_context(
+    item: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ordinary prose and nondecimal symbols retain the direct exact-text path."""
+    application = _ExecutionActionApplication()
+    assert (
+        cli_main.main(
+            _complete_task_arguments("--checklist-item", f"{item}=failed"),
+            application=application,
+        )
+        == 0
+    )
+    request = cast("CompleteTaskRequest", application.requests[0])
+    assert request.checklist_result == {item: "failed"}
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("application_kind", ["no_reads", "failed_read"])
+def test_cli_numeric_checklist_requires_available_injected_context(
+    application_kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing or failed read must become an argument error, without dispatch."""
+    application = (
+        _UnavailableChecklistApplication()
+        if application_kind == "failed_read"
+        else _ExecutionActionApplication()
+    )
+    assert (
+        cli_main.main(
+            _complete_task_arguments("--checklist-item", "1=met"),
+            application=application,
+        )
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.requests == []
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is False
+    assert "Valid checklist items" not in output["error"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"ok": False, "error": {"message": "Scoped Task unavailable."}},
+        {"ok": True, "data": {"task": {}}},
+        {"ok": True, "data": {"task": {"metadata_json": "not-json"}}},
+        {"ok": True, "data": {"task": {"metadata_json": '{"version": "unsupported"}'}}},
+    ],
+)
+def test_cli_numeric_checklist_rejects_missing_or_invalid_scoped_metadata(
+    response: JsonObject, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Failed or noncanonical read data must not dispatch or select another Task."""
+    application = _ChecklistContextApplication(response)
+    assert (
+        cli_main.main(
+            _complete_task_arguments("--checklist-item", "1=met"),
+            application=application,
+        )
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.reads.selectors == [(PROJECT_ID, 7)]
+    assert application.requests == []
+    assert "Valid checklist items" not in json.loads(capsys.readouterr().out)["error"]
+
+
+@pytest.mark.parametrize("instance_key", ["story:7", "task:0", "retry:0:task:7"])
+def test_cli_numeric_checklist_requires_canonical_task_identity(
+    instance_key: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An invalid or non-Task selector must stop before requesting context."""
+    application = _ChecklistContextApplication({"ok": False})
+    arguments = _complete_task_arguments("--checklist-item", "1=met")
+    arguments[arguments.index("--instance-key") + 1] = instance_key
+    assert cli_main.main(arguments, application=application) == ARGUMENT_ERROR_EXIT_CODE
+    assert application.reads.selectors == []
+    assert application.requests == []
+    assert "Valid checklist items" not in json.loads(capsys.readouterr().out)["error"]
 
 
 @pytest.mark.parametrize(

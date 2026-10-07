@@ -7,13 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from cli.main import build_parser
+from cli.main import build_parser, main
 from cli.workflow_commands import COMMAND_PREFIXES, render_workflow_next
+from services.application import CompleteTaskRequest, PostSprintTriageRequest
 from workflow.contracts import (
     FactReference,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
+    TransitionResult,
     WorkflowPosition,
 )
 
@@ -52,6 +54,25 @@ _PLACEHOLDERS = {
     "<idempotency-key>": "run-41",
     "<actor>": "cli-user",
 }
+
+
+class _RenderedFileApplication:
+    """Capture the semantic request produced by advertised file templates."""
+
+    def __init__(self) -> None:
+        self.requests: list[CompleteTaskRequest | PostSprintTriageRequest] = []
+
+    def complete_task(self, request: CompleteTaskRequest) -> TransitionResult:
+        """Expose the completion boundary without providers or durable state."""
+        self.requests.append(request)
+        return TransitionResult(ok=True)
+
+    def record_post_sprint_triage(
+        self, request: PostSprintTriageRequest
+    ) -> TransitionResult:
+        """Expose the triage boundary without providers or durable state."""
+        self.requests.append(request)
+        return TransitionResult(ok=True)
 
 
 def position_fixture() -> WorkflowPosition:
@@ -700,11 +721,13 @@ def test_planning_actions_with_malformed_decisions_are_not_advertised(
         ),
     ],
 )
-def test_execution_actions_render_parser_valid_semantic_commands(
+def test_execution_actions_render_parser_valid_semantic_commands(  # noqa: PLR0913
     request_kind: str,
     instance_key: str,
     expected_flags: tuple[str, ...],
     fact_references: tuple[FactReference, ...],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Advertise only strict execution semantics and required exact selectors."""
     decision = NodeDecision(
@@ -730,16 +753,51 @@ def test_execution_actions_render_parser_valid_semantic_commands(
 
     commands = render_workflow_next(position)["commands"]
 
-    assert len(commands) == 1
-    command = commands[0]["command"]
+    command = next(
+        item["command"] for item in commands if item["request_kind"] == request_kind
+    )
     assert "--request-file" not in command
     assert "fingerprint" not in command
     for flag in expected_flags:
         assert flag in command
-    parsed = build_parser().parse_args(
-        [_PLACEHOLDERS.get(argument, argument) for argument in shlex.split(command)[1:]]
-    )
+    checklist_file = tmp_path / "rendered-checklist.json"
+    checklist_file.write_text('{"Confirm A=B=C": "observed=A=B=C"}', encoding="utf-8")
+    triage_file = tmp_path / "rendered-triage.json"
+    triage_file.write_text('{"summary": "  Retain exact summary.  "}', encoding="utf-8")
+    replacements = {
+        **_PLACEHOLDERS,
+        "<checklist-file>": str(checklist_file),
+        "<file>": str(triage_file),
+    }
+    arguments = [
+        replacements.get(argument, argument) for argument in shlex.split(command)[1:]
+    ]
+    parsed = build_parser().parse_args(arguments)
     assert parsed.project_id == position.project_id
+    assert parsed.instance_key == instance_key
+    if request_kind in {"complete_task", "record_post_sprint_triage"}:
+        application = _RenderedFileApplication()
+        assert main(arguments, application=application) == 0
+        assert json.loads(capsys.readouterr().out)["ok"] is True
+        request = application.requests[0]
+        assert request.project_id == position.project_id
+        assert request.instance_key == instance_key
+        assert request.idempotency_key == "run-41"
+        assert request.actor == "cli-user"
+        if request_kind == "complete_task":
+            assert parsed.checklist_files == [str(checklist_file)]
+            assert parsed.checklist_items is None
+            assert parsed.artifact_refs == ["services/application.py"]
+            assert parsed.acceptance_result == "fully_met"
+            assert isinstance(request, CompleteTaskRequest)
+            assert request.checklist_result == {"Confirm A=B=C": "observed=A=B=C"}
+            assert request.outcome_summary == "Implemented semantic execution."
+        else:
+            assert parsed.triage_files == [str(triage_file)]
+            assert parsed.triage_summaries is None
+            assert parsed.impact == "none"
+            assert isinstance(request, PostSprintTriageRequest)
+            assert request.canonical_payload == {"summary": "  Retain exact summary.  "}
 
     malformed = decision.model_copy(
         update={
