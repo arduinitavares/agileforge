@@ -980,12 +980,12 @@ function repositoryBindingRecoveryMarkup(recovery, context) {
         preview: 'The source package could not be checked because the repository observation is stale. Nothing was registered.',
         registration: 'Specification source registration failed. No source was registered by this attempt.',
     }[context];
-    const revisionChanged = display.changed_fields.every((field) => ['head', 'branch', 'detached_head'].includes(field)) && display.changed_fields.length > 0;
+    const locationChanged = display.changed_fields.some((field) => ['worktree', 'git_directory', 'remotes'].includes(field));
     const cause = display.cause === 'WORKTREE_CHANGED'
         ? 'The working tree changed since the saved repository inspection.'
         : (display.cause === 'INSPECTION_UNAVAILABLE'
             ? 'The repository could not be inspected at the failed check.'
-            : (revisionChanged ? 'The repository revision changed since the saved inspection.' : 'The repository location or details changed since the saved inspection.'));
+            : (locationChanged ? 'The repository location or details changed since the saved inspection.' : 'The repository revision changed since the saved inspection.'));
     const currentSource = lifecycleState.specification?.source_binding?.state === 'current';
     return `<section data-repository-binding-recovery="${context}" data-recorded-binding-id="${display.recorded_binding_id}" role="alert" class="max-w-3xl space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
         <p data-repository-recovery-outcome="true" class="font-semibold">${outcome}</p>
@@ -1007,17 +1007,28 @@ function sourceRegistrationRecoveryFromError(error) {
 function specificationSourceRecoveryNotice() {
     const repository = lifecycleState.repository?.repository;
     const stored = specificationSourceRecoveries.get(selectedProjectId);
-    if (stored && stored.recovery.recorded_binding_id === repository?.repository_binding_id && stored.worktreePath === repository?.worktree_path) return stored;
+    const storedMatchesBinding = stored && stored.recovery.recorded_binding_id === repository?.repository_binding_id && stored.worktreePath === repository?.worktree_path;
+    if (storedMatchesBinding && stored.dashboardGeneration === lastSuccessfulDashboardLoadSequence) return stored;
     if (stored) specificationSourceRecoveries.delete(selectedProjectId);
     const action = findAction(lifecycleState.actions, 'register_specification_source');
     const recovery = action?.availability === 'locked' ? repositoryBindingRecoveryDisplay(action.repository_recovery) : null;
-    return recovery && recovery.recorded_binding_id === repository?.repository_binding_id
-        ? { recovery, context: 'locked', worktreePath: repository.worktree_path, feedback: '' } : null;
+    if (!recovery || recovery.recorded_binding_id !== repository?.repository_binding_id) return null;
+    const notice = {
+        recovery, context: 'locked', worktreePath: repository.worktree_path, feedback: '',
+        dashboardGeneration: lastSuccessfulDashboardLoadSequence,
+    };
+    if (storedMatchesBinding && stored.feedbackError && stored.feedback === 'Repository binding refresh failed. Your entered fields are retained. Try refreshing again.') {
+        notice.feedback = stored.feedback;
+        notice.feedbackError = true;
+        specificationSourceRecoveries.set(selectedProjectId, notice);
+    }
+    return notice;
 }
 
 function showSpecificationSourceRecovery(recovery, context) {
     specificationSourceRecoveries.set(selectedProjectId, {
         recovery, context, worktreePath: lifecycleState.repository?.repository?.worktree_path, feedback: '',
+        dashboardGeneration: lastSuccessfulDashboardLoadSequence,
     });
     renderDashboard();
 }

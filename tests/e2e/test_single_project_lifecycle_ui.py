@@ -4141,11 +4141,17 @@ def test_source_binding_refresh_failure_keeps_registration_selection(
     fake.observation_stale = True
     form.evaluate("form => form.requestSubmit()")
     panel = page.locator("#specification-panel")
-    recovery = panel.locator('[data-repository-binding-recovery="registration"]')
+    expect(form).to_have_count(1)
+    recovery = panel.locator("[data-repository-binding-recovery]")
+    expect(recovery).to_have_count(1)
+    expect(recovery).to_have_attribute(
+        "data-repository-binding-recovery", "registration"
+    )
     expect(recovery).to_be_visible()
     fake.refresh_failure_status = refresh_failure_status
     recovery.locator('[data-repository-recovery-action="refresh"]').click()
     feedback = recovery.locator("[data-repository-recovery-feedback]")
+    expect(feedback).to_have_count(1)
     expect(feedback).to_have_text(
         "Repository binding refresh failed. Your entered fields are retained. "
         "Try refreshing again."
@@ -4164,6 +4170,11 @@ def test_source_binding_refresh_failure_keeps_registration_selection(
     assert fake.specification_source_registrations == []
 
     page.locator("#refresh-project").click()
+    expect(recovery).to_have_attribute("data-repository-binding-recovery", "locked")
+    expect(recovery.locator("[data-repository-recovery-outcome]")).to_have_text(
+        "Specification source registration is locked because "
+        "the repository observation is stale."
+    )
     expect(form.locator('[data-specification-source-preview="true"]')).to_be_disabled()
     expect(form.locator('button[type="submit"]')).to_be_disabled()
     expect(recovery).to_be_visible()
@@ -4172,6 +4183,16 @@ def test_source_binding_refresh_failure_keeps_registration_selection(
         "Try refreshing again."
     )
     _assert_retained_source_fields(form, source_path, adr_paths)
+    form.locator('[data-specification-source-preview="true"]').evaluate(
+        "button => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))"
+    )
+    form.evaluate("form => form.requestSubmit()")
+    assert len(fake.source_preview_requests) == 1
+    assert len(fake.source_registration_attempts) == 1
+    assert fake.refresh_attempts == 1
+    assert fake.refresh_count == 0
+    assert fake.source_capture_count == 0
+    assert fake.specification_source_registrations == []
     assert fake.api_errors == []
     context.close()
 

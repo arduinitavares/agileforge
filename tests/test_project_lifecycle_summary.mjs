@@ -1426,7 +1426,11 @@ test('a second stale rejection after refresh is a registration recovery rather t
 
 for (const [cause, changedFields, copy] of [
     ['REPOSITORY_IDENTITY_CHANGED', ['head', 'branch'], 'The repository revision changed since the saved inspection.'],
+    ['REPOSITORY_IDENTITY_CHANGED', ['head', 'working_tree_status'], 'The repository revision changed since the saved inspection.'],
+    ['REPOSITORY_IDENTITY_CHANGED', ['branch', 'detached_head', 'working_tree_status'], 'The repository revision changed since the saved inspection.'],
     ['REPOSITORY_IDENTITY_CHANGED', ['worktree'], 'The repository location or details changed since the saved inspection.'],
+    ['REPOSITORY_IDENTITY_CHANGED', ['git_directory', 'head', 'working_tree_status'], 'The repository location or details changed since the saved inspection.'],
+    ['REPOSITORY_IDENTITY_CHANGED', ['head', 'working_tree_status', 'remotes'], 'The repository location or details changed since the saved inspection.'],
     ['INSPECTION_UNAVAILABLE', [], 'The repository could not be inspected at the failed check.'],
 ]) {
     test(`recovery uses bounded cause for ${cause} ${changedFields.join(',')}`, async () => {
@@ -1435,6 +1439,135 @@ for (const [cause, changedFields, copy] of [
         assert.equal(recoveryNotice(h).querySelector('[data-repository-recovery-cause]').textContent, copy);
         if (cause === 'INSPECTION_UNAVAILABLE') assert.equal(recoveryNotice(h).querySelector('[data-repository-recovery-observed]'), null);
     });
+}
+
+async function storedSourceFailureHarness(context, { currentSource = false, replies = [] } = {}) {
+    const failureReplies = context === 'preview'
+        ? [{ url: '/api/projects/7/specifications/source/preview', response: dashboardResponse(staleSourcePreviewResponse(), 422) }]
+        : [
+            { url: '/api/projects/7/specifications/source/preview', response: checkedPackage() },
+            { url: '/api/projects/7/specifications/source', response: dashboardResponse(staleSourceRegistrationResponse(), 409) },
+        ];
+    const h = await sourceRecoveryHarness({ bundle: sourceRegistrationDashboardBundle({ currentSource }), replies: [...failureReplies, ...replies] });
+    enterSourceDraft(h); await checkSelectedPackage(h);
+    if (context === 'registration') await h.submit(sourceForm(h));
+    assert.equal(recoveryNotice(h).dataset.repositoryBindingRecovery, context);
+    return h;
+}
+
+function sourceFailureRequests(context) {
+    return [
+        ['/api/projects/7/dashboard', 'GET'],
+        ['/api/projects/7/specifications/source/preview', 'POST'],
+        ...(context === 'registration' ? [['/api/projects/7/specifications/source', 'POST']] : []),
+    ];
+}
+
+for (const context of ['preview', 'registration']) {
+    for (const outcome of ['available', 'current replacement available', 'different lock', 'absent', 'continued stale']) {
+        test(`successful same-binding reload reconciles stored ${context} failure with ${outcome}`, async () => {
+            const currentSource = outcome === 'current replacement available';
+            const latestRecovery = repositoryBindingRecovery({
+                cause: 'REPOSITORY_IDENTITY_CHANGED', recorded_dirty: true, observed_dirty: false,
+                changed_fields: ['head', 'working_tree_status'],
+            });
+            const latest = sourceRegistrationDashboardBundle({ currentSource, locked: outcome === 'continued stale', recovery: latestRecovery });
+            if (currentSource) {
+                latest.data.specification.body.data.source.specification_source_id = 32;
+                latest.data.specification.body.data.source.source_fingerprint = refreshedSourceFingerprint;
+                latest.data.position.body.data.decisions[0].fact_references = [{ fact_type: 'specification_source', fact_id: '32', fingerprint: refreshedSourceFingerprint }];
+            }
+            if (outcome === 'different lock') latest.data.position.body.actions[0] = {
+                ...latest.data.position.body.actions[0], availability: 'locked', reason_code: 'GOAL_NOT_ACTIVE',
+            };
+            if (outcome === 'absent') latest.data.position.body.actions = [];
+            const sourceIdentity = structuredClone(latest.data.specification.body.data.source);
+            const h = await storedSourceFailureHarness(context, { replies: [
+                { url: '/api/projects/7/dashboard', response: dashboardResponse(latest) },
+            ] });
+            const oldButton = recoveryNotice(h).querySelector('[data-repository-recovery-action="refresh"]');
+            assert.equal(await h.context.loadDashboard(), true);
+            assert.deepEqual(JSON.parse(h.state('JSON.stringify(lifecycleState.specification.source)')), sourceIdentity);
+            if (outcome === 'continued stale') {
+                const notice = recoveryNotice(h); assert.ok(notice);
+                assert.equal(notice.dataset.repositoryBindingRecovery, 'locked');
+                assert.equal(notice.querySelector('[data-repository-recovery-outcome]').textContent, 'Specification source registration is locked because the repository observation is stale.');
+                assert.equal(notice.querySelector('[data-repository-recovery-cause]').textContent, 'The repository revision changed since the saved inspection.');
+                assert.equal(notice.querySelector('[data-repository-recovery-recorded]').textContent, 'Recorded working tree: Dirty');
+                assert.equal(notice.querySelector('[data-repository-recovery-observed]').textContent, 'At the failed check: Clean');
+                assertSourceDraft(h);
+                await checkSelectedPackage(h); await h.submit(sourceForm(h));
+                assert.equal(sourceForm(h).querySelector('[data-specification-source-preview="true"]').disabled, true);
+                assert.equal(sourceForm(h).querySelector('button[type="submit"]').disabled, true);
+            } else {
+                assert.equal(Boolean(recoveryNotice(h)), false, 'The successful current action must retire the obsolete recovery');
+                assert.equal(Boolean(h.elements['stage-workbench'].querySelector('[data-repository-recovery-action="refresh"]')), false);
+                await h.click(oldButton);
+                if (outcome === 'available' || currentSource) assertSourceDraft(h);
+            }
+            assert.deepEqual(h.requests.map(({ url, options }) => [url, options.method ?? 'GET']), [
+                ...sourceFailureRequests(context), ['/api/projects/7/dashboard', 'GET'],
+            ], 'Reload, retired recovery, and locked controls cannot check, register, or refresh automatically');
+        });
+    }
+
+    test(`failed and superseded reads retain stored ${context} failure until a successful read`, async () => {
+        let resolveSuperseded;
+        const supersededResponse = new Promise((resolve) => { resolveSuperseded = resolve; });
+        const h = await storedSourceFailureHarness(context, { replies: [
+            { url: '/api/projects/7/dashboard', response: supersededResponse },
+            { url: '/api/projects/7/dashboard', error: new Error('Dashboard read unavailable.') },
+            { url: '/api/projects/7/dashboard', response: dashboardResponse(sourceRegistrationDashboardBundle()) },
+        ] });
+        const obsoleteRead = h.context.loadDashboard();
+        await assert.rejects(h.context.loadDashboard(), /Dashboard read unavailable\./);
+        resolveSuperseded(dashboardResponse(sourceRegistrationDashboardBundle()));
+        assert.equal(await obsoleteRead, false);
+        h.context.renderDashboard();
+        assert.equal(recoveryNotice(h).dataset.repositoryBindingRecovery, context);
+        assert.equal(recoveryNotice(h).querySelector('[data-repository-recovery-cause]').textContent, 'The working tree changed since the saved repository inspection.');
+        assert.equal(recoveryNotice(h).querySelector('[data-repository-recovery-action="refresh"]').disabled, false);
+        assertSourceDraft(h);
+        assert.equal(await h.context.loadDashboard(), true);
+        assert.equal(Boolean(recoveryNotice(h)), false, 'Only the successful read retires the saved failure');
+        assertSourceDraft(h);
+        assert.deepEqual(h.requests.map(({ url, options }) => [url, options.method ?? 'GET']), [
+            ...sourceFailureRequests(context), ...Array.from({ length: 3 }, () => ['/api/projects/7/dashboard', 'GET']),
+        ]);
+    });
+
+    for (const stillStale of [false, true]) {
+        test(`successful reload ${stillStale ? 'rebases' : 'retires'} fixed refresh-failure feedback after ${context} failure`, async () => {
+            const latest = sourceRegistrationDashboardBundle({ locked: stillStale, recovery: repositoryBindingRecovery({
+                cause: 'REPOSITORY_IDENTITY_CHANGED', changed_fields: ['branch', 'detached_head', 'working_tree_status'], observed_dirty: false,
+            }) });
+            const h = await storedSourceFailureHarness(context, { replies: [
+                { url: '/api/projects/7/repository/refresh', response: dashboardResponse({ message: 'SERVER_SENTINEL' }, 503) },
+                { url: '/api/projects/7/dashboard', response: dashboardResponse(latest) },
+            ] });
+            await refreshSourceRecovery(h);
+            assert.equal(recoveryNotice(h).querySelector('[data-repository-recovery-feedback]').textContent, refreshFailureMessage);
+            const oldButton = recoveryNotice(h).querySelector('[data-repository-recovery-action="refresh"]');
+            assert.equal(await h.context.loadDashboard(), true);
+            h.context.renderDashboard();
+            assertSourceDraft(h);
+            if (stillStale) {
+                const notice = recoveryNotice(h);
+                assert.equal(notice.dataset.repositoryBindingRecovery, 'locked');
+                assert.equal(notice.querySelector('[data-repository-recovery-cause]').textContent, 'The repository revision changed since the saved inspection.');
+                assert.equal(notice.querySelector('[data-repository-recovery-feedback]').textContent, refreshFailureMessage);
+                assert.equal(notice.querySelector('[data-repository-recovery-feedback]').getAttribute('role'), 'alert');
+                await checkSelectedPackage(h); await h.submit(sourceForm(h));
+            } else {
+                assert.equal(Boolean(recoveryNotice(h)), false, 'Refresh-failure feedback cannot keep an obsolete recovery alive');
+                await h.click(oldButton);
+            }
+            assert.equal(h.elements['stage-workbench'].textContent.includes('SERVER_SENTINEL'), false);
+            assert.deepEqual(h.requests.map(({ url, options }) => [url, options.method ?? 'GET']), [
+                ...sourceFailureRequests(context), ['/api/projects/7/repository/refresh', 'POST'], ['/api/projects/7/dashboard', 'GET'],
+            ]);
+        });
+    }
 }
 
 for (const code of ['STALE_SPECIFICATION_INPUT', 'REPOSITORY_PROVENANCE_STALE', 'UNRELATED_FAILURE']) {
