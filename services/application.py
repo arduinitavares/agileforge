@@ -2171,6 +2171,8 @@ class CompleteTaskRequest(_ExecutionMutationRequest):
     artifact_refs: tuple[SemanticText, ...] = Field(min_length=1)
     acceptance_result: Literal["partially_met", "fully_met"]
     checklist_result: dict[SemanticText, SemanticText] = Field(min_length=1)
+    uncommitted: Annotated[bool, Field(strict=True)] = False
+    worktree_path: str | None = Field(default=None, min_length=1)
 
 
 class CloseStoryRequest(_ExecutionMutationRequest):
@@ -4078,6 +4080,8 @@ class AgileForgeApplication:
                 "artifact_refs": list(artifact_refs),
                 "acceptance_result": request.acceptance_result,
                 "checklist_result": checklist_result,
+                "uncommitted": request.uncommitted,
+                "worktree_path": request.worktree_path,
             }
         )
         replay = self._replay_execution_action(
@@ -4123,6 +4127,8 @@ class AgileForgeApplication:
                 artifact_refs=artifact_refs,
                 acceptance_result=request.acceptance_result,
                 checklist_result=checklist_result,
+                uncommitted=request.uncommitted,
+                worktree_path=request.worktree_path,
             )
         )
 

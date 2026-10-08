@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from services.repository_probe import TaskRepositoryProbe
     from services.task_execution_service import TaskCompletionInput
+    from services.task_repository_evidence import PreparedTaskRepositoryEvidence
     from workflow.contracts import NodeDecision
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
@@ -94,8 +96,16 @@ def test_handler_failure_after_flush_rolls_back_business_audit_and_receipt(
     def fail_after_flush(
         session: Session,
         command: TaskCompletionInput,
+        *,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+        repository_probe: TaskRepositoryProbe | None = None,
     ) -> NoReturn:
-        original(session, command)
+        original(
+            session,
+            command,
+            prepared_repository_evidence=prepared_repository_evidence,
+            repository_probe=repository_probe,
+        )
         raise _InterruptedAfterFlushError
 
     monkeypatch.setattr(
@@ -111,12 +121,15 @@ def test_handler_failure_after_flush_rolls_back_business_audit_and_receipt(
         assert task.status is TaskStatus.IN_PROGRESS
         assert session.exec(select(TaskCompletionEvidence)).all() == []
         assert session.exec(select(TaskExecutionLog)).all() == []
-        assert session.exec(
-            select(WorkflowTransitionReceipt).where(
-                col(WorkflowTransitionReceipt.idempotency_key)
-                == "interrupted-completion"
-            )
-        ).all() == []
+        assert (
+            session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == "interrupted-completion"
+                )
+            ).all()
+            == []
+        )
 
 
 def test_interrupted_retry_succeeds_once_and_replays_once(
@@ -132,7 +145,11 @@ def test_interrupted_retry_succeeds_once_and_replays_once(
     def fail_once(
         _session: Session,
         _command: TaskCompletionInput,
+        *,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+        repository_probe: TaskRepositoryProbe | None = None,
     ) -> NoReturn:
+        del prepared_repository_evidence, repository_probe
         raise _InterruptedAfterFlushError
 
     monkeypatch.setattr(execution_handlers, "complete_task_in_session", fail_once)
@@ -172,7 +189,11 @@ def test_process_restart_recovers_identical_position_retry_and_replay(
     def interrupt(
         _session: Session,
         _command: TaskCompletionInput,
+        *,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+        repository_probe: TaskRepositoryProbe | None = None,
     ) -> NoReturn:
+        del prepared_repository_evidence, repository_probe
         raise _InterruptedAfterFlushError
 
     monkeypatch.setattr(execution_handlers, "complete_task_in_session", interrupt)

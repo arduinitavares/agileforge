@@ -418,6 +418,8 @@ class CompleteTaskApiRequest(MutationApiRequest):
     artifact_refs: list[SemanticText] = Field(min_length=1)
     acceptance_result: Literal["partially_met", "fully_met"]
     checklist_result: dict[SemanticText, SemanticText] = Field(min_length=1)
+    uncommitted: Annotated[bool, Field(strict=True)] = False
+    worktree_path: str | None = Field(default=None, min_length=1)
 
 
 class CloseStoryApiRequest(MutationApiRequest):
@@ -1944,6 +1946,8 @@ def complete_project_task(
                 artifact_refs=tuple(req.artifact_refs),
                 acceptance_result=req.acceptance_result,
                 checklist_result=req.checklist_result,
+                uncommitted=req.uncommitted,
+                worktree_path=req.worktree_path,
                 **_metadata(req),
             )
         )

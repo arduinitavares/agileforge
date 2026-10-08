@@ -30,7 +30,7 @@ from services.application import (
 from services.dashboard_reads import dashboard_read_view
 from services.read_projections import DurableReadProjectionService
 from services.vision_evidence_reader import RepositoryEvidenceCapability
-from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.adapters.sprint_retry_fixtures import durable_rows, retry_transport_fixture
 from tests.services.test_durable_product_definition_projections import (
     NOW,
     _add_goal_turn,
@@ -43,6 +43,8 @@ from tests.services.test_durable_product_definition_projections import (
     _seeded_int,
 )
 from tests.workflow.execution_fixtures import seed_started_execution
+from tests.workflow.retry_execution_fixtures import complete_retry_task
+from tests.workflow.test_sprint_retry_execution import _start_retry
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, RecommendationKind
 from workflow.definitions.root import project_graph
@@ -457,6 +459,78 @@ def test_dashboard_bundle_matches_active_sprint_reads(
         "status": sprints.status_code,
         "body": sprints.json(),
     }
+
+
+def test_dashboard_history_presents_completed_original_and_retry_evidence(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The existing history slot carries real completion fields on one snapshot."""
+    source = retry_transport_fixture(engine).source
+    retry_id = _start_retry(
+        engine,
+        source.domain,
+        project_id=source.project_id,
+        sprint_id=source.source_sprint_id,
+        suffix="dashboard-history",
+    )
+    complete_retry_task(
+        source.domain,
+        project_id=source.project_id,
+        retry_id=retry_id,
+        task_id=source.first_task_id,
+        suffix="dashboard-history",
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: _application(engine))
+    client = TestClient(api_module.app)
+    path = f"/api/projects/{source.project_id}"
+    standalone = client.get(f"{path}/sprint/history")
+    original_load = WorkflowFactRepository.load
+    loads = 0
+
+    def counted_load(
+        repository: WorkflowFactRepository, project_id: int
+    ) -> WorkflowFactSnapshot:
+        nonlocal loads
+        loads += 1
+        return original_load(repository, project_id)
+
+    monkeypatch.setattr(WorkflowFactRepository, "load", counted_load)
+    before = durable_rows(engine)
+    bundled = client.get(f"{path}/dashboard")
+
+    assert bundled.status_code == HTTPStatus.OK
+    assert loads == 1
+    slots = bundled.json()["data"]
+    assert tuple(slots) == tuple(_ROUTES)
+    assert slots["sprintHistory"] == {
+        "status": standalone.status_code,
+        "body": standalone.json(),
+    }
+    attempts = slots["sprintHistory"]["body"]["data"]["execution_attempts"]
+    for selected_retry in (None, retry_id):
+        attempt = next(
+            item
+            for item in attempts
+            if item["sprint_id"] == source.source_sprint_id
+            and item["retry_attempt_id"] == selected_retry
+        )
+        completion = next(
+            item
+            for item in attempt["task_completions"]
+            if item["task_id"] == source.first_task_id
+        )
+        assert completion["repository_evidence"] == {
+            "version": "agileforge.task-repository-evidence.v1",
+            "state": "not_bound",
+            "uncommitted_acknowledged": False,
+        }
+        assert completion["revision_recording"] == "not_bound"
+        assert completion["repository_warnings"] == ["REPOSITORY_NOT_BOUND"]
+        assert completion["repository_warning_messages"] == [
+            "No repository was bound at Task completion."
+        ]
+    assert durable_rows(engine) == before
 
 
 @pytest.mark.parametrize(

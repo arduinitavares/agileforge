@@ -11,6 +11,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.product_definition import SpecificationCandidate
 from models.workflow import (
     WorkflowNodeAttempt,
@@ -25,6 +26,10 @@ from services.contracts.specification_authoring import (
 from services.specification_source_registration import (
     PreparedSpecificationSourceRegistration,
     SpecificationSourceRegistrationError,
+)
+from services.task_repository_evidence import (
+    TaskRepositoryVerificationTimeout,
+    prepare_task_repository_evidence,
 )
 from workflow.contracts import (
     JsonObject,
@@ -118,6 +123,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from services.repository_probe import TaskRepositoryProbe
+    from services.task_repository_evidence import PreparedTaskRepositoryEvidence
     from workflow.clock import Clock
     from workflow.facts import WorkflowFactSnapshot
     from workflow.graph import WorkflowGraph
@@ -237,6 +244,7 @@ class WorkflowDomain:
         adk_recipe_registry: AdkRecipeRegistryProtocol | None = None,
         specification_source_check: SpecificationSourceCheck | None = None,
         specification_registration_check: SpecificationRegistrationCheck | None = None,
+        _task_repository_probe: TaskRepositoryProbe | None = None,
     ) -> None:
         """Retain explicit persistence, graph, and time dependencies."""
         self._engine = engine
@@ -245,6 +253,9 @@ class WorkflowDomain:
         self._adk_recipe_registry = adk_recipe_registry
         self._specification_source_check = specification_source_check
         self._specification_registration_check = specification_registration_check
+        self._task_repository_probe = (
+            _task_repository_probe or GitPythonRepositoryProbe()
+        )
         self._configure_busy_timeout()
 
     def position(self, project_id: int) -> WorkflowPosition:
@@ -306,10 +317,31 @@ class WorkflowDomain:
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Guard and apply one request inside its receipt transaction."""
         evaluated_at = self._clock.now()
+        prepared_repository_evidence = None
+        if isinstance(request, CompleteTask):
+            with Session(self._engine) as preparation_session:
+                existing = self._existing_receipt_claim(preparation_session, request)
+                if existing is not None and existing.immediate_result is not None:
+                    return existing.immediate_result
+                prepared_repository_evidence = prepare_task_repository_evidence(
+                    preparation_session,
+                    project_id=request.project_id,
+                    repository_probe=self._task_repository_probe,
+                    worktree_path=request.worktree_path,
+                    uncommitted=request.uncommitted is True,
+                )
         with Session(self._engine) as session:
             try:
-                result = self.transition_in_session(session, request, evaluated_at)
+                result = self.transition_in_session(
+                    session,
+                    request,
+                    evaluated_at,
+                    prepared_repository_evidence=prepared_repository_evidence,
+                )
                 session.commit()
+            except TaskRepositoryVerificationTimeout as error:
+                session.rollback()
+                return self._fact_conflict(str(error))
             except OperationalError as error:
                 session.rollback()
                 conflict = self.lock_timeout_result(error)
@@ -347,12 +379,15 @@ class WorkflowDomain:
         session: Session,
         request: TransitionRequest,
         evaluated_at: datetime | None = None,
+        *,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Apply one transition in a caller-owned transaction without committing it."""
         return self._transition_in_session(
             session,
             request,
             self._clock.now() if evaluated_at is None else evaluated_at,
+            prepared_repository_evidence,
         )
 
     def _transition_in_session(
@@ -360,6 +395,7 @@ class WorkflowDomain:
         session: Session,
         request: TransitionRequest,
         evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Own receipt claim, handler facts, and completion in one transaction."""
         self._begin_write(session)
@@ -396,7 +432,9 @@ class WorkflowDomain:
             "request_fingerprint": receipt.request_fingerprint,
         }
         try:
-            result = self._execute_request(session, request, evaluated_at)
+            result = self._execute_request(
+                session, request, evaluated_at, prepared_repository_evidence
+            )
         finally:
             if previous_marker is None:
                 session.info.pop("agileforge.active_transition_receipt", None)
@@ -486,10 +524,11 @@ class WorkflowDomain:
         if receipt is None:
             return None
         if receipt.request_fingerprint != request_fingerprint:
+            message = "The idempotency key was already used for different input."
+            if request_kind == "complete_task":
+                message += " A changed request requires a new idempotency key."
             return _ReceiptClaim(
-                immediate_result=WorkflowDomain._fact_conflict(
-                    "The idempotency key was already used for different input."
-                )
+                immediate_result=WorkflowDomain._fact_conflict(message)
             )
         if receipt.result_json is None or receipt.completed_at is None:
             return _ReceiptClaim(
@@ -514,6 +553,7 @@ class WorkflowDomain:
         session: Session,
         request: TransitionRequest,
         evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Dispatch only after the receipt claim and all position guards."""
         if isinstance(request, CreateProject | RecordRepositoryBinding):
@@ -533,8 +573,11 @@ class WorkflowDomain:
                 session,
                 request,
                 evaluated_at,
+                prepared_repository_evidence,
             )
-        return self._execute_positioned(session, request, evaluated_at)
+        return self._execute_positioned(
+            session, request, evaluated_at, prepared_repository_evidence
+        )
 
     def _execute_project_request(
         self,
@@ -842,6 +885,7 @@ class WorkflowDomain:
         session: Session,
         request: _PositionedTransitionRequest,
         evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Apply one live attempt output without requiring public availability."""
         if request.attempt_id is None or request.attempt_fingerprint is None:
@@ -913,6 +957,7 @@ class WorkflowDomain:
             request,
             decision,
             evaluated_at,
+            prepared_repository_evidence,
         )
         if result.ok:
             record_success_outcome(
@@ -1153,6 +1198,7 @@ class WorkflowDomain:
         session: Session,
         request: _PositionedTransitionRequest,
         evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Re-derive and guard a positioned request before handler dispatch."""
         decision_or_failure = self._guarded_decision(
@@ -1173,6 +1219,7 @@ class WorkflowDomain:
             request,
             decision_or_failure,
             evaluated_at,
+            prepared_repository_evidence,
         )
         position = self._position_in_session(
             session,
@@ -1225,6 +1272,7 @@ class WorkflowDomain:
         request: _PositionedTransitionRequest,
         decision: NodeDecision,
         evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
     ) -> TransitionResult:
         """Dispatch one request through its retained lifecycle workstream."""
         if isinstance(
@@ -1235,7 +1283,14 @@ class WorkflowDomain:
             | CloseSprint
             | RecordPostSprintTriage,
         ):
-            result = execute_execution_request(session, request, decision, evaluated_at)
+            result = execute_execution_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+                prepared_repository_evidence=prepared_repository_evidence,
+                repository_probe=self._task_repository_probe,
+            )
         elif isinstance(request, RetrySprint | StartSprintRetry):
             result = execute_sprint_retry_request(
                 session, request, decision, evaluated_at

@@ -512,7 +512,7 @@ def _schema_preflight_is_exact(
     canonical = ast.parse(
         '''
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
-    """Create or atomically upgrade only the exact pre-retry business schema."""
+    """Create or atomically upgrade only the two exact supported old schemas."""
     target_engine = engine_override or engine
     if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         _assert_current_business_schema(target_engine)
@@ -525,14 +525,28 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
                 SQLModel.metadata.create_all(connection)
             elif observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
                 pass
-            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
-                SQLModel.metadata.create_all(
-                    connection,
-                    tables=[
-                        SQLModel.metadata.tables[table_name]
-                        for table_name in sorted(_RETRY_TABLE_NAMES)
-                    ],
-                )
+            elif observed in (
+                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
+                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+            ):
+                if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
+                    SQLModel.metadata.create_all(
+                        connection,
+                        tables=[
+                            SQLModel.metadata.tables[table_name]
+                            for table_name in sorted(_RETRY_TABLE_NAMES)
+                        ],
+                    )
+                for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
+                    columns = inspect(connection).get_columns(table_name)
+                    if not any(
+                        column["name"] == "repository_evidence_json"
+                        for column in columns
+                    ):
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {table_name} "
+                            "ADD COLUMN repository_evidence_json TEXT"
+                        )
             else:
                 _assert_current_business_schema(connection)
             if (
@@ -540,6 +554,7 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_repository_evidence_columns(connection)
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -2184,18 +2199,19 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
     assert findings == ()
     assert not unused
 
-    pre_retry_create = """                SQLModel.metadata.create_all(
-                    connection,
-                    tables=[
-                        SQLModel.metadata.tables[table_name]
-                        for table_name in sorted(_RETRY_TABLE_NAMES)
-                    ],
-                )"""
+    pre_retry_create = """                    SQLModel.metadata.create_all(
+                        connection,
+                        tables=[
+                            SQLModel.metadata.tables[table_name]
+                            for table_name in sorted(_RETRY_TABLE_NAMES)
+                        ],
+                    )"""
     post_create_validation = """            if (
                 _inspect_business_schema_manifest(connection)
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_repository_evidence_columns(connection)
             connection.commit()"""
     schema_guard_definition = "def _assert_current_business_schema("
     assert source.count(schema_guard_definition) == 1
@@ -2216,14 +2232,47 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
         ),
         (
             "broadened-pre-retry-manifest",
-            "            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:",
+            "            elif observed in (\n"
+            "                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
+            "                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
+            "            ):",
             "            elif observed.table_names <= "
             "PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.table_names:",
         ),
         (
+            "broadened-pre-revision-manifest",
+            "            elif observed in (\n"
+            "                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
+            "                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
+            "            ):",
+            "            elif observed.table_names <= "
+            "PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names:",
+        ),
+        (
             "unrestricted-retry-ddl",
             pre_retry_create,
-            "                SQLModel.metadata.create_all(connection)",
+            "                    SQLModel.metadata.create_all(connection)",
+        ),
+        (
+            "unrestricted-evidence-ddl",
+            "                for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:",
+            "                for table_name in SQLModel.metadata.tables:",
+        ),
+        (
+            "evidence-ddl-before-rejection",
+            "            else:\n"
+            "                _assert_current_business_schema(connection)",
+            "            else:\n"
+            "                connection.exec_driver_sql(\n"
+            "                    'ALTER TABLE backlog_artifacts '\n"
+            "                    'ADD COLUMN repository_evidence_json TEXT'\n"
+            "                )\n"
+            "                _assert_current_business_schema(connection)",
+        ),
+        (
+            "missing-evidence-column-validation",
+            "            _assert_repository_evidence_columns(connection)\n",
+            "",
         ),
         (
             "missing-post-create-validation",

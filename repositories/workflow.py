@@ -1,3 +1,4 @@
+# repositories/workflow.py
 """Read canonical durable facts for one workflow Project."""
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ from services.contracts.specification_source import (
     SpecificationSourceBundle,
     source_bundle_fingerprint,
 )
+from services.contracts.task_repository_evidence import UnboundTaskRepositoryEvidence
 from services.contracts.vision_evidence import VisionEvidenceBundle
 from services.planning_artifact_content import (
     load_bound_sprint_plan_envelope,
@@ -126,6 +128,7 @@ from workflow.execution_integrity import (
     story_completion_fingerprint,
     task_evidence_fingerprint,
     triage_payload_fingerprint,
+    validate_task_repository_evidence_binding,
 )
 from workflow.facts import (
     BacklogItemFact,
@@ -3810,6 +3813,25 @@ class WorkflowFactRepository:
                     artifact_refs_json=row.artifact_refs_json,
                     acceptance_result=row.acceptance_result,
                     checklist_result_json=row.checklist_result_json,
+                    repository_evidence_json=row.repository_evidence_json,
+                )
+                repository_evidence = evidence.repository_evidence
+                binding = (
+                    self._session.exec(
+                        select(RepositoryBinding).where(
+                            col(RepositoryBinding.repository_binding_id)
+                            == repository_evidence.repository_binding_id
+                        ),
+                        execution_options=self._query_options(),
+                    ).one_or_none()
+                    if repository_evidence is not None
+                    and not isinstance(
+                        repository_evidence, UnboundTaskRepositoryEvidence
+                    )
+                    else None
+                )
+                validate_task_repository_evidence_binding(
+                    repository_evidence, project_id=project_id, binding=binding
                 )
             except ExecutionIntegrityError as exc:
                 raise self._error(str(exc)) from exc
@@ -3826,6 +3848,7 @@ class WorkflowFactRepository:
                     "acceptance_result": evidence.acceptance_result,
                     "checklist_result": evidence.checklist_result,
                     "evidence_fingerprint": row.evidence_fingerprint,
+                    "repository_evidence": evidence.repository_evidence,
                 }
             )
             try:
@@ -3837,6 +3860,7 @@ class WorkflowFactRepository:
                         artifact_refs=fact.artifact_refs,
                         acceptance_result=fact.acceptance_result,
                         checklist_result=fact.checklist_result,
+                        repository_evidence=fact.repository_evidence,
                     ),
                 )
             except ExecutionIntegrityError as exc:

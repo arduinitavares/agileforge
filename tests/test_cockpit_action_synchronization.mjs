@@ -127,6 +127,152 @@ function completeDashboardGets(requests, actions, fail = false, overrides = {}) 
     requests[0].resolve({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
 }
 
+function taskCompletionHarness(retry = false) {
+    const instance = retry ? 'retry:101:task:71' : 'task:71';
+    const action = { node_id: 'execution.task.complete', request_kind: 'complete_task',
+        endpoint: 'sprint/task/complete', transport: 'semantic', instance_key: instance };
+    const h = harness([action]);
+    let uuid = 0;
+    h.context.crypto.randomUUID = () => `task-completion-${++uuid}`;
+    const status = { project_id: 7, sprint: { sprint_id: 31, status: 'active' },
+        current_retry: retry ? { retry_attempt_id: 101 } : null,
+        tasks: [{ task_id: 71, sprint_id: 31, status: 'To Do', dependencies_satisfied: true,
+            instance_key: instance, fact_fingerprint: 'sha256:task-evidence' }], stories: [] };
+    const decision = { ...action, category: 'available', reason_code: 'NEXT_TASK_READY',
+        decision_fingerprint: 'sha256:task-authority',
+        fact_references: [{ fact_type: 'task', fact_id: '71', fingerprint: 'sha256:task-evidence' }] };
+    h.state(`lifecycleState.position = ${JSON.stringify({ decisions: [decision] })};
+        lifecycleState.sprintStatus = { kind: 'ready', data: ${JSON.stringify(status)} };
+        workspaceTaskInventory = { kind: 'ready', data: ${JSON.stringify(status)} };
+        workspaceView = { stageId: 9, sprintId: 31, taskId: 71,
+            scopeKey: '${retry ? 'retry:101:sprint:31' : 'sprint:31'}', tab: 'checks' };`);
+    const submit = element();
+    const completionStatus = element();
+    const form = {
+        dataset: { workspaceTaskCompletion: 'true', workspaceTaskId: '71',
+            workspaceActionNode: action.node_id, workspaceActionInstance: instance },
+        elements: {
+            outcome_summary: { value: 'Retained outcome.' },
+            artifact_refs: { value: 'artifact://task/71\nartifact://task/71/check' },
+            acceptance_result: { value: 'fully_met' },
+            checklist_result: { value: 'verification: passed' },
+            uncommitted: { checked: false, type: 'checkbox', id: 'workspace-task-delivery-ack' },
+            worktree_path: { value: '', type: 'text', id: 'workspace-task-worktree-path' },
+        },
+        querySelector(selector) {
+            return selector === 'button[type="submit"]' ? submit : completionStatus;
+        },
+    };
+    return { ...h, action, status, form, submitButton: submit, completionStatus };
+}
+
+test('Task completion submits only semantic acknowledgement and an exact nonempty path in original and retry scopes', async () => {
+    for (const retry of [false, true]) {
+        for (const [checked, worktree] of [[false, ''], [true, ' /selected/worktree '], [false, '   ']]) {
+            const h = taskCompletionHarness(retry);
+            h.form.elements.uncommitted.checked = checked;
+            h.form.elements.worktree_path.value = worktree;
+            const pending = h.submit(h.form);
+            assert.equal(h.requests.length, 1);
+            const request = h.requests[0];
+            assert.equal(request.url, '/api/projects/7/sprint/task/complete');
+            const body = JSON.parse(request.options.body);
+            assert.deepEqual(body, {
+                instance_key: h.action.instance_key,
+                outcome_summary: 'Retained outcome.',
+                artifact_refs: ['artifact://task/71', 'artifact://task/71/check'],
+                acceptance_result: 'fully_met', checklist_result: { verification: 'passed' },
+                uncommitted: checked,
+                ...(worktree !== '' ? { worktree_path: worktree } : {}),
+                actor: 'dashboard-ui', idempotency_key: 'dashboard-task-completion-2',
+            });
+            assert.equal(request.options.headers['X-AgileForge-Expected-Decision'], 'sha256:task-authority');
+            assert.equal(request.options.headers['X-AgileForge-Expected-Instance'], h.action.instance_key);
+            request.resolve(failed);
+            await pending;
+        }
+    }
+});
+
+test('dirty refusal preserves form and binding until a manual acknowledged POST with a fresh key', async () => {
+    for (const retry of [false, true]) {
+        const h = taskCompletionHarness(retry);
+        h.form.elements.worktree_path.value = ' /selected/worktree ';
+        const before = JSON.stringify(h.form.elements);
+        const first = h.submit(h.form);
+        await h.submit(h.form);
+        assert.equal(h.requests.length, 1, 'pending duplicate was not submitted');
+        h.requests[0].resolve({ ok: false, status: 409, text: async () => JSON.stringify({
+            detail: { errors: [{ code: 'WORKFLOW_FACT_CONFLICT',
+                message: 'Uncommitted work requires uncommitted=true. A changed request requires a new idempotency key.' }] },
+        }) });
+        await first;
+        assert.equal(h.requests.length, 1, 'no automatic resubmission');
+        assert.equal(JSON.stringify(h.form.elements), before);
+        assert.equal(h.form.elements.uncommitted.checked, false);
+        assert.equal(h.state('workspaceView.taskId'), 71);
+        assert.equal(h.form.dataset.workspaceActionInstance, h.action.instance_key);
+        assert.equal(h.context.workspaceTaskCompletionBinding(h.form).action.instance_key, h.action.instance_key);
+        assert.ok(h.completionStatus.textContent.includes('new idempotency key'));
+        assert.equal(h.submitButton.disabled, false);
+        h.form.elements.uncommitted.checked = true;
+        const second = h.submit(h.form);
+        assert.equal(h.requests.length, 2);
+        const firstBody = JSON.parse(h.requests[0].options.body);
+        const secondBody = JSON.parse(h.requests[1].options.body);
+        assert.equal(firstBody.uncommitted, false);
+        assert.equal(secondBody.uncommitted, true);
+        assert.notEqual(secondBody.idempotency_key, firstBody.idempotency_key);
+        assert.deepEqual({ ...secondBody, uncommitted: false, idempotency_key: firstBody.idempotency_key }, firstBody);
+        assert.deepEqual(h.requests[1].options.headers, h.requests[0].options.headers);
+        h.requests[1].resolve(failed);
+        await second;
+        assert.equal(h.form.elements.uncommitted.checked, true);
+    }
+});
+
+test('accepted Task completion with failed authoritative refresh remains locked without another POST', async () => {
+    const h = taskCompletionHarness();
+    h.form.elements.uncommitted.checked = true;
+    const pending = h.submit(h.form);
+    h.requests[0].resolve({ ok: true, status: 200, text: async () => '{}' });
+    await nextTurn();
+    completeDashboardGets(h.requests.slice(1), [h.action], true);
+    await pending;
+    assert.equal(h.state('activeDeliveryUnreconciled'), true);
+    assert.equal(h.submitButton.disabled, true);
+    assert.equal(h.cockpit.disabled, true);
+    await h.submit(h.form);
+    assert.equal(h.requests.length, 1 + dashboardReadCount);
+    assert.equal(h.requests.filter((request) => request.options.method === 'POST').length, 1);
+});
+
+test('render memory preserves explicit acknowledgement and exact path only within the selected subject', () => {
+    const h = taskCompletionHarness();
+    const fields = [h.form.elements.uncommitted, h.form.elements.worktree_path];
+    const disclosure = { dataset: { workspaceTaskCompletionDisclosure: '71' }, open: true };
+    const workbench = { scrollTop: 23, contains: () => false,
+        querySelectorAll: (selector) => selector === 'input, textarea, select' ? fields : [disclosure] };
+    h.elements['stage-workbench'] = workbench;
+    h.form.elements.uncommitted.checked = true;
+    h.form.elements.worktree_path.value = ' /exact path ';
+    h.state('workspaceRenderScope = workspaceRenderKey();');
+    h.context.captureWorkspaceRenderState();
+    fields[0].checked = false;
+    fields[1].value = '';
+    disclosure.open = false;
+    h.context.restoreWorkspaceRenderState();
+    assert.equal(fields[0].checked, true);
+    assert.equal(fields[1].value, ' /exact path ');
+    assert.equal(disclosure.open, true);
+    h.state('workspaceView.taskId = 72;');
+    fields[0].checked = false;
+    fields[1].value = '';
+    h.context.restoreWorkspaceRenderState();
+    assert.equal(fields[0].checked, false);
+    assert.equal(fields[1].value, '');
+});
+
 async function successfulDashboardLoad(h, actions) {
     const start = h.requests.length;
     const pending = h.context.loadDashboard();
