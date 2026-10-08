@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from models.core import Task
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.sprint import SprintPlannerOutput
+from tests.workflow.execution_fixtures import unbind_synthetic_execution_repository
 from tests.workflow.execution_retry_support import _close_execution_sprint
 from tests.workflow.planning_fixtures import (
     apply_current_dependencies,
@@ -226,6 +227,7 @@ def _plan_and_start(
         )
     )
     assert started.ok
+    unbind_synthetic_execution_repository(engine, plan.project_id)
     return sprint_id
 
 

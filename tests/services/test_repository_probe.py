@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
+import stat
+import sys
+from errno import EACCES
+from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
-from git import Repo
+from git import Git, Repo
+from git.exc import GitCommandError
 
 import adapters.git.repository_probe as adapter_module
 from adapters.git.repository_probe import GitPythonRepositoryProbe
@@ -20,8 +27,10 @@ from services.repository_probe import (
 from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable, Iterable, Sequence
     from subprocess import Popen  # nosec B404  # type-only process annotation
+
+    from git.diff import Diff
 
 
 @pytest.fixture
@@ -50,6 +59,122 @@ def _status_sort_key(entry: RepositoryStatusEntry) -> tuple[str, str, bytes, byt
     )
 
 
+_BULK_ARGV_LIMIT: int = 256
+_BULK_COMMAND_GROWTH_ALLOWANCE: int = 2
+_PORCELAIN_RECORD_PREFIX_LENGTH: int = 3
+_SDK_TIMEOUT_STATUS: int = -9
+_LIVE_TIMEOUT_ELAPSED_LIMIT: float = 3.0
+
+
+def _bulk_probe_fixture(
+    root: Path, count: int, operation: str
+) -> set[RepositoryStatusEntry]:
+    """Create fixture-known staged, worktree, and untracked bulk changes."""
+    root.mkdir()
+    names = tuple(f"bulk-old-{number:04d}.txt" for number in range(count))
+    expected = {
+        RepositoryStatusEntry(area="index", change="modified", path="both.txt"),
+        RepositoryStatusEntry(area="worktree", change="modified", path="both.txt"),
+        RepositoryStatusEntry(
+            area="untracked", change="added", path="space and\nnewline.txt"
+        ),
+    }
+    with Repo.init(root) as repo:
+        with repo.config_writer() as config:
+            config.set_value("user", "name", "Bulk Probe Test")
+            config.set_value("user", "email", "bulk-probe@example.com")
+        for number, name in enumerate(names):
+            (root / name).write_text(f"original {number}\n", encoding="utf-8")
+        (root / "both.txt").write_text("original\n", encoding="utf-8")
+        repo.index.add([*names, "both.txt"])
+        repo.index.commit("bulk probe fixture")
+        if operation == "renamed":
+            renamed = tuple(name.replace("old", "new") for name in names)
+            for old, new in zip(names, renamed, strict=True):
+                (root / old).rename(root / new)
+                expected.add(
+                    RepositoryStatusEntry(
+                        area="index", change="renamed", path=new, previous_path=old
+                    )
+                )
+            repo.index.remove(list(names))
+            repo.index.add(list(renamed))
+        else:
+            for name in names:
+                (root / name).write_text("actual change\n", encoding="utf-8")
+                expected.add(
+                    RepositoryStatusEntry(area="worktree", change="modified", path=name)
+                )
+        (root / "both.txt").write_text("staged\n", encoding="utf-8")
+        repo.index.add(["both.txt"])
+    (root / "both.txt").write_text("unstaged\n", encoding="utf-8")
+    (root / "space and\nnewline.txt").write_text("untracked\n", encoding="utf-8")
+    return expected
+
+
+def _record_git_commands(
+    commands: list[tuple[str, ...]], *, bound_argv: bool
+) -> Callable[..., object]:
+    """Record actual Git subprocess arguments without changing execution semantics."""
+    original_execute = cast("Callable[..., object]", Git.execute)
+
+    def observe_execute(
+        git: Git, command: str | Sequence[str], *args: object, **kwargs: object
+    ) -> object:
+        assert not isinstance(command, str)
+        argv = tuple(map(str, command))
+        commands.append(argv)
+        if "--name-only" in argv:
+            assert git.environment()["GIT_LITERAL_PATHSPECS"] == "1"
+            assert git.environment()["GIT_OPTIONAL_LOCKS"] == "0"
+        if bound_argv and len(argv) > _BULK_ARGV_LIMIT:
+            message = "Changed-path argv exceeds the bounded command budget."
+            raise OSError(message)
+        return original_execute(git, command, *args, **kwargs)
+
+    return observe_execute
+
+
+@pytest.mark.parametrize("operation", ["modified", "renamed"])
+def test_bulk_probe_keeps_git_command_and_argv_budgets_constant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Thousands of actual changes must not spawn or expand per-path commands."""
+    observations: list[list[tuple[str, ...]]] = []
+    for count in (3, 3000):
+        root = tmp_path / f"{operation}-{count}"
+        expected = _bulk_probe_fixture(root, count, operation)
+        index = root / ".git" / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        commands: list[tuple[str, ...]] = []
+        with monkeypatch.context() as context:
+            context.setattr(
+                Git,
+                "execute",
+                _record_git_commands(commands, bound_argv=operation == "renamed"),
+            )
+            observed = GitPythonRepositoryProbe().inspect(root)
+        assert set(observed.status_entries) == expected
+        assert observed.dirty is True
+        assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+        observations.append(commands)
+
+    small, large = observations
+    assert len(large) <= len(small) + _BULK_COMMAND_GROWTH_ALLOWANCE
+    assert max(map(len, large)) <= max(map(len, small)) + _BULK_COMMAND_GROWTH_ALLOWANCE
+    for commands in observations:
+        diffs = [command for command in commands if "diff" in command]
+        assert all("--shortstat" not in command for command in diffs)
+        batched = [command for command in diffs if "--name-only" in command]
+        assert len(batched) == 1
+        assert {"-z", "--no-ext-diff", "--no-textconv"} <= set(batched[0])
+        assert not any(
+            argument.startswith("bulk-") or argument == "both.txt"
+            for command in commands
+            for argument in command
+        )
+
+
 def test_missing_path_has_typed_error(tmp_path: Path) -> None:
     """Reject missing roots with a stable typed error."""
     path = tmp_path / "missing"
@@ -74,6 +199,60 @@ def test_unborn_head_has_typed_error(tmp_path: Path) -> None:
     assert caught.value.code is RepositoryProbeErrorCode.UNBORN_HEAD
 
 
+def test_completion_identity_is_observable_without_head_or_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unborn repository still has a usable membership identity."""
+    with Repo.init(tmp_path):
+        pass
+
+    def forbid_head(_repo: Repo) -> str:
+        message = "Membership preflight must not require HEAD."
+        pytest.fail(message)  # ty: ignore[invalid-argument-type]
+
+    def forbid_status(_repo: Repo) -> tuple[RepositoryStatusEntry, ...]:
+        message = "Membership preflight must not inspect status."
+        pytest.fail(message)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(adapter_module, "_status_entries", forbid_status)
+    probe = GitPythonRepositoryProbe(_read_head_sha=forbid_head)
+    assert probe.inspect_common_git_dir(tmp_path) == str((tmp_path / ".git").resolve())
+
+
+def test_completion_identity_resolves_linked_worktree_and_symlink(
+    git_repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Comparing worktree-specific Git directories would reject a linked member."""
+    linked = tmp_path / "identity-linked"
+    with Repo(git_repository) as repo:
+        repo.git.worktree("add", "--detach", str(linked), "HEAD")
+    alias = tmp_path / "identity-alias"
+    alias.symlink_to(linked, target_is_directory=True)
+    assert GitPythonRepositoryProbe().inspect_common_git_dir(alias) == str(
+        (git_repository / ".git").resolve()
+    )
+
+
+@pytest.mark.parametrize("target", ["missing", "nongit"])
+def test_completion_identity_has_typed_unreachable_errors(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    """Missing/non-Git paths must not escape as arbitrary adapter exceptions."""
+    selected = tmp_path / target
+    if target == "nongit":
+        selected.mkdir()
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect_common_git_dir(selected)
+    assert caught.value.code is (
+        RepositoryProbeErrorCode.PATH_MISSING
+        if target == "missing"
+        else RepositoryProbeErrorCode.NOT_GIT_WORKTREE
+    )
+
+
 def test_clean_branch_returns_identity_and_empty_status(git_repository: Path) -> None:
     """Return committed worktree identity without a synthetic warning."""
     repo = Repo(git_repository)
@@ -91,6 +270,501 @@ def test_clean_branch_returns_identity_and_empty_status(git_repository: Path) ->
     assert result.probe_version == "agileforge.repository-probe.v1"
 
 
+def test_cheap_revision_includes_untracked_without_full_status(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cheap verification must detect untracked dirt without constructing entries."""
+
+    def forbid_status(_repo: Repo) -> tuple[RepositoryStatusEntry, ...]:
+        message = "Cheap inspection built full status entries."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(adapter_module, "_status_entries", forbid_status)
+    probe = GitPythonRepositoryProbe()
+    with Repo(git_repository) as repo:
+        head_sha = repo.head.commit.hexsha
+    clean = probe.inspect_revision(git_repository)
+    assert clean.head_sha == head_sha
+    assert clean.dirty is False
+    assert set(clean.model_dump()) == {"head_sha", "dirty"}
+    (git_repository / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    assert probe.inspect_revision(git_repository).dirty is True
+
+
+def test_topology_and_cheap_revision_support_linked_detached_worktrees(
+    git_repository: Path, tmp_path: Path
+) -> None:
+    """Related linked worktrees share topology but preserve their own dirty state."""
+    probe = GitPythonRepositoryProbe()
+    assert probe.has_other_worktrees(git_repository) is False
+    linked = tmp_path / "linked"
+    with Repo(git_repository) as repo:
+        repo.git.worktree("add", "--detach", str(linked), "HEAD")
+        head_sha = repo.head.commit.hexsha
+    (linked / "untracked.txt").write_text("linked\n", encoding="utf-8")
+    assert probe.has_other_worktrees(git_repository) is True
+    assert probe.has_other_worktrees(linked) is True
+    assert probe.inspect_revision(git_repository).dirty is False
+    linked_revision = probe.inspect_revision(linked)
+    assert linked_revision.head_sha == head_sha
+    assert linked_revision.dirty is True
+
+
+def test_cheap_revision_changed_head_is_typed(git_repository: Path) -> None:
+    """A HEAD race must remain a mismatch rather than an unavailable result."""
+    heads = iter(("a" * 40, "b" * 40))
+    probe = GitPythonRepositoryProbe(_read_head_sha=lambda _repo: next(heads))
+    with pytest.raises(RepositoryProbeError) as caught:
+        probe.inspect_revision(git_repository)
+    assert caught.value.code is RepositoryProbeErrorCode.REPOSITORY_CHANGED_DURING_PROBE
+
+
+@pytest.mark.parametrize("cheap", [False, True], ids=["full", "cheap"])
+def test_probe_does_not_refresh_target_index_for_clean_stale_stat(
+    git_repository: Path, *, cheap: bool
+) -> None:
+    """Git status must not rewrite the target index merely to refresh stat data."""
+    tracked = git_repository / "tracked.txt"
+    observed_stat = tracked.stat()
+    os.utime(
+        tracked,
+        ns=(observed_stat.st_atime_ns, observed_stat.st_mtime_ns + 2_000_000_000),
+    )
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    probe = GitPythonRepositoryProbe()
+    result = (
+        probe.inspect_revision(git_repository)
+        if cheap
+        else probe.inspect(git_repository)
+    )
+    assert result.dirty is False
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize(
+    ("colon_dirty", "other_dirty"),
+    [(True, False), (True, True), (False, True)],
+    ids=["colon-only", "both-changed", "other-only"],
+)
+def test_actual_content_predicate_treats_colon_path_literally(
+    git_repository: Path, *, colon_dirty: bool, other_dirty: bool
+) -> None:
+    """Git pathspec magic must neither hide :foo nor borrow changes from foo."""
+    with Repo(git_repository) as repo:
+        for name in (":foo", "foo"):
+            (git_repository / name).write_text("unchanged\n", encoding="utf-8")
+        repo.index.add([":foo", "foo"])
+        repo.index.commit("literal path fixture")
+        if colon_dirty:
+            (git_repository / ":foo").write_text("colon changed\n", encoding="utf-8")
+        if other_dirty:
+            (git_repository / "foo").write_text("other changed\n", encoding="utf-8")
+        index = git_repository / ".git" / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        repo.git.set_persistent_git_options(c="diff.autoRefreshIndex=false")
+        with repo.git.custom_environment(GIT_OPTIONAL_LOCKS="0"):
+            porcelain = repo.git.status("--porcelain=v1", "-z")
+            worktree_paths = {
+                record[3:]
+                for record in porcelain.split("\0")
+                if len(record) > _PORCELAIN_RECORD_PREFIX_LENGTH and record[1] != " "
+            }
+            observed = adapter_module._has_diff(
+                repo,
+                path=":foo",
+                changed_paths=(
+                    adapter_module._worktree_diff_paths(repo) & worktree_paths
+                ),
+            )
+        assert observed is colon_dirty
+        assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_does_not_match_stat_only_bracket_path_to_other_dirty_file(
+    git_repository: Path,
+) -> None:
+    """A glob-shaped clean path must not inflate actual dirty paths or their count."""
+    with Repo(git_repository) as repo:
+        for name in ("file[1].txt", "file1.txt"):
+            (git_repository / name).write_text("unchanged\n", encoding="utf-8")
+        repo.index.add(["file[1].txt", "file1.txt"])
+        repo.index.commit("bracket path fixture")
+    stat_only = git_repository / "file[1].txt"
+    observed_stat = stat_only.stat()
+    os.utime(
+        stat_only,
+        ns=(observed_stat.st_atime_ns, observed_stat.st_mtime_ns + 2_000_000_000),
+    )
+    (git_repository / "file1.txt").write_text("actual change\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert observed.dirty is True
+    paths = sorted({entry.path for entry in observed.status_entries})
+    assert paths == ["file1.txt"]
+    assert len(paths) == 1
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_retains_fifo_change_without_reading_content_or_writing_index(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracked FIFO replacement needs raw metadata, never a content comparison."""
+    mkfifo = getattr(os, "mkfifo", None)
+    if mkfifo is None:
+        message = "FIFO creation is unavailable on this platform"
+        raise pytest.skip.Exception(message)
+    tracked = git_repository / "tracked.txt"
+    tracked.unlink()
+    mkfifo(tracked)
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    original_execute = cast("Callable[..., object]", Git.execute)
+
+    def metadata_diff(
+        git: Git, command: str | Sequence[str], *args: object, **kwargs: object
+    ) -> object:
+        if "--shortstat" in command:
+            message = "A FIFO must not be opened for content comparison."
+            raise AssertionError(message)
+        return original_execute(git, command, *args, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", metadata_diff)
+    result = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert result.dirty is True
+    assert result.status_entries == (
+        RepositoryStatusEntry(area="worktree", change="modified", path="tracked.txt"),
+    )
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("coexisting", ["none", "tracked", "untracked"])
+def test_full_probe_rejects_incomplete_colon_path_observation(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch, coexisting: str
+) -> None:
+    """Unsupported tracked colon names must fail before raw diff can omit them."""
+    with Repo(git_repository) as repo:
+        (git_repository / ":foo").write_text("unchanged\n", encoding="utf-8")
+        repo.index.add([":foo"])
+        repo.index.commit("colon completeness fixture")
+    (git_repository / ":foo").write_text("colon changed\n", encoding="utf-8")
+    if coexisting == "tracked":
+        (git_repository / "tracked.txt").write_text(
+            "tracked changed\n", encoding="utf-8"
+        )
+    elif coexisting == "untracked":
+        (git_repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    diff_calls: list[object] = []
+    original = adapter_module._diff_entries
+
+    def observe_diff(
+        diffs: Iterable[Diff],
+        *,
+        area: Literal["index", "worktree"],
+        reverse: bool = False,
+    ) -> tuple[RepositoryStatusEntry, ...]:
+        diff_calls.append(None)
+        return original(diffs, area=area, reverse=reverse)
+
+    monkeypatch.setattr(adapter_module, "_diff_entries", observe_diff)
+
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert str(caught.value) == "Git metadata could not be read."
+    assert diff_calls == []
+    assert GitPythonRepositoryProbe().inspect_revision(git_repository).dirty is True
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_rejects_other_silent_raw_diff_omissions(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matching dirty booleans must not conceal a missing normalized path."""
+    (git_repository / "tracked.txt").write_text("tracked changed\n", encoding="utf-8")
+    (git_repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    monkeypatch.setattr(adapter_module, "_diff_entries", lambda *_args, **_kwargs: ())
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert str(caught.value) == "Git metadata could not be read."
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize(
+    "raw_output",
+    [
+        b":100644 100644 " + b"0" * 40 + b" " + b"0" * 40 + b" M\0tracked.txt",
+        b"invalid header\0tracked.txt\0",
+        b":100644 100644 " + b"0" * 40 + b" " + b"0" * 40 + b" R100\0tracked.txt\0",
+    ],
+    ids=["unterminated-path", "malformed-header", "missing-rename-target"],
+)
+def test_full_probe_rejects_incomplete_raw_record_framing(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch, raw_output: bytes
+) -> None:
+    """Partial NUL records must fail closed rather than drop dirty paths."""
+    (git_repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    def raw_diff(_git: Git, *arguments: object, **kwargs: object) -> object:
+        if "--name-only" in arguments:
+            return "tracked.txt\0"
+        if kwargs.get("stdout_as_string") is False:
+            assert "--raw" in arguments
+            return raw_output
+        return _git._call_process("diff", *arguments, **kwargs)
+
+    monkeypatch.setattr(Git, "diff", raw_diff, raising=False)
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("operation", ["staged", "rename-source", "rename-target"])
+def test_full_probe_rejects_colon_index_paths_before_raw_diff(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A staged current or rename-source leading colon has the same parser limit."""
+    with Repo(git_repository) as repo:
+        (git_repository / ":foo").write_text("unchanged\n", encoding="utf-8")
+        repo.index.add([":foo"])
+        repo.index.commit("colon staged fixture")
+        if operation == "staged":
+            (git_repository / ":foo").write_text("changed\n", encoding="utf-8")
+            repo.index.add([":foo"])
+        elif operation == "rename-source":
+            repo.git.mv("--", ":foo", "ordinary.txt")
+        else:
+            repo.git.mv("--", "tracked.txt", ":target")
+
+    def forbid_diff(*_args: object, **_kwargs: object) -> str:
+        message = "Known unsupported colon path reached raw diff."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(Git, "diff", forbid_diff, raising=False)
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert str(caught.value) == "Git metadata could not be read."
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_full_probe_preserves_supported_colon_path_cases(
+    git_repository: Path, *, dirty: bool
+) -> None:
+    """Unchanged leading-colon and ordinary embedded-colon paths stay supported."""
+    with Repo(git_repository) as repo:
+        for name in (":unchanged", "inner:colon.txt"):
+            (git_repository / name).write_text("unchanged\n", encoding="utf-8")
+        repo.index.add([":unchanged", "inner:colon.txt"])
+        repo.index.commit("supported colon fixture")
+    stat_only = git_repository / ":unchanged"
+    observed_stat = stat_only.stat()
+    os.utime(
+        stat_only,
+        ns=(observed_stat.st_atime_ns, observed_stat.st_mtime_ns + 2_000_000_000),
+    )
+    if dirty:
+        (git_repository / "inner:colon.txt").write_text("changed\n", encoding="utf-8")
+        (git_repository / ":untracked").write_text("untracked\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert observed.dirty is dirty
+    assert {entry.path for entry in observed.status_entries} == (
+        {"inner:colon.txt", ":untracked"} if dirty else set()
+    )
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_preserves_staged_and_unstaged_cancelled_net_diff(
+    git_repository: Path,
+) -> None:
+    """A return to HEAD still has both status areas relative to the index."""
+    tracked = git_repository / "tracked.txt"
+    original = tracked.read_text(encoding="utf-8")
+    with Repo(git_repository) as repo:
+        tracked.write_text("staged change\n", encoding="utf-8")
+        repo.index.add(["tracked.txt"])
+    tracked.write_text(original, encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert observed.dirty is True
+    assert {entry.path for entry in observed.status_entries} == {"tracked.txt"}
+    assert {entry.area for entry in observed.status_entries} == {"index", "worktree"}
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_frames_unusual_dirty_names_next_to_unchanged_colon_path(
+    git_repository: Path,
+) -> None:
+    """An ignored colon-leading record must not split supported dirty filenames."""
+    modified = "space and\ncafé [1].txt"
+    previous = "rename old\nname.txt"
+    renamed = "rename new\nname.txt"
+    with Repo(git_repository) as repo:
+        for name in (":unchanged", modified, previous):
+            (git_repository / name).write_text(f"original {name}\n", encoding="utf-8")
+        repo.index.add([":unchanged", modified, previous])
+        repo.index.commit("NUL framing fixture")
+        repo.git.mv("--", previous, renamed)
+    for name in (modified, renamed):
+        (git_repository / name).write_text("worktree change\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert set(observed.status_entries) == {
+        RepositoryStatusEntry(
+            area="index", change="renamed", path=renamed, previous_path=previous
+        ),
+        RepositoryStatusEntry(area="worktree", change="modified", path=modified),
+        RepositoryStatusEntry(area="worktree", change="modified", path=renamed),
+    }
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_full_probe_retains_untracked_reuse_of_staged_rename_source(
+    git_repository: Path,
+) -> None:
+    """An untracked current path can also be a tracked rename's previous path."""
+    with Repo(git_repository) as repo:
+        repo.git.mv("renamed-old.txt", "renamed-new.txt")
+    (git_repository / "renamed-old.txt").write_text("new untracked\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert set(observed.status_entries) == {
+        RepositoryStatusEntry(
+            area="index",
+            change="renamed",
+            path="renamed-new.txt",
+            previous_path="renamed-old.txt",
+        ),
+        RepositoryStatusEntry(area="untracked", change="added", path="renamed-old.txt"),
+    }
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("renames_disabled", [False, True])
+def test_full_probe_preserves_rename_current_path_and_unusual_untracked_paths(
+    git_repository: Path, *, renames_disabled: bool
+) -> None:
+    """NUL metadata must skip rename sources and preserve path whitespace."""
+    target = "renamed new.txt"
+    untracked = "nested/space and\nnewline.txt"
+    with Repo(git_repository) as repo:
+        repo.git.mv("renamed-old.txt", target)
+        if renames_disabled:
+            with repo.config_writer() as config:
+                config.set_value("status", "renames", "false")
+    (git_repository / "nested").mkdir()
+    (git_repository / untracked).write_text("untracked\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert {entry.path for entry in observed.status_entries} == {target, untracked}
+    renamed = next(
+        entry for entry in observed.status_entries if entry.change == "renamed"
+    )
+    assert renamed.previous_path == "renamed-old.txt"
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("operation", ["full", "cheap", "topology"])
+def test_completion_probe_git_failures_are_typed_and_do_not_leak_stderr(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A non-diff Git failure must produce a closed safe probe error."""
+
+    def fail_git(*_args: object, **_kwargs: object) -> bool:
+        command = "test-git"
+        raise GitCommandError(command, 128, stderr="private raw error output")
+
+    if operation == "topology":
+        monkeypatch.setattr(Git, "worktree", fail_git, raising=False)
+    elif operation == "cheap":
+        monkeypatch.setattr(Git, "status", fail_git, raising=False)
+    else:
+        monkeypatch.setattr(adapter_module, "_has_diff", fail_git)
+        (git_repository / "tracked.txt").write_text("actual dirty\n", encoding="utf-8")
+    probe = GitPythonRepositoryProbe()
+    inspect = {
+        "full": probe.inspect,
+        "cheap": probe.inspect_revision,
+        "topology": probe.has_other_worktrees,
+    }[operation]
+    with pytest.raises(RepositoryProbeError) as caught:
+        inspect(git_repository)
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert str(caught.value) == "Git metadata could not be read."
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("cheap", [False, True], ids=["full", "cheap"])
+def test_probe_ignores_configured_external_diff_and_textconv_helpers(
+    git_repository: Path, tmp_path: Path, *, cheap: bool
+) -> None:
+    """Custom diff helpers must neither execute nor hide real worktree changes."""
+    marker = tmp_path / "driver-ran"
+    driver = tmp_path / "diff-driver.sh"
+    driver.write_text(
+        "#!/bin/sh\n" + "touch " + shlex.quote(str(marker)) + "\nexit 0\n",
+        encoding="utf-8",
+    )
+    command = shlex.join(("sh", str(driver)))
+    with Repo(git_repository) as repo:
+        (git_repository / ".gitattributes").write_text(
+            "tracked.txt diff=inspection-test\n", encoding="utf-8"
+        )
+        repo.index.add([".gitattributes"])
+        repo.index.commit("configured diff fixture")
+        with repo.config_writer() as config:
+            config.set_value('diff "inspection-test"', "command", command)
+            config.set_value('diff "inspection-test"', "textconv", command)
+    (git_repository / "tracked.txt").write_text("real change\n", encoding="utf-8")
+    probe = GitPythonRepositoryProbe()
+    result = (
+        probe.inspect_revision(git_repository)
+        if cheap
+        else probe.inspect(git_repository)
+    )
+    assert result.dirty is True
+    assert marker.exists() is False
+
+
 @pytest.mark.parametrize("fail_head_read", [False, True], ids=["success", "error"])
 def test_probe_reaps_git_process_before_returning_or_raising(
     git_repository: Path,
@@ -101,9 +775,11 @@ def test_probe_reaps_git_process_before_returning_or_raising(
     processes: list[Popen[bytes]] = []
 
     def read_head(repo: Repo) -> str:
+        # This injected reader deliberately opens a cached SDK process; production
+        # now uses bounded synchronous rev-parse instead of the object database.
+        head_sha = repo.head.commit.hexsha
         if not opened_repositories:
             opened_repositories.append(repo)
-            # HEAD validation has already started the real cached cat-file process.
             cached_command = repo.git.cat_file_header
             assert cached_command is not None
             process = cached_command.proc
@@ -112,7 +788,7 @@ def test_probe_reaps_git_process_before_returning_or_raising(
         if fail_head_read:
             message = "HEAD metadata became unreadable"
             raise OSError(message)
-        return repo.head.commit.hexsha
+        return head_sha
 
     probe = GitPythonRepositoryProbe(_read_head_sha=read_head)
     try:
@@ -170,6 +846,35 @@ def test_dirty_probe_returns_dirty_warning(git_repository: Path) -> None:
     assert result.dirty is True
     assert result.warnings[0].code == "DIRTY_WORKTREE"
     assert result.warnings[0].message == "Repository worktree contains changes."
+
+
+@pytest.mark.parametrize("area", ["worktree", "index", "both"])
+def test_full_probe_treats_tracked_head_filename_as_path(
+    git_repository: Path, area: str
+) -> None:
+    """A filename equal to the revision must preserve staged/worktree evidence."""
+    tracked = git_repository / "HEAD"
+    with Repo(git_repository) as repo:
+        tracked.write_text("original\n", encoding="utf-8")
+        repo.index.add(["HEAD"])
+        repo.index.commit("HEAD filename fixture")
+        tracked.write_text("changed\n", encoding="utf-8")
+        if area != "worktree":
+            repo.index.add(["HEAD"])
+        if area == "both":
+            tracked.write_text("unstaged after staged\n", encoding="utf-8")
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+
+    expected_areas = {"index", "worktree"} if area == "both" else {area}
+    assert {
+        (entry.area, entry.change, entry.path, entry.previous_path)
+        for entry in observed.status_entries
+    } == {(item, "modified", "HEAD", None) for item in expected_areas}
+    assert observed.dirty is True
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
 
 
 def test_detached_head_succeeds_without_branch_name(git_repository: Path) -> None:
@@ -322,15 +1027,23 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
         working_tree_dir=worktree_path,
         common_dir=common_git_dir,
         active_branch=SimpleNamespace(name="main"),
-        git=SimpleNamespace(clear_cache=lambda: None),
+        git=Git(tmp_path),
     )
 
     def repository_factory(*_args: object, **_kwargs: object) -> Repo:
         return cast("Repo", fake_repo)
 
     monkeypatch.setattr(adapter_module, "Repo", repository_factory)
+    monkeypatch.setattr(
+        Git,
+        "status",
+        lambda *_args, **_kwargs: f"?? {unicode_path}\0?? {decoded_path}\0",
+        raising=False,
+    )
 
-    result = GitPythonRepositoryProbe().inspect(tmp_path)
+    result = GitPythonRepositoryProbe(_read_head_sha=lambda _repo: "a" * 40).inspect(
+        tmp_path
+    )
     expected_entries = tuple(
         sorted(
             (
@@ -390,6 +1103,66 @@ def test_unreadable_git_metadata_has_typed_error(
         GitPythonRepositoryProbe().inspect(git_repository)
 
     assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["inspect", "inspect_common_git_dir", "inspect_revision", "has_other_worktrees"],
+)
+@pytest.mark.parametrize("path_check", ["exists", "is_dir"])
+def test_filesystem_preflight_permission_failure_is_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path_check: str,
+) -> None:
+    """Filesystem failures before opening Git must honor the closed error contract."""
+    target = tmp_path.resolve()
+    original_check = getattr(Path, path_check)
+
+    def denied_check(path: Path) -> bool:
+        if path == target:
+            raise PermissionError(EACCES, "filesystem preflight denied", str(target))
+        return original_check(path)
+
+    monkeypatch.setattr(Path, path_check, denied_check)
+    with pytest.raises(RepositoryProbeError) as caught:
+        getattr(GitPythonRepositoryProbe(), method)(target)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert caught.value.path == str(target)
+    assert isinstance(caught.value.__cause__, PermissionError)
+    assert caught.value.__cause__.errno == EACCES
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["inspect", "inspect_common_git_dir", "inspect_revision", "has_other_worktrees"],
+)
+def test_inaccessible_parent_has_typed_preflight_error(
+    tmp_path: Path, method: str
+) -> None:
+    """An actual unsearchable parent must not leak its filesystem exception."""
+    parent = tmp_path / "unreadable"
+    target = parent / "selected-target"
+    target.mkdir(parents=True)
+    original_mode = stat.S_IMODE(parent.stat().st_mode)
+    parent.chmod(0)
+    try:
+        try:
+            target.stat()
+        except PermissionError:
+            pass
+        else:
+            message = "Host privileges do not enforce directory search permissions."
+            pytest.skip(message)  # ty: ignore[too-many-positional-arguments]
+        with pytest.raises(RepositoryProbeError) as caught:
+            getattr(GitPythonRepositoryProbe(), method)(target)
+        assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+        assert caught.value.path == str(target)
+        assert isinstance(caught.value.__cause__, PermissionError)
+    finally:
+        parent.chmod(original_mode)
 
 
 def test_malformed_path_has_typed_error() -> None:
@@ -456,3 +1229,257 @@ def test_status_fingerprint_changes_when_untracked_path_changes(
     second = probe.inspect(git_repository)
 
     assert first.status_fingerprint != second.status_fingerprint
+
+
+@pytest.mark.parametrize(
+    "setting", ["outside_timeout_seconds", "verification_timeout_seconds"]
+)
+@pytest.mark.parametrize("invalid", [0, -1, float("nan"), float("inf"), True, False])
+def test_probe_timeout_configuration_requires_finite_positive_numbers(
+    setting: str,
+    invalid: float,
+) -> None:
+    """Invalid deadlines must never disable the completion command bound."""
+    with pytest.raises(ValueError, match="finite positive"):
+        GitPythonRepositoryProbe(
+            outside_timeout_seconds=(
+                invalid if setting == "outside_timeout_seconds" else 10.0
+            ),
+            verification_timeout_seconds=(
+                invalid if setting == "verification_timeout_seconds" else 2.0
+            ),
+        )
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_every_completion_git_command_has_a_nonstreaming_deadline(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    configured: bool,
+) -> None:
+    """Include hidden HEAD, raw diff, remote and topology subprocesses in the audit."""
+    with Repo(git_repository) as repo:
+        repo.create_remote("origin", "https://example.invalid/project.git")
+        (git_repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
+        repo.index.add(["tracked.txt"])
+        (git_repository / "tracked.txt").write_text("changed again\n", encoding="utf-8")
+    (git_repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    outside, inside = (0.8, 0.3) if configured else (10.0, 2.0)
+    probe = (
+        GitPythonRepositoryProbe(
+            outside_timeout_seconds=outside,
+            verification_timeout_seconds=inside,
+        )
+        if configured
+        else GitPythonRepositoryProbe()
+    )
+    original_execute = cast("Callable[..., object]", Git.execute)
+    commands: list[tuple[str, ...]] = []
+    expected_timeout = outside
+
+    def bounded_execute(
+        git: Git,
+        command: Sequence[object],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        if sys.platform == "win32":
+            assert "kill_after_timeout" not in kwargs, tuple(command)
+        else:
+            assert kwargs.get("kill_after_timeout") == expected_timeout, tuple(command)
+        assert kwargs.get("as_process", False) is False, tuple(command)
+        commands.append(tuple(str(part) for part in command))
+        return original_execute(git, command, *args, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", bounded_execute)
+    probe.inspect_common_git_dir(git_repository)
+    observed = probe.inspect(git_repository)
+    assert observed.dirty is True
+    assert observed.remotes == ("https://example.invalid/project.git",)
+    assert probe.has_other_worktrees(git_repository) is False
+    assert any("rev-parse" in command for command in commands)
+    assert any("--raw" in command for command in commands)
+    assert any("--name-only" in command for command in commands)
+    assert any("remote" in command for command in commands)
+    assert any("worktree" in command for command in commands)
+    assert all("cat-file" not in command for command in commands)
+    expected_timeout = inside
+    assert probe.inspect_revision(git_repository).dirty is True
+
+
+@pytest.mark.parametrize(
+    "phase", ["head", "status", "raw", "names", "remote", "topology"]
+)
+def test_gitpython_timeout_is_a_closed_probe_failure(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Only SDK timeout evidence becomes PROBE_TIMED_OUT; stderr stays private."""
+    with Repo(git_repository) as repo:
+        repo.create_remote("origin", "https://example.invalid/project.git")
+    (git_repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    original_execute = cast("Callable[..., object]", Git.execute)
+
+    def timeout_execute(
+        git: Git,
+        command: Sequence[object],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        parts = tuple(str(part) for part in command)
+        matching = {
+            "head": "rev-parse" in parts or "cat-file" in parts,
+            "status": "status" in parts,
+            "raw": "--raw" in parts,
+            "names": "--name-only" in parts,
+            "remote": "remote" in parts,
+            "topology": "worktree" in parts,
+        }
+        if matching[phase]:
+            raise GitCommandError(
+                list(parts),
+                _SDK_TIMEOUT_STATUS,
+                stderr=(
+                    'Timeout: the command "private synthetic target" '
+                    "did not complete in 0.1 secs."
+                ),
+            )
+        return original_execute(git, command, *args, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", timeout_execute)
+    probe = GitPythonRepositoryProbe()
+    inspect = probe.has_other_worktrees if phase == "topology" else probe.inspect
+    with pytest.raises(RepositoryProbeError) as caught:
+        inspect(git_repository)
+    assert caught.value.code.value == "PROBE_TIMED_OUT"
+    assert str(caught.value) == "Repository probe timed out."
+    assert "private synthetic target" not in str(caught.value)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason=(
+        "Live GitPython watchdog proof requires supported Linux ps; "
+        "this macOS sandbox denies its ps subprocess."
+    ),
+)
+def test_linux_owned_stalled_git_is_actually_terminated(
+    git_repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real sleeping Git replacement must die before it can return status."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_git = tmp_path / "stalled-git"
+    pid_file = tmp_path / "stalled-git.pid"
+    fake_git.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        f"pid_file = {str(pid_file)!r}\n"
+        "if 'status' in sys.argv[1:]:\n"
+        "    with open(pid_file, 'w') as stream: stream.write(str(os.getpid()))\n"
+        "    time.sleep(5)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o700)
+    monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
+    probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.5)
+    started = monotonic()
+    with pytest.raises(RepositoryProbeError) as caught:
+        probe.inspect_revision(git_repository)
+    assert caught.value.code.value == "PROBE_TIMED_OUT"
+    assert monotonic() - started < _LIVE_TIMEOUT_ELAPSED_LIMIT
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+def test_windows_sdk_compatibility_preserves_healthy_inspection(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows SDK rejection must not break native healthy-probe test support."""
+    monkeypatch.setattr(
+        adapter_module, "_WINDOWS_TIMEOUT_UNSUPPORTED", True, raising=False
+    )
+    original_execute = cast("Callable[..., object]", Git.execute)
+
+    def windows_execute(
+        git: Git,
+        command: Sequence[object],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        if "kill_after_timeout" in kwargs:
+            raise GitCommandError(
+                [str(part) for part in command], "Windows SDK timeout unsupported"
+            )
+        return original_execute(git, command, *args, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", windows_execute)
+    probe = GitPythonRepositoryProbe()
+    assert probe.inspect(git_repository).dirty is False
+    assert probe.inspect_revision(git_repository).dirty is False
+    assert probe.has_other_worktrees(git_repository) is False
+
+
+def test_gitlink_status_parsing_does_not_open_submodule_repositories(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw gitlink metadata must preserve status without SDK object traversal."""
+    module_path = git_repository / "module"
+    with Repo.init(module_path) as module:
+        with module.config_writer() as config:
+            config.set_value("user", "name", "Synthetic Module Test")
+            config.set_value("user", "email", "module@example.invalid")
+        (module_path / "file.txt").write_text("first\n", encoding="utf-8")
+        module.index.add(["file.txt"])
+        first_module_sha = module.index.commit("first module commit").hexsha
+        with Repo(git_repository) as repo:
+            (git_repository / ".gitmodules").write_text(
+                '[submodule "module"]\n\tpath = module\n'
+                "\turl = https://example.invalid/module.git\n",
+                encoding="utf-8",
+            )
+            repo.index.add([".gitmodules"])
+            repo.git.update_index(
+                "--add", "--cacheinfo", f"160000,{first_module_sha},module"
+            )
+            repo.index.commit("record gitlink")
+        (module_path / "file.txt").write_text("second\n", encoding="utf-8")
+        module.index.add(["file.txt"])
+        module.index.commit("second module commit")
+    with Repo(git_repository) as repo:
+        legacy_entries = adapter_module._diff_entries(
+            repo.index.diff(None), area="worktree"
+        )
+        expected_fingerprint = canonical_hash(
+            {
+                "probe_version": "agileforge.repository-probe.v1",
+                "head_sha": repo.head.commit.hexsha,
+                "branch_name": repo.active_branch.name,
+                "detached_head": False,
+                "dirty": True,
+                "status_entries": [
+                    entry.model_dump(mode="json") for entry in legacy_entries
+                ],
+                "remotes": (),
+                "remote_omitted": False,
+            }
+        )
+    assert legacy_entries == (
+        RepositoryStatusEntry(area="worktree", change="modified", path="module"),
+    )
+
+    def forbid_submodules(_repo: Repo) -> None:
+        message = "Status parsing opened SDK submodule objects."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(Repo, "submodules", property(forbid_submodules))
+    observed = GitPythonRepositoryProbe().inspect(git_repository)
+    assert observed.status_entries == legacy_entries
+    assert observed.status_fingerprint == expected_fingerprint

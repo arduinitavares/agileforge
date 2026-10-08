@@ -158,10 +158,20 @@ class DurableTransitionReplayService:
             if not isinstance(operator_input, dict):
                 message = "Semantic replay input must serialize as an object."
                 raise TypeError(message)
+            completion_fields: frozenset[str] = frozenset()
+            completion_changed = False
+            if query.request_kind == "complete_task":
+                completion_fields = frozenset({"uncommitted", "worktree_path"})
+                completion_changed = (stored_payload.get("uncommitted") is True) != (
+                    operator_input.get("uncommitted") is True
+                ) or stored_payload.get("worktree_path") != operator_input.get(
+                    "worktree_path"
+                )
             if (
                 stored.project_id != query.project_id
                 or stored.actor != query.actor
                 or stored.correlation_id != query.correlation_id
+                or completion_changed
                 or (
                     query.request_kind in _CALLER_OWNED_TRANSITION_SELECTOR_KINDS
                     and "instance_key" not in operator_input
@@ -169,11 +179,13 @@ class DurableTransitionReplayService:
                 or any(
                     stored_payload.get(key) != value
                     for key, value in operator_input.items()
+                    if key not in completion_fields
                 )
             ):
-                return _fact_conflict(
-                    "The idempotency key was already used for different input."
-                )
+                message = "The idempotency key was already used for different input."
+                if query.request_kind == "complete_task":
+                    message += " A changed request requires a new idempotency key."
+                return _fact_conflict(message)
             if receipt.result_json is None or receipt.completed_at is None:
                 return _fact_conflict("The idempotency receipt is incomplete.")
             return _replayed_result(receipt)
@@ -239,11 +251,9 @@ def _sprint_replay_conflicts(
     if requested_kind not in _SPRINT_OWNER_KINDS:
         return True
     if stored_kind is None:
-        return (
-            requested_kind != "named_team"
-            or query.semantic_input.get("team_name")
-            != stored.normalized_input.get("team_name")
-        )
+        return requested_kind != "named_team" or query.semantic_input.get(
+            "team_name"
+        ) != stored.normalized_input.get("team_name")
     return stored_kind not in _SPRINT_OWNER_KINDS or stored_kind != requested_kind
 
 

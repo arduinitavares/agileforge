@@ -1,3 +1,4 @@
+# repositories/sprint_retry.py
 """Load immutable retry facts without changing original Sprint history."""
 # ruff: noqa: EM101, EM102, TRY003
 
@@ -9,6 +10,7 @@ from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
 from models.core import Sprint, SprintStory, Task, UserStory
+from models.repository import RepositoryBinding
 from models.sprint_retry import (
     SprintRetryAttempt,
     SprintRetryClosure,
@@ -20,6 +22,10 @@ from models.sprint_retry import (
     SprintRetryTaskState,
     SprintRetryTriage,
 )
+from services.contracts.task_repository_evidence import (
+    UnboundTaskRepositoryEvidence,
+    canonical_task_repository_evidence_json,
+)
 from workflow.contracts import JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
@@ -28,6 +34,7 @@ from workflow.execution_integrity import (
     story_completion_fingerprint,
     task_evidence_fingerprint,
     triage_payload_fingerprint,
+    validate_task_repository_evidence_binding,
 )
 from workflow.execution_scope import ExecutionScopeError, resolve_execution_scope
 from workflow.facts import (
@@ -319,6 +326,23 @@ def _task_evidence(
                 artifact_refs_json=row.artifact_refs_json,
                 acceptance_result=row.acceptance_result,
                 checklist_result_json=row.checklist_result_json,
+                repository_evidence_json=row.repository_evidence_json,
+            )
+            repository_evidence = evidence.repository_evidence
+            binding = (
+                session.exec(
+                    select(RepositoryBinding).where(
+                        col(RepositoryBinding.repository_binding_id)
+                        == repository_evidence.repository_binding_id
+                    ),
+                    execution_options=options,
+                ).one_or_none()
+                if repository_evidence is not None
+                and not isinstance(repository_evidence, UnboundTaskRepositoryEvidence)
+                else None
+            )
+            validate_task_repository_evidence_binding(
+                repository_evidence, project_id=attempt.project_id, binding=binding
             )
         except ExecutionIntegrityError as exc:
             raise _invalid(str(exc)) from exc
@@ -332,6 +356,7 @@ def _task_evidence(
                 acceptance_result=evidence.acceptance_result,
                 checklist_result=evidence.checklist_result,
                 evidence_fingerprint=row.evidence_fingerprint,
+                repository_evidence=evidence.repository_evidence,
             )
         )
     return tuple(result)
@@ -362,6 +387,13 @@ def _validate_task_fingerprints(
                     artifact_refs_json=canonical_json(list(fact.artifact_refs)),
                     acceptance_result=fact.acceptance_result,
                     checklist_result_json=canonical_json(fact.checklist_result),
+                    repository_evidence_json=(
+                        canonical_task_repository_evidence_json(
+                            fact.repository_evidence
+                        )
+                        if fact.repository_evidence is not None
+                        else None
+                    ),
                 ),
                 scope=scope,
             )

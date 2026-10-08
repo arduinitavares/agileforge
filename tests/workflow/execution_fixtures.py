@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, select
 
-from models.core import Task, UserStory, UserStoryDependency
+from models.core import Project, Task, UserStory, UserStoryDependency
 from models.enums import StoryStatus, TaskStatus
+from models.repository import RepositoryBinding
 from tests.workflow.test_planning_transitions import (
     _domain as _planning_domain,
 )
@@ -42,9 +43,27 @@ def _required_identity(value: int | None, label: str) -> int:
     return value
 
 
+def unbind_synthetic_execution_repository(engine: Engine, project_id: int) -> None:
+    """Remove only execution fixtures' fake active target, retaining source history."""
+    with Session(engine) as session:
+        project = session.get_one(Project, project_id)
+        if project.active_repository_binding_id is None:
+            return
+        binding = session.get(RepositoryBinding, project.active_repository_binding_id)
+        if (
+            binding is not None
+            and binding.worktree_path == "repository"
+            and binding.common_git_dir == "repository/.git"
+        ):
+            project.active_repository_binding_id = None
+            session.add(project)
+            session.commit()
+
+
 def _accept_and_start_sprint(
     domain: WorkflowDomain,
     *,
+    engine: Engine,
     project_id: int,
     plan_binding: _SprintPlanBinding,
     idempotency_suffix: str,
@@ -78,6 +97,7 @@ def _accept_and_start_sprint(
     if not started.ok:
         message = "Sprint start fixture failed."
         raise AssertionError(message)
+    unbind_synthetic_execution_repository(engine, project_id)
     return sprint_id
 
 
@@ -103,6 +123,7 @@ def seed_started_execution(
     )
     sprint_id = _accept_and_start_sprint(
         domain,
+        engine=engine,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix="",
@@ -168,6 +189,7 @@ def seed_started_execution_with_unselected_story(
     )
     sprint_id = _accept_and_start_sprint(
         domain,
+        engine=engine,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix="-selected-scope",
@@ -215,6 +237,7 @@ def start_following_execution_sprint(
     )
     sprint_id = _accept_and_start_sprint(
         domain,
+        engine=engine,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix=idempotency_suffix,
@@ -321,6 +344,7 @@ def seed_started_execution_with_transitive_dependency(
     )
     sprint_id = _accept_and_start_sprint(
         domain,
+        engine=engine,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix="-historical-dependency",

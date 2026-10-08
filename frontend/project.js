@@ -4078,6 +4078,31 @@ function workspacePlannedChecksMarkup(task, completion) {
         : '<p class="mt-2 text-xs text-slate-600">No planned checklist is retained for this Task.</p>';
 }
 
+function workspaceTaskRepositoryMarkup(completion) {
+    const evidence = completion?.repository_evidence;
+    const messages = Array.isArray(completion?.repository_warning_messages)
+        ? completion.repository_warning_messages : [];
+    const warnings = messages.length
+        ? `<ul class="mt-2 list-disc pl-4 text-xs text-amber-800">${messages.map((message) => `<li>${escapeWorkflowText(message)}</li>`).join('')}</ul>`
+        : '';
+    const acknowledged = evidence?.uncommitted_acknowledged === true ? 'Yes' : 'No';
+    let observation;
+    if (evidence?.state === 'captured') {
+        const paths = Array.isArray(evidence.dirty_paths) ? evidence.dirty_paths.slice(0, 50) : [];
+        const branch = evidence.detached_head === true ? 'Detached HEAD' : evidence.branch_name;
+        observation = `<dl class="mt-1 grid gap-1 text-xs text-slate-600"><div>HEAD: ${escapeWorkflowText(evidence.head_sha)}</div><div>Branch: ${escapeWorkflowText(branch)}</div><div>Worktree: ${escapeWorkflowText(evidence.worktree_path)}</div><div>Bound checkout match: ${evidence.probed_path_matches_binding === true ? 'Yes' : 'No'}</div><div>Dirty: ${evidence.dirty === true ? 'Yes' : 'No'}</div><div>Dirty path count: ${escapeWorkflowText(evidence.dirty_path_count)}</div><div>Dirty paths truncated: ${evidence.dirty_paths_truncated === true ? 'Yes' : 'No'}</div><div>Acknowledgement: ${acknowledged}</div></dl>${paths.length
+            ? `<p class="mt-2 text-xs text-slate-600">Showing ${paths.length} of ${escapeWorkflowText(evidence.dirty_path_count)} dirty paths.</p><ul class="mt-1 list-disc break-all pl-4 text-xs text-slate-700">${paths.map((path) => `<li>${escapeWorkflowText(path)}</li>`).join('')}</ul>`
+            : ''}`;
+    } else if (evidence?.state === 'unavailable') {
+        observation = `<p class="mt-1 text-xs text-amber-800">Repository unavailable</p><dl class="mt-1 grid gap-1 text-xs text-slate-600"><div>Worktree: ${escapeWorkflowText(evidence.worktree_path)}</div><div>Bound checkout match: ${evidence.probed_path_matches_binding === true ? 'Yes' : 'No'}</div><div>Acknowledgement: ${acknowledged}</div></dl><p class="mt-2 text-xs text-slate-700">${escapeWorkflowText(evidence.error_summary)}</p>`;
+    } else if (evidence?.state === 'not_bound') {
+        observation = `<p class="mt-1 text-xs text-slate-600">Repository not bound</p><p class="mt-1 text-xs text-slate-600">Acknowledgement: ${acknowledged}</p>`;
+    } else {
+        observation = '<p class="mt-1 text-xs text-slate-600">Revision not recorded</p>';
+    }
+    return `<section class="mt-3 break-words"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Repository at completion</p>${observation}${warnings}</section>`;
+}
+
 function workspaceTaskDetailMarkup(snapshot) {
     if (!snapshot || snapshot.kind === 'idle' || !snapshot.selection?.taskId) {
         return '<p class="text-sm text-slate-600">Select a Task to inspect its persisted details, checks, and retained activity.</p>';
@@ -4093,7 +4118,7 @@ function workspaceTaskDetailMarkup(snapshot) {
     const taskId = task.task_id;
     const details = `<p class="workspace-task-description mt-1 text-sm text-slate-900">${escapeWorkflowText(task.description || 'No description recorded.')}</p><dl class="mt-2 grid gap-1 text-xs text-slate-600"><div>Formal status: ${escapeWorkflowText(task.status || 'Unavailable')}</div><div>Dependency condition: ${task.dependencies_satisfied === true ? 'satisfied' : (task.dependencies_satisfied === false ? 'not satisfied' : 'Unavailable')}</div><div>Effective Sprint status: ${escapeWorkflowText(snapshot.data?.effective_status || 'Unavailable')}</div><div>Scope: ${escapeWorkflowText(snapshot.data?.current_retry?.sprint_instance_key || `sprint:${task.sprint_id || snapshot.selection?.sprintId || 'Unavailable'}`)}</div></dl>`;
     const checks = `${workspacePlannedChecksMarkup(task, completion)}${completion
-        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Persisted completion result</p><p class="mt-1 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div></section>`
+        ? `<section class="mt-3"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Persisted completion result</p><p class="mt-1 text-xs text-slate-600">Acceptance: ${escapeWorkflowText(completion.acceptance_result || 'Unavailable')}</p><div class="mt-2 text-xs text-slate-700">${humanValueMarkup(completion.checklist_result || {})}</div></section>${workspaceTaskRepositoryMarkup(completion)}`
         : '<p class="mt-3 text-xs text-slate-600">No persisted completion result.</p>'}`;
     const activityMarkup = activity.length
         ? `<ul class="mt-2 space-y-2 text-xs text-slate-700">${activity.map((item) => `<li class="border-t border-slate-200 pt-2"><strong>${escapeWorkflowText(item.changed_at || 'Undated')}</strong> · ${escapeWorkflowText(item.old_status || 'Unknown')} → ${escapeWorkflowText(item.new_status || 'Unknown')}<br>${escapeWorkflowText(item.outcome_summary || 'No outcome summary recorded.')}</li>`).join('')}</ul><p class="mt-3 text-xs text-slate-600">External activity is unavailable; these are retained Task status records only.</p>`
@@ -4111,7 +4136,7 @@ function workspaceTaskDetailMarkup(snapshot) {
 function workspaceTaskCompletionForm(row) {
     if (!row?.action) return '';
     const taskId = row.task.task_id;
-    return `<details class="mt-3 rounded border border-teal-200 bg-teal-50 p-2" data-workspace-task-completion-disclosure="${taskId}"><summary class="cursor-pointer text-xs font-semibold text-teal-900">Record completion for Task #${taskId}</summary><form class="mt-2 grid gap-2 text-xs" data-workspace-task-completion="true" data-workspace-task-id="${taskId}" data-workspace-action-node="${escapeWorkflowText(row.action.node_id)}" data-workspace-action-instance="${escapeWorkflowText(row.action.instance_key)}"><label>Outcome summary<textarea required id="workspace-task-${taskId}-outcome" name="outcome_summary" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Artifact references (one per line)<textarea required id="workspace-task-${taskId}-artifacts" name="artifact_refs" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Acceptance result<select required id="workspace-task-${taskId}-acceptance" name="acceptance_result" class="mt-1 w-full rounded border-slate-300"><option value="fully_met">Fully met</option><option value="partially_met">Partially met</option></select></label><label>Checklist evidence (criterion: result, one per line)<textarea required id="workspace-task-${taskId}-checklist" name="checklist_result" class="mt-1 w-full rounded border-slate-300"></textarea></label><button type="submit" class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">Record Task completion</button><p data-workspace-task-completion-status="true" hidden></p></form></details>`;
+    return `<details class="mt-3 rounded border border-teal-200 bg-teal-50 p-2" data-workspace-task-completion-disclosure="${taskId}"><summary class="cursor-pointer text-xs font-semibold text-teal-900">Record completion for Task #${taskId}</summary><form class="mt-2 grid gap-2 text-xs" data-workspace-task-completion="true" data-workspace-task-id="${taskId}" data-workspace-action-node="${escapeWorkflowText(row.action.node_id)}" data-workspace-action-instance="${escapeWorkflowText(row.action.instance_key)}"><label>Outcome summary<textarea required id="workspace-task-${taskId}-outcome" name="outcome_summary" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Artifact references (one per line)<textarea required id="workspace-task-${taskId}-artifacts" name="artifact_refs" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Acceptance result<select required id="workspace-task-${taskId}-acceptance" name="acceptance_result" class="mt-1 w-full rounded border-slate-300"><option value="fully_met">Fully met</option><option value="partially_met">Partially met</option></select></label><label>Checklist evidence (criterion: result, one per line)<textarea required id="workspace-task-${taskId}-checklist" name="checklist_result" class="mt-1 w-full rounded border-slate-300"></textarea></label><label>Worktree path (optional)<input type="text" id="workspace-task-worktree-path" name="worktree_path" class="mt-1 w-full rounded border-slate-300"><span class="mt-1 block text-slate-600">Select the worktree inspected for this completion.</span></label><label class="flex items-start gap-2"><input type="checkbox" id="workspace-task-delivery-ack" name="uncommitted" class="mt-0.5 rounded border-slate-300"><span>I acknowledge uncommitted changes or unavailable repository evidence.</span></label><button type="submit" class="justify-self-start rounded bg-teal-700 px-2 py-1 font-semibold text-white">Record Task completion</button><p data-workspace-task-completion-status="true" hidden></p></form></details>`;
 }
 
 function currentWorkspaceTaskRows() {
@@ -4438,6 +4463,7 @@ async function submitWorkspaceTaskCompletion(form) {
     const refs = String(form.elements.artifact_refs?.value ?? '').split('\n').map((item) => item.trim()).filter(Boolean);
     const checklist = checklistResult(form.elements.checklist_result?.value);
     const outcome = String(form.elements.outcome_summary?.value ?? '').trim();
+    const worktreePath = String(form.elements.worktree_path?.value ?? '');
     if (!outcome || !refs.length || !checklist) {
         setProjectError('Record an outcome, at least one artifact reference, and checklist evidence for this Task.');
         return;
@@ -4458,6 +4484,8 @@ async function submitWorkspaceTaskCompletion(form) {
             artifact_refs: refs,
             acceptance_result: form.elements.acceptance_result.value,
             checklist_result: checklist,
+            uncommitted: form.elements.uncommitted?.checked === true,
+            ...(worktreePath !== '' ? { worktree_path: worktreePath } : {}),
         }, {
             expectedDecision: binding.decision.decision_fingerprint,
             expectedInstance: binding.action.instance_key,

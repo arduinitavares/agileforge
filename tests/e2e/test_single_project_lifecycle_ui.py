@@ -684,6 +684,28 @@ class FakeLifecycle:
         assert idempotency_key.startswith("dashboard-")
         assert _FORBIDDEN_BODY_FIELDS.isdisjoint(body)
 
+    def _task_completion_semantics(self, body: JsonObject) -> tuple[bool, str | None]:
+        """Accept only completion fields and optional human inspection choices."""
+        optional = {"uncommitted", "worktree_path"}.intersection(body)
+        self._assert_fields(
+            body,
+            {
+                "acceptance_result",
+                "artifact_refs",
+                "checklist_result",
+                "instance_key",
+                "outcome_summary",
+                *optional,
+            },
+        )
+        acknowledged = body.get("uncommitted", False)
+        assert isinstance(acknowledged, bool)
+        worktree_path = body.get("worktree_path")
+        if "worktree_path" in body:
+            assert isinstance(worktree_path, str)
+            assert worktree_path != ""
+        return acknowledged, cast("str | None", worktree_path)
+
     def _create_project(self, body: JsonObject) -> tuple[int, JsonObject]:
         self._assert_fields(body, {"description", "name", "repository_path"})
         name = body["name"]
@@ -2238,18 +2260,7 @@ class Issue260RetryLifecycle(SprintContinuityLifecycle):
         headers: dict[str, str],
     ) -> tuple[int, JsonObject]:
         if suffix == "/sprint/task/complete":
-            self._assert_fields(
-                body,
-                {
-                    "acceptance_result",
-                    "actor",
-                    "artifact_refs",
-                    "checklist_result",
-                    "idempotency_key",
-                    "instance_key",
-                    "outcome_summary",
-                },
-            )
+            self._task_completion_semantics(body)
             assert body["instance_key"] == "retry:101:task:71"
             self.retry_task_completion_requests.append(dict(body))
             self.retry_task_completed = True
@@ -4245,6 +4256,244 @@ class CompactTaskLifecycle(SprintContinuityLifecycle):
         if match[2]:
             data.update({"items": [], "count": 0})
         return data
+
+
+@dataclass
+class CompletionRepositoryLifecycle(CompactTaskLifecycle):
+    """Refuse dirty full acceptance until the human explicitly acknowledges it."""
+
+    completion_requests: list[JsonObject] = field(default_factory=list)
+    completion_headers: list[dict[str, str]] = field(default_factory=list)
+    recorded_completion: JsonObject | None = None
+
+    def _sprint_status_response(self) -> tuple[int, JsonObject]:
+        """Keep the same selected Task after its completion becomes immutable."""
+        status, envelope = super()._sprint_status_response()
+        if self.recorded_completion is not None:
+            data = cast("JsonObject", envelope["data"])
+            rows = cast("list[JsonObject]", data["tasks"])
+            rows[-1]["status"] = "Done"
+        return status, envelope
+
+    def _position_projection(self) -> JsonObject:
+        position = super()._position_projection()
+        if self.recorded_completion is not None:
+            position["decisions"] = []
+            position["_actions"] = []
+        return position
+
+    def _read(self, suffix: str) -> JsonObject:
+        data = super()._read(suffix)
+        match = re.fullmatch(r"/sprints/31/tasks/(69|70|71)(/execution)?", suffix)
+        if match is not None:
+            completion: JsonObject | None = None
+            if match[1] == "71":
+                completion = self.recorded_completion
+                if completion is not None:
+                    cast("JsonObject", data["task"])["status"] = "Done"
+                    cast("JsonObject", data["original_task"])["status"] = "Done"
+            elif match[1] == "69":
+                completion = {
+                    "acceptance_result": "fully_met",
+                    "checklist_result": {"verification": "passed"},
+                    "repository_evidence": None,
+                    "revision_recording": "not_recorded",
+                    "repository_warnings": [],
+                    "repository_warning_messages": [],
+                }
+            data["completion"] = completion
+            data["original_completion"] = completion
+        return data
+
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        if suffix != "/sprint/task/complete":
+            return super()._mutate(suffix, body, headers)
+        acknowledged, worktree_path = self._task_completion_semantics(body)
+        assert "uncommitted" in body
+        assert body["instance_key"] == "task:71"
+        assert headers.get("x-agileforge-expected-decision") == _fingerprint("d")
+        assert headers.get("x-agileforge-expected-instance") == "task:71"
+        self.completion_requests.append(dict(body))
+        self.completion_headers.append(
+            {
+                name: headers[name]
+                for name in (
+                    "x-agileforge-expected-decision",
+                    "x-agileforge-expected-instance",
+                )
+            }
+        )
+        if not acknowledged and body["acceptance_result"] == "fully_met":
+            return _HTTP_CONFLICT, {
+                "detail": {
+                    "errors": [
+                        {
+                            "code": "WORKFLOW_FACT_CONFLICT",
+                            "message": (
+                                "UNCOMMITTED_WORKTREE: uncommitted work requires "
+                                "uncommitted=true or CLI --uncommitted. "
+                                "A changed request requires a new idempotency key."
+                            ),
+                        }
+                    ]
+                }
+            }
+        self.recorded_completion = {
+            "acceptance_result": body["acceptance_result"],
+            "outcome_summary": body["outcome_summary"],
+            "artifact_refs": body["artifact_refs"],
+            "checklist_result": body["checklist_result"],
+            "repository_evidence": {
+                "version": "agileforge.task-repository-evidence.v1",
+                "state": "captured",
+                "repository_binding_id": 17,
+                "repository_binding_fingerprint": _fingerprint("b"),
+                "worktree_path": worktree_path or "/fake/selected/worktree",
+                "common_git_dir": "/fake/repository/.git",
+                "head_sha": "abcdef0123456789abcdef0123456789abcdef0123",
+                "branch_name": "delivery/evidence",
+                "detached_head": False,
+                "dirty": True,
+                "dirty_path_count": 1,
+                "dirty_paths": ["changed.txt"],
+                "dirty_paths_truncated": False,
+                "probed_path_matches_binding": False,
+                "other_worktrees_present": False,
+                "status_fingerprint": _fingerprint("c"),
+                "probe_version": "agileforge.repository-probe.v1",
+                "inspected_at": "2026-10-07T12:00:00Z",
+                "uncommitted_acknowledged": acknowledged,
+            },
+            "revision_recording": "recorded",
+            "repository_warnings": ["UNCOMMITTED_WORKTREE"],
+            "repository_warning_messages": [
+                "Uncommitted changes were present in the selected worktree."
+            ],
+        }
+        return _HTTP_OK, self._mutation_result()
+
+
+def _open_task_completion_form(page: Page) -> tuple[Locator, Locator]:
+    """Open the selected inspector and verify default semantic controls."""
+    _select_workspace_stage(page, 9)
+    page.locator("#workspace-task-row-71").click()
+    detail = page.locator('[data-workspace-task-detail="71"]')
+    detail.get_by_role("tab", name="Checks", exact=True).click()
+    expect(
+        detail.get_by_role("tabpanel").get_by_text(
+            "No persisted completion result.", exact=True
+        )
+    ).to_be_visible()
+    disclosure = page.locator('[data-workspace-task-completion-disclosure="71"]')
+    disclosure.get_by_text("Record completion for Task #71", exact=True).click()
+    form = disclosure.locator('[data-workspace-task-completion="true"]')
+    acknowledgement = form.get_by_role(
+        "checkbox",
+        name=("I acknowledge uncommitted changes or unavailable repository evidence."),
+        exact=True,
+    )
+    expect(acknowledgement).to_have_count(1)
+    expect(acknowledgement).not_to_be_checked()
+    worktree = form.locator("#workspace-task-worktree-path")
+    expect(worktree).to_have_attribute("type", "text")
+    expect(worktree).to_have_value("")
+    _assert_human_only_surface(page)
+    return form, acknowledgement
+
+
+def _assert_completion_repository_checks(page: Page, tmp_path: Path) -> None:
+    """Scope recorded and legacy evidence to the selected visible Checks panel."""
+    detail = page.locator('[data-workspace-task-detail="71"]')
+    detail.get_by_role("tab", name="Checks", exact=True).click()
+    panel = detail.get_by_role("tabpanel")
+    expect(panel.get_by_text("Repository at completion", exact=True)).to_be_visible()
+    expect(panel.get_by_text("Acknowledgement: Yes", exact=True)).to_be_visible()
+    expect(panel.get_by_text("Dirty: Yes", exact=True)).to_be_visible()
+    expect(panel).to_contain_text("abcdef0123456789abcdef0123456789abcdef0123")
+    expect(panel).to_contain_text("/fake/selected/worktree")
+    expect(panel.get_by_text("Acceptance: fully_met", exact=True)).to_be_visible()
+    page.get_by_role("button", name="All Tasks", exact=True).click()
+    page.locator("#workspace-task-row-69").click()
+    legacy = page.locator('[data-workspace-task-detail="69"]')
+    legacy.get_by_role("tab", name="Checks", exact=True).click()
+    expect(
+        legacy.get_by_role("tabpanel").get_by_text("Revision not recorded", exact=True)
+    ).to_be_visible()
+    expect(legacy.get_by_role("tabpanel")).not_to_contain_text("Dirty: No")
+    _assert_human_only_surface(page)
+    page.screenshot(
+        path=str(tmp_path / "completion-repository-evidence.png"), full_page=True
+    )
+
+
+def test_task_completion_dirty_refusal_requires_explicit_acknowledgement(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Retain semantic evidence and identity until a manually acknowledged POST."""
+    fake = CompletionRepositoryLifecycle(repositories={}, sprint_active=True)
+    context, page = _open_project_page(dashboard_harness, fake)
+    try:
+        expected_posts = 2
+        selected = page.locator("#workspace-task-row-71")
+        form, acknowledgement = _open_task_completion_form(page)
+        worktree = form.locator("#workspace-task-worktree-path")
+        evidence_fields = {
+            "Outcome summary": "Completed the selected Task with retained dirty work.",
+            "Artifact references (one per line)": (
+                "artifact://task/71\nartifact://task/71/check"
+            ),
+            "Checklist evidence (criterion: result, one per line)": (
+                "Verify protected access and audit evidence.: passed"
+            ),
+        }
+        exact_path = " /fake/selected/worktree "
+        for label, value in evidence_fields.items():
+            form.get_by_label(label, exact=True).fill(value)
+        form.get_by_label("Acceptance result", exact=True).select_option("fully_met")
+        worktree.fill(exact_path)
+        submit = form.get_by_role("button", name="Record Task completion", exact=True)
+        submit.click()
+        status = form.locator("[data-workspace-task-completion-status]")
+        expect(status).to_contain_text(
+            "A changed request requires a new idempotency key."
+        )
+        expect(submit).to_be_enabled()
+        assert len(fake.completion_requests) == 1
+        assert fake.completion_requests[0]["uncommitted"] is False
+        assert fake.recorded_completion is None
+        expect(acknowledgement).not_to_be_checked()
+        expect(selected).to_have_attribute("aria-pressed", "true")
+        expect(form).to_have_attribute("data-workspace-action-instance", "task:71")
+        for label, value in evidence_fields.items():
+            expect(form.get_by_label(label, exact=True)).to_have_value(value)
+        expect(form.get_by_label("Acceptance result", exact=True)).to_have_value(
+            "fully_met"
+        )
+        expect(worktree).to_have_value(exact_path)
+        acknowledgement.check()
+        submit.click()
+        expect(page.locator("#refresh-project")).to_be_enabled()
+        _assert_completion_repository_checks(page, tmp_path)
+        assert len(fake.completion_requests) == expected_posts
+        first, second = fake.completion_requests
+        assert second["uncommitted"] is True
+        assert first["worktree_path"] == second["worktree_path"] == exact_path
+        assert first["idempotency_key"] != second["idempotency_key"]
+        assert {
+            **second,
+            "uncommitted": False,
+            "idempotency_key": first["idempotency_key"],
+        } == first
+        assert fake.completion_headers[0] == fake.completion_headers[1]
+        assert fake.api_errors == []
+    finally:
+        context.close()
 
 
 @pytest.mark.parametrize("viewport", [_DESKTOP_VIEWPORT, _MOBILE_VIEWPORT])

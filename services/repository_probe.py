@@ -28,6 +28,8 @@ class RepositoryProbeErrorCode(StrEnum):
     UNBORN_HEAD = "UNBORN_HEAD"
     REPOSITORY_CHANGED_DURING_PROBE = "REPOSITORY_CHANGED_DURING_PROBE"
     MALFORMED_PATH = "MALFORMED_PATH"
+    WORKTREE_PATH_UNUSABLE = "WORKTREE_PATH_UNUSABLE"
+    PROBE_TIMED_OUT = "PROBE_TIMED_OUT"
 
 
 _ERROR_MESSAGES: dict[RepositoryProbeErrorCode, str] = {
@@ -42,6 +44,10 @@ _ERROR_MESSAGES: dict[RepositoryProbeErrorCode, str] = {
         "Repository HEAD changed during the probe."
     ),
     RepositoryProbeErrorCode.MALFORMED_PATH: "Repository path is malformed.",
+    RepositoryProbeErrorCode.WORKTREE_PATH_UNUSABLE: (
+        "The selected worktree path could not be used."
+    ),
+    RepositoryProbeErrorCode.PROBE_TIMED_OUT: "Repository probe timed out.",
 }
 
 
@@ -93,3 +99,23 @@ class RepositoryProbe(Protocol):
 
     def inspect(self, path: Path | str) -> RepositoryProbeResult:
         """Inspect one Git worktree without altering it."""
+
+
+class RepositoryRevisionProbeResult(_FrozenProbeModel):
+    """Cheap completion verification without status records or fingerprints."""
+
+    head_sha: str
+    dirty: bool
+
+
+class TaskRepositoryProbe(RepositoryProbe, Protocol):
+    """Completion-specific inspection without widening the base protocol."""
+
+    def inspect_common_git_dir(self, path: Path | str) -> str:
+        """Read resolved repository membership without requiring HEAD or status."""
+
+    def inspect_revision(self, path: Path | str) -> RepositoryRevisionProbeResult:
+        """Read only HEAD and whether the selected worktree contains changes."""
+
+    def has_other_worktrees(self, path: Path | str) -> bool:
+        """Read repository topology without inspecting another worktree's files."""

@@ -837,6 +837,19 @@ def _install_execution_action_mutations(
     complete.add_argument("--instance-key", required=True)
     complete.add_argument("--outcome-summary", required=True)
     complete.add_argument(
+        "--uncommitted",
+        action="store_true",
+        help=(
+            "Acknowledge full acceptance with dirty or unavailable repository evidence."
+        ),
+    )
+    complete.add_argument(
+        "--worktree",
+        dest="worktree_path",
+        metavar="PATH",
+        help="Select a worktree belonging to the active Repository Binding.",
+    )
+    complete.add_argument(
         "--artifact-ref",
         dest="artifact_refs",
         action="append",
@@ -2418,6 +2431,8 @@ def _task_complete(args: argparse.Namespace, application: _Application) -> int:
                 artifact_refs=tuple(args.artifact_refs),
                 acceptance_result=acceptance_result,
                 checklist_result=checklist_result,
+                uncommitted=args.uncommitted,
+                worktree_path=args.worktree_path,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

@@ -1,3 +1,4 @@
+# workflow/execution_integrity.py
 """Canonical integrity shared by execution graph reads and writes."""
 
 from __future__ import annotations
@@ -8,6 +9,13 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import TypeAdapter, ValidationError
 
 from models.enums import TaskStatus
+from models.repository import RepositoryBinding, repository_binding_fingerprint
+from services.contracts.task_repository_evidence import (
+    CapturedTaskRepositoryEvidence,
+    TaskRepositoryEvidence,
+    UnboundTaskRepositoryEvidence,
+    parse_task_repository_evidence_json,
+)
 from workflow.contracts import JsonObject, JsonValue
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
@@ -95,12 +103,13 @@ class SelectedStoryDependencySnapshot:
 
 @dataclass(frozen=True)
 class TaskEvidencePayload:
-    """Canonical user-supplied evidence for one Task completion."""
+    """Canonical semantic and repository evidence for one Task completion."""
 
     outcome_summary: str
     artifact_refs: tuple[str, ...]
     acceptance_result: Literal["partially_met", "fully_met"]
     checklist_result: JsonObject
+    repository_evidence: TaskRepositoryEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -119,12 +128,18 @@ def canonical_task_evidence_payload(
     artifact_refs_json: str,
     acceptance_result: str,
     checklist_result_json: str,
+    repository_evidence_json: str | None = None,
 ) -> TaskEvidencePayload:
     """Decode and require the one durable canonical Task-evidence payload."""
     try:
         artifact_refs = tuple(_STRING_LIST.validate_json(artifact_refs_json))
         checklist_result = _JSON_OBJECT.validate_json(checklist_result_json)
-    except ValidationError as exc:
+        repository_evidence = (
+            parse_task_repository_evidence_json(repository_evidence_json)
+            if repository_evidence_json is not None
+            else None
+        )
+    except ValueError as exc:
         _fail("Task completion evidence JSON is invalid.", cause=exc)
     if (
         artifact_refs != tuple(sorted(set(artifact_refs)))
@@ -140,7 +155,39 @@ def canonical_task_evidence_payload(
             "Literal['partially_met', 'fully_met']", acceptance_result
         ),
         checklist_result=checklist_result,
+        repository_evidence=repository_evidence,
     )
+
+
+def validate_task_repository_evidence_binding(
+    evidence: TaskRepositoryEvidence | None,
+    *,
+    project_id: int,
+    binding: RepositoryBinding | None,
+) -> None:
+    """Validate retained binding identity without requiring it to remain active."""
+    if evidence is None or isinstance(evidence, UnboundTaskRepositoryEvidence):
+        return
+    if (
+        binding is None
+        or binding.project_id != project_id
+        or binding.repository_binding_id != evidence.repository_binding_id
+    ):
+        _fail("Task repository evidence has a missing or cross-Project binding.")
+    if (
+        repository_binding_fingerprint(binding)
+        != evidence.repository_binding_fingerprint
+    ):
+        _fail("Task repository evidence binding fingerprint changed.")
+    if evidence.probed_path_matches_binding != (
+        evidence.worktree_path == binding.worktree_path
+    ):
+        _fail("Task repository evidence target path does not match its binding flag.")
+    if (
+        isinstance(evidence, CapturedTaskRepositoryEvidence)
+        and evidence.common_git_dir != binding.common_git_dir
+    ):
+        _fail("Task repository evidence targets a different common Git directory.")
 
 
 @dataclass(frozen=True)
@@ -663,16 +710,19 @@ def task_evidence_fingerprint(
         or not task.dependencies_satisfied
     ):
         _fail("Task completion does not match an eligible contract Task.")
-    return canonical_hash(
-        {
-            "execution_contract_fingerprint": contract.fingerprint,
-            "task": task.model_dump(mode="json"),
-            "outcome_summary": evidence.outcome_summary,
-            "artifact_refs": evidence.artifact_refs,
-            "acceptance_result": evidence.acceptance_result,
-            "checklist_result": evidence.checklist_result,
-        }
-    )
+    payload: dict[str, object] = {
+        "execution_contract_fingerprint": contract.fingerprint,
+        "task": task.model_dump(mode="json"),
+        "outcome_summary": evidence.outcome_summary,
+        "artifact_refs": evidence.artifact_refs,
+        "acceptance_result": evidence.acceptance_result,
+        "checklist_result": evidence.checklist_result,
+    }
+    if evidence.repository_evidence is not None:
+        payload["repository_evidence"] = evidence.repository_evidence.model_dump(
+            mode="json"
+        )
+    return canonical_hash(payload)
 
 
 def story_completion_eligibility_fingerprint(
@@ -869,4 +919,5 @@ __all__ = [
     "story_completion_fingerprint",
     "task_evidence_fingerprint",
     "triage_payload_fingerprint",
+    "validate_task_repository_evidence_binding",
 ]

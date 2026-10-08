@@ -1,3 +1,4 @@
+# workflow/facts.py
 """Named immutable workflow facts used to evaluate the domain graph."""
 
 from __future__ import annotations
@@ -7,6 +8,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from services.contracts.task_repository_evidence import (
+    TaskRepositoryEvidence,  # noqa: TC001  # Pydantic evaluates this field at runtime.
+)
 from workflow.contracts import FrozenModel, JsonObject
 
 _DATETIME = _datetime.datetime
@@ -17,6 +21,11 @@ def _normalize_utc(value: _DATETIME) -> _DATETIME:
     if value.tzinfo is None:
         return value.replace(tzinfo=_datetime.UTC)
     return value.astimezone(_datetime.UTC)
+
+
+def _repository_evidence_absent(value: TaskRepositoryEvidence | None) -> bool:
+    """Omit only legacy absent evidence in direct and nested serializers."""
+    return value is None
 
 
 class ProjectFact(FrozenModel):
@@ -517,6 +526,9 @@ class TaskCompletionFact(FrozenModel):
     acceptance_result: Literal["partially_met", "fully_met"]
     checklist_result: JsonObject
     evidence_fingerprint: str
+    repository_evidence: TaskRepositoryEvidence | None = Field(
+        default=None, exclude_if=_repository_evidence_absent
+    )
 
 
 class StoryCompletionFact(FrozenModel):

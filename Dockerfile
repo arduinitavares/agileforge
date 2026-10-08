@@ -20,7 +20,7 @@ RUN printf '%s\n' 'Types: deb' \
     > /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-       ca-certificates curl git tini xz-utils libatomic1 \
+       ca-certificates curl git procps tini xz-utils libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_TOOL_DIR=/opt/tools \

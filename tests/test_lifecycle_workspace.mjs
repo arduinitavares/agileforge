@@ -189,6 +189,34 @@ test('controller retains confirmed detail as stale after a refresh failure', asy
     assert.equal(controller.snapshot().data.task.task_id, 14);
 });
 
+test('controller preserves original and effective completion evidence through merge and stale refresh', async () => {
+    const original = { repository_evidence: null, revision_recording: 'not_recorded',
+        repository_warnings: [], repository_warning_messages: [] };
+    const effective = { repository_evidence: { state: 'captured', head_sha: 'a'.repeat(40),
+        worktree_path: '/retry/worktree', dirty: true, dirty_path_count: 1, dirty_paths: ['changed.txt'],
+        dirty_paths_truncated: false, uncommitted_acknowledged: true }, revision_recording: 'recorded',
+        repository_warnings: ['UNCOMMITTED_WORKTREE'], repository_warning_messages: ['Uncommitted work acknowledged.'] };
+    let fail = false;
+    const controller = api().createController({ requestJson: async (url) => {
+        if (fail) throw new Error('network unavailable');
+        const identity = { project_id: 7, task: { task_id: 14, sprint_id: 31 },
+            current_retry: { retry_attempt_id: 101 } };
+        return { data: url.endsWith('/execution') ? { ...identity, items: [] }
+            : { ...identity, completion: effective, original_completion: original } };
+    } });
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 14, scopeKey: 'retry:101:sprint:31' });
+    const retained = JSON.parse(JSON.stringify(controller.snapshot().data));
+    assert.deepEqual(retained.completion, effective);
+    assert.deepEqual(retained.original_completion, original);
+    assert.deepEqual(retained.execution.items, []);
+    fail = true;
+    await controller.refresh();
+    assert.equal(controller.snapshot().kind, 'stale');
+    assert.deepEqual(JSON.parse(JSON.stringify(controller.snapshot().data)), retained);
+    await controller.select({ projectId: 7, sprintId: 31, taskId: 15, scopeKey: 'retry:101:sprint:31' });
+    assert.equal(controller.snapshot().data, null);
+});
+
 test('controller clears old confirmed detail when a different Task selection fails', async () => {
     let request = 0;
     const controller = api().createController({ requestJson: async () => {
