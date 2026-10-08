@@ -33,6 +33,307 @@
 
 ## DESIGN
 
+### Follow-up: shutdown regression and executable schema transitions, 2026-10-08
+
+Keep the verified exclusive fence, full rollback bundle, authenticated journal,
+idempotency, live-WAL/sealed-snapshot distinction, strict unknown-schema rejection
+and actionable selected-project upgrade hint. The three new findings extend only
+the shutdown and migration/registry contracts. Test seams are the real ADK failure
+and cleanup path, the registered-database upgrade/restore boundary with disposable
+SQLite files, and the finite registry plus independently frozen release fixtures.
+No launcher timeout change or provider call is allowed. The Linux process test
+remains required CI evidence; native tests must reproduce its underlying failure.
+
+**Shutdown diagnosis:** investigate authentication classification, wait lifetime
+and post-failure cleanup independently. Durable terminal failure alone does not
+prove command completion. Record the observed root cause and add a host-runnable
+RED regression before changing the responsible production path. Preserve the
+SPECIFICATION_PRODUCER_FAILED code and fixed safe message for authentication.
+
+Independent host reproduction resolved the cause: #230's provider_retry and
+provider_models imports force LiteLLM 1.78.3 to load during CLI composition.
+That import synchronously fetches the external model-cost map with a 5-second
+HTTP timeout. Master preserves ADK 2.2.0's lazy SDK import and makes no fetch in
+the provider-free action. A synthetic 5-second fetch reproduced the exact symptom:
+at 8.004 seconds the process remains alive with SPECIFICATION_PRODUCER_FAILED
+already durable; natural exit is 8.179 seconds. The same master probe exits in
+2.876 seconds without HTTP, and the same HEAD probe with a bundled cost-map
+override exits in 3.125 seconds. Those overrides are diagnostic controls only.
+No authentication retry or owned-trace cleanup hang was observed. The launcher's
+output is buffered until child exit, and the test checks durability after the
+deadline, so neither fact establishes a separate post-commit hang. Linux process
+execution remains unverified on this host.
+
+Restore lazy SDK initialization in provider_retry and provider_models, including
+the default transport construction if it loads the SDK. Lightweight action state,
+timing policy and control-plane imports must not fetch provider metadata. Resolve
+SDK exception classes and SDK settings only when the physical provider path is
+used, retaining ADK's existing lazy import semantics. Apply debug suppression at
+that real SDK boundary. Do not force LITELLM_LOCAL_MODEL_COST_MAP globally or
+change pricing metadata, authentication classification, retry budgets or shutdown
+deadlines. A fresh-process behavioral regression must intercept HTTP before
+imports and prove that importing CLI composition and constructing models makes
+zero metadata requests; it must also exercise the provider-free authentication
+outcome through the actual application seam with the fixed code/message. Keep
+the existing structural routing/fail-closed and real translated transport tests.
+
+**Executable transitions:** each SchemaTransition owns a typed migration callable
+accepting the caller-owned SQLAlchemy Connection. Resolve the ordered exact-hash
+path to CURRENT_SCHEMA_ID first. Under one explicit BEGIN IMMEDIATE, recheck the
+source, run each callable in order and verify that step's exact output full hash
+and registered structural fingerprint before continuing. Hash and structure reads
+must use that same connection so uncommitted DDL is visible. Reuse the established
+schema-hash serialization, preserving all registered hashes. Any failed step or
+mismatch rolls back the complete chain, leaving the durable recovery journal and
+pre-upgrade backup intact. Callables must not commit, open a separate connection,
+or depend on the changing CURRENT manifest for their historical source/target.
+The issue230 step installs only its frozen canonical provider indexes.
+
+Production migrations no longer call ensure_business_db_ready as a dispatcher.
+That bootstrap continues to create fresh databases and retains its existing
+development-only PRE_RETRY handling/current readiness checks. #300 must append
+one SchemaRelease (independent complete hashes and structural fingerprint), one
+SchemaTransition from the previous current release with its migration callable
+and exact hash pairs, then select the new CURRENT_SCHEMA_ID. It must preserve
+historical entries, supply its frozen fixture evidence and tests, and must not
+extend a generic latest-schema bootstrap to recognize all production releases.
+
+**Registry proof:** every release variant must have one acyclic route to current;
+all transition hash endpoints must be registered under their declared releases,
+and exact source/target mappings must be unique. Every release fingerprint is
+checked against a database materialized from its independent fixture, covering
+both master encodings. Historical fingerprints are declared per release, without
+a shared mutable fingerprint alias. Inspect all tables actually present in each
+registered state; historical recognition must not filter its structures through
+the latest CURRENT manifest's table list. A future table removal/rename must not
+make the exact registered source unrecognizable before its migration runs. Keep
+the final CURRENT equality and unknown/retired-schema rejection gates intact.
+A simulated later release with a distinct
+structure proves master -> issue230 -> later execution and restore, intermediate
+output verification and rollback on a bad hash/callable failure.
+
+**TDD tasks and review checkpoints:**
+
+1. Fresh implementer: executable migration hooks and registry proofs (items 2/3).
+   Files: cli/production_schema_upgrade.py, cli/production_state.py (only a shared
+   connection-aware hash seam if needed), models/db.py (historical schema
+   inspection only; bootstrap migration behavior unchanged),
+   tests/container_runtime/test_production_schema_upgrade.py and a
+   focused new registry/step test module plus frozen release fixture, operator
+   docs and docs/provider-retry-audit.md. Observe RED for ordered two-step
+   migration, same-transaction DDL visibility, wrong intermediate hash and rollback;
+   then GREEN. Add pure-data coverage of reachability, unique/registered endpoints
+   and fixture fingerprints, including invalid registry controls. Run frozen
+   targeted container_runtime tests, ty, Ruff/ANN/format and diff checks. Fresh
+   reviewer returns separate spec-compliance and quality verdicts before acceptance.
+2. Fresh implementer after diagnosis: terminal authentication shutdown (item 1).
+   Files chosen from concrete evidence: adapters/adk/provider_retry.py,
+   adapters/adk/provider_models.py, adapters/adk/provider_transport.py only if the
+   default transport needs lazy initialization, and a focused cold-start regression
+   module plus affected provider tests. The Linux test/fixture remain unchanged
+   unless concrete injection evidence requires correction. Observe host RED before
+   the cause fix, then GREEN for authentication and non-authentication controls.
+   Keep 8-second launcher deadline unchanged. Run affected ADK/CLI failure suites,
+   collect the unchanged Linux launcher test, and obtain fresh spec/quality review.
+3. Root integration and fresh independent whole-diff review. Run repo-wide ty
+   (must print All checks passed!), Ruff and ANN, format all changed/new Python,
+   diff check, exact CI Node command, full container_runtime plus provider
+   retry/audit/transport/boundary/schema and agent-failure code paths, dedicated
+   production read surfaces, and e2e/dev_runtime collection. Record all RED/GREEN
+   receipts, native capability limits and preserved original changes. Leave all
+   edits uncommitted, with no Git mutation or real product/provider/Docker state.
+
+### Production profile upgrades — maintainer scope change, 2026-10-07
+
+The provider indexes exposed a broader missing contract: production profiles and
+restores accept only the current structural schema, while their manifest hashes
+every SQLite schema row, including indexes. An older profile cannot reach the
+existing exact-baseline migrations. The approved follow-up now adds one general
+production upgrade mechanism; issue #289/PR #300 will register its next state on
+that mechanism. The already reviewed cancellation audit, canonical index DDL,
+indexed queries and ordered deletion test remain unchanged.
+
+**Chosen interface:** explicit `production upgrade --profile default`. Normal
+serve/CLI/info continue to hold shared runtime fences; they never perform schema
+maintenance. A registered older profile fails with an actionable message naming
+`production upgrade --profile default` and a Compose invocation requiring the
+selected project explicitly. A pending upgrade names the same recovery command.
+Backup remains able to capture a fully validated
+registered prior profile, so operators have an independent rollback option.
+Automatic upgrade was considered and rejected: explicit maintenance makes the
+backup, schema-write downtime and downgrade boundary visible and avoids changing
+shared-fence concurrency for already-current readers.
+
+**Registry and extension point:** keep a small append-only registry of reviewed
+schema states with immutable identity, complete `database_schema_sha256` and the
+expected structural fingerprint. The frozen master pre-index state reproduced by
+the issue-260 and issue-230 fixtures is registered (master b3a4fb4; complete hash
+begins `3f1d81bb`). The index state is the new current target (hash begins
+`f9bd5c17`). Direct construction also exposed two exact DDL encodings: frozen
+fixtures omit SQLAlchemy's trailing spaces on table lines, whereas a freshly
+created master database retains them. Register both finite variants explicitly:
+frozen `3f1d81bbdec3c5f1f699877cc82f154c0b8e4fb1b2c3dd4824e51603098d0a88`
+→ `f9bd5c17713d15174727cd79e235a1dd62a7e11bac5392c3fbdeb9bf85a339c2`, and raw
+master `d257a8ce162334434d2adc069228ef004db1eb04978db2543a410b7be4a8f29c`
+→ fresh `66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64`.
+Tests must independently construct the raw master schema as well as the frozen
+fixtures. Do not normalize arbitrary DDL whitespace or admit unregistered hashes.
+An entry's hash identifies the entire schema, not an exemption for
+all nonunique indexes. Migration dispatch follows registered executable steps
+inside BEGIN IMMEDIATE, verifying each exact intermediate hash and structure and
+the final CURRENT_BUSINESS_SCHEMA_MANIFEST. Future changes append a state and its
+transition callable, preserve prior identities and register
+the previous current state as a source. A behavioral guard builds the current
+schema and upgrades frozen predecessors; a changed current structural/full hash
+without a new registered state fails. Do not infer the expected target hash from
+the database being upgraded.
+
+**Upgrade algorithm:** under the existing exclusive runtime fence, validate
+ownership, paths, startup/model markers, model hash, aliases and relocations.
+Load with `validate_current_schema=False`, requiring the recorded full schema
+hash to equal the file hash before any normal upgrade. Require an exact registered
+source. Capture and verify a pre-upgrade bundle using existing backup machinery,
+in a private deployment-owned upgrade-backup directory outside the profile, then
+durably publish an upgrade journal identifying the profile/state, source manifest
+digest, source/target schema hashes and verified backup/receipt. Run the reviewed
+migration transaction, verify exact current structural and complete hash, and
+atomically republish the production manifest through `_publish_manifest`, changing
+only `business_schema_sha256`. Retain a completed journal and rollback bundle as
+upgrade evidence. An already-current second upgrade performs no DDL, no new
+backup and no manifest rewrite.
+
+**Crash recovery:** only the explicit upgrade command may resume a durable
+journal. Revalidate its owned paths, source manifest, profile identity and backup
+evidence. The only accepted database hashes are the journal's registered source
+and exact registered current target. If migration committed but manifest still
+records the source, reverify the full target and republish. If publication already
+completed, verify the exact resulting manifest and finish the journal. Interrupted
+SQLite migration rolls back or is rejected; partial/unknown states, unrelated
+indexes, column drift and user_version drift are never normalized. Public
+`load_production_state` keeps its strict default checks; any recovery-only hash
+allowance is bounded to a verified upgrade journal and registered source/target.
+
+**Model-configuration operations:** applying/recovering markers still require
+explicit `recover-models` before upgrading. Fully verified complete/recovered
+markers belong to the pre-upgrade schema's rollback pair. The explicit upgrade
+archives their exact bytes in the verified rollback evidence and retires their
+active startup marker through the durable journal, rather than rewriting saved
+receipts or accepting arbitrary manifest changes. Existing saved model-operation
+files remain untouched. After a schema upgrade, rollback across that schema
+boundary uses the full pre-upgrade bundle with the prior image; old model-only
+recovery cannot restore an obsolete schema manifest. Journal recovery covers a
+crash during marker retirement. Document this consequence in the operator guide.
+
+**Restore:** first verify the bundle/provenance unchanged, including its recorded
+schema hash. Accept exact registered older states as well as the exact current
+state. Migrate only the installed restored database under exclusive fences,
+verify current structure and expected complete hash, then finalize the rebased
+manifest. Never mutate the bundle. The retained source bundle is the rollback
+point; restored state keeps its source-backup provenance.
+
+**Development:** dev profiles hash schema source files rather than SQLite schema
+rows. Index installation does not cause the production-manifest problem there.
+Keep existing source-drift rejection and the checkout-local launcher contract.
+Audit all direct and indirect business_schema_sha256 verification paths, including
+API readiness, product CLI and production model configuration.
+
+**Live databases and sealed snapshots:** final independent review reproduced two
+WAL gaps in the rollback contract. Live repository discovery must read committed
+WAL bindings, matching the SQLite backup API's snapshot, so the existing complete
+capture and fence checks cannot be bypassed. Live and installed schema readers
+also remain WAL-aware. Complete-hash and structural readers accept an explicit
+immutable mode only at an already verified, sealed bundle boundary; source
+provenance, rollback evidence and restore preflight use that mode to avoid adding
+sidecar files or changing bundle inventory. Close owned hash connections
+deterministically. Do not checkpoint or rewrite a sealed bundle to repair it.
+SQLite's [URI rules](https://www.sqlite.org/uri.html) and
+[read-only WAL rules](https://www.sqlite.org/wal.html#read_only_databases) support
+this distinction; disposable reproductions establish the worktree failures.
+All executable upgrade examples must select the same Compose project explicitly.
+Startup and pending-journal hints also require the selected project. Because a
+runtime hint cannot discover its caller's Compose namespace, explain how to set
+`project_name` and use a guarded shell expansion that refuses unset/empty values
+before invoking Docker. Test the projected hint and fake command execution;
+never operate a Docker resource to verify it.
+
+**Provider-free test seams:** runtime command with fake serve/CLI, strict profile
+load, backup/provenance verification, restore, migration/journal publication fault
+injection, registered schema construction and real runtime fences. Use disposable
+databases and the independently frozen master fixtures. No LLM calls, real home
+profiles, Docker resources or native Linux product processes on macOS.
+
+#### Follow-up TDD tasks (execute before final review)
+
+1. **Registry and explicit profile upgrade.** Files: new
+   `cli/production_schema_upgrade.py`, `cli/container_runtime.py`, minimal
+   `cli/production_state.py`/`cli/production_model_config.py` seams if required,
+   `cli/state_transfer.py` for shared side-effect-controlled read-only schema
+   inspection without changing bundle verification,
+   `tests/container_runtime/test_provider_index_manifest.py` (rework the interrupted
+   partial test), focused schema-upgrade tests. Observe RED on frozen-master
+   profile → explicit upgrade → strict info/fake serve/fake CLI → backup
+   verification. Add vertical RED/GREEN slices for actionable startup errors,
+   exact registry guard, second-upgrade no-op, durable journal recovery around
+   migration/manifest/marker publication, unknown states and genuine drift.
+   Preserve existing `test_database_schema_drift_is_rejected` unchanged. Include
+   a clean-interpreter regression without AGILEFORGE_DB_URL, verifying scoped
+   import/environment/cache restoration. Explicit model recovery on a registered
+   prior schema must finish before upgrade; model recovery must refuse a pending
+   schema journal before it writes. Run
+   `uv run --frozen pytest tests/container_runtime/test_provider_index_manifest.py
+   tests/container_runtime/test_production_state.py
+   tests/container_runtime/test_model_config_update.py -q`, plus any new focused
+   test file. Fresh spec-compliance and quality review before Task 2.
+2. **Registered restore and operator contract.** Files:
+   `cli/container_runtime.py`, `scripts/container.py`,
+   `tests/container_runtime/test_container_transport.py`,
+   `tests/container_runtime/test_provider_index_manifest.py`
+   or a focused restore test, `docs/linux-containers.md`,
+   `docs/provider-retry-audit.md`. Observe RED for an independently frozen
+   master-era bundle → restore → current strict load → backup verification.
+   Preserve bundle provenance checks and current restore identity. Add `upgrade`
+   to the checkout controller's explicit maintenance-command allowlist with a
+   fake-transport RED/GREEN test; the direct Compose command remains the public
+   operator example. Document
+   rebuild image → stop → upgrade → up, backup/journal location, crash recovery,
+   downgrade with prior image/full rollback bundle, terminal model-operation
+   handling and the small registry extension needed by #300. Run
+   `uv run --frozen pytest tests/container_runtime/test_provider_index_manifest.py
+   tests/container_runtime/test_container_runtime.py
+   tests/container_runtime/test_state_transfer.py -q`. Fresh spec/quality review.
+3. **Resolve final-review WAL rollback defects.** Files:
+   `cli/production_state.py`, `cli/production_schema_upgrade.py`,
+   `cli/container_runtime.py`, `cli/state_transfer.py`,
+   focused tests in `tests/container_runtime/`, `docs/provider-retry-audit.md`.
+   Observe RED before source edits: WAL-mode prior profile upgrade and interrupted
+   journal recovery must retain a byte-identical verified rollback bundle; restore
+   from a WAL-mode master bundle must leave that bundle unchanged and create no
+   sidecars. A committed WAL-only active repository binding must be discovered,
+   fully captured for a fenced synthetic repository, and rejected before schema
+   writes if outside the fence or explicitly omitted. Preserve live-WAL schema
+   visibility and all genuine drift checks; no changes to backup provenance or
+   inventory validation. Fix the short audit guide's Compose project selector
+   without prose/regex tests. The runtime startup/recovery hint is another
+   operator callsite: observe RED for project selection in projected errors and
+   fake command execution with selected versus unset/empty project names. Run
+   `uv run --frozen pytest tests/container_runtime/test_production_schema_upgrade.py
+   tests/container_runtime/test_registered_schema_restore.py
+   tests/container_runtime/test_state_transfer.py
+   tests/container_runtime/test_schema_upgrade_review_regressions.py -q`, plus the
+   new focused regression file. Fresh implementer, spec/quality review, then a
+   fresh final whole-diff fix review. Findings and observed RED/GREEN receipts
+   stay in the execution ledger.
+4. **Final independent whole-diff review and verification.** Verify all new work
+   together while preserving the previously reviewed follow-up. Run repo-wide
+   ty (must print `All checks passed!`), ruff and ANN, changed-Python format,
+   git diff --check, exact CI Node command, affected container_runtime (including
+   production_state/state_transfer), provider retry/audit/transport/boundary,
+   schema, db_tools, API deletion and production_read_surfaces suites. Collect
+   all tests/e2e and tests/dev_runtime; report Linux-only process execution as
+   unavailable on this macOS host. Use fresh ultra implementers per task,
+   independent spec/quality reviewers between tasks and fresh final whole-change
+   review. No commits, pushes or external comments; retain changes uncommitted.
+
 ### 1. Verified current behavior and root cause
 
 Evidence is at the actual SHA above and applies to the brief's SHA because the runtime source is unchanged:

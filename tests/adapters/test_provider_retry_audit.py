@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from threading import Barrier
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 from models.core import Project
@@ -26,6 +28,12 @@ from services.contracts.provider_retry import (
     ProviderRetryConfig,
     ProviderTryAuditRecord,
 )
+from tests.adapters.test_provider_boundary_routes import (
+    BackoffClock,
+    boundary,
+    error,
+    invoke,
+)
 from workflow.fingerprints import business_fact_fingerprint, fact_fingerprint
 
 if TYPE_CHECKING:
@@ -37,6 +45,294 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 10, 7, 12, tzinfo=UTC)
 _PAIR_EVENT_COUNT = 2
 _TWO_TRIES_EVENT_COUNT = 4
+_LARGE_HISTORY_ROWS: int = 12000
+_MAX_TRIES: int = 10
+
+
+def _assert_prepared_plan(statement: str, details: list[str]) -> str:
+    assert not any(
+        "ix_workflow_events_event_type" in detail
+        or "SCAN workflow_events" in detail
+        or "TEMP B-TREE" in detail
+        for detail in details
+    ), details
+    if "UNION ALL" in statement:
+        for identity in ("action", "call"):
+            for ownership in ("<?", ">?", "=?"):
+                assert any(
+                    f"ix_workflow_events_provider_{identity}" in detail
+                    and f"<expr>=? AND project_id{ownership}" in detail
+                    for detail in details
+                ), details
+        return "global"
+    if "$.action_id" in statement or "$.call_id" in statement:
+        identity = "action" if "$.action_id" in statement else "call"
+        assert any(
+            f"ix_workflow_events_provider_{identity}" in detail
+            and "<expr>=? AND project_id=?" in detail
+            for detail in details
+        ), details
+        return identity
+    assert any(
+        "ix_workflow_events_provider_invalid" in detail and "project_id=?" in detail
+        for detail in details
+    ), details
+    return "invalid"
+
+
+@pytest.mark.parametrize(
+    "operation", ["start", "finish", "start_replay", "finish_replay", "terminal"]
+)
+@pytest.mark.parametrize(
+    ("history_size", "history_identity"),
+    [(0, "empty")]
+    + [
+        (size, kind)
+        for size in (1000, 4000, 12000)
+        for kind in ("unrelated", "same_action")
+    ],
+)
+def test_provider_operations_use_identity_constrained_prepared_queries(
+    audit_database: tuple[Engine, int],
+    operation: str,
+    history_size: int,
+    history_identity: str,
+) -> None:
+    """Every prepared audit lookup seeks identity and owner, never provider history."""
+    engine, project_id = audit_database
+    repository = ProviderAttemptAuditRepository(engine)
+    started = _start(project_id)
+    finished = _finish(started)
+    if history_size:
+        _seed_provider_history(
+            engine,
+            project_id,
+            history_size,
+            same_action=history_identity == "same_action",
+        )
+    if operation != "start":
+        repository.append_started(started)
+    if operation in {"finish_replay", "terminal"}:
+        repository.append_finished(finished)
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.startswith("SELECT") and "json_valid(" in statement:
+            captured.append((statement, cast("tuple[object, ...]", parameters)))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        if operation in {"start", "start_replay"}:
+            repository.append_started(started)
+        elif operation in {"finish", "finish_replay"}:
+            repository.append_finished(finished)
+        else:
+            assert (
+                repository.terminal_failure(
+                    project_id=project_id, action_id="action-a", call_id="call-a"
+                )
+                is not None
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert captured
+    found: set[str] = set()
+    with engine.connect() as connection:
+        for statement, parameters in captured:
+            details = [
+                str(row[3])
+                for row in connection.exec_driver_sql(
+                    "EXPLAIN QUERY PLAN " + statement, parameters
+                ).all()
+            ]
+            found.add(_assert_prepared_plan(statement, details))
+    expected = {"global", "call", "invalid"}
+    if operation != "terminal":
+        expected.add("action")
+    assert found == expected
+
+
+def _seed_provider_history(
+    engine: Engine, project_id: int, size: int, *, same_action: bool = False
+) -> None:
+    """Populate synthetic old calls without sending to a provider."""
+    template = _start(project_id).model_dump(mode="json")
+    rows = [
+        (
+            "PROVIDER_TRY_STARTED",
+            project_id,
+            json.dumps(
+                {
+                    **template,
+                    "action_id": "action-a"
+                    if same_action
+                    else f"history-action-{ordinal}",
+                    "call_id": f"history-call-{ordinal}",
+                }
+            ),
+        )
+        for ordinal in range(size)
+    ]
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workflow_events (event_type, project_id, event_metadata) "
+            "VALUES (?, ?, ?)",
+            rows,
+        )
+
+
+@pytest.mark.parametrize("identity", ["action", "call"])
+@pytest.mark.parametrize("owner", ["foreign", "null"])
+def test_old_foreign_identity_is_never_hidden_by_later_history(
+    audit_database: tuple[Engine, int], identity: str, owner: str
+) -> None:
+    """Old action/call collisions, including NULL owners, survive growing history."""
+    engine, project_id = audit_database
+    with Session(engine) as session:
+        foreign = Project(name="Foreign old audit")
+        session.add(foreign)
+        session.commit()
+        assert foreign.project_id is not None
+        foreign_id = foreign.project_id
+    collision = _start(
+        foreign_id,
+        action_id="action-a" if identity == "action" else "foreign-action",
+        call_id="call-a" if identity == "call" else "foreign-call",
+        started_at=NOW - timedelta(days=3650),
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workflow_events (event_type, project_id, event_metadata) "
+            "VALUES (?, ?, ?)",
+            (
+                "PROVIDER_TRY_STARTED",
+                foreign_id if owner == "foreign" else None,
+                collision.model_dump_json(),
+            ),
+        )
+    _seed_provider_history(engine, project_id, _LARGE_HISTORY_ROWS)
+    repository = ProviderAttemptAuditRepository(engine)
+    with pytest.raises(ProviderAuditError):
+        repository.append_started(_start(project_id))
+    with pytest.raises(ProviderAuditError):
+        repository.terminal_failure(
+            project_id=project_id, action_id="action-a", call_id="call-a"
+        )
+    with engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql(
+                "SELECT count(*) FROM workflow_events"
+            ).scalar_one()
+            == _LARGE_HISTORY_ROWS + 1
+        )
+
+
+@pytest.mark.parametrize("metadata", [None, "{late malformed JSON"])
+def test_late_malformed_local_evidence_blocks_a_complete_twenty_row_call(
+    audit_database: tuple[Engine, int], metadata: str | None
+) -> None:
+    """Damaged local history after a full ten-try call still fails every operation."""
+    engine, project_id = audit_database
+    repository = ProviderAttemptAuditRepository(engine)
+    config = ProviderRetryConfig(max_attempts=_MAX_TRIES)
+    first: ProviderTryAuditRecord | None = None
+    last: ProviderTryAuditRecord | None = None
+    for ordinal in range(1, _MAX_TRIES + 1):
+        started = _start(
+            project_id,
+            try_ordinal=ordinal,
+            max_attempts=_MAX_TRIES,
+            retry_config=config,
+            started_at=NOW + timedelta(seconds=(ordinal - 1) * 2),
+        )
+        if first is None:
+            first = started
+        finished = _finish(started)
+        if ordinal < _MAX_TRIES:
+            finished = _finish(
+                started,
+                disposition="retry_scheduled",
+                termination_reason=None,
+                selected_delay_seconds=1.0,
+                next_eligible_retry_at=started.started_at + timedelta(seconds=2),
+            )
+        repository.append_started(started)
+        repository.append_finished(finished)
+        last = finished
+    assert first is not None
+    assert last is not None
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workflow_events (event_type, project_id, event_metadata) "
+            "VALUES (?, ?, ?)",
+            ("PROVIDER_TRY_STARTED", project_id, metadata),
+        )
+    with pytest.raises(ProviderAuditError):
+        repository.append_started(first)
+    with pytest.raises(ProviderAuditError):
+        repository.append_finished(last)
+    with pytest.raises(ProviderAuditError):
+        repository.append_started(_start(project_id, action_id="new", call_id="new"))
+    with pytest.raises(ProviderAuditError):
+        repository.terminal_failure(
+            project_id=project_id, action_id="action-a", call_id="call-a"
+        )
+
+
+@pytest.mark.parametrize("operation", ["start", "terminal"])
+@pytest.mark.parametrize("index_state", ["missing", "drifted"])
+def test_unprepared_supplied_engine_fails_before_provider_operation(
+    audit_database: tuple[Engine, int], operation: str, index_state: str
+) -> None:
+    """An explicit unprepared engine fails locally without installing or scanning."""
+    engine, project_id = audit_database
+    with engine.begin() as connection:
+        if index_state == "missing":
+            for name in ("action", "call", "invalid"):
+                connection.exec_driver_sql(
+                    f"DROP INDEX ix_workflow_events_provider_{name}"
+                )
+        else:
+            connection.exec_driver_sql("DROP INDEX ix_workflow_events_provider_action")
+            connection.exec_driver_sql(
+                "CREATE INDEX ix_workflow_events_provider_action "
+                "ON workflow_events(project_id, event_id)"
+            )
+    repository = ProviderAttemptAuditRepository(engine)
+    statements: list[str] = []
+
+    def capture(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        if operation == "start":
+            with pytest.raises(ProviderAuditError):
+                repository.append_started(_start(project_id))
+        else:
+            with pytest.raises(ProviderAuditError):
+                repository.terminal_failure(
+                    project_id=project_id, action_id="action-a", call_id="call-a"
+                )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert not any("json_valid(" in sql or "CREATE " in sql for sql in statements)
+    assert _events(engine) == []
 
 
 @pytest.fixture
@@ -95,6 +391,84 @@ def _events(engine: Engine) -> list[WorkflowEvent]:
         return list(
             session.exec(select(WorkflowEvent).order_by(col(WorkflowEvent.event_id)))
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 429])
+async def test_backoff_cancellation_persists_an_unsent_cancelled_pair(
+    audit_database: tuple[Engine, int], status: int
+) -> None:
+    """Cancellation preserves the scheduled send and durably closes its retry."""
+    engine, project_id = audit_database
+    repository = ProviderAttemptAuditRepository(engine)
+    clock = BackoffClock()
+    sends: list[dict[str, object]] = []
+
+    async def send(**kwargs: object) -> object:
+        """Return a retryable response from one injected provider send."""
+        sends.append(kwargs)
+        raise error(status)
+
+    module = boundary()
+    client = module.RetryingOpenRouterClient(
+        completion=send, clock=clock, uniform=lambda _low, high: high
+    )
+    context = module.ProviderActionContext(
+        project_id=project_id,
+        action_id="cancelled-backoff-action",
+        policy=ProviderRetryConfig(max_attempts=3),
+        audit=repository,
+        action_deadline=clock.value + 120.0,
+        pre_try_check=lambda: None,
+        idempotency_key_digest="b" * 64,
+    )
+    with module.bind_provider_action(context):
+        task = asyncio.create_task(invoke(client))
+        await asyncio.wait_for(clock.backoff_started.wait(), timeout=1.0)
+        scheduled_events = _events(engine)
+        scheduled_metadata = [event.event_metadata for event in scheduled_events]
+        clock.value += 7.0
+        task.cancel("synthetic backoff cancellation")
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+
+    assert caught.value is clock.cancellation
+    assert len(sends) == 1
+    assert clock.waits == [1.0]
+    events = _events(engine)
+    assert [event.event_metadata for event in events[:2]] == scheduled_metadata
+    assert [event.event_type for event in events] == [
+        WorkflowEventType.PROVIDER_TRY_STARTED,
+        WorkflowEventType.PROVIDER_TRY_FINISHED,
+        WorkflowEventType.PROVIDER_TRY_STARTED,
+        WorkflowEventType.PROVIDER_TRY_FINISHED,
+    ]
+    first, scheduled, cancelled_start, cancelled_finish = [
+        ProviderTryAuditRecord.model_validate_json(event.event_metadata or "")
+        for event in events
+    ]
+    assert scheduled.disposition == "retry_scheduled"
+    assert scheduled.http_status == status
+    assert cancelled_start == ProviderTryAuditRecord.model_validate(
+        first.model_dump() | {"try_ordinal": 2, "started_at": clock.utc_now()}
+    )
+    assert cancelled_finish == ProviderTryAuditRecord.model_validate(
+        cancelled_start.model_dump()
+        | {
+            "finished_at": clock.utc_now(),
+            "duration_seconds": 0.0,
+            "retry_classification": "cancelled",
+            "disposition": "cancelled",
+        }
+    )
+    assert (
+        repository.terminal_failure(
+            project_id=project_id,
+            action_id=context.action_id,
+            call_id=first.call_id,
+        )
+        is None
+    )
 
 
 def test_committed_pair_and_terminal_summary_survive_database_reopen(

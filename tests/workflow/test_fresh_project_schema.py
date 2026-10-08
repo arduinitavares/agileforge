@@ -371,8 +371,10 @@ def test_issue_210_fresh_metadata_matches_independent_structural_manifest() -> N
     _assert_current_business_schema(fresh)
 
 
-def test_provider_events_open_existing_enum_storage_without_schema_changes() -> None:
-    """New vocabulary fits the captured VARCHAR(27), with no enum CHECK rewrite."""
+def test_provider_events_keep_enum_storage_with_only_authorized_lookup_indexes() -> (
+    None
+):
+    """Provider vocabulary keeps VARCHAR(27) and adds only three lookup indexes."""
     from models.enums import WorkflowEventType  # noqa: PLC0415
 
     existing = _complete_current_schema()
@@ -405,13 +407,20 @@ def test_provider_events_open_existing_enum_storage_without_schema_changes() -> 
                     WorkflowEventType.PROVIDER_TRY_FINISHED.name,
                 ),
             )
-            assert (
-                connection.exec_driver_sql(
-                    "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL "
-                    "ORDER BY type, name"
-                ).all()
-                == schema_before
-            )
+            schema_after = connection.exec_driver_sql(
+                "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL "
+                "ORDER BY type, name"
+            ).all()
+            additions = [row for row in schema_after if row not in schema_before]
+            assert {row[1] for row in additions} == {
+                "ix_workflow_events_provider_action",
+                "ix_workflow_events_provider_call",
+                "ix_workflow_events_provider_invalid",
+            }
+            assert all(row[0] == "index" for row in additions)
+            assert [
+                row for row in schema_after if row not in additions
+            ] == schema_before
         assert inspect(existing).get_check_constraints("workflow_events") == []
         assert (
             str(inspect(existing).get_columns("workflow_events")[1]["type"])

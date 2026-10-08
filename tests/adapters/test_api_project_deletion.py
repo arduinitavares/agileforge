@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 import api
 from models.core import Project
@@ -66,8 +66,15 @@ def test_delete_project_removes_provider_audit_and_preserves_other_project(
     with Session(engine) as session:
         assert session.get(Project, deleted_id) is None
         assert session.get(Project, retained_id) is not None
-        events = session.exec(select(WorkflowEvent)).all()
-        assert [(event.project_id, event.event_type) for event in events] == [
-            (retained_id, WorkflowEventType.PROVIDER_TRY_STARTED),
-            (retained_id, WorkflowEventType.PROVIDER_TRY_FINISHED),
-        ]
+        connection = session.connection()
+        try:
+            connection.exec_driver_sql("PRAGMA reverse_unordered_selects=ON")
+            events = session.exec(
+                select(WorkflowEvent).order_by(col(WorkflowEvent.event_id))
+            ).all()
+            assert [(event.project_id, event.event_type) for event in events] == [
+                (retained_id, WorkflowEventType.PROVIDER_TRY_STARTED),
+                (retained_id, WorkflowEventType.PROVIDER_TRY_FINISHED),
+            ]
+        finally:
+            connection.exec_driver_sql("PRAGMA reverse_unordered_selects=OFF")

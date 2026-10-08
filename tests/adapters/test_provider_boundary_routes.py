@@ -9,6 +9,7 @@ import asyncio
 import importlib
 import json
 import tomllib
+import traceback
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -68,6 +69,27 @@ class Clock:
         self.waits.append(seconds)
         self.value += seconds + self.oversleep
         await asyncio.sleep(0)
+
+
+class BackoffClock(Clock):
+    """Hold the retry wait until its public completion task is cancelled."""
+
+    def __init__(self) -> None:
+        """Expose wait readiness and the exact cancellation raised by the wait."""
+        super().__init__()
+        self.backoff_started: asyncio.Event = asyncio.Event()
+        self.release_backoff: asyncio.Event = asyncio.Event()
+        self.cancellation: asyncio.CancelledError | None = None
+
+    async def sleep(self, seconds: float) -> None:
+        """Wait on a controllable event without advancing the fake clock."""
+        self.waits.append(seconds)
+        self.backoff_started.set()
+        try:
+            await self.release_backoff.wait()
+        except asyncio.CancelledError as cancellation:
+            self.cancellation = cancellation
+            raise
 
 
 class Audit:
@@ -569,6 +591,64 @@ async def test_cancellation_finishes_audit_and_propagates() -> None:
     ):
         await invoke(module.RetryingOpenRouterClient(completion=send, clock=clock))
     assert audit.finishes[-1].disposition == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["started", "finished"])
+@pytest.mark.parametrize("private_failure", [False, True])
+async def test_backoff_cancellation_survives_audit_failure(
+    monkeypatch: pytest.MonkeyPatch, phase: str, *, private_failure: bool
+) -> None:
+    """An audit write failure retains cancellation with only a safe cause."""
+    clock = BackoffClock()
+    audit = Audit(clock)
+    sends = 0
+
+    async def send(**kwargs: object) -> object:
+        """Return an eligible failure before the controllable backoff."""
+        del kwargs
+        nonlocal sends
+        sends += 1
+        raise error(500)
+
+    audit_error: Exception = (
+        RuntimeError("private synthetic audit failure")
+        if private_failure
+        else ProviderAuditError()
+    )
+
+    def refuse_write(record: ProviderTryAuditRecord) -> None:
+        """Fail only the newly cancelled reservation's requested audit phase."""
+        del record
+        raise audit_error
+
+    module = boundary()
+    client = module.RetryingOpenRouterClient(
+        completion=send, clock=clock, uniform=lambda _low, high: high
+    )
+    with module.bind_provider_action(context(clock, audit)):
+        task = asyncio.create_task(invoke(client))
+        await asyncio.wait_for(clock.backoff_started.wait(), timeout=1.0)
+        scheduled = audit.finishes[0]
+        monkeypatch.setattr(audit, f"append_{phase}", refuse_write)
+        task.cancel("synthetic backoff cancellation")
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+
+    assert caught.value is clock.cancellation
+    assert isinstance(caught.value.__cause__, ProviderAuditError)
+    assert str(caught.value.__cause__) == (
+        "Provider attempt audit could not be recorded or verified."
+    )
+    assert caught.value.__cause__.__context__ is None
+    assert "private synthetic audit failure" not in "".join(
+        traceback.format_exception(caught.value)
+    )
+    assert sends == 1
+    assert audit.finishes == [scheduled]
+    assert scheduled.disposition == "retry_scheduled"
+    assert len(audit.starts) == (1 if phase == "started" else 2)
+    assert audit.checked == []
 
 
 @pytest.mark.asyncio

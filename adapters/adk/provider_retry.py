@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import random
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -21,16 +22,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import httpx
-import litellm
 from google.adk.models.lite_llm import LiteLLMClient
-from litellm.exceptions import (
-    APIError,
-    InternalServerError,
-    RateLimitError,
-    ServiceUnavailableError,
-    Timeout,
-)
-from litellm.llms.openrouter.common_utils import OpenRouterException
 from openai import APIError as OpenAIAPIError
 from openai import APIStatusError
 from pydantic import ValidationError
@@ -55,17 +47,9 @@ _MAX_RETRY_AFTER_LENGTH: int = 1024
 _MAX_RAW_RETRY_AFTER_LENGTH: int = 2 * _MAX_RETRY_AFTER_LENGTH
 _MAX_STATUS_CODE_LENGTH: int = 16
 _MAX_SAFE_RETRY_AFTER_INTEGER: int = 9_007_199_254_740_991
-_TRANSLATED_RESPONSE_ERRORS: tuple[type[BaseException], ...] = (
-    APIError,
-    InternalServerError,
-    RateLimitError,
-    ServiceUnavailableError,
-    Timeout,
-)
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     OpenAIAPIError,
     httpx.HTTPError,
-    OpenRouterException,
 )
 _OWNED_STATUS_ATTRIBUTE: str = "agileforge_response_status"
 _MAX_HTTP_STATUS: int = 599
@@ -133,10 +117,43 @@ def _http_request(error: BaseException) -> httpx.Request | None:
     return None
 
 
+def _sdk_error_types() -> tuple[
+    tuple[type[BaseException], ...],
+    tuple[type[BaseException], ...],
+    tuple[type[BaseException], ...],
+]:
+    """Resolve SDK evidence only after an SDK call or exception loaded it."""
+    if "litellm" not in sys.modules:
+        return (), (), ()
+    from litellm.exceptions import (  # noqa: PLC0415
+        APIError,
+        InternalServerError,
+        RateLimitError,
+        ServiceUnavailableError,
+        Timeout,
+    )
+    from litellm.llms.openrouter.common_utils import (  # noqa: PLC0415
+        OpenRouterException,
+    )
+
+    return (
+        (
+            APIError,
+            InternalServerError,
+            RateLimitError,
+            ServiceUnavailableError,
+            Timeout,
+        ),
+        (OpenRouterException,),
+        (Timeout,),
+    )
+
+
 def _is_openrouter_response(error: BaseException) -> bool:
-    if isinstance(error, _TRANSLATED_RESPONSE_ERRORS):
+    translated_errors, openrouter_errors, _ = _sdk_error_types()
+    if isinstance(error, translated_errors):
         return getattr(error, "llm_provider", None) == "openrouter"
-    if isinstance(error, OpenRouterException):
+    if isinstance(error, openrouter_errors):
         return True
     if isinstance(error, (httpx.HTTPStatusError, APIStatusError)):
         request = _http_request(error)
@@ -173,13 +190,14 @@ def classify_openrouter_failure(
     """Require a selected OpenRouter model and typed structured response evidence."""
     if not model_id.startswith("openrouter/"):
         return None
+    _, openrouter_errors, timeout_errors = _sdk_error_types()
     for candidate in _exception_chain(error):
         if isinstance(candidate, (asyncio.CancelledError, ValidationError)):
             return None
         has_owned_status = hasattr(candidate, _OWNED_STATUS_ATTRIBUTE)
         if has_owned_status and getattr(candidate, _OWNED_STATUS_ATTRIBUTE) is None:
             return None
-        if not isinstance(candidate, _TRANSPORT_ERRORS):
+        if not isinstance(candidate, _TRANSPORT_ERRORS + openrouter_errors):
             continue
         response = getattr(candidate, "response", None)
         status = _status_code(
@@ -198,7 +216,10 @@ def classify_openrouter_failure(
         if (
             not _is_openrouter_response(candidate)
             or status not in _TRANSIENT_STATUSES
-            or (isinstance(candidate, Timeout) and status != HTTPStatus.GATEWAY_TIMEOUT)
+            or (
+                isinstance(candidate, timeout_errors)
+                and status != HTTPStatus.GATEWAY_TIMEOUT
+            )
         ):
             return None
         return TransientProviderResponse(
@@ -439,6 +460,16 @@ async def _owned_timeout(awaitable: Awaitable[object], seconds: float) -> object
         raise
 
 
+def _initialize_litellm() -> None:
+    """Preserve ADK's deferred safe SDK initialization at the provider boundary."""
+    from google.adk.models.lite_llm import _ensure_litellm_imported  # noqa: PLC0415
+
+    _ensure_litellm_imported()
+    import litellm  # noqa: PLC0415
+
+    setattr(litellm, "suppress_debug_info", True)  # noqa: B010
+
+
 def _check_controls(model: str, request: Mapping[str, object]) -> None:
     """Reject implicit SDK settings and immutable identity replacements."""
     if not model.startswith("openrouter/"):
@@ -451,6 +482,9 @@ def _check_controls(model: str, request: Mapping[str, object]) -> None:
         or "stream" in extra_body
     ):
         raise ProviderAttemptStopped()
+    _initialize_litellm()
+    import litellm  # noqa: PLC0415
+
     # These mutable defaults merge after capture/fingerprinting. Explicit
     # request provider routing, reasoning and generation extras remain supported.
     if litellm.OpenrouterConfig.get_config():
@@ -522,12 +556,13 @@ def _remaining(
 
 def _confirmed_status(error: BaseException) -> int | None:
     """Resolve only the effective current transport status."""
+    transport_errors = _TRANSPORT_ERRORS + _sdk_error_types()[1]
     for candidate in _exception_chain(error):
         if hasattr(candidate, _OWNED_STATUS_ATTRIBUTE):
             return _status_code(getattr(candidate, _OWNED_STATUS_ATTRIBUTE))
         if isinstance(candidate, (ValidationError, asyncio.CancelledError)):
             return None
-        if isinstance(candidate, _TRANSPORT_ERRORS):
+        if isinstance(candidate, transport_errors):
             response = getattr(candidate, "response", None)
             status = _status_code(getattr(candidate, "status_code", None))
             if status is None and isinstance(response, httpx.Response):
@@ -663,14 +698,7 @@ class RetryingOpenRouterClient(LiteLLMClient):
         ] = _owned_timeout,
     ) -> None:
         """Inject deterministic seams without retaining action or event-loop state."""
-        if completion is None:
-            # Deferred import breaks the transport's structured-evidence dependency.
-            from adapters.adk.provider_transport import (  # noqa: PLC0415
-                OpenRouterOneSendCompletion,
-            )
-
-            completion = OpenRouterOneSendCompletion()
-        self._completion: Callable[..., Awaitable[object]] = completion
+        self._completion: Callable[..., Awaitable[object]] | None = completion
         self._clock = clock if clock is not None else _SystemClock()
         self._uniform = uniform
         self._timeout_runner = timeout_runner
@@ -703,6 +731,8 @@ class RetryingOpenRouterClient(LiteLLMClient):
             }
         )
         _check_controls(model, request)
+        import litellm  # noqa: PLC0415
+
         request.update(num_retries=0, max_retries=0, caching=False)
         call = _ProviderCall(
             context, self._clock, uuid4().hex, model, _request_fingerprint(request)
@@ -782,7 +812,17 @@ class RetryingOpenRouterClient(LiteLLMClient):
         timeout = min(existing_timeout, remaining)
         previous_sends = call.sends
         dispatch = _TryDispatch(call, start.try_ordinal, request)
-        owns_dispatch = getattr(self._completion, "owns_dispatch_notifications", False)
+        completion = self._completion
+        if completion is None:
+            from adapters.adk.provider_transport import (  # noqa: PLC0415
+                OpenRouterOneSendCompletion,
+            )
+
+            completion = cast(
+                "Callable[..., Awaitable[object]]", OpenRouterOneSendCompletion()
+            )
+            self._completion = completion
+        owns_dispatch = getattr(completion, "owns_dispatch_notifications", False)
 
         send_request = copy.deepcopy(request) | {"timeout": timeout}
         if owns_dispatch:
@@ -792,7 +832,7 @@ class RetryingOpenRouterClient(LiteLLMClient):
                 # Injected completion seam promises one invocation = one send.
                 dispatch()
             result = await self._timeout_runner(
-                self._completion(**send_request),
+                completion(**send_request),
                 timeout,
             )
             dispatch.require_dispatched()
@@ -901,7 +941,23 @@ class RetryingOpenRouterClient(LiteLLMClient):
             < context.policy.min_remaining_seconds
         ):
             self._budget_stop(call)
-        await self._clock.sleep(delay)
+        try:
+            await self._clock.sleep(delay)
+        except asyncio.CancelledError as cancellation:
+            # The failed send is already finished; close an unsent reservation.
+            try:
+                cancelled_start_time = self._clock.monotonic()
+                cancelled_start = call.started(start.try_ordinal + 1)
+                context.audit.append_started(cancelled_start)
+                call.finish(
+                    cancelled_start,
+                    cancelled_start_time,
+                    disposition="cancelled",
+                    retry_classification="cancelled",
+                )
+            except Exception:  # noqa: BLE001 - cancellation remains the outcome.
+                raise cancellation from ProviderAuditError()
+            raise
         context.pre_try_check()
         if (
             _remaining(context, self._clock, call.retry_deadline)

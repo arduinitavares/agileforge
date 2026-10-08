@@ -1,12 +1,9 @@
 # adapters/adk/provider_models.py
 """Shared model construction; retry policy is captured by each host action."""
 
-import litellm
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.provider_retry import RetryingOpenRouterClient
-
-setattr(litellm, "suppress_debug_info", True)  # noqa: B010
 
 
 def create_openrouter_model(*, model_id: str, **completion_kwargs: object) -> LiteLlm:

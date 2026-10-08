@@ -406,6 +406,98 @@ controller --project-name "$project_name" production-maintenance \
   --bundle /workspace/default-transfer --json
 ```
 
+### Upgrade an existing production profile
+
+Build the reviewed production image from a clean committed checkout using the
+maintainer build command above. Use the same Compose project and reviewed image
+selection throughout maintenance. Stop the production service, development
+service, and every other process writing either durable volume before upgrading:
+
+```sh
+controller --checkout "$PWD" --project-name "$project_name" \
+  build --target production --tag agileforge-production:local
+docker compose --project-name "$project_name" --profile '*' stop
+docker compose --project-name "$project_name" run --rm production \
+  upgrade --profile default --json
+docker compose --project-name "$project_name" up -d production
+```
+
+Run `up` only after `upgrade` succeeds. The one-shot
+[`run --rm` command](https://docs.docker.com/reference/cli/docker/compose/run/)
+uses the selected service image and volumes for maintenance; subsequent
+[`up -d`](https://docs.docker.com/reference/cli/docker/compose/up/) recreates a
+service whose image changed while retaining its mounted volumes. If using the
+checkout controller for maintenance, its explicit allowlist also accepts
+`production-maintenance --image agileforge-production:local -- upgrade
+--profile default --json` and checks for writable volume consumers.
+
+Normal startup, `info`, product CLI, and model configuration refuse an exact
+registered prior schema with an actionable `upgrade` command. They do not
+rewrite its recorded schema hash. The runtime `backup` command can still capture
+a verified registered prior profile before upgrade. Unknown complete schema
+hashes, structural drift, partial index sets, and SQLite `user_version` drift
+are rejected; maintenance does not normalize them.
+
+The explicit upgrade takes exclusive runtime fences and captures a verified full
+rollback bundle before changing the installed business database. Its private
+deployment-owned evidence is stored at
+`/var/lib/agileforge/upgrade-backups/<operation-id>/bundle`, with a retained
+`journal.json` receipt beside that bundle. The active profile journal is
+`/var/lib/agileforge/profiles/default/schema-upgrade.json`. Keep these files and
+the command's reported backup path intact. If interrupted, keep writers stopped
+and rerun the same `docker compose --project-name "$project_name" run --rm
+production upgrade --profile default --json` command. It verifies the journal and
+retained rollback evidence before resuming migration, manifest publication, or
+marker retirement. Repeating a completed upgrade verifies current state without
+another migration or backup.
+Recover a pending operation with the same reviewed image and registry target
+that started it before selecting a newer schema image. A later release upgrade
+starts a new operation and retains the preceding completed receipt.
+
+Production restore verifies the bundle and its source provenance before creating
+the destination. It accepts only exact registered historical or current schema
+states, upgrades the installed copy under the same exclusive fences, and verifies
+the current structure and expected complete schema hash before publishing the
+rebased runtime manifest. The original bundle, its schema hash, model hash, and
+provenance bytes stay unchanged; the restored profile records its source-backup
+digest. Restore uses that source bundle as rollback evidence and creates no
+schema-upgrade journal or second rollback bundle. A failure after copying can
+leave an unfinished destination without an active `runtime.json`; preserve it
+for investigation and use another fresh profile for a retry. Any cleanup is a
+separate, deliberate operator action.
+
+To roll back across a schema release, stop writers, select the prior reviewed
+image, and restore the full retained pre-upgrade bundle into a fresh profile.
+Keep the existing profile and rollback evidence. Validate the restored profile
+with the prior image's `info` command, then select that profile in the production
+service's `serve --profile <name>` command before restarting. Do not downgrade a
+production database by dropping indexes or editing its runtime manifest.
+
+For maintainers, production upgrades execute the registered migration callables
+in order under one `BEGIN IMMEDIATE`. Each step's exact schema hash and structural
+fingerprint are checked on that same connection before the next step; the final
+current manifest is checked before commit. Any mismatch or callable failure rolls
+back the whole chain while retaining the pending journal and verified backup.
+Callables own no transaction boundaries and must use only their supplied
+connection and frozen historical definitions. Fresh/development bootstrap is a
+separate readiness path.
+
+Issue #300 should append exactly one `SchemaRelease` and one `SchemaTransition`
+from the previous current release in `cli/production_schema_upgrade.py`. Declare
+the new independent structural fingerprint, complete hashes for its frozen DDL
+encodings, a typed migration callable, and exact hash pairs for every previous
+current encoding; then select the new `CURRENT_SCHEMA_ID`. Preserve historical
+entries and populate `tests/fixtures/issue_230/schema_releases.json` with frozen
+fixture evidence for every registered encoding. The callback/source-fixture matrix
+automatically collects every registered transition and exact hash pair, executes
+its callable from that frozen source, and checks its declared target hash and
+structural fingerprint; new registrations require no matrix edits. Add registry,
+ordered-step, rollback, and restore tests. Update the current models/manifest for
+the new release without turning `ensure_business_db_ready` into a production
+history dispatcher. The
+[provider audit maintainer notes](provider-retry-audit.md#production-rollback-and-future-schema-releases)
+describe the extension contract.
+
 To change an existing production profile's model choices, place a complete
 `models.yaml` in the workspace volume and prepare an owned, private parent for
 the recovery record outside every registered repository and Git admin tree.
@@ -441,9 +533,23 @@ controller --project-name "$project_name" production-maintenance \
 Recovery checks the marker, receipt, saved bytes, state identity, and current
 file hashes before restoring the literal previous pair. Repeating the same
 recovery is safe. A completed update can also be rolled back before another
-configuration update. The command refuses unrelated manual drift and a wrong
+configuration update or schema upgrade. The command refuses unrelated manual
+drift and a wrong
 or modified recovery record; preserve both files and investigate such a refusal
 rather than editing the manifest by hand.
+
+Resolve an `applying` or `recovering` model-operation marker with `recover-models`
+before a schema upgrade. A verified `complete` or `recovered` marker is archived
+byte-for-byte inside the pre-upgrade rollback bundle and its active marker is
+retired through the schema journal. Saved model-operation receipts and files stay
+untouched. Model-only recovery cannot restore their obsolete runtime manifest
+across a schema boundary; use the prior image and full pre-upgrade bundle.
+Restore accepts an optional archived terminal marker only when its source
+profile/state identity and selected model/runtime hashes match the bundled pair.
+It never follows the marker's external recovery path. The marker remains
+historical evidence in `config/source-model-config-update.json`, without becoming
+an active marker against the restored profile. Older bundles without a marker
+remain supported.
 
 ### Promote a development profile into the packaged app
 

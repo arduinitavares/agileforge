@@ -33,7 +33,18 @@ from cli.dev_server import (
     stop_ui,
     wait_for_readiness,
 )
-from cli.production_model_config import configure_models, recover_models
+from cli.production_model_config import (
+    ModelConfigUpdateError,
+    _Marker,
+    configure_models,
+    recover_models,
+)
+from cli.production_schema_upgrade import (
+    load_registered_production_state,
+    upgrade_production_state,
+    upgrade_registered_database,
+    validate_registered_database,
+)
 from cli.production_state import (
     PRODUCTION_STATE_BASE,
     ProductionStateError,
@@ -59,7 +70,6 @@ from cli.state_transfer import (
     backup_state,
     restore_payload,
     verify_backup,
-    verify_current_business_schema,
     verify_current_trace_schema,
 )
 from utils.build_identity import (
@@ -154,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     info_parser = commands.add_parser("info", help="Validate and show runtime state")
     _add_profile_argument(info_parser)
     info_parser.add_argument("--json", action="store_true")
+
+    upgrade_parser = commands.add_parser(
+        "upgrade", help="Upgrade or recover a production schema"
+    )
+    _add_profile_argument(upgrade_parser)
+    upgrade_parser.add_argument("--json", action="store_true")
 
     serve_parser = commands.add_parser(
         "serve",
@@ -624,13 +640,14 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def backup_production_state(
+def backup_production_state(  # noqa: PLR0913
     state: ProductionStateManifest,
     destination: Path,
     *,
     deployment_root: Path = PRODUCTION_DEPLOYMENT_ROOT,
     repositories: tuple[Path, ...] | None = None,
     maintenance_fences_held: bool = False,
+    additional_provenance: tuple[Path, ...] = (),
 ) -> Path:
     """Capture complete state and every registered repository under one fence."""
     paths = production_state_paths(state.profile_root)
@@ -643,7 +660,7 @@ def backup_production_state(
         repositories=repositories,
         include_registered_repositories=True,
         maintenance_roots=_maintenance_roots(deployment_root),
-        provenance_files=(paths.manifest,),
+        provenance_files=(paths.manifest, *additional_provenance),
     )
     return backup_state(
         layout,
@@ -702,7 +719,7 @@ def _load_restored_provenance(  # noqa: C901
             message = "restored model configuration hash does not match provenance"
             raise ContainerRuntimeError(message)
         if (
-            database_schema_sha256(bundle / "business.sqlite3")
+            database_schema_sha256(bundle / "business.sqlite3", immutable=True)
             != source_state.business_schema_sha256
         ):
             message = "restored business schema hash does not match provenance"
@@ -729,7 +746,9 @@ def _load_restored_provenance(  # noqa: C901
             message = "restored model configuration hash does not match provenance"
             raise ContainerRuntimeError(message)
 
-        business_schema_hash = database_schema_sha256(bundle / "business.sqlite3")
+        business_schema_hash = database_schema_sha256(
+            bundle / "business.sqlite3", immutable=True
+        )
         if (
             expected_schema_hash is not None
             and expected_schema_hash != business_schema_hash
@@ -853,6 +872,50 @@ def _install_restored_payload(profile_root: Path) -> None:
         provenance_root.rmdir()
 
 
+def _validate_restored_model_marker(
+    bundle: Path, source_state: ProductionStateManifest
+) -> None:
+    """Validate an archived local terminal pair without following recovery paths."""
+    marker_path = bundle / "provenance" / "model-config-update.json"
+    if not marker_path.exists():
+        return
+    try:
+        marker = _Marker.model_validate_json(marker_path.read_bytes())
+    except (OSError, ValidationError) as error:
+        message = "restored model update marker is invalid"
+        raise ModelConfigUpdateError(message) from error
+    if marker.status not in {"complete", "recovered"}:
+        message = "restored model update marker needs explicit recovery"
+        raise ModelConfigUpdateError(message)
+    if (
+        marker.profile_root != str(source_state.profile_root)
+        or marker.profile_name != source_state.profile_name
+        or marker.state_id != source_state.state_id
+    ):
+        message = "restored model update marker names another profile or state"
+        raise ModelConfigUpdateError(message)
+    runtime_provenance = bundle / "provenance" / "runtime.json"
+    if not runtime_provenance.is_file():
+        message = "restored model update marker requires production provenance"
+        raise ModelConfigUpdateError(message)
+    model_sha = (
+        marker.new_model_sha256
+        if marker.status == "complete"
+        else marker.old_model_sha256
+    )
+    manifest_sha = (
+        marker.new_manifest_sha256
+        if marker.status == "complete"
+        else marker.old_manifest_sha256
+    )
+    if (
+        _sha256_file(bundle / "model-config") != model_sha
+        or _sha256_file(runtime_provenance) != manifest_sha
+    ):
+        message = "restored model update marker final pair has drifted"
+        raise ModelConfigUpdateError(message)
+
+
 def restore_production_state(  # noqa: PLR0913
     bundle: Path,
     profile_root: Path,
@@ -876,12 +939,17 @@ def restore_production_state(  # noqa: PLR0913
     targets = dict(relocation_targets or {}) if from_development else None
     with _runtime_fences(deployment_root, exclusive=True):
         transfer_manifest = verify_backup(bundle)
-        verify_current_business_schema(bundle / "business.sqlite3")
-        if (bundle / "trace.sqlite3").is_file():
-            verify_current_trace_schema(bundle / "trace.sqlite3")
         source_state = _load_restored_provenance(
             bundle, from_development=from_development
         )
+        _validate_restored_model_marker(bundle, source_state)
+        validate_registered_database(
+            bundle / "business.sqlite3",
+            profile_name=source_state.profile_name,
+            immutable=True,
+        )
+        if (bundle / "trace.sqlite3").is_file():
+            verify_current_trace_schema(bundle / "trace.sqlite3")
         if targets is not None:
             validate_relocation_targets(
                 bundle / "business.sqlite3", transfer_manifest, targets
@@ -903,6 +971,16 @@ def restore_production_state(  # noqa: PLR0913
         )
         relocation_sha256 = _sha256_file(relocation_record)
         _install_restored_payload(profile_root)
+        installed_database = production_state_paths(profile_root).business_database
+        target = upgrade_registered_database(installed_database)
+        observed = validate_registered_database(
+            installed_database, profile_name=profile_root.name, require_current=True
+        )
+        if observed != target:
+            message = (
+                "restored production migration did not produce the registered target"
+            )
+            raise ProductionStateError(message)
         return finalize_restored_production_state(
             profile_root,
             source_state=source_state,
@@ -974,7 +1052,7 @@ def main(  # noqa: C901, PLR0911, PLR0912, PLR0915
             return 0
         if arguments.command == "backup":
             with _runtime_fences(deployment_root, exclusive=True):
-                state = load_production_state(
+                state = load_registered_production_state(
                     profile_root,
                     build=build,
                     expected_owner_uid=expected_state_owner_uid,
@@ -992,6 +1070,21 @@ def main(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     maintenance_fences_held=True,
                 )
             _emit_payload({"ok": True, "backup": str(bundle)})
+            return 0
+        if arguments.command == "upgrade":
+            owner_uid = (
+                _effective_uid()
+                if expected_state_owner_uid is None
+                else expected_state_owner_uid
+            )
+            with _runtime_fences(deployment_root, exclusive=True):
+                result = upgrade_production_state(
+                    profile_root,
+                    build=build,
+                    deployment_root=deployment_root,
+                    expected_owner_uid=owner_uid,
+                )
+            _emit_payload(result)
             return 0
         if arguments.command in {"configure-models", "recover-models"}:
             owner_uid = (

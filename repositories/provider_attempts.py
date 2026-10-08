@@ -8,13 +8,19 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
-from sqlalchemy import case, func, or_
+from sqlalchemy import union_all
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, col, select
 
 from models.core import Project
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
+from models.provider_audit_indexes import (
+    provider_audit_indexes_present,
+    provider_event_predicate,
+    provider_identity,
+    provider_invalid_predicate,
+)
 from models.workflow import WorkflowNodeAttempt
 from services.contracts.provider_retry import (
     ProviderAuditError,
@@ -23,13 +29,7 @@ from services.contracts.provider_retry import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
-    from sqlalchemy.sql.elements import ColumnElement
-
-_EVENT_TYPES: tuple[WorkflowEventType, ...] = (
-    WorkflowEventType.PROVIDER_TRY_STARTED,
-    WorkflowEventType.PROVIDER_TRY_FINISHED,
-)
+    from sqlalchemy.engine import Connection, Engine
 _CALL_IDENTITY_FIELDS: frozenset[str] = frozenset(
     {
         "project_id",
@@ -74,6 +74,13 @@ class ProviderAttemptAuditRepository:
     def __init__(self, engine: Engine) -> None:
         """Use only the explicitly supplied business engine and owned sessions."""
         self._engine: Engine = engine
+        self._indexes_ready: bool = False
+
+    def _require_indexes(self, connection: Connection) -> None:
+        if not self._indexes_ready:
+            if not provider_audit_indexes_present(connection):
+                raise ProviderAuditError
+            self._indexes_ready = True
 
     def append_started(self, record: ProviderTryAuditRecord) -> None:
         """Commit the host's safe start record before any physical send."""
@@ -100,6 +107,7 @@ class ProviderAttemptAuditRepository:
                     )
                     # Reserve SQLite's one writer before reading the identity.
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    self._require_indexes(connection)
                     with Session(connection) as session:
                         self._append_in_transaction(session, record, finished=finished)
                         session.flush()
@@ -116,6 +124,7 @@ class ProviderAttemptAuditRepository:
         self, session: Session, record: ProviderTryAuditRecord, *, finished: bool
     ) -> None:
         _validate_host(session, record)
+        _reject_invalid_metadata(session, record.project_id)
         _validate_action(session, record)
         records = _call_records(session, record.project_id, record.call_id)
         pairs = _paired_records(records)
@@ -165,14 +174,18 @@ class ProviderAttemptAuditRepository:
     ) -> ProviderFailureSummary | None:
         """Verify every paired try and retain the last confirmed eligible status."""
         try:
+            if self._engine.dialect.name != "sqlite":
+                raise ProviderAuditError
             if expected_summary is not None:
                 expected_summary = ProviderFailureSummary.model_validate(
                     expected_summary.model_dump()
                 )
             with Session(self._engine) as session:
+                self._require_indexes(session.connection())
                 _reject_foreign_identity(
                     session, project_id=project_id, action_id=action_id, call_id=call_id
                 )
+                _reject_invalid_metadata(session, project_id)
                 records = _call_records(session, project_id, call_id)
                 if not records:
                     if expected_summary is not None:
@@ -218,12 +231,9 @@ def _validate_action(session: Session, record: ProviderTryAuditRecord) -> None:
     existing = session.exec(
         select(WorkflowEvent)
         .where(
-            col(WorkflowEvent.event_type).in_(_EVENT_TYPES),
+            provider_event_predicate(),
             col(WorkflowEvent.project_id) == record.project_id,
-            or_(
-                _invalid_metadata(),
-                _safe_metadata_value("action_id") == record.action_id,
-            ),
+            provider_identity("action_id") == record.action_id,
         )
         .order_by(col(WorkflowEvent.event_id))
         .limit(1)
@@ -239,35 +249,35 @@ def _validate_action(session: Session, record: ProviderTryAuditRecord) -> None:
         raise ProviderAuditError
 
 
-def _safe_metadata_value(field: str) -> ColumnElement[str | None]:
-    metadata = col(WorkflowEvent.event_metadata)
-    # CASE is lazy in SQLite; no optimizer-dependent WHERE short circuit is needed.
-    safe_metadata = case((func.json_valid(metadata) == 1, metadata), else_="{}")
-    return func.json_extract(safe_metadata, f"$.{field}")
-
-
-def _invalid_metadata() -> ColumnElement[bool]:
-    return func.coalesce(func.json_valid(col(WorkflowEvent.event_metadata)), 0) != 1
+def _reject_invalid_metadata(session: Session, project_id: int) -> None:
+    if (
+        session.exec(
+            select(col(WorkflowEvent.event_id))
+            .where(
+                provider_invalid_predicate(),
+                col(WorkflowEvent.project_id) == project_id,
+            )
+            .limit(1)
+        ).first()
+        is not None
+    ):
+        raise ProviderAuditError
 
 
 def _reject_foreign_identity(
     session: Session, *, project_id: int, action_id: str, call_id: str
 ) -> None:
-    collision = session.exec(
-        select(col(WorkflowEvent.event_id))
-        .where(
-            col(WorkflowEvent.event_type).in_(_EVENT_TYPES),
-            or_(
-                col(WorkflowEvent.project_id) != project_id,
-                col(WorkflowEvent.project_id).is_(None),
-            ),
-            or_(
-                _safe_metadata_value("action_id") == action_id,
-                _safe_metadata_value("call_id") == call_id,
-            ),
+    owner = col(WorkflowEvent.project_id)
+    branches = [
+        select(col(WorkflowEvent.event_id)).where(
+            provider_event_predicate(),
+            provider_identity(field) == identity,
+            ownership,
         )
-        .limit(1)
-    ).first()
+        for field, identity in (("action_id", action_id), ("call_id", call_id))
+        for ownership in (owner < project_id, owner > project_id, owner.is_(None))
+    ]
+    collision = session.connection().execute(union_all(*branches).limit(1)).first()
     if collision is not None:
         raise ProviderAuditError
 
@@ -278,9 +288,9 @@ def _call_records(
     events = session.exec(
         select(WorkflowEvent)
         .where(
-            col(WorkflowEvent.event_type).in_(_EVENT_TYPES),
+            provider_event_predicate(),
             col(WorkflowEvent.project_id) == project_id,
-            or_(_invalid_metadata(), _safe_metadata_value("call_id") == call_id),
+            provider_identity("call_id") == call_id,
         )
         .order_by(col(WorkflowEvent.event_id))
         .limit(_MAX_CALL_EVENT_ROWS + 1)
