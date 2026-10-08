@@ -1,0 +1,44 @@
+[
+  {
+    "identity": "master-b3a4fb4",
+    "encoding": "frozen",
+    "complete_sha256": "3f1d81bbdec3c5f1f699877cc82f154c0b8e4fb1b2c3dd4824e51603098d0a88",
+    "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
+    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql"]
+  },
+  {
+    "identity": "master-b3a4fb4",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "d257a8ce162334434d2adc069228ef004db1eb04978db2543a410b7be4a8f29c",
+    "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
+    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql"]
+  },
+  {
+    "identity": "issue230-provider-indexes",
+    "encoding": "frozen",
+    "complete_sha256": "f9bd5c17713d15174727cd79e235a1dd62a7e11bac5392c3fbdeb9bf85a339c2",
+    "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
+    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql", "issue_230/issue230_provider_indexes.sql"]
+  },
+  {
+    "identity": "issue230-provider-indexes",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64",
+    "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
+    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql", "issue_230/issue230_provider_indexes.sql"]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "frozen",
+    "complete_sha256": "dfe8255b3a91cb680a318a80e25b6d7ec68d737c408bbd91fdf97ed6acad93e3",
+    "structural_sha256": "ad8a9fefaa2141e1f9a3ef66ec557430d43f404892dea255d49ab02d19f696f8",
+    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql", "issue_230/issue230_provider_indexes.sql", "issue_230/simulated_later_release.sql"]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "58132b24e9410d70dff5ee2eb4ff95e7b8aa2cfe558231c816e36abc06663c7c",
+    "structural_sha256": "ad8a9fefaa2141e1f9a3ef66ec557430d43f404892dea255d49ab02d19f696f8",
+    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql", "issue_230/issue230_provider_indexes.sql", "issue_230/simulated_later_release.sql"]
+  }
+]

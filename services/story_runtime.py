@@ -33,6 +33,7 @@ from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
     parse_json_payload,
+    provider_action_context,
 )
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.failure_artifacts import (
@@ -241,7 +242,7 @@ def _validate_and_canonicalize_output(
     return output, [item.model_dump(mode="json") for item in canonical_items]
 
 
-async def _run_story_request(  # noqa: C901, PLR0911, PLR0912, PLR0915
+async def _run_story_request(
     request_payload: StoryInputContext,
     *,
     project_id: int,
@@ -279,6 +280,25 @@ async def _run_story_request(  # noqa: C901, PLR0911, PLR0912, PLR0915
             request_payload=request_payload,
         )
 
+    with provider_action_context(project_id=project_id):
+        return await _run_validated_story_request(
+            payload,
+            request_payload=request_payload,
+            project_id=project_id,
+            targeted=targeted,
+            target_story_id=target_story_id,
+        )
+
+
+async def _run_validated_story_request(  # noqa: C901, PLR0912, PLR0915
+    payload: UserStoryWriterInput,
+    *,
+    request_payload: StoryInputContext,
+    project_id: int,
+    targeted: bool,
+    target_story_id: int | None,
+) -> dict[str, Any]:
+    """Keep semantic repairs inside the captured outer provider action."""
     attempt_payload = payload
     for attempt_index in range(1, MAX_STORY_SCHEMA_REPAIR_ATTEMPTS + 1):
         attempt_context = attempt_payload.model_dump(mode="json")
@@ -300,9 +320,7 @@ async def _run_story_request(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 safe_validation_errors = None
             elif validation_errors:
                 error = safe_story_validation_message(validation_errors)
-                safe_validation_errors = safe_story_validation_errors(
-                    validation_errors
-                )
+                safe_validation_errors = safe_story_validation_errors(validation_errors)
             else:
                 error = _STORY_INVOCATION_FAILURE_MESSAGE
                 safe_validation_errors = None
@@ -442,11 +460,7 @@ async def _run_story_request(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     raw_text=None,
                     validation_errors=validation_errors,
                     extra=(
-                        {
-                            "invalid_fields": list(
-                                sentinel_fields or reference_fields
-                            )
-                        }
+                        {"invalid_fields": list(sentinel_fields or reference_fields)}
                         if sentinel_fields or reference_fields
                         else None
                     ),

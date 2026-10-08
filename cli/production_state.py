@@ -11,6 +11,7 @@ import stat
 import subprocess  # nosec B404
 import sys
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ from utils.runtime_controls import LAUNCHER_CHILD_ENV, LAUNCHER_CHILD_VALUE
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from sqlalchemy.engine import Connection
 
     from utils.build_identity import BuildIdentity
 
@@ -232,10 +235,11 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def database_schema_sha256(path: Path) -> str:
-    """Hash one SQLite database's complete durable schema definition."""
+def database_schema_sha256(path: Path, *, immutable: bool = False) -> str:
+    """Hash the complete schema; immutable mode is for verified sealed snapshots."""
+    uri = f"{path.as_uri()}?mode=ro" + ("&immutable=1" if immutable else "")
     try:
-        with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             rows = connection.execute(
                 "SELECT type, name, tbl_name, sql FROM sqlite_schema "
                 "WHERE name NOT LIKE 'sqlite_%' "
@@ -245,11 +249,25 @@ def database_schema_sha256(path: Path) -> str:
     except sqlite3.Error as error:
         message = "business database schema could not be inspected"
         raise ProductionStateError(message) from error
+    return _schema_rows_sha256(rows, user_version[0] if user_version else 0)
+
+
+def connection_schema_sha256(connection: Connection) -> str:
+    """Use the same complete-schema encoding for visible, uncommitted DDL."""
+    rows = connection.exec_driver_sql(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name, tbl_name"
+    ).all()
+    user_version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
+    return _schema_rows_sha256([tuple(row) for row in rows], user_version)
+
+
+def _schema_rows_sha256(rows: list[tuple[object, ...]], user_version: int) -> str:
     if not rows:
         message = "business database has no application schema"
         raise ProductionStateError(message)
     payload = json.dumps(
-        {"schema": rows, "user_version": user_version[0] if user_version else 0},
+        {"schema": rows, "user_version": user_version},
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -303,6 +321,7 @@ def load_production_state(
 ) -> ProductionStateManifest:
     """Load one complete production profile without creating any state."""
     from cli.production_model_config import validate_startup_marker  # noqa: PLC0415
+    from cli.production_schema_upgrade import validate_upgrade_startup  # noqa: PLC0415
 
     paths = production_state_paths(profile_root)
     owner_uid = _effective_uid() if expected_owner_uid is None else expected_owner_uid
@@ -310,6 +329,7 @@ def load_production_state(
         paths.root, label="production profile root", expected_owner_uid=owner_uid
     )
     validate_startup_marker(paths, expected_owner_uid=owner_uid)
+    validate_upgrade_startup(paths, expected_owner_uid=owner_uid)
     return _load_production_state_pair(
         profile_root,
         build=build,
@@ -326,6 +346,7 @@ def _load_production_state_pair(  # noqa: C901, PLR0912, PLR0913, PLR0915
     validate_current_schema: bool = True,
     expected_manifest_sha256: str | None = None,
     expected_model_sha256: str | None = None,
+    allowed_business_schema_sha256: str | None = None,
 ) -> ProductionStateManifest:
     """Validate an exact pair under a caller-held exclusive runtime fence."""
     if build.schema_version != "agileforge.build.v1":
@@ -408,12 +429,25 @@ def _load_production_state_pair(  # noqa: C901, PLR0912, PLR0913, PLR0915
     if _file_sha256(paths.model_config) != state.model_config_sha256:
         message = "model configuration drift detected"
         raise ProductionStateError(message)
-    if database_schema_sha256(paths.business_database) != state.business_schema_sha256:
+    observed_schema_sha256 = database_schema_sha256(paths.business_database)
+    if observed_schema_sha256 != state.business_schema_sha256 and (
+        allowed_business_schema_sha256 is None
+        or observed_schema_sha256 != allowed_business_schema_sha256
+    ):
         message = "business schema drift detected"
         raise ProductionStateError(message)
     if validate_current_schema:
+        from cli.production_schema_upgrade import (  # noqa: PLC0415
+            validate_registered_database,
+        )
+
+        validate_registered_database(
+            paths.business_database,
+            profile_name=state.profile_name,
+            require_current=True,
+        )
         try:
-            verify_current_business_schema(paths.business_database)
+            verify_current_business_schema(paths.business_database, immutable=False)
             if trace_metadata is not None:
                 verify_current_trace_schema(paths.trace_database)
         except TransferError as error:

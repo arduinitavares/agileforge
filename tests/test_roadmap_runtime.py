@@ -9,8 +9,10 @@ from typing import Any, cast
 
 import pytest
 
+from adapters.adk import provider_retry
 from services import roadmap_runtime
 from services.contracts.backlog import BacklogItem
+from services.contracts.provider_retry import ProviderAuditError
 from services.contracts.roadmap import RoadmapBuilderInput
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 
@@ -61,6 +63,31 @@ GOLD_ITEM_IDS = {
     "RISK.002",
     "RISK.003",
 }
+
+
+@pytest.mark.asyncio
+async def test_roadmap_helper_binds_context_and_resets_on_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit helpers need a host action even when their invocation fails."""
+    failure = ProviderAuditError()
+    contexts: list[provider_retry.ProviderActionContext] = []
+
+    async def invoke(_payload: RoadmapBuilderInput) -> str:
+        accessor = getattr(provider_retry, "get_provider_action_context", lambda: None)
+        context = accessor()
+        assert context is not None, "Roadmap helper must bind its host action"
+        contexts.append(context)
+        raise failure
+
+    monkeypatch.setattr(roadmap_runtime, "_invoke_roadmap_agent", invoke)
+    with pytest.raises(ProviderAuditError) as caught:
+        await roadmap_runtime.run_roadmap_agent_from_state(
+            _state(), project_id=1, user_input=None
+        )
+    assert caught.value is failure
+    assert contexts[0].project_id == 1
+    assert provider_retry.get_provider_action_context() is None
 
 
 def _state() -> dict[str, Any]:

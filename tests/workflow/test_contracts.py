@@ -173,6 +173,7 @@ def test_contract_enums_are_closed() -> None:
         "WORKFLOW_FACT_CONFLICT",
         "ATTEMPT_OBSOLETE",
         "EXTERNAL_EXECUTION_FAILED",
+        "EXTERNAL_PROVIDER_TEMPORARY",
         "SPRINT_CAPACITY_REQUIRED",
         "PROJECT_NOT_FOUND",
         "REPOSITORY_BINDING_INVALID",

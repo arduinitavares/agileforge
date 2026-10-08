@@ -1,0 +1,4 @@
+-- Frozen issue #230 transition output, independently retained for release proof.
+CREATE INDEX ix_workflow_events_provider_action ON workflow_events (json_extract(CASE WHEN json_valid(event_metadata) = 1 THEN event_metadata ELSE '{}' END, '$.action_id'), project_id, event_id) WHERE event_type IN ('PROVIDER_TRY_STARTED', 'PROVIDER_TRY_FINISHED');
+CREATE INDEX ix_workflow_events_provider_call ON workflow_events (json_extract(CASE WHEN json_valid(event_metadata) = 1 THEN event_metadata ELSE '{}' END, '$.call_id'), project_id, event_id) WHERE event_type IN ('PROVIDER_TRY_STARTED', 'PROVIDER_TRY_FINISHED');
+CREATE INDEX ix_workflow_events_provider_invalid ON workflow_events (project_id, event_id) WHERE event_type IN ('PROVIDER_TRY_STARTED', 'PROVIDER_TRY_FINISHED') AND coalesce(json_valid(event_metadata), 0) != 1;

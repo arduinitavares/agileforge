@@ -53,10 +53,18 @@ from models.product_definition import (
 )
 from models.repository import RepositoryBinding
 from models.specs import SpecRegistry
-from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from models.workflow import (
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
+)
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     SpecificationStructuringOutput,
+)
+from services.node_attempt_replay import (
+    DurableNodeAttemptReplayService,
+    NodeAttemptReplayQuery,
 )
 from services.specification_authoring_input import SpecificationStructuringInputService
 from services.specification_source_registration import (
@@ -64,6 +72,7 @@ from services.specification_source_registration import (
     SpecificationSourceRegistrationService,
 )
 from services.specs.candidate_contract import load_candidate_contract
+from tests.adapters.test_adk_workflow_runner import EXPECTED_PROVIDER_RETRY
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
@@ -85,6 +94,7 @@ if TYPE_CHECKING:
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
+    from services.contracts.provider_retry import ProviderRetryClock
     from workflow.contracts import (
         JsonObject,
         NodeDecision,
@@ -111,14 +121,14 @@ ISSUE_200_OUTPUT: Path = (
     / "issue_200"
     / "complete-provider-output.json"
 )
-ISSUE_245_FIXTURE_DIR: Path = (
-    Path(__file__).parents[1] / "fixtures" / "issue_245"
-)
+ISSUE_245_FIXTURE_DIR: Path = Path(__file__).parents[1] / "fixtures" / "issue_245"
 ISSUE_245_SOURCE: Path = ISSUE_245_FIXTURE_DIR / "source.md"
 
 
 def _issue_245_fixture_bytes() -> bytes:
     return ISSUE_245_SOURCE.read_bytes().replace(b"\r\n", b"\n")
+
+
 ISSUE_200_MAX_OUTPUT_TOKENS: int = 32_768
 ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
     "timeout_seconds": 5.0,
@@ -373,6 +383,7 @@ def _system(  # noqa: PLR0913
     *,
     session_service: BaseSessionService | None = None,
     source_check: SpecificationSourceCheck | None = None,
+    provider_clock: ProviderRetryClock | None = None,
     execution_settings: JsonObject = EXECUTION_SETTINGS,
     source_bytes: bytes = b"# Exact external Specification\n",
     context_bytes: bytes | None = None,
@@ -511,11 +522,10 @@ def _system(  # noqa: PLR0913
         domain=domain,
         registry=registry,
         session_service=(
-            InMemorySessionService()
-            if session_service is None
-            else session_service
+            InMemorySessionService() if session_service is None else session_service
         ),
         specification_source_check=runner_source_check,
+        provider_clock=provider_clock,
         config=AdkExecutionConfig(
             project_id=project_id,
             model_id="fake/specification-structurer",
@@ -921,9 +931,7 @@ def test_real_runner_preserves_exact_source_bytes_lf_and_crlf(
 ) -> None:
     """Input assembly must preserve exact LF and CRLF source bytes."""
     leaf = _unused_leaf("unused_structurer")
-    _, _, _, _, frozen, _ = _system(
-        engine, tmp_path, leaf, source_bytes=raw_bytes
-    )
+    _, _, _, _, frozen, _ = _system(engine, tmp_path, leaf, source_bytes=raw_bytes)
     parsed_input = SpecificationStructuringInput.model_validate(frozen)
     assert parsed_input.registered_source.source.text.encode("utf-8") == raw_bytes
 
@@ -1136,7 +1144,7 @@ def test_incomplete_realistic_response_uses_actionable_durable_failure(
         assert outcome.failure_message == result.error.message
         attempt = _latest_attempt(session, project_id=project_id)
         assert attempt.execution_settings_json == canonical_json(
-            ISSUE_200_EXECUTION_SETTINGS
+            {**ISSUE_200_EXECUTION_SETTINGS, "provider_retry": EXPECTED_PROVIDER_RETRY}
         )
         assert not session.exec(select(SpecificationCandidate)).all()
 
@@ -1222,13 +1230,16 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
         assert canonical_spec_json(payload) == canonical_spec_json(expected.payload)
         attempt = _latest_attempt(session, project_id=project_id)
         assert attempt.execution_settings_json == canonical_json(
-            ISSUE_200_EXECUTION_SETTINGS
+            {**ISSUE_200_EXECUTION_SETTINGS, "provider_retry": EXPECTED_PROVIDER_RETRY}
         )
         assert envelope.attempt_fingerprint == attempt.attempt_fingerprint
         assert envelope.model_configuration_fingerprint == canonical_hash(
             {
                 "model_id": attempt.model_id,
-                "execution_settings": ISSUE_200_EXECUTION_SETTINGS,
+                "execution_settings": {
+                    **ISSUE_200_EXECUTION_SETTINGS,
+                    "provider_retry": EXPECTED_PROVIDER_RETRY,
+                },
             }
         )
 
@@ -1906,16 +1917,13 @@ def test_output_validation_failure_persists_correlated_diagnostic_in_memory(
     )
     assert user_event.invocation_id
     assert (
-        user_event.invocation_id
-        == leaf_event.invocation_id
-        == diag_event.invocation_id
+        user_event.invocation_id == leaf_event.invocation_id == diag_event.invocation_id
     )
     assert diag_event.output is None
     assert diag_event.actions is not None
     diagnostic = diag_event.actions.state_delta["specification_output_diagnostic"]
     assert (
-        diagnostic["schema_version"]
-        == "agileforge.specification-output-diagnostic.v1"
+        diagnostic["schema_version"] == "agileforge.specification-output-diagnostic.v1"
     )
     assert diagnostic["stage"] == "primary"
     assert diagnostic["code"] == "INVALID_SPECIFICATION_PAYLOAD"
@@ -2036,9 +2044,7 @@ def test_output_validation_failure_persists_correlated_diagnostic_sqlite(  # noq
             diag_from_event = diag_event.actions.state_delta[
                 "specification_output_diagnostic"
             ]
-            diag_from_state = persisted_session.state[
-                "specification_output_diagnostic"
-            ]
+            diag_from_state = persisted_session.state["specification_output_diagnostic"]
             assert diag_from_event == diag_from_state
             assert (
                 diag_from_state["schema_version"]
@@ -2216,9 +2222,7 @@ def test_precedence_post_call_revalidation_supersedes_output_diagnostic(
     )
     assert adk_session is not None
     diagnostic_events = [
-        ev
-        for ev in adk_session.events
-        if ev.author == "specification_output_validator"
+        ev for ev in adk_session.events if ev.author == "specification_output_validator"
     ]
     assert len(diagnostic_events) == 0
 
@@ -2742,3 +2746,219 @@ def test_issue_245_omitted_historical_item_fails_and_preserves_source(
         assert (
             tmp_path / "registered-specification-source" / "SPECIFICATION.md"
         ).read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("source_drift", [False, True])
+def test_specification_physical_retries_preserve_provider_failure_and_reprobe_sources(
+    engine: Engine, tmp_path: Path, source_drift: bool
+) -> None:
+    """Preserve exhaustion and stop physical retries after fresh source drift."""
+    from adapters.adk.provider_retry import RetryingOpenRouterClient  # noqa: PLC0415
+    from tests.adapters.test_adk_workflow_runner import (  # noqa: PLC0415
+        GraphProviderResponseError,
+        ProviderGraphClock,
+        ProviderRetryGraphLeaf,
+    )
+
+    clock = ProviderGraphClock(now_value=NOW)
+    sends: list[int] = []
+    drifted = False
+    source_probes: list[bool] = []
+
+    async def completion(**kwargs: object) -> object:
+        del kwargs
+        sends.append(429)
+        error = GraphProviderResponseError(429, "synthetic", "openrouter", "test-model")
+        error.agileforge_response_status = 429
+        raise error
+
+    def drift() -> None:
+        nonlocal drifted
+        drifted = source_drift
+
+    def sources(_project_id: int, _persisted: JsonObject) -> WorkflowError | None:
+        source_probes.append(drifted)
+        return (
+            WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message="Synthetic source changed during backoff.",
+            )
+            if drifted
+            else None
+        )
+
+    clock.on_sleep = drift
+    client = RetryingOpenRouterClient(
+        completion=completion, clock=clock, uniform=lambda _low, _high: 1.0
+    )
+    leaf = ProviderRetryGraphLeaf(
+        name="provider_retry_specification", client=client, response={}
+    )
+    runner, _domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=sources,
+    )
+    result = runner.run(decision, normalized_input, guards=guards)
+    assert result.error is not None
+    assert result.error.code.value == (
+        "STALE_SPECIFICATION_INPUT" if source_drift else "EXTERNAL_PROVIDER_TEMPORARY"
+    )
+    assert sends == ([429] if source_drift else [429, 429, 429])
+    assert len(source_probes) >= len(sends)
+    if source_drift:
+        assert source_probes[-1] is True
+    if not source_drift:
+        summary = cast(
+            "JsonObject", result.model_dump(mode="json")["output"]["provider_failure"]
+        )
+        assert summary["attempts"] == 3  # noqa: PLR2004
+    replay = runner.run(decision, normalized_input, guards=guards)
+    assert replay == result.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        assert not session.exec(select(SpecificationCandidate)).all()
+        assert _latest_outcome(session, project_id=project_id).status == (
+            "obsolete" if source_drift else "failure"
+        )
+
+
+@pytest.mark.parametrize("legacy_start", [False, True])
+def test_successful_specification_retry_replays_terminal_candidate_after_preflight(  # noqa: PLR0915
+    engine: Engine, tmp_path: Path, legacy_start: bool
+) -> None:
+    """Current and legacy Start receipts replay the real terminal candidate."""
+    from adapters.adk.provider_retry import RetryingOpenRouterClient  # noqa: PLC0415
+    from tests.adapters.test_adk_workflow_runner import (  # noqa: PLC0415
+        GraphProviderResponseError,
+        ProviderGraphClock,
+        ProviderRetryGraphLeaf,
+        _provider_audits,
+    )
+
+    clock = ProviderGraphClock(now_value=NOW + timedelta(seconds=1), ticks=100.0)
+    sends: list[int] = []
+    original_start: list[tuple[str, str, str]] = []
+    source_probes: list[int] = []
+
+    def unchanged_source(project_id: int, _input: JsonObject) -> None:
+        """Keep the registered test source stable across real preflight checks."""
+        source_probes.append(project_id)
+
+    async def completion(**kwargs: object) -> object:
+        del kwargs
+        if not sends:
+            with Session(engine) as session:
+                receipt = session.exec(
+                    select(WorkflowTransitionReceipt).where(
+                        col(WorkflowTransitionReceipt.request_kind)
+                        == "start_node_attempt"
+                    )
+                ).one()
+                assert receipt.result_json is not None
+                original_start.append(
+                    (
+                        receipt.request_json,
+                        receipt.request_fingerprint,
+                        receipt.result_json,
+                    )
+                )
+            sends.append(500)
+            error = GraphProviderResponseError(
+                500, "synthetic", "openrouter", "test-model"
+            )
+            error.agileforge_response_status = 500
+            raise error
+        sends.append(200)
+        return object()
+
+    client = RetryingOpenRouterClient(
+        completion=completion, clock=clock, uniform=lambda _low, _high: 1.0
+    )
+    leaf = ProviderRetryGraphLeaf(
+        name="successful_retry_specification", client=client, response=_valid_output()
+    )
+    runner, _domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=unchanged_source,
+        provider_clock=clock,
+        structuring_time=clock.now_value,
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.ok
+    assert result.output
+    assert result.position is not None
+    assert sends == [500, 200]
+    assert clock.waits == [1.0]
+    probes_before = list(source_probes)
+    assert len(probes_before) >= len(sends)
+    request_json, request_fingerprint, initial_result_json = original_start[0]
+    with Session(engine) as session:
+        candidates = session.exec(select(SpecificationCandidate)).all()
+        assert len(candidates) == 1
+        candidate_json = candidates[0].canonical_envelope_json
+        assert _latest_outcome(session, project_id=project_id).status == "success"
+        assert (
+            len(
+                session.exec(
+                    select(WorkflowTransitionReceipt).where(
+                        col(WorkflowTransitionReceipt.request_kind)
+                        == "revalidate_node_attempt"
+                    )
+                ).all()
+            )
+            >= 2  # noqa: PLR2004
+        )
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt"
+            )
+        ).one()
+        assert receipt.result_json == canonical_json(result.model_dump(mode="json"))
+        if legacy_start:
+            receipt.result_json = initial_result_json
+            session.add(receipt)
+            session.commit()
+        saved_result_json = receipt.result_json
+        audit_before = _provider_audits(session)
+        receipt_count = len(session.exec(select(WorkflowTransitionReceipt)).all())
+
+    replayed = runner.run(decision, normalized_input, guards=guards)
+    assert replayed == result.model_copy(update={"replayed": True})
+    semantic_replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        NodeAttemptReplayQuery(
+            project_id=project_id,
+            graph_version=guards.position.graph_version,
+            fact_fingerprint=guards.position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            node_id=decision.node_id,
+            instance_key=decision.instance_key,
+            idempotency_key=guards.idempotency_key,
+            actor=guards.actor,
+            correlation_id=guards.correlation_id,
+            semantic_input=normalized_input,
+        )
+    )
+    assert semantic_replay == result.model_copy(update={"replayed": True})
+    assert sends == [500, 200]
+    assert clock.waits == [1.0]
+    assert source_probes == probes_before
+    with Session(engine) as session:
+        assert _provider_audits(session) == audit_before
+        assert (
+            len(session.exec(select(WorkflowTransitionReceipt)).all()) == receipt_count
+        )
+        candidate = session.exec(select(SpecificationCandidate)).one()
+        assert candidate.canonical_envelope_json == candidate_json
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt"
+            )
+        ).one()
+        assert receipt.request_json == request_json
+        assert receipt.request_fingerprint == request_fingerprint
+        assert receipt.result_json == saved_result_json

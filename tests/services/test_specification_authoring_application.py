@@ -33,9 +33,10 @@ if TYPE_CHECKING:
 
     from adapters.adk.recipes import AdkRecipeRegistry
     from adapters.adk.runner import AdkExecutionConfig, AdkRunRequest
+    from services.contracts.provider_retry import ProviderAttemptAudit
     from services.node_attempt_replay import NodeAttemptReplayQuery
     from workflow.contracts import JsonObject
-    from workflow.requests import TransitionRequest
+    from workflow.requests import StartNodeAttempt, TransitionRequest
 
 PROJECT_ID = 7
 CANDIDATE_ID = 31
@@ -298,6 +299,27 @@ def test_vision_attempt_lease_is_longer_without_affecting_other_roles(
     """The application gives Vision enough time without delaying other leases."""
     captured: list[AdkExecutionConfig] = []
 
+    class ProviderCapableDomain(_Domain):
+        def replay_provider_attempt(
+            self, request: StartNodeAttempt
+        ) -> TransitionResult | None:
+            assert request.project_id == PROJECT_ID
+            return None
+
+        def provider_attempt_audit(self) -> ProviderAttemptAudit:
+            msg = "Capturing runner must not execute provider audit operations."
+            raise AssertionError(msg)
+
+        def check_provider_attempt(self, **kwargs: object) -> WorkflowError | None:
+            del kwargs
+            msg = "Capturing runner must not execute provider guard operations."
+            raise AssertionError(msg)
+
+        def provider_attempt_lease_remaining_seconds(self, **kwargs: object) -> float:
+            del kwargs
+            msg = "Capturing runner must not execute provider lease operations."
+            raise AssertionError(msg)
+
     class CapturingRunner:
         def __init__(self, **kwargs: object) -> None:
             captured.append(cast("AdkExecutionConfig", kwargs["config"]))
@@ -307,7 +329,7 @@ def test_vision_attempt_lease_is_longer_without_affecting_other_roles(
 
     monkeypatch.setattr(runner_module, "AdkWorkflowRunner", CapturingRunner)
     application = AgileForgeApplication(
-        workflow_domain=_Domain(),
+        workflow_domain=ProviderCapableDomain(),
         recipe_registry=cast("AdkRecipeRegistry", object()),
         vision_generation_config={"max_output_tokens": 11111},
     )

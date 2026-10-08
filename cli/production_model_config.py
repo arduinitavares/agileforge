@@ -26,6 +26,7 @@ from cli.production_state import (
 from cli.state_transfer import (
     _git_external_roots,
     discover_registered_repositories,
+    verify_current_trace_schema,
 )
 from utils.model_config import parse_model_config
 
@@ -428,12 +429,18 @@ def recover_models(
     expected_owner_uid: int,
 ) -> dict[str, object]:
     """Explicitly restore a recorded exact pre-update pair under exclusive fences."""
+    from cli.production_schema_upgrade import (  # noqa: PLC0415
+        validate_registered_database,
+        validate_upgrade_startup,
+    )
+
     paths = production_state_paths(profile_root)
     _require_owned_directory(
         paths.root,
         label="production profile root",
         expected_owner_uid=expected_owner_uid,
     )
+    validate_upgrade_startup(paths, expected_owner_uid=expected_owner_uid)
     marker = _read_marker(paths, expected_owner_uid)
     if marker is None:
         message = "no recorded model update to recover"
@@ -462,7 +469,11 @@ def recover_models(
         expected_owner_uid=expected_owner_uid,
         expected_manifest_sha256=marker.old_manifest_sha256,
         expected_model_sha256=marker.old_model_sha256,
+        validate_current_schema=False,
     )
+    validate_registered_database(paths.business_database, profile_name=paths.root.name)
+    if paths.trace_database.exists():
+        verify_current_trace_schema(paths.trace_database)
     if marker.status != "recovered":
         _publish_marker(paths, marker.model_copy(update={"status": "recovered"}))
     return {

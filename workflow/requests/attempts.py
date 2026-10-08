@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from services.contracts.provider_retry import ProviderFailureSummary
 from workflow.contracts import FrozenModel, JsonObject, WorkflowErrorCode
 from workflow.requests.base import GuardedRequest
 
@@ -32,6 +33,9 @@ class FailNodeAttempt(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+    provider_failure: ProviderFailureSummary | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class RevalidateNodeAttempt(FrozenModel):

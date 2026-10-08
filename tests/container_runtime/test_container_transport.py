@@ -150,11 +150,11 @@ def test_production_maintenance_refuses_unknown_writable_container(
         )
 
 
-@pytest.mark.parametrize("action", ["configure-models", "recover-models"])
-def test_model_maintenance_uses_exact_image_and_writable_consumer_check(
+@pytest.mark.parametrize("action", ["configure-models", "recover-models", "upgrade"])
+def test_profile_maintenance_uses_exact_image_and_writable_consumer_check(
     monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
-    """Both model commands pass through the production maintenance transport."""
+    """Model and schema commands use the fenced production maintenance transport."""
     commands: list[tuple[str, ...]] = []
     resolved = f"sha256:{'a' * 64}"
     monkeypatch.setattr(container, "_maintenance_consumers", lambda _resources: [])
