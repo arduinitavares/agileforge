@@ -65,6 +65,7 @@ def _status_sort_key(entry: RepositoryStatusEntry) -> tuple[str, str, bytes, byt
 
 
 _BULK_ARGV_LIMIT: int = 256
+_GIT_INDEX_V4: int = 4
 _BULK_COMMAND_GROWTH_ALLOWANCE: int = 2
 _PORCELAIN_RECORD_PREFIX_LENGTH: int = 3
 _SDK_TIMEOUT_STATUS: int = -9
@@ -725,6 +726,50 @@ def test_full_probe_rejects_other_silent_raw_diff_omissions(
     assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
     assert str(caught.value) == "Git metadata could not be read."
     assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize(
+    "stage_output",
+    [
+        b"160000 " + b"0" * 40 + b" 0\ttracked.txt",
+        b"160000 " + b"0" * 40 + b" 0 tracked.txt\0",
+        b"960000 " + b"0" * 40 + b" 0\ttracked.txt\0",
+        b"160000 " + b"0" * 40 + b" 9\ttracked.txt\0",
+        b"160000 " + b"x" * 40 + b" 0\ttracked.txt\0",
+        b"160000 " + b"0" * 40 + b" 1\ttracked.txt\0",
+    ],
+    ids=[
+        "unterminated-path",
+        "missing-path-separator",
+        "invalid-mode",
+        "invalid-stage",
+        "invalid-object-id",
+        "nonzero-gitlink-stage",
+    ],
+)
+def test_full_probe_rejects_unconfirmed_gitlink_index_metadata(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage_output: bytes,
+) -> None:
+    """Incomplete or non-stage-zero metadata cannot fill a raw diff coverage gap."""
+    (git_repository / "tracked.txt").write_text("tracked changed\n", encoding="utf-8")
+    monkeypatch.setattr(adapter_module, "_diff_entries", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        Git, "ls_files", lambda *_args, **_kwargs: stage_output, raising=False
+    )
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns, index.stat().st_ctime_ns)
+
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert (
+        index.read_bytes(),
+        index.stat().st_mtime_ns,
+        index.stat().st_ctime_ns,
+    ) == before
 
 
 @pytest.mark.parametrize(
@@ -1735,12 +1780,34 @@ def test_verification_disables_fsmonitor_without_changing_dirty_answer(
 
 
 @pytest.mark.parametrize("change", ["clean", "tracked", "untracked", "gitlink"])
-@pytest.mark.parametrize("ignore", ["none", "untracked", "dirty", "all"])
-def test_verification_preserves_nested_submodule_status_semantics(
-    git_repository: Path, change: str, ignore: str
+@pytest.mark.parametrize(
+    ("ignore", "index_version"),
+    [
+        ("default", 2),
+        ("none", 2),
+        ("untracked", 2),
+        ("dirty", 2),
+        ("all", 2),
+        ("default", _GIT_INDEX_V4),
+    ],
+)
+def test_probes_preserve_nested_submodule_status_semantics(
+    git_repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    ignore: str,
+    index_version: int,
 ) -> None:
     """Containment must preserve nested changes and configured ignore semantics."""
-    module_path = git_repository / "module"
+    module_name = (
+        "module\twith\nnewline"
+        if index_version == _GIT_INDEX_V4 and os.name == "posix"
+        else "module"
+    )
+    config_path = (
+        json.dumps(module_name) if index_version == _GIT_INDEX_V4 else module_name
+    )
+    module_path = git_repository / module_name
     with Repo.init(module_path) as module:
         with module.config_writer() as config:
             config.set_value("user", "name", "Synthetic Module Test")
@@ -1750,15 +1817,18 @@ def test_verification_preserves_nested_submodule_status_semantics(
         first_sha = module.index.commit("first module commit").hexsha
         with Repo(git_repository) as repo:
             (git_repository / ".gitmodules").write_text(
-                '[submodule "module"]\n\tpath = module\n'
+                f'[submodule "module"]\n\tpath = {config_path}\n'
                 "\turl = https://example.invalid/module.git\n",
                 encoding="utf-8",
             )
             repo.index.add([".gitmodules"])
-            repo.git.update_index("--add", "--cacheinfo", f"160000,{first_sha},module")
+            repo.git.update_index(
+                "--add", "--cacheinfo", f"160000,{first_sha},{module_name}"
+            )
             repo.index.commit("record gitlink")
             with repo.config_writer() as config:
-                config.set_value('submodule "module"', "ignore", ignore)
+                if ignore != "default":
+                    config.set_value('submodule "module"', "ignore", ignore)
                 config.set_value("submodule", "recurse", True)
         if change in {"tracked", "gitlink"}:
             (module_path / "file.txt").write_text("second\n", encoding="utf-8")
@@ -1767,6 +1837,9 @@ def test_verification_preserves_nested_submodule_status_semantics(
             module.index.commit("second module commit")
         if change == "untracked":
             (module_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+    if index_version == _GIT_INDEX_V4:
+        with Repo(git_repository) as repo:
+            repo.git.update_index("--index-version=4")
     expected = (
         change != "clean"
         and ignore != "all"
@@ -1784,11 +1857,40 @@ def test_verification_preserves_nested_submodule_status_semantics(
     index = git_repository / ".git" / "index"
     module_index = module_path / ".git" / "index"
     before = [
-        (item.read_bytes(), item.stat().st_mtime_ns) for item in (index, module_index)
+        (item.read_bytes(), item.stat().st_mtime_ns, item.stat().st_ctime_ns)
+        for item in (index, module_index)
     ]
-    assert GitPythonRepositoryProbe().inspect_revision(git_repository).dirty is baseline
+
+    def forbid_submodules(_repo: Repo) -> None:
+        message = "Status parsing opened SDK submodule objects."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(Repo, "submodules", property(forbid_submodules))
+    entries = (
+        (RepositoryStatusEntry(area="worktree", change="modified", path=module_name),)
+        if expected
+        else ()
+    )
+    probe = GitPythonRepositoryProbe()
+    observed = probe.inspect(git_repository)
+    assert observed.dirty is baseline
+    assert observed.status_entries == entries
+    assert observed.status_fingerprint == canonical_hash(
+        {
+            "probe_version": "agileforge.repository-probe.v1",
+            "head_sha": observed.head_sha,
+            "branch_name": observed.branch_name,
+            "detached_head": False,
+            "dirty": expected,
+            "status_entries": [entry.model_dump(mode="json") for entry in entries],
+            "remotes": (),
+            "remote_omitted": False,
+        }
+    )
+    assert probe.inspect_revision(git_repository).dirty is baseline
     assert [
-        (item.read_bytes(), item.stat().st_mtime_ns) for item in (index, module_index)
+        (item.read_bytes(), item.stat().st_mtime_ns, item.stat().st_ctime_ns)
+        for item in (index, module_index)
     ] == before
 
 
@@ -1914,9 +2016,12 @@ def test_windows_sdk_compatibility_preserves_healthy_inspection(
     assert probe.has_other_worktrees(git_repository) is False
 
 
+@pytest.mark.parametrize("staged", [False, True])
 def test_gitlink_status_parsing_does_not_open_submodule_repositories(
     git_repository: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    staged: bool,
 ) -> None:
     """Raw gitlink metadata must preserve status without SDK object traversal."""
     module_path = git_repository / "module"
@@ -1940,10 +2045,18 @@ def test_gitlink_status_parsing_does_not_open_submodule_repositories(
             repo.index.commit("record gitlink")
         (module_path / "file.txt").write_text("second\n", encoding="utf-8")
         module.index.add(["file.txt"])
-        module.index.commit("second module commit")
+        second_module_sha = module.index.commit("second module commit").hexsha
+        if staged:
+            with Repo(git_repository) as repo:
+                repo.git.update_index(
+                    "--cacheinfo", f"160000,{second_module_sha},module"
+                )
+            (module_path / "untracked.txt").write_text("new\n", encoding="utf-8")
     with Repo(git_repository) as repo:
         legacy_entries = adapter_module._diff_entries(
-            repo.index.diff(None), area="worktree"
+            repo.index.diff("HEAD" if staged else None),
+            area="index" if staged else "worktree",
+            reverse=staged,
         )
         expected_fingerprint = canonical_hash(
             {
@@ -1960,7 +2073,9 @@ def test_gitlink_status_parsing_does_not_open_submodule_repositories(
             }
         )
     assert legacy_entries == (
-        RepositoryStatusEntry(area="worktree", change="modified", path="module"),
+        RepositoryStatusEntry(
+            area="index" if staged else "worktree", change="modified", path="module"
+        ),
     )
 
     def forbid_submodules(_repo: Repo) -> None:

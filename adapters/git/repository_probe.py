@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import stat
 import sys
@@ -55,6 +56,10 @@ _DIRTY_WORKTREE_MESSAGE = "Repository worktree contains changes."
 _REMOTE_OMITTED_MESSAGE = "Local or invalid repository remotes were omitted."
 _PORCELAIN_PATH_OFFSET: int = 3
 _RAW_DIFF_HEADER_FIELD_COUNT: int = 5
+_GITLINK_MODE: bytes = b"160000"
+_INDEX_STAGE_HEADER: re.Pattern[bytes] = re.compile(
+    rb"([0-7]{6}) ([0-9a-f]{40}) ([0-3])"
+)
 _WINDOWS_TIMEOUT_UNSUPPORTED: bool = sys.platform == "win32"
 _TIMEOUT_EXIT_STATUS: int = -9  # GitPython's Unix watchdog uses SIGKILL.
 _VERIFICATION_REAP_SECONDS: float = 0.1
@@ -496,6 +501,16 @@ def _status_entries(
             for path in untracked_paths
         ),
     ]
+    missing_worktree_paths = (
+        current_paths - {entry.path for entry in entries}
+    ) & worktree_paths
+    if missing_worktree_paths:
+        # Default raw diff omits untracked-only contents of a dirty gitlink.
+        gitlink_paths = _gitlink_index_paths(repo, timeout_seconds=timeout_seconds)
+        entries.extend(
+            RepositoryStatusEntry(area="worktree", change="modified", path=path)
+            for path in missing_worktree_paths & gitlink_paths
+        )
     if {entry.path for entry in entries} != current_paths:
         raise _error(
             RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE,
@@ -551,6 +566,34 @@ def _porcelain_status_paths(
             if status[1] != " ":
                 worktree_paths.add(current)
     return paths, tracked_paths, worktree_paths, untracked_paths
+
+
+def _gitlink_index_paths(repo: Repo, *, timeout_seconds: float) -> set[str]:
+    """Read stage-zero gitlink modes without decoding SDK index or module objects."""
+    output = cast(
+        "bytes",
+        repo.git.ls_files(
+            "--stage",
+            "-z",
+            stdout_as_string=False,
+            **_deadline_options(timeout_seconds),
+        ),
+    )
+    error = _error(
+        RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE,
+        Path(repo.working_tree_dir or repo.working_dir),
+    )
+    if output and not output.endswith(b"\0"):
+        raise error
+    paths: set[str] = set()
+    for record in output[:-1].split(b"\0") if output else ():
+        header, separator, path = record.partition(b"\t")
+        metadata = _INDEX_STAGE_HEADER.fullmatch(header)
+        if not separator or not path or metadata is None:
+            raise error
+        if metadata[1] == _GITLINK_MODE and metadata[3] == b"0":
+            paths.add(_normalize_text(path))
+    return paths
 
 
 def _worktree_diff_paths(repo: Repo, *, timeout_seconds: float = 10.0) -> set[str]:

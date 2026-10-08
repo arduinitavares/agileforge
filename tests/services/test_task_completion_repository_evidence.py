@@ -1317,6 +1317,78 @@ def test_ack_does_not_bypass_repository_identity_or_revision_change(
     assert _completion_business_state(engine) == before
 
 
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_untracked_submodule_completion_preserves_acknowledgement_policy(
+    engine: Engine, tmp_path: Path, *, acknowledged: bool
+) -> None:
+    """Porcelain-only gitlinks must be captured and obey the existing dirty policy."""
+    command, root, probe = _policy_command(engine, tmp_path)
+    module_path = root / "module"
+    with Repo.init(module_path) as module:
+        with module.config_writer() as config:
+            config.set_value("user", "name", "Synthetic Module Test")
+            config.set_value("user", "email", "module@example.invalid")
+        (module_path / "file.txt").write_text("first\n", encoding="utf-8")
+        module.index.add(["file.txt"])
+        module_sha = module.index.commit("first module commit").hexsha
+    with Repo(root) as repo:
+        (root / ".gitmodules").write_text(
+            '[submodule "module"]\n\tpath = module\n'
+            "\turl = https://example.invalid/module.git\n",
+            encoding="utf-8",
+        )
+        repo.index.add([".gitmodules"])
+        repo.git.update_index("--add", "--cacheinfo", f"160000,{module_sha},module")
+        repo.index.commit("record gitlink")
+    (module_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+    indexes = (root / ".git" / "index", module_path / ".git" / "index")
+    index_before = [
+        (item.read_bytes(), item.stat().st_mtime_ns, item.stat().st_ctime_ns)
+        for item in indexes
+    ]
+    prepared = _prepared(engine, command.project_id, probe, acknowledged=acknowledged)
+    assert isinstance(prepared.evidence, CapturedTaskRepositoryEvidence)
+    assert prepared.evidence.dirty is True
+    assert prepared.evidence.dirty_path_count == 1
+    assert prepared.evidence.dirty_paths == ("module",)
+    with Session(engine) as session:
+        verified = verify_task_repository_evidence(
+            session,
+            project_id=command.project_id,
+            prepared=prepared,
+            repository_probe=probe,
+            uncommitted=acknowledged,
+        )
+    assert verified == prepared.evidence
+    domain = _domain(engine, probe)
+    request = _request(domain, command.project_id, command.task_id).model_copy(
+        update={"acceptance_result": "fully_met", "uncommitted": acknowledged},
+    )
+    before = _completion_business_state(engine)
+    result = domain.transition(request)
+    assert result.ok is acknowledged
+    if acknowledged:
+        captured = _stored(engine)
+        assert captured["state"] == "captured"
+        assert captured["dirty"] is True
+        assert captured["dirty_paths"] == ["module"]
+        assert captured["uncommitted_acknowledged"] is True
+    else:
+        assert result.error is not None
+        assert "UNCOMMITTED_ACKNOWLEDGEMENT_REQUIRED" in result.error.message
+        assert _completion_business_state(engine) == before
+    probe.events.clear()
+    replay = domain.transition(request)
+    assert replay.replayed is True
+    assert replay.output == result.output
+    assert replay.error == result.error
+    assert probe.events == []
+    assert [
+        (item.read_bytes(), item.stat().st_mtime_ns, item.stat().st_ctime_ns)
+        for item in indexes
+    ] == index_before
+
+
 def test_missing_ack_full_refusal_is_durable_and_replays_without_git(
     engine: Engine, tmp_path: Path
 ) -> None:
@@ -1438,11 +1510,16 @@ def test_real_verification_pipe_timeout_promptly_releases_sqlite_writer(
 ) -> None:
     """The actual runner must unwind its caller's writer before descendants stall it."""
     engine = timeout_file_engine
-    command, _root, probe = _policy_command(engine, tmp_path, retry=False)
+    command, root, probe = _policy_command(engine, tmp_path, retry=False)
+    with Repo(root) as repo:
+        captured_head_sha = repo.git.rev_parse("--verify", "HEAD^{commit}")
     wrapper, records = _owned_pipe_git(tmp_path, parent_exits=True)
     owned_processes = _observe_owned_status_processes(monkeypatch, wrapper)
     original_git = Git.GIT_PYTHON_GIT_EXECUTABLE
-    probe.adapter = GitPythonRepositoryProbe(verification_timeout_seconds=0.75)
+    probe.adapter = GitPythonRepositoryProbe(
+        verification_timeout_seconds=0.75,
+        _read_head_sha=lambda _repo: captured_head_sha,
+    )
     verification_started: float | None = None
 
     def stall_verification() -> None:
