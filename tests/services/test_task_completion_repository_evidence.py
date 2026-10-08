@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import warnings
 from contextlib import closing
@@ -12,13 +13,15 @@ from datetime import UTC, datetime
 from errno import EACCES
 from http import HTTPStatus
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
-from git import Repo
+from git import Git, Repo
 from sqlalchemy import event
 from sqlmodel import Session, col, select
 
+import adapters.git.repository_probe as probe_adapter
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project, Task
 from models.enums import TaskStatus
@@ -49,6 +52,11 @@ from services.task_repository_evidence import (
     verify_task_repository_evidence,
 )
 from tests.conftest import fresh_test_engine
+from tests.services.test_repository_probe import (
+    _assert_owned_pipe_group_stopped,
+    _observe_owned_status_processes,
+    _owned_pipe_git,
+)
 from tests.workflow import execution_fixtures
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.execution_retry_support import (
@@ -1419,6 +1427,62 @@ def test_verification_timeout_rolls_back_claim_and_allows_unchanged_key_retry(
     successful = domain.transition(request)
     assert successful.ok is True
     assert successful.replayed is False
+    assert domain.transition(request).replayed is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Verification groups require POSIX.")
+def test_real_verification_pipe_timeout_promptly_releases_sqlite_writer(
+    timeout_file_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The actual runner must unwind its caller's writer before descendants stall it."""
+    engine = timeout_file_engine
+    command, _root, probe = _policy_command(engine, tmp_path, retry=False)
+    wrapper, records = _owned_pipe_git(tmp_path, parent_exits=True)
+    owned_processes = _observe_owned_status_processes(monkeypatch, wrapper)
+    original_git = Git.GIT_PYTHON_GIT_EXECUTABLE
+    probe.adapter = GitPythonRepositoryProbe(verification_timeout_seconds=0.75)
+    verification_started: float | None = None
+
+    def stall_verification() -> None:
+        nonlocal verification_started
+        verification_started = monotonic()
+        monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
+
+    probe.before_revision = stall_verification
+    monkeypatch.setattr(probe_adapter, "_deadline_options", lambda _seconds: {})
+    domain = _domain(engine, probe)
+    request = _request(domain, command.project_id, command.task_id)
+    before = _completion_business_state(engine)
+    with Session(engine) as session:
+        receipts_before = [
+            row.model_dump()
+            for row in session.exec(select(WorkflowTransitionReceipt)).all()
+        ]
+    try:
+        result = domain.transition(request)
+        assert verification_started is not None
+        elapsed = monotonic() - verification_started
+    finally:
+        _assert_owned_pipe_group_stopped(records, owned_processes=owned_processes)
+    assert elapsed < 1.0
+    assert result.ok is False
+    assert result.error is not None
+    assert "REPOSITORY_VERIFICATION_TIMEOUT" in result.error.message
+    assert _completion_business_state(engine) == before
+    with Session(engine) as session:
+        assert [
+            row.model_dump()
+            for row in session.exec(select(WorkflowTransitionReceipt)).all()
+        ] == receipts_before
+    assert engine.url.database is not None
+    with closing(sqlite3.connect(engine.url.database, timeout=0)) as second_writer:
+        second_writer.execute("BEGIN IMMEDIATE")
+        second_writer.rollback()
+    monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", original_git)
+    probe.before_revision = None
+    assert domain.transition(request).ok is True
     assert domain.transition(request).replayed is True
 
 

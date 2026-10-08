@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import ctypes
+import json
 import os
 import shlex
 import shutil
+import signal
 import stat
+import struct
 import sys
+from contextlib import suppress
 from errno import EACCES
 from pathlib import Path
-from time import monotonic
+from subprocess import Popen, TimeoutExpired  # nosec B404  # owned test child only
+from time import monotonic, sleep
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -28,7 +34,6 @@ from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
-    from subprocess import Popen  # nosec B404  # type-only process annotation
 
     from git.diff import Diff
 
@@ -64,6 +69,225 @@ _BULK_COMMAND_GROWTH_ALLOWANCE: int = 2
 _PORCELAIN_RECORD_PREFIX_LENGTH: int = 3
 _SDK_TIMEOUT_STATUS: int = -9
 _LIVE_TIMEOUT_ELAPSED_LIMIT: float = 3.0
+_PIPE_TIMEOUT_ELAPSED_LIMIT: float = 1.0
+_OVERALL_TIMEOUT_ELAPSED_LIMIT: float = 0.9
+_DARWIN_ZOMBIE_STATUS: int = 5
+_OWNED_PIPE_ROLES: frozenset[str] = frozenset({"parent", "child", "grandchild"})
+
+
+def _owned_pipe_git(tmp_path: Path, *, parent_exits: bool) -> tuple[Path, Path]:
+    """Own one fake Git group whose child and grandchild inherit both pipes."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    wrapper = tmp_path / "pipe-holding-git"
+    records = tmp_path / "pipe-holding-git-pids.jsonl"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "if 'status' not in sys.argv[1:]:\n"
+        f"    os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n"
+        "import json, time\n"
+        f"records = {str(records)!r}\n"
+        "def record(role):\n"
+        "    with open(records, 'a') as stream:\n"
+        "        stream.write(json.dumps([role, os.getpid(), os.getpgrp()]) + '\\n')\n"
+        "if 'status' in sys.argv[1:]:\n"
+        "    if os.getpgrp() != os.getpid(): os.setsid()\n"
+        "    record('parent')\n"
+        "    if os.fork() == 0:\n"
+        "        record('child')\n"
+        "        if os.fork() == 0:\n"
+        "            record('grandchild')\n"
+        "            time.sleep(6)\n"
+        "            os._exit(0)\n"
+        "        time.sleep(6)\n"
+        "        os._exit(0)\n"
+        "    ready = time.monotonic() + 1\n"
+        "    while len(open(records).readlines()) < 3 and time.monotonic() < ready:\n"
+        "        time.sleep(0.005)\n"
+        f"    if {parent_exits!r}: os._exit(0)\n"
+        "    time.sleep(6)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    return wrapper, records
+
+
+def _owned_process_is_executing(pid: int) -> bool:
+    """Distinguish a dead adopted zombie from an executing pipe holder, without ps."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform == "linux":
+        process_stat = Path(f"/proc/{pid}/stat")
+        try:
+            return process_stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return False
+    if sys.platform == "darwin":
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        info = ctypes.create_string_buffer(256)
+        # XNU includes adopted zombies only with a nonzero BSDINFO arg.
+        size = libproc.proc_pidinfo(pid, 3, 1, info, len(info))
+        if not size:
+            # PID info can disappear between kill(0) and the state read. Prove that
+            # race; unavailable information for a still-live PID is not death proof.
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            message = "Cannot verify the state of the owned process."
+            raise AssertionError(message)
+        return struct.unpack_from("I", info.raw, 4)[0] != _DARWIN_ZOMBIE_STATUS
+    return True
+
+
+def _observe_owned_status_processes(
+    monkeypatch: pytest.MonkeyPatch, wrapper: Path
+) -> list[Popen[bytes]]:
+    """Capture SDK-created status processes independently of fixture PID markers."""
+    original_execute = cast("Callable[..., object]", Git.execute)
+    processes: list[Popen[bytes]] = []
+
+    def observe(
+        git: Git, command: Sequence[object], *args: object, **kwargs: object
+    ) -> object:
+        result = original_execute(git, command, *args, **kwargs)
+        if str(command[0]) == str(wrapper) and "status" in command:
+            assert kwargs.get("as_process") is True
+            assert kwargs.get("start_new_session") is True
+            assert isinstance(result, Git.AutoInterrupt)
+            assert result.proc is not None
+            processes.append(result.proc)
+        return result
+
+    monkeypatch.setattr(Git, "execute", observe)
+    return processes
+
+
+def _assert_owned_pipe_group_stopped(
+    records: Path, *, owned_processes: Sequence[Popen[bytes]]
+) -> None:
+    """Prove all recorded descendants stopped and clean only the owned group."""
+    # Ownership comes from deliberate new-session Popen creation, never from
+    # incomplete or malformed child-written PID markers.
+    groups = {process.pid for process in owned_processes}
+    assert groups
+    assert len(groups) == 1
+    assert all(group > 0 and group != os.getpgrp() for group in groups)
+    for process in owned_processes:
+        try:
+            actual_group = os.getpgid(process.pid)
+        except ProcessLookupError:
+            continue  # An exited leader can still have pipe-holding descendants.
+        assert actual_group == process.pid
+    stopped = False
+    try:
+        assert _owned_process_is_executing(os.getpid())
+        rows = [json.loads(line) for line in records.read_text().splitlines()]
+        assert {row[0] for row in rows} == _OWNED_PIPE_ROLES
+        assert {row[2] for row in rows} == groups
+        assert {row[1] for row in rows if row[0] == "parent"} == groups
+        for _ in range(20):
+            if not any(_owned_process_is_executing(row[1]) for row in rows):
+                break
+            sleep(0.01)
+        assert not any(_owned_process_is_executing(row[1]) for row in rows)
+        stopped = True
+    finally:
+        if not stopped:
+            for process in owned_processes:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=0.2)
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="Owned process group cleanup uses POSIX."
+)
+@pytest.mark.parametrize("complete_markers", [False, True])
+def test_owned_pipe_cleanup_cannot_turn_a_failed_oracle_into_a_pass(
+    tmp_path: Path, *, complete_markers: bool
+) -> None:
+    """Readiness and live-state failures must still stop an explicitly owned group."""
+    records = tmp_path / "recorded-roles.jsonl"
+    ready = tmp_path / "actual-roles.jsonl"
+    program = (
+        "import json, os, time\n"
+        f"records = {str(records)!r}\n"
+        f"ready = {str(ready)!r}\n"
+        "def record(role):\n"
+        "    row = json.dumps([role, os.getpid(), os.getpgrp()]) + '\\n'\n"
+        "    with open(ready, 'a') as stream: stream.write(row)\n"
+        f"    if role == 'parent' or {complete_markers!r}:\n"
+        "        with open(records, 'a') as stream: stream.write(row)\n"
+        "record('parent')\n"
+        "if os.fork() == 0:\n"
+        "    record('child')\n"
+        "    if os.fork() == 0: record('grandchild')\n"
+        "time.sleep(10)\n"
+    )
+    leader = Popen(  # noqa: S603  # nosec B603  # owned synthetic process group only
+        [sys.executable, "-c", program], start_new_session=True
+    )
+    pids = [leader.pid]
+    try:
+        deadline = monotonic() + 2
+        while (
+            not ready.exists()
+            or len(ready.read_text().splitlines()) != len(_OWNED_PIPE_ROLES)
+        ) and monotonic() < deadline:
+            sleep(0.01)
+        rows = [json.loads(line) for line in ready.read_text().splitlines()]
+        pids.extend(row[1] for row in rows)
+        assert {row[0] for row in rows} == _OWNED_PIPE_ROLES
+        assert os.getpgid(leader.pid) == leader.pid
+        assert all(_owned_process_is_executing(row[1]) for row in rows)
+        with pytest.raises(AssertionError):
+            _assert_owned_pipe_group_stopped(records, owned_processes=[leader])
+        for _ in range(20):
+            if not any(_owned_process_is_executing(row[1]) for row in rows):
+                break
+            sleep(0.01)
+        assert not any(_owned_process_is_executing(row[1]) for row in rows)
+    finally:
+        if any(_owned_process_is_executing(pid) for pid in pids):
+            with suppress(ProcessLookupError):
+                os.killpg(leader.pid, signal.SIGKILL)
+        leader.wait(timeout=1)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin zombie-state oracle.")
+def test_owned_process_oracle_recognizes_an_unreaped_darwin_child() -> None:
+    """A known zombie is stopped even while kill(0) still recognizes its PID."""
+    assert _owned_process_is_executing(os.getpid())
+    child = Popen([sys.executable, "-c", "pass"], start_new_session=True)  # nosec B603
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        info = ctypes.create_string_buffer(256)
+        size: int = 0
+        for _ in range(40):
+            # XNU's nonzero BSDINFO arg explicitly enables zombie lookup.
+            size = libproc.proc_pidinfo(child.pid, 3, 1, info, len(info))
+            if (
+                size
+                and struct.unpack_from("I", info.raw, 4)[0] == _DARWIN_ZOMBIE_STATUS
+            ):
+                break
+            sleep(0.025)
+        assert size
+        assert struct.unpack_from("I", info.raw, 4)[0] == _DARWIN_ZOMBIE_STATUS
+        os.kill(child.pid, 0)
+        assert _owned_process_is_executing(child.pid) is False
+    finally:
+        if child.returncode is None:
+            try:
+                child.wait(timeout=1)
+            except TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=1)
 
 
 def _bulk_probe_fixture(
@@ -716,7 +940,23 @@ def test_completion_probe_git_failures_are_typed_and_do_not_leak_stderr(
     if operation == "topology":
         monkeypatch.setattr(Git, "worktree", fail_git, raising=False)
     elif operation == "cheap":
-        monkeypatch.setattr(Git, "status", fail_git, raising=False)
+        if os.name != "posix":
+            monkeypatch.setattr(Git, "execute", fail_git)
+        else:
+            real_git = shutil.which("git")
+            assert real_git is not None
+            executable = git_repository.parent / "failing-status-git"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "if 'status' in sys.argv[1:]:\n"
+                "    sys.stderr.write('private raw error output')\n"
+                "    sys.exit(128)\n"
+                f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(executable))
     else:
         monkeypatch.setattr(adapter_module, "_has_diff", fail_git)
         (git_repository / "tracked.txt").write_text("actual dirty\n", encoding="utf-8")
@@ -1252,7 +1492,7 @@ def test_probe_timeout_configuration_requires_finite_positive_numbers(
 
 
 @pytest.mark.parametrize("configured", [False, True])
-def test_every_completion_git_command_has_a_nonstreaming_deadline(
+def test_completion_git_commands_use_phase_appropriate_deadline_ownership(
     git_repository: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1276,7 +1516,7 @@ def test_every_completion_git_command_has_a_nonstreaming_deadline(
     )
     original_execute = cast("Callable[..., object]", Git.execute)
     commands: list[tuple[str, ...]] = []
-    expected_timeout = outside
+    verification = False
 
     def bounded_execute(
         git: Git,
@@ -1284,11 +1524,18 @@ def test_every_completion_git_command_has_a_nonstreaming_deadline(
         *args: object,
         **kwargs: object,
     ) -> object:
-        if sys.platform == "win32":
+        if verification and sys.platform != "win32":
+            assert kwargs.get("as_process") is True, tuple(command)
+            assert kwargs.get("start_new_session") is True, tuple(command)
+            assert kwargs.get("shell") is False, tuple(command)
+            assert "kill_after_timeout" not in kwargs, tuple(command)
+            assert "core.fsmonitor=false" in command
+            assert "submodule.recurse=false" in command
+        elif sys.platform == "win32":
             assert "kill_after_timeout" not in kwargs, tuple(command)
         else:
-            assert kwargs.get("kill_after_timeout") == expected_timeout, tuple(command)
-        assert kwargs.get("as_process", False) is False, tuple(command)
+            assert kwargs.get("kill_after_timeout") == outside, tuple(command)
+            assert kwargs.get("as_process", False) is False, tuple(command)
         commands.append(tuple(str(part) for part in command))
         return original_execute(git, command, *args, **kwargs)
 
@@ -1304,8 +1551,245 @@ def test_every_completion_git_command_has_a_nonstreaming_deadline(
     assert any("remote" in command for command in commands)
     assert any("worktree" in command for command in commands)
     assert all("cat-file" not in command for command in commands)
-    expected_timeout = inside
+    verification = True
     assert probe.inspect_revision(git_repository).dirty is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Verification groups require POSIX.")
+@pytest.mark.parametrize("parent_exits", [False, True])
+def test_verification_deadline_stops_owned_pipe_holding_descendants(
+    git_repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    parent_exits: bool,
+) -> None:
+    """Inherited pipes must not extend the deadline, even after the leader exits."""
+    wrapper, records = _owned_pipe_git(tmp_path, parent_exits=parent_exits)
+    owned_processes = _observe_owned_status_processes(monkeypatch, wrapper)
+    monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
+    # The old watchdog invokes a sandbox-denied ps command. Disable only that
+    # legacy path so RED measures the six-second inherited-pipe stall safely.
+    monkeypatch.setattr(adapter_module, "_deadline_options", lambda _seconds: {})
+    # Actual child/grandchild forks avoid interpreter-startup confounders. The
+    # separate 0.4s overall-budget test independently exercises a tighter bound.
+    probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.75)
+    caught: RepositoryProbeError | None = None
+    started = monotonic()
+    try:
+        try:
+            probe.inspect_revision(git_repository)
+        except RepositoryProbeError as error:
+            caught = error
+        elapsed = monotonic() - started
+    finally:
+        _assert_owned_pipe_group_stopped(records, owned_processes=owned_processes)
+    assert elapsed < _PIPE_TIMEOUT_ELAPSED_LIMIT
+    assert caught is not None
+    assert caught.code is RepositoryProbeErrorCode.PROBE_TIMED_OUT
+    assert str(caught) == "Repository probe timed out."
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="Executable deadline fixture uses POSIX."
+)
+def test_verification_uses_one_deadline_for_all_git_commands(
+    git_repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three individually fast commands must not renew the overall budget."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    wrapper = tmp_path / "slow-git"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "if any(part in sys.argv[1:] for part in ('status', 'rev-parse')):\n"
+        "    time.sleep(0.18)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
+    monkeypatch.setattr(adapter_module, "_deadline_options", lambda _seconds: {})
+    probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.4)
+    started = monotonic()
+    with pytest.raises(RepositoryProbeError) as caught:
+        probe.inspect_revision(git_repository)
+    assert caught.value.code is RepositoryProbeErrorCode.PROBE_TIMED_OUT
+    assert monotonic() - started < _OVERALL_TIMEOUT_ELAPSED_LIMIT
+
+
+def test_verification_expired_reader_hook_does_not_start_status(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exhausted required HEAD read must refuse before the next Git command."""
+    clock = [0.0]
+    monkeypatch.setattr(adapter_module, "monotonic", lambda: clock[0], raising=False)
+
+    def slow_head(_repo: Repo) -> str:
+        clock[0] += 3.0
+        return "1" * 40
+
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        Git, "execute", _record_git_commands(commands, bound_argv=False)
+    )
+    probe = GitPythonRepositoryProbe(_read_head_sha=slow_head)
+    with pytest.raises(RepositoryProbeError) as caught:
+        probe.inspect_revision(git_repository)
+    assert caught.value.code is RepositoryProbeErrorCode.PROBE_TIMED_OUT
+    assert not any("status" in command for command in commands)
+
+
+def test_verification_missing_git_executable_has_a_safe_typed_error(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable SDK executable must not leak a raw Popen type error."""
+    monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", None)
+    with pytest.raises(RepositoryProbeError) as caught:
+        GitPythonRepositoryProbe().inspect_revision(git_repository)
+    assert caught.value.code is RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE
+    assert str(caught.value) == "Git metadata could not be read."
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Communicate deadline applies to POSIX.")
+def test_verification_passes_only_decreasing_remaining_budgets(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The next required command receives elapsed time deducted from its budget."""
+    clock = [0.0]
+    budgets: list[float] = []
+    monkeypatch.setattr(adapter_module, "monotonic", lambda: clock[0], raising=False)
+
+    class ControlledProcess:
+        """Model elapsed process time while keeping SDK command dispatch observable."""
+
+        stdin = stdout = stderr = None
+        returncode = 0
+
+        def __init__(self, output: bytes) -> None:
+            self.output = output
+
+        def communicate(self, *, timeout: float) -> tuple[bytes, bytes]:
+            budgets.append(timeout)
+            clock[0] += 0.25
+            return self.output, b""
+
+    def controlled_execute(
+        _git: Git, command: Sequence[object], **kwargs: object
+    ) -> object:
+        output = b"1" * 40 if "rev-parse" in command else b""
+        if kwargs.get("as_process"):
+            return SimpleNamespace(proc=ControlledProcess(output), status=None)
+        budgets.append(cast("float", kwargs.get("kill_after_timeout", 2.0)))
+        clock[0] += 0.25
+        return output.decode()
+
+    monkeypatch.setattr(Git, "execute", controlled_execute)
+    observed = GitPythonRepositoryProbe().inspect_revision(git_repository)
+    assert observed.head_sha == "1" * 40
+    assert observed.dirty is False
+    assert budgets == pytest.approx([2.0, 1.75, 1.5])
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="Executable fsmonitor fixture uses POSIX."
+)
+@pytest.mark.parametrize("dirty", [False, True])
+def test_verification_disables_fsmonitor_without_changing_dirty_answer(
+    git_repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dirty: bool,
+) -> None:
+    """Local status must not execute the configured fsmonitor hook."""
+    # The harness injects core.fsmonitor=false as command-scope configuration.
+    # Remove that injection only for this disposable fixture to exercise the hook.
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+    marker = tmp_path / "fsmonitor-invoked"
+    hook = tmp_path / "fsmonitor-hook"
+    hook.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w').write('invoked')\n"
+        "sys.stdout.buffer.write(b'token\\0/\\0')\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+    if dirty:
+        (git_repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    with Repo(git_repository) as repo:
+        with repo.config_writer() as config:
+            config.set_value("core", "fsmonitor", str(hook))
+        with repo.git.custom_environment(GIT_OPTIONAL_LOCKS="0"):
+            assert bool(repo.git.status("--porcelain", "-z")) is dirty
+    assert marker.exists()
+    marker.unlink()
+    index = git_repository / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    assert GitPythonRepositoryProbe().inspect_revision(git_repository).dirty is dirty
+    assert not marker.exists()
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("change", ["clean", "tracked", "untracked", "gitlink"])
+@pytest.mark.parametrize("ignore", ["none", "untracked", "dirty", "all"])
+def test_verification_preserves_nested_submodule_status_semantics(
+    git_repository: Path, change: str, ignore: str
+) -> None:
+    """Containment must preserve nested changes and configured ignore semantics."""
+    module_path = git_repository / "module"
+    with Repo.init(module_path) as module:
+        with module.config_writer() as config:
+            config.set_value("user", "name", "Synthetic Module Test")
+            config.set_value("user", "email", "module@example.invalid")
+        (module_path / "file.txt").write_text("first\n", encoding="utf-8")
+        module.index.add(["file.txt"])
+        first_sha = module.index.commit("first module commit").hexsha
+        with Repo(git_repository) as repo:
+            (git_repository / ".gitmodules").write_text(
+                '[submodule "module"]\n\tpath = module\n'
+                "\turl = https://example.invalid/module.git\n",
+                encoding="utf-8",
+            )
+            repo.index.add([".gitmodules"])
+            repo.git.update_index("--add", "--cacheinfo", f"160000,{first_sha},module")
+            repo.index.commit("record gitlink")
+            with repo.config_writer() as config:
+                config.set_value('submodule "module"', "ignore", ignore)
+                config.set_value("submodule", "recurse", True)
+        if change in {"tracked", "gitlink"}:
+            (module_path / "file.txt").write_text("second\n", encoding="utf-8")
+        if change == "gitlink":
+            module.index.add(["file.txt"])
+            module.index.commit("second module commit")
+        if change == "untracked":
+            (module_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+    expected = (
+        change != "clean"
+        and ignore != "all"
+        and not (change == "untracked" and ignore in {"untracked", "dirty"})
+        and not (change == "tracked" and ignore == "dirty")
+    )
+    with (
+        Repo(git_repository) as repo,
+        repo.git.custom_environment(GIT_OPTIONAL_LOCKS="0"),
+    ):
+        baseline = bool(
+            repo.git.status("--porcelain", "-z", "--untracked-files=normal")
+        )
+    assert baseline is expected
+    index = git_repository / ".git" / "index"
+    module_index = module_path / ".git" / "index"
+    before = [
+        (item.read_bytes(), item.stat().st_mtime_ns) for item in (index, module_index)
+    ]
+    assert GitPythonRepositoryProbe().inspect_revision(git_repository).dirty is baseline
+    assert [
+        (item.read_bytes(), item.stat().st_mtime_ns) for item in (index, module_index)
+    ] == before
 
 
 @pytest.mark.parametrize(
@@ -1359,13 +1843,10 @@ def test_gitpython_timeout_is_a_closed_probe_failure(
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux",
-    reason=(
-        "Live GitPython watchdog proof requires supported Linux ps; "
-        "this macOS sandbox denies its ps subprocess."
-    ),
+    os.name != "posix",
+    reason="Live verification group ownership requires POSIX.",
 )
-def test_linux_owned_stalled_git_is_actually_terminated(
+def test_posix_owned_stalled_git_is_actually_terminated(
     git_repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1376,18 +1857,25 @@ def test_linux_owned_stalled_git_is_actually_terminated(
     fake_git = tmp_path / "stalled-git"
     pid_file = tmp_path / "stalled-git.pid"
     fake_git.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys, time\n"
-        f"pid_file = {str(pid_file)!r}\n"
-        "if 'status' in sys.argv[1:]:\n"
-        "    with open(pid_file, 'w') as stream: stream.write(str(os.getpid()))\n"
-        "    time.sleep(5)\n"
-        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        "#!/bin/sh\n"
+        "for part do\n"
+        '    if [ "$part" = status ]; then\n'
+        f"        printf '%s' \"$$\" > {shlex.quote(str(pid_file))}\n"
+        "        exec /bin/sleep 5\n"
+        "    fi\n"
+        "done\n"
+        f'exec {shlex.quote(real_git)} "$@"\n',
         encoding="utf-8",
     )
     fake_git.chmod(0o700)
+    with Repo(git_repository) as repo:
+        expected_head = repo.head.commit.hexsha
     monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
-    probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.5)
+    # This test isolates termination of status; the three-command overall budget
+    # is exercised separately and must not spend this fixture's startup allowance.
+    probe = GitPythonRepositoryProbe(
+        verification_timeout_seconds=0.5, _read_head_sha=lambda _repo: expected_head
+    )
     started = monotonic()
     with pytest.raises(RepositoryProbeError) as caught:
         probe.inspect_revision(git_repository)

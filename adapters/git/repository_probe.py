@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
+from subprocess import TimeoutExpired  # nosec B404  # own SDK-created process
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from git import Repo
+from git.compat import safe_decode
 from git.diff import Diff, DiffIndex
 from git.exc import BadName, GitCommandError, InvalidGitRepositoryError, NoSuchPathError
 
@@ -29,6 +33,22 @@ from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
+    from typing import Protocol
+
+    from git import Git
+
+    class _VerificationGitExecutor(Protocol):
+        """Pinned SDK runtime keywords omitted by its public execute overloads."""
+
+        def __call__(
+            self,
+            command: list[str],
+            *,
+            shell: Literal[False],
+            as_process: bool = False,
+            start_new_session: bool = False,
+        ) -> str | Git.AutoInterrupt: ...
+
 
 _PROBE_VERSION = "agileforge.repository-probe.v1"
 _DIRTY_WORKTREE_MESSAGE = "Repository worktree contains changes."
@@ -37,6 +57,7 @@ _PORCELAIN_PATH_OFFSET: int = 3
 _RAW_DIFF_HEADER_FIELD_COUNT: int = 5
 _WINDOWS_TIMEOUT_UNSUPPORTED: bool = sys.platform == "win32"
 _TIMEOUT_EXIT_STATUS: int = -9  # GitPython's Unix watchdog uses SIGKILL.
+_VERIFICATION_REAP_SECONDS: float = 0.1
 type StatusChange = Literal[
     "added",
     "modified",
@@ -90,11 +111,13 @@ class GitPythonRepositoryProbe:
         )
         self._read_head_sha = _read_head_sha
 
-    def _current_head_sha(self, repo: Repo, *, timeout_seconds: float) -> str:
+    def _current_head_sha(
+        self, repo: Repo, *, timeout_seconds: float, deadline: float | None = None
+    ) -> str:
         """Keep deterministic test readers separate from bounded production reads."""
         if self._read_head_sha is not None:
             return self._read_head_sha(repo)
-        return _head_sha(repo, timeout_seconds=timeout_seconds)
+        return _head_sha(repo, timeout_seconds=timeout_seconds, deadline=deadline)
 
     def inspect_common_git_dir(self, path: Path | str) -> str:
         """Read resolved Git identity before completion HEAD/status inspection."""
@@ -132,19 +155,31 @@ class GitPythonRepositoryProbe:
     def inspect_revision(self, path: Path | str) -> RepositoryRevisionProbeResult:
         """Check stable HEAD and dirty state without building full evidence."""
         timeout = self._verification_timeout_seconds
+        deadline = monotonic() + timeout
         with _completion_repository(
             path, require_head=False, timeout_seconds=timeout
         ) as repo:
-            first_head_sha = self._current_head_sha(repo, timeout_seconds=timeout)
+            normalized = Path(repo.working_tree_dir or repo.working_dir)
+            _remaining_verification_seconds(deadline, normalized)
+            first_head_sha = self._current_head_sha(
+                repo, timeout_seconds=timeout, deadline=deadline
+            )
+            _remaining_verification_seconds(deadline, normalized)
             dirty = bool(
-                repo.git.status(
+                _verification_git(
+                    repo,
+                    "status",
                     "--porcelain",
                     "-z",
                     "--untracked-files=normal",
-                    **_deadline_options(timeout),
+                    deadline=deadline,
                 )
             )
-            if first_head_sha != self._current_head_sha(repo, timeout_seconds=timeout):
+            second_head_sha = self._current_head_sha(
+                repo, timeout_seconds=timeout, deadline=deadline
+            )
+            _remaining_verification_seconds(deadline, normalized)
+            if first_head_sha != second_head_sha:
                 raise _error(
                     RepositoryProbeErrorCode.REPOSITORY_CHANGED_DURING_PROBE,
                     Path(repo.working_tree_dir or repo.working_dir),
@@ -318,9 +353,88 @@ def _command_error(error: GitCommandError, path: Path) -> RepositoryProbeError:
     return _error(code, path)
 
 
-def _head_sha(repo: Repo, *, timeout_seconds: float = 10.0) -> str:
+def _remaining_verification_seconds(deadline: float, path: Path) -> float:
+    """Reject exhausted overall verification budgets before or after required I/O."""
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise _error(RepositoryProbeErrorCode.PROBE_TIMED_OUT, path)
+    return remaining
+
+
+def _verification_git(repo: Repo, *arguments: str, deadline: float) -> str:
+    """Use SDK environment/launch integration with an owned POSIX process group."""
+    normalized = Path(repo.working_tree_dir or repo.working_dir)
+    _remaining_verification_seconds(deadline, normalized)
+    executable = repo.git.GIT_PYTHON_GIT_EXECUTABLE
+    if executable is None:
+        raise _error(RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE, normalized)
+    command: list[str] = [
+        executable,
+        "-c",
+        "diff.autoRefreshIndex=false",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "submodule.recurse=false",
+        *arguments,
+    ]
+    # 3.1.57's implementation accepts shell/**subprocess_kwargs, but its public
+    # overloads omit them. This boundary describes only the two modes used here.
+    execute = cast("_VerificationGitExecutor", repo.git.execute)
+    if _WINDOWS_TIMEOUT_UNSUPPORTED:
+        # Preserve healthy Windows tests; product runtime and group bounds are POSIX.
+        output = cast("str", execute(command, shell=False))
+    else:
+        process = cast(
+            "Git.AutoInterrupt",
+            execute(command, as_process=True, start_new_session=True, shell=False),
+        )
+        proc = process.proc
+        if proc is None:
+            raise _error(RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE, normalized)
+        try:
+            stdout, stderr = proc.communicate(
+                timeout=_remaining_verification_seconds(deadline, normalized)
+            )
+            output = cast("str", safe_decode(stdout)).removesuffix("\n")
+            _remaining_verification_seconds(deadline, normalized)
+        except BaseException as error:
+            # The leader may have exited already while descendants still hold pipes.
+            # Its new-session PGID remains ours; never enumerate unrelated processes.
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            # No unbounded pipe drain or destructor wait may retain the DB writer.
+            with suppress(TimeoutExpired):
+                proc.wait(timeout=_VERIFICATION_REAP_SECONDS)
+            if isinstance(error, (TimeoutExpired, RepositoryProbeError)):
+                raise _error(
+                    RepositoryProbeErrorCode.PROBE_TIMED_OUT, normalized
+                ) from error
+            raise
+        finally:
+            # We own cleanup. Disarm before closing so an I/O error cannot trigger
+            # GitPython's potentially unbounded AutoInterrupt destructor wait.
+            process.status = proc.returncode
+            process.proc = None
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with suppress(OSError):
+                        stream.close()
+        if proc.returncode:
+            raise GitCommandError(command, proc.returncode, stderr, stdout)
+    _remaining_verification_seconds(deadline, normalized)
+    return output
+
+
+def _head_sha(
+    repo: Repo, *, timeout_seconds: float = 10.0, deadline: float | None = None
+) -> str:
     """Resolve HEAD as a commit without opening GitPython's persistent cat-file."""
     try:
+        if deadline is not None:
+            return _verification_git(
+                repo, "rev-parse", "--verify", "HEAD^{commit}", deadline=deadline
+            )
         return repo.git.rev_parse(
             "--verify", "HEAD^{commit}", **_deadline_options(timeout_seconds)
         )
