@@ -161,13 +161,12 @@ def test_pure_model_parser_rejects_invalid_config(raw: str, error: str) -> None:
 
 def test_pure_model_parser_requires_all_roles_only_when_requested() -> None:
     """Maintenance enforces complete role coverage while old test configs stay valid."""
-    assert model_config.parse_model_config("models:\n  product_goal: test/model\n") == {
-        "models": {"product_goal": "test/model"}
+    raw = "models:\n  product_goal: openrouter/test-model\n"
+    assert model_config.parse_model_config(raw) == {
+        "models": {"product_goal": "openrouter/test-model"}
     }
     with pytest.raises(ValueError, match="product_vision"):
-        model_config.parse_model_config(
-            "models:\n  product_goal: test/model\n", require_all_roles=True
-        )
+        model_config.parse_model_config(raw, require_all_roles=True)
 
 
 def test_model_configs_exactly_match_live_production_roles() -> None:
@@ -176,6 +175,33 @@ def test_model_configs_exactly_match_live_production_roles() -> None:
 
     assert _configured_model_roles(_PRODUCTION_MODEL_CONFIG_PATH) == expected
     assert _configured_model_roles(_TEST_MODEL_CONFIG_PATH) == expected
+
+
+@pytest.mark.parametrize(
+    "model_id", ["openai/test-model", "other/test-model", "openrouter/"]
+)
+def test_complete_model_config_rejects_unsupported_providers(model_id: str) -> None:
+    """Reject unsupported routing before a complete configuration is installed."""
+    models = {**_EXPECTED_PRODUCTION_MODELS, "product_goal": model_id}
+    with pytest.raises(ValueError, match="openrouter/"):
+        model_config.parse_model_config(
+            yaml.safe_dump({"models": models}), require_all_roles=True
+        )
+
+
+def test_model_config_load_rejects_unsupported_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fail during configuration loading rather than after a node attempt starts."""
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  product_goal: other/test-model\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(path))
+    model_config.clear_config_cache()
+    try:
+        with pytest.raises(ValueError, match="openrouter/"):
+            get_model_id("product_goal")
+    finally:
+        model_config.clear_config_cache()
 
 
 def test_specification_structure_uses_the_structurer_model_role() -> None:

@@ -385,6 +385,31 @@ def test_invalid_candidate_and_existing_drift_never_publish_marker(
     assert not recovery.exists()
 
 
+def test_unsupported_provider_candidate_preserves_installed_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject complete but unsupported routing before publishing recovery state."""
+    deployment, profile, build_file = _profile(tmp_path)
+    config = profile / "config" / "models.yaml"
+    manifest = profile / "runtime.json"
+    old_model = config.read_bytes()
+    old_manifest = manifest.read_bytes()
+    candidate = tmp_path / "candidate.yaml"
+    candidate.write_bytes(old_model.replace(b"openrouter/openai/", b"openai/", 1))
+    recovery = deployment / "recovery"
+
+    code, payload = _call(
+        _update_arguments(candidate, recovery), deployment, build_file, capsys
+    )
+
+    assert code == _ERROR_EXIT
+    assert "candidate" in str(payload["error"])
+    assert config.read_bytes() == old_model
+    assert manifest.read_bytes() == old_manifest
+    assert not recovery.exists()
+    assert not (profile / "model-config-update.json").exists()
+
+
 def test_recovery_rejects_altered_record_but_completed_startup_is_local(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

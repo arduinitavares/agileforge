@@ -507,11 +507,7 @@ def _check_controls(model: str, request: Mapping[str, object]) -> None:
 def _semantic_value(value: object) -> object:
     """Semantic value."""
     if isinstance(value, Mapping):
-        return {
-            str(key): _semantic_value(item)
-            for key, item in value.items()
-            if str(key).lower() not in _TRANSPORT_KEYS
-        }
+        return {str(key): _semantic_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_semantic_value(item) for item in value]
     if value is None or isinstance(value, (str, bool, int, float)):
@@ -530,7 +526,7 @@ def _request_fingerprint(request: Mapping[str, object]) -> str:
     semantic = {
         key: _semantic_value(value)
         for key, value in request.items()
-        if key in _SEMANTIC_KEYS
+        if key in _SEMANTIC_KEYS and key.lower() not in _TRANSPORT_KEYS
     }
     payload = json.dumps(
         semantic, sort_keys=True, separators=(",", ":"), allow_nan=False

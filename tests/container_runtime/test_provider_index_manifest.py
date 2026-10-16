@@ -244,7 +244,7 @@ def test_rendered_upgrade_hint_requires_explicit_compose_project(
     environment = {"PATH": str(transport), "FAKE_DOCKER_ARGS": str(recorded)}
     if project_name is not None:
         environment["project_name"] = project_name
-    result = subprocess.run(  # noqa: S603 - trusted synthetic-profile error command.
+    result = subprocess.run(  # noqa: S603 # nosec B603 - trusted fixture command.
         ["/bin/sh", "-c", command],
         cwd=tmp_path,
         env=environment,

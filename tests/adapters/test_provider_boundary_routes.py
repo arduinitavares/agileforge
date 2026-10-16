@@ -1369,17 +1369,55 @@ async def test_each_send_uses_immutable_semantics_and_credentials_are_not_hashed
             [{"role": "user", "content": "safe"}],
             [],
             api_key="first-key",
-            extra_headers={"secret": "first-header"},
+            extra_headers={"X-Test-Header": "first-header"},
         )
         await client.acompletion(
             "openrouter/test-model",
             [{"role": "user", "content": "safe"}],
             [],
             api_key="second-key",
-            extra_headers={"secret": "second-header"},
+            extra_headers={"X-Test-Header": "second-header"},
         )
     assert observed == ["safe"] * 3
     assert len({record.request_fingerprint for record in audit.starts}) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("property_name", ["timeout", "headers", "authorization"])
+async def test_nested_tool_properties_change_the_audited_request_fingerprint(
+    property_name: str,
+) -> None:
+    """Keep semantic schema fields even when their names resemble transport keys."""
+    module = boundary()
+    clock = Clock()
+    audit = Audit(clock)
+
+    async def send(**kwargs: object) -> object:
+        """Complete without contacting a provider."""
+        del kwargs
+        return object()
+
+    client = module.RetryingOpenRouterClient(completion=send, clock=clock)
+    with module.bind_provider_action(context(clock, audit)):
+        for property_type in ("string", "integer"):
+            await client.acompletion(
+                "openrouter/test-model",
+                [{"role": "user", "content": "Use the supplied schema."}],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "example",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {property_name: {"type": property_type}},
+                            },
+                        },
+                    }
+                ],
+            )
+    assert len(audit.starts) == 2
+    assert audit.starts[0].request_fingerprint != audit.starts[1].request_fingerprint
 
 
 @pytest.mark.asyncio
