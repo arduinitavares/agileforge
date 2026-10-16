@@ -4,7 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { randomUUID, webcrypto } from 'node:crypto';
 import test from 'node:test';
-import { dashboardBundle } from './dashboard_bundle_fixture.mjs';
+import { dashboardBundle, repositoryBindingRecovery, staleSourceRegistrationResponse, staleSourcePreviewResponse } from './dashboard_bundle_fixture.mjs';
 
 const sourcePath = path.resolve('frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -104,6 +104,36 @@ const bootstrap = { request_kind: 'generate_vision_bootstrap', endpoint: 'vision
 const failed = { ok: false, status: 500, text: async () => JSON.stringify({ message: 'Controlled test stop.' }) };
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 const dashboardReadCount = 1;
+
+test('checked response keeps allowlisted recovery in distinct preview and registration envelopes', () => {
+    const h = harness();
+    const rejected = (payload, status) => {
+        try { h.context.checkedResponsePayload(payload, status, false); assert.fail('Expected a rejected response'); }
+        catch (error) { return error; }
+    };
+    const registration = rejected(staleSourceRegistrationResponse(), 409);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.context.sourceRegistrationRecoveryFromError(registration))), repositoryBindingRecovery());
+    assert.equal(registration.previewRepositoryRecovery, null);
+    const preview = rejected(staleSourcePreviewResponse(), 422);
+    assert.equal(h.context.sourceRegistrationRecoveryFromError(preview), null);
+    assert.deepEqual(JSON.parse(JSON.stringify(preview.previewRepositoryRecovery)), repositoryBindingRecovery());
+    const unrelated = rejected({ detail: { errors: [{ code: 'UNRELATED_FAILURE' }], output: { repository_recovery: repositoryBindingRecovery() } } }, 409);
+    assert.equal(h.context.sourceRegistrationRecoveryFromError(unrelated), null);
+});
+
+test('malformed recovery cannot create a refresh operation or disclose server-provided fields', () => {
+    const h = harness();
+    for (const recovery of [
+        repositoryBindingRecovery({ action: 'https://outside.invalid/refresh' }),
+        repositoryBindingRecovery({ recorded_binding_id: 0 }),
+        repositoryBindingRecovery({ recorded_dirty: 'false' }),
+        repositoryBindingRecovery({ observed_dirty: 'true' }),
+        repositoryBindingRecovery({ changed_fields: ['SERVER_SENTINEL'] }),
+        repositoryBindingRecovery({ cause: 'UNTRUSTED_CAUSE' }),
+        repositoryBindingRecovery({ path: '/private/SERVER_SENTINEL' }),
+    ]) assert.equal(h.context.repositoryBindingRecoveryDisplay(recovery), null);
+    assert.equal(h.context.repositoryBindingRecoveryDisplay(null), null);
+});
 
 function assertDashboardGets(requests) {
     assert.equal(requests.length, dashboardReadCount);

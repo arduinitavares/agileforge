@@ -18,6 +18,10 @@ from sqlmodel import Session
 from models.core import Project
 from models.repository import RepositoryBinding, repository_binding_fingerprint
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.contracts.repository_recovery import (
+    RepositoryBindingChangedField,
+    RepositoryBindingRecovery,
+)
 from services.contracts.specification_source import (
     SPECIFICATION_SOURCE_CONTEXT_ID,
     SPECIFICATION_SOURCE_MAX_ADR_COUNT,
@@ -83,9 +87,12 @@ class SpecificationSourceRegistrationError(RuntimeError):
         self,
         code: SpecificationSourceRegistrationErrorCode,
         message: str,
+        *,
+        recovery: RepositoryBindingRecovery | None = None,
     ) -> None:
         """Retain the stable closed code with one bounded diagnostic."""
         self.code = code
+        self.recovery = recovery
         super().__init__(message)
 
 
@@ -304,11 +311,13 @@ class SpecificationSourceRegistrationService:
             raise SpecificationSourceRegistrationError(
                 SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
                 "Repository provenance cannot be inspected for source capture.",
+                recovery=_repository_binding_recovery(context, None),
             ) from error
         if not _probe_matches_context(observed, context):
             raise SpecificationSourceRegistrationError(
                 SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE,
                 "Repository provenance differs from the active binding.",
+                recovery=_repository_binding_recovery(context, observed),
             )
         return observed
 
@@ -552,6 +561,49 @@ def _durable_context(
         dirty=binding.dirty,
         status_fingerprint=binding.status_fingerprint,
         remotes_json=binding.remotes_json,
+    )
+
+
+def _repository_binding_recovery(
+    context: _DurableSourceContext,
+    observed: RepositoryProbeResult | None,
+) -> RepositoryBindingRecovery:
+    """Classify a stale check using only its existing saved/live observations."""
+    if observed is None:
+        return RepositoryBindingRecovery(
+            cause="INSPECTION_UNAVAILABLE",
+            recorded_binding_id=context.repository_binding_id,
+            recorded_dirty=context.dirty,
+            observed_dirty=None,
+            changed_fields=(),
+        )
+
+    comparisons: tuple[tuple[RepositoryBindingChangedField, object, object], ...] = (
+        ("worktree", context.worktree_path, observed.worktree_path),
+        ("git_directory", context.common_git_dir, observed.common_git_dir),
+        ("head", context.head_sha, observed.head_sha),
+        ("branch", context.branch_name, observed.branch_name),
+        ("detached_head", context.detached_head, observed.detached_head),
+        (
+            "working_tree_status",
+            (context.dirty, context.status_fingerprint),
+            (observed.dirty, observed.status_fingerprint),
+        ),
+        ("remotes", context.remotes_json, canonical_json(list(observed.remotes))),
+    )
+    changed_fields = tuple(
+        field for field, recorded, checked in comparisons if recorded != checked
+    )
+    return RepositoryBindingRecovery(
+        cause=(
+            "REPOSITORY_IDENTITY_CHANGED"
+            if any(field != "working_tree_status" for field in changed_fields)
+            else "WORKTREE_CHANGED"
+        ),
+        recorded_binding_id=context.repository_binding_id,
+        recorded_dirty=context.dirty,
+        observed_dirty=observed.dirty,
+        changed_fields=changed_fields,
     )
 
 

@@ -686,6 +686,13 @@ def _project_action_availability(
             ) as error:
                 action["availability"] = "locked"
                 action["reason_code"] = error.code.value
+                if (
+                    isinstance(error, SpecificationSourceRegistrationError)
+                    and error.recovery is not None
+                ):
+                    action["repository_recovery"] = error.recovery.model_dump(
+                        mode="json"
+                    )
                 return
             if not capability.available:
                 action["availability"] = "locked"
@@ -783,16 +790,19 @@ def _source_preview_error(error: SpecificationSourceRegistrationError) -> HTTPEx
         if error.code is SpecificationSourceRegistrationErrorCode.PROJECT_NOT_FOUND
         else 422
     )
+    detail: JsonObject = {
+        "error": {"code": error.code.value, "message": str(error)},
+        "limits": {
+            "document_limit_bytes": SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
+            "package_limit_bytes": SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
+        },
+        "provider_run_performed": False,
+    }
+    if error.recovery is not None:
+        detail["repository_recovery"] = error.recovery.model_dump(mode="json")
     return HTTPException(
         status_code=status_code,
-        detail={
-            "error": {"code": error.code.value, "message": str(error)},
-            "limits": {
-                "document_limit_bytes": SPECIFICATION_SOURCE_MAX_DOCUMENT_BYTES,
-                "package_limit_bytes": SPECIFICATION_SOURCE_MAX_BUNDLE_BYTES,
-            },
-            "provider_run_performed": False,
-        },
+        detail=detail,
     )
 
 

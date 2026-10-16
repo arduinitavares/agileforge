@@ -26,11 +26,13 @@ from services.agent_workbench.backlog_phase import record_backlog_decision_in_se
 from services.application import (
     AgileForgeApplication,
     DeliveryReviewSelectionService,
+    RepositoryRefreshRequest,
 )
 from services.dashboard_reads import dashboard_read_view
 from services.read_projections import DurableReadProjectionService
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.services import test_specification_source_application as source_fixtures
 from tests.services.test_durable_product_definition_projections import (
     NOW,
     _add_goal_turn,
@@ -42,7 +44,12 @@ from tests.services.test_durable_product_definition_projections import (
     _seed_vision_candidate,
     _seeded_int,
 )
+from tests.services.test_specification_source_application import (
+    _accepted_replacement_fixture,
+    _active_binding_id,
+)
 from tests.workflow.execution_fixtures import seed_started_execution
+from tests.workflow.test_specification_rebinding import _accepted_rows
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, RecommendationKind
 from workflow.definitions.root import project_graph
@@ -63,6 +70,8 @@ if TYPE_CHECKING:
     from workflow.facts import WorkflowFactSnapshot
 
 
+source_recovery_engine = source_fixtures.source_recovery_engine
+
 _ROUTES = {
     "project": "",
     "position": "/position",
@@ -81,6 +90,65 @@ _ROUTES = {
     "sprintStatusResponse": "/sprint/status",
     "sprintHistory": "/sprint/history",
 }
+
+
+def test_rebound_dashboard_preserves_exact_accepted_source_identity_without_extra_probe(
+    source_recovery_engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone and bundled reads retain accepted lineage after explicit refresh."""
+    engine = source_recovery_engine
+    fixture = _accepted_replacement_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    before = fixture.application.reads.specification_review(
+        project_id=fixture.project_id
+    )["data"]
+    assert isinstance(before, dict)
+    refreshed = fixture.application.refresh_repository(
+        RepositoryRefreshRequest(
+            project_id=fixture.project_id,
+            idempotency_key="dashboard-rebinding",
+            actor="operator",
+        )
+    )
+    assert refreshed.ok, refreshed.error
+    next_binding_id = _active_binding_id(engine, fixture.project_id)
+    assert next_binding_id > fixture.binding_id
+    accepted_source = original_rows["sources"][0]
+    expected_binding = {
+        "state": "different_binding",
+        "active_repository_binding_id": next_binding_id,
+        "accepted_source": {
+            "specification_source_id": accepted_source["specification_source_id"],
+            "source_fingerprint": accepted_source["source_fingerprint"],
+            "repository_binding_id": accepted_source["repository_binding_id"],
+        },
+    }
+    fixture.probe.calls = 0
+    status = fixture.application.reads.specification_status(
+        project_id=fixture.project_id
+    )["data"]
+    assert isinstance(status, dict)
+    assert status["source_binding"] == expected_binding
+    assert status["current"] == before["current"]
+    monkeypatch.setattr(api_module, "_application", lambda: fixture.application)
+    client = TestClient(api_module.app)
+    standalone = client.get(f"/api/projects/{fixture.project_id}/specifications/review")
+    assert standalone.status_code == HTTPStatus.OK
+    review = standalone.json()["data"]
+    assert review["source_binding"] == expected_binding
+    assert review["current"] == status["current"]
+    assert review["source"] is None
+    assert review["candidate"] is None
+    assert review["review"] is None
+    assert fixture.probe.calls == 0
+
+    dashboard = client.get(f"/api/projects/{fixture.project_id}/dashboard")
+    assert dashboard.status_code == HTTPStatus.OK
+    assert dashboard.json()["data"]["specification"]["body"] == standalone.json()
+    assert fixture.probe.calls == 1  # The existing source action capability check only.
+    assert _accepted_rows(engine) == original_rows
 
 
 def _application(engine: Engine) -> AgileForgeApplication:
