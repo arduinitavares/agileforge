@@ -14,7 +14,7 @@ from math import isfinite
 from pathlib import Path
 from subprocess import TimeoutExpired  # nosec B404  # own SDK-created process
 from time import monotonic
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, overload
 from urllib.parse import urlsplit, urlunsplit
 
 from git import Repo
@@ -48,7 +48,8 @@ if TYPE_CHECKING:
             shell: Literal[False],
             as_process: bool = False,
             start_new_session: bool = False,
-        ) -> str | Git.AutoInterrupt: ...
+            stdout_as_string: bool = True,
+        ) -> str | bytes | Git.AutoInterrupt: ...
 
 
 _PROBE_VERSION = "agileforge.repository-probe.v1"
@@ -196,11 +197,13 @@ class GitPythonRepositoryProbe:
         with _completion_repository(
             path, timeout_seconds=self._outside_timeout_seconds
         ) as repo:
-            records = repo.git.worktree(
+            records = _verification_git(
+                repo,
+                "worktree",
                 "list",
                 "--porcelain",
                 "-z",
-                **_deadline_options(self._outside_timeout_seconds),
+                deadline=monotonic() + self._outside_timeout_seconds,
             )
             return sum(item.startswith("worktree ") for item in records.split("\0")) > 1
 
@@ -231,8 +234,14 @@ class GitPythonRepositoryProbe:
         remote_urls: list[str] = []
         remote_omitted = False
         for remote in repo.remotes:
-            urls = repo.git.remote(
-                "get-url", "--all", remote.name, **_deadline_options(timeout)
+            urls = _verification_git(
+                repo,
+                "remote",
+                "get-url",
+                "--all",
+                "--",
+                remote.name,
+                deadline=monotonic() + timeout,
             )
             for url in urls.split("\n"):
                 identity = _remote_identity(url)
@@ -338,15 +347,6 @@ def _positive_timeout(value: float) -> float:
     return float(value)
 
 
-def _deadline_options(timeout_seconds: float) -> dict[str, float]:
-    """Bound synchronous GitPython commands on supported runtime platforms."""
-    # Product runtime is Linux-only; retain healthy native Windows inspection tests.
-    # The pinned SDK rejects this keyword on Windows before starting any command.
-    return (
-        {} if _WINDOWS_TIMEOUT_UNSUPPORTED else {"kill_after_timeout": timeout_seconds}
-    )
-
-
 def _command_error(error: GitCommandError, path: Path) -> RepositoryProbeError:
     """Classify only the pinned SDK watchdog's typed exit and timeout marker."""
     code = (
@@ -366,8 +366,22 @@ def _remaining_verification_seconds(deadline: float, path: Path) -> float:
     return remaining
 
 
-def _verification_git(repo: Repo, *arguments: str, deadline: float) -> str:
-    """Use SDK environment/launch integration with an owned POSIX process group."""
+@overload
+def _verification_git(
+    repo: Repo, *arguments: str, deadline: float, as_bytes: Literal[False] = False
+) -> str: ...
+
+
+@overload
+def _verification_git(
+    repo: Repo, *arguments: str, deadline: float, as_bytes: Literal[True]
+) -> bytes: ...
+
+
+def _verification_git(
+    repo: Repo, *arguments: str, deadline: float, as_bytes: bool = False
+) -> str | bytes:
+    """Bound every probe command using the SDK and an owned POSIX process group."""
     normalized = Path(repo.working_tree_dir or repo.working_dir)
     _remaining_verification_seconds(deadline, normalized)
     executable = repo.git.GIT_PYTHON_GIT_EXECUTABLE
@@ -388,7 +402,10 @@ def _verification_git(repo: Repo, *arguments: str, deadline: float) -> str:
     execute = cast("_VerificationGitExecutor", repo.git.execute)
     if _WINDOWS_TIMEOUT_UNSUPPORTED:
         # Preserve healthy Windows tests; product runtime and group bounds are POSIX.
-        output = cast("str", execute(command, shell=False))
+        output = cast(
+            "str | bytes",
+            execute(command, shell=False, stdout_as_string=not as_bytes),
+        )
     else:
         process = cast(
             "Git.AutoInterrupt",
@@ -401,7 +418,11 @@ def _verification_git(repo: Repo, *arguments: str, deadline: float) -> str:
             stdout, stderr = proc.communicate(
                 timeout=_remaining_verification_seconds(deadline, normalized)
             )
-            output = cast("str", safe_decode(stdout)).removesuffix("\n")
+            output = (
+                stdout.removesuffix(b"\n")
+                if as_bytes
+                else cast("str", safe_decode(stdout)).removesuffix("\n")
+            )
             _remaining_verification_seconds(deadline, normalized)
         except BaseException as error:
             # The leader may have exited already while descendants still hold pipes.
@@ -440,8 +461,12 @@ def _head_sha(
             return _verification_git(
                 repo, "rev-parse", "--verify", "HEAD^{commit}", deadline=deadline
             )
-        return repo.git.rev_parse(
-            "--verify", "HEAD^{commit}", **_deadline_options(timeout_seconds)
+        return _verification_git(
+            repo,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            deadline=monotonic() + timeout_seconds,
         )
     except GitCommandError as error:
         normalized = Path(repo.working_tree_dir or repo.working_dir)
@@ -525,12 +550,14 @@ def _porcelain_status_paths(
     timeout_seconds: float = 10.0,
 ) -> tuple[set[str], set[str], set[str], set[str]]:
     """Validate full-status completeness without replacing normalized entries."""
-    output = repo.git.status(
+    output = _verification_git(
+        repo,
+        "status",
         "--porcelain=v1",
         "-z",
         "--untracked-files=all",
         "--renames",
-        **_deadline_options(timeout_seconds),
+        deadline=monotonic() + timeout_seconds,
     )
     error = _error(
         RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE,
@@ -570,14 +597,13 @@ def _porcelain_status_paths(
 
 def _gitlink_index_paths(repo: Repo, *, timeout_seconds: float) -> set[str]:
     """Read stage-zero gitlink modes without decoding SDK index or module objects."""
-    output = cast(
-        "bytes",
-        repo.git.ls_files(
-            "--stage",
-            "-z",
-            stdout_as_string=False,
-            **_deadline_options(timeout_seconds),
-        ),
+    output = _verification_git(
+        repo,
+        "ls-files",
+        "--stage",
+        "-z",
+        as_bytes=True,
+        deadline=monotonic() + timeout_seconds,
     )
     error = _error(
         RepositoryProbeErrorCode.GIT_METADATA_UNREADABLE,
@@ -599,12 +625,14 @@ def _gitlink_index_paths(repo: Repo, *, timeout_seconds: float) -> set[str]:
 def _worktree_diff_paths(repo: Repo, *, timeout_seconds: float = 10.0) -> set[str]:
     """Collect worktree diff names once without expanding paths into argv."""
     with repo.git.custom_environment(GIT_LITERAL_PATHSPECS="1"):
-        output = repo.git.diff(
+        output = _verification_git(
+            repo,
+            "diff",
             "--name-only",
             "-z",
             "--no-ext-diff",
             "--no-textconv",
-            **_deadline_options(timeout_seconds),
+            deadline=monotonic() + timeout_seconds,
         )
     return {_normalize_text(path) for path in output.split("\0") if path}
 
@@ -631,11 +659,12 @@ def _raw_diff_entries(
     if area == "index":
         arguments.extend(("-R", "HEAD", "--cached"))
     arguments.append("--")
-    output = cast(
-        "bytes",
-        repo.git.diff(
-            *arguments, stdout_as_string=False, **_deadline_options(timeout_seconds)
-        ),
+    output = _verification_git(
+        repo,
+        "diff",
+        *arguments,
+        as_bytes=True,
+        deadline=monotonic() + timeout_seconds,
     )
     diffs: DiffIndex[Diff] = DiffIndex()
     for record, previous_path, current_path in _raw_diff_records(output):

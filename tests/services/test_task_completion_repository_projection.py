@@ -23,7 +23,11 @@ from tests.services.test_task_completion_repository_evidence import (
     _repository,
     _request,
 )
-from tests.workflow.execution_fixtures import seed_started_execution
+from tests.workflow import test_planning_transitions as planning_fixtures
+from tests.workflow.execution_fixtures import (
+    _accept_and_start_sprint,
+    seed_started_execution,
+)
 from tests.workflow.execution_retry_support import (
     _close_execution_sprint,
     _triage_execution_sprint,
@@ -42,10 +46,146 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine, ExecutionContext
     from sqlalchemy.engine.interfaces import DBAPICursor
 
+    from workflow.contracts import JsonObject
     from workflow.facts import WorkflowFactSnapshot
 
 _DIRTY_PATH_LIMIT: int = 50
 _ERROR_SUMMARY_LIMIT: int = 240
+_BATCH_TASK_COUNT: int = 2
+
+
+def _two_task_sprint(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> tuple[int, int, int, tuple[int, ...]]:
+    """Start a real accepted plan with two Tasks sharing one Repository Binding."""
+    original = planning_fixtures._sprint_plan
+
+    def plan(
+        story_id: int,
+        *,
+        story_item_id: str,
+        spec_item_ids: tuple[str, ...],
+        checklist_items: tuple[str, ...],
+    ) -> JsonObject:
+        payload = original(
+            story_id,
+            story_item_id=story_item_id,
+            spec_item_ids=spec_item_ids,
+            checklist_items=checklist_items,
+        )
+        selected = cast("list[JsonObject]", payload["selected_stories"])
+        tasks = cast("list[JsonObject]", selected[0]["tasks"])
+        tasks.append({**tasks[0], "description": "Verify the second planned Task"})
+        return payload
+
+    monkeypatch.setattr(planning_fixtures, "_sprint_plan", plan)
+    project_id = planning_fixtures._seed_accepted_backlog(engine)
+    domain = planning_fixtures._domain(engine)
+    planning_fixtures._record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = planning_fixtures._record_and_accept_story(
+        engine, domain, project_id
+    )
+    binding = planning_fixtures._record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Batched completion reads",
+        idempotency_key="batch-completion-plan",
+    )
+    sprint_id = _accept_and_start_sprint(
+        domain,
+        engine=engine,
+        project_id=project_id,
+        plan_binding=binding,
+        idempotency_suffix="-batch-completions",
+    )
+    snapshot = _load(engine, project_id)
+    return (
+        project_id,
+        sprint_id,
+        story_id,
+        tuple(item.task_id for item in snapshot.tasks if item.sprint_id == sprint_id),
+    )
+
+
+def _binding_select_count(engine: Engine, project_id: int) -> int:
+    """Count real binding reads through the public immutable-snapshot boundary."""
+    statements: list[str] = []
+
+    def observe(
+        _connection: Connection,
+        _cursor: DBAPICursor,
+        statement: str,
+        _parameters: object,
+        _context: ExecutionContext,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if (
+            normalized.startswith("select ")
+            and "from repository_bindings " in normalized
+        ):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        _load(engine, project_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    return len(statements)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_completion_history_batches_shared_binding_reads(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, retry: bool
+) -> None:
+    """Two original or retry completions add one binding query, independent of Tasks."""
+    project_id, sprint_id, story_id, task_ids = _two_task_sprint(engine, monkeypatch)
+    assert len(task_ids) == _BATCH_TASK_COUNT
+    target = _repository(tmp_path)
+    _bind(engine, project_id, target)
+    domain = _domain(engine)
+    retry_id = None
+    if retry:
+        for task_id in task_ids[:-1]:
+            assert domain.transition(
+                _request(domain, project_id, task_id).model_copy(
+                    update={
+                        "idempotency_key": f"batch-task-{task_id}",
+                        "acceptance_result": "fully_met",
+                    }
+                )
+            ).ok
+        _close_execution_sprint(
+            domain,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            task_id=task_ids[-1],
+        )
+        _triage_execution_sprint(domain, project_id=project_id, sprint_id=sprint_id)
+        domain = WorkflowDomain(
+            engine=engine, graph=project_graph(), clock=FixedClock(EVALUATED_AT)
+        )
+        retry_id = _start_retry(
+            engine, domain, project_id=project_id, sprint_id=sprint_id, suffix="batch"
+        )
+    before = _binding_select_count(engine, project_id)
+    for task_id in task_ids:
+        request = _request(domain, project_id, task_id, retry_id).model_copy(
+            update={"idempotency_key": f"batch-complete-{retry_id}-{task_id}"}
+        )
+        assert domain.transition(request).ok
+    assert _binding_select_count(engine, project_id) == before + 1
+    snapshot = _load(engine, project_id)
+    facts = (
+        snapshot.sprint_retries[0].task_completions
+        if retry
+        else snapshot.task_completions
+    )
+    assert {item.task_id for item in facts} == set(task_ids)
+    assert all(item.repository_evidence is not None for item in facts)
 
 
 def _load(engine: Engine, project_id: int) -> WorkflowFactSnapshot:

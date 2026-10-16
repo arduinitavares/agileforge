@@ -258,8 +258,24 @@ the same. Retained Task metadata allows indexed replay after completion, a
 closed Sprint, or a later active Sprint. Changed results or other semantic
 fields conflict; do not change, omit, or add entries on replay.
 
-If a payload is rejected, correct it and use a fresh idempotency key because
-rejected receipts are durable. In particular, an indexed attempt rejected by
+For a bound repository, completion captures the selected worktree's HEAD, branch,
+dirty paths, and Repository Binding as immutable evidence. Use `--worktree PATH`
+to select a registered linked worktree explicitly; omitting it uses the bound
+worktree. A dirty or unavailable observation requires an explicit
+`--uncommitted` acknowledgement before `fully_met` can be recorded. The
+acknowledgement is retained as evidence and does not commit or modify repository
+files. Unbound Projects record that no repository is bound; historical
+completions without repository evidence remain explicitly unrecorded.
+
+When completion returns `REPOSITORY_VERIFICATION_TIMEOUT`, retry the unchanged
+request with the same idempotency key: this verification failure does not retain
+a rejection receipt. Preserve the actor, correlation ID, worktree selection,
+acknowledgement, and all semantic evidence on that retry.
+
+For a durable rejection, including `REPOSITORY_REVISION_CHANGED`, correct it and
+use a fresh idempotency key.
+Changing `--worktree`, `--uncommitted`, or other request fields is a changed
+request and requires a fresh key. In particular, an indexed attempt rejected by
 an older CLI stored literal keys such as `{"1": "met"}`. Retrying through the
 new index normalization with that same key conflicts instead of replaying;
 use a fresh key for the corrected completion.

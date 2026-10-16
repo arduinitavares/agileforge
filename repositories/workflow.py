@@ -3800,30 +3800,51 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         tasks_by_key = {(item.sprint_id, item.task_id): item for item in snapshot.tasks}
-        facts: list[TaskCompletionFact] = []
-        for row in rows:
-            key = (row.sprint_id, row.task_id)
-            task = tasks_by_key.get(key)
-            if task is None:
-                message = "Task completion evidence targets a cross-Project task."
-                raise self._error(message)
-            try:
-                evidence = canonical_task_evidence_payload(
+        try:
+            payloads = tuple(
+                canonical_task_evidence_payload(
                     outcome_summary=row.outcome_summary,
                     artifact_refs_json=row.artifact_refs_json,
                     acceptance_result=row.acceptance_result,
                     checklist_result_json=row.checklist_result_json,
                     repository_evidence_json=row.repository_evidence_json,
                 )
+                for row in rows
+            )
+        except ExecutionIntegrityError as exc:
+            raise self._error(str(exc)) from exc
+        binding_ids = {
+            evidence.repository_evidence.repository_binding_id
+            for evidence in payloads
+            if evidence.repository_evidence is not None
+            and not isinstance(
+                evidence.repository_evidence, UnboundTaskRepositoryEvidence
+            )
+        }
+        bindings = (
+            {
+                binding.repository_binding_id: binding
+                for binding in self._session.exec(
+                    select(RepositoryBinding).where(
+                        col(RepositoryBinding.repository_binding_id).in_(binding_ids)
+                    ),
+                    execution_options=self._query_options(),
+                ).all()
+            }
+            if binding_ids
+            else {}
+        )
+        facts: list[TaskCompletionFact] = []
+        for row, evidence in zip(rows, payloads, strict=True):
+            key = (row.sprint_id, row.task_id)
+            task = tasks_by_key.get(key)
+            if task is None:
+                message = "Task completion evidence targets a cross-Project task."
+                raise self._error(message)
+            try:
                 repository_evidence = evidence.repository_evidence
                 binding = (
-                    self._session.exec(
-                        select(RepositoryBinding).where(
-                            col(RepositoryBinding.repository_binding_id)
-                            == repository_evidence.repository_binding_id
-                        ),
-                        execution_options=self._query_options(),
-                    ).one_or_none()
+                    bindings.get(repository_evidence.repository_binding_id)
                     if repository_evidence is not None
                     and not isinstance(
                         repository_evidence, UnboundTaskRepositoryEvidence

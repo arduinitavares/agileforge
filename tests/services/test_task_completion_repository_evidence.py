@@ -21,7 +21,6 @@ from git import Git, Repo
 from sqlalchemy import event
 from sqlmodel import Session, col, select
 
-import adapters.git.repository_probe as probe_adapter
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project, Task
 from models.enums import TaskStatus
@@ -1528,7 +1527,6 @@ def test_real_verification_pipe_timeout_promptly_releases_sqlite_writer(
         monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
 
     probe.before_revision = stall_verification
-    monkeypatch.setattr(probe_adapter, "_deadline_options", lambda _seconds: {})
     domain = _domain(engine, probe)
     request = _request(domain, command.project_id, command.task_id)
     before = _completion_business_state(engine)

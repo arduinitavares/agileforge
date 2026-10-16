@@ -317,26 +317,45 @@ def _task_evidence(
         .order_by(col(SprintRetryTaskEvidence.sprint_retry_task_evidence_id)),
         execution_options=options,
     ).all()
-    result: list[TaskCompletionFact] = []
-    for row in rows:
-        _check_scope(row, attempt, "Task evidence")
-        try:
-            evidence = canonical_task_evidence_payload(
+    try:
+        payloads = tuple(
+            canonical_task_evidence_payload(
                 outcome_summary=row.outcome_summary,
                 artifact_refs_json=row.artifact_refs_json,
                 acceptance_result=row.acceptance_result,
                 checklist_result_json=row.checklist_result_json,
                 repository_evidence_json=row.repository_evidence_json,
             )
+            for row in rows
+        )
+    except ExecutionIntegrityError as exc:
+        raise _invalid(str(exc)) from exc
+    binding_ids = {
+        evidence.repository_evidence.repository_binding_id
+        for evidence in payloads
+        if evidence.repository_evidence is not None
+        and not isinstance(evidence.repository_evidence, UnboundTaskRepositoryEvidence)
+    }
+    bindings = (
+        {
+            binding.repository_binding_id: binding
+            for binding in session.exec(
+                select(RepositoryBinding).where(
+                    col(RepositoryBinding.repository_binding_id).in_(binding_ids)
+                ),
+                execution_options=options,
+            ).all()
+        }
+        if binding_ids
+        else {}
+    )
+    result: list[TaskCompletionFact] = []
+    for row, evidence in zip(rows, payloads, strict=True):
+        _check_scope(row, attempt, "Task evidence")
+        try:
             repository_evidence = evidence.repository_evidence
             binding = (
-                session.exec(
-                    select(RepositoryBinding).where(
-                        col(RepositoryBinding.repository_binding_id)
-                        == repository_evidence.repository_binding_id
-                    ),
-                    execution_options=options,
-                ).one_or_none()
+                bindings.get(repository_evidence.repository_binding_id)
                 if repository_evidence is not None
                 and not isinstance(repository_evidence, UnboundTaskRepositoryEvidence)
                 else None

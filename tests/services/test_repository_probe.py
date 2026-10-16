@@ -755,9 +755,19 @@ def test_full_probe_rejects_unconfirmed_gitlink_index_metadata(
     """Incomplete or non-stage-zero metadata cannot fill a raw diff coverage gap."""
     (git_repository / "tracked.txt").write_text("tracked changed\n", encoding="utf-8")
     monkeypatch.setattr(adapter_module, "_diff_entries", lambda *_args, **_kwargs: ())
-    monkeypatch.setattr(
-        Git, "ls_files", lambda *_args, **_kwargs: stage_output, raising=False
-    )
+    bounded_git = adapter_module._verification_git
+
+    def index_output(
+        repo: Repo, *arguments: str, deadline: float, as_bytes: bool = False
+    ) -> str | bytes:
+        if arguments[0] == "ls-files":
+            assert as_bytes is True
+            return stage_output
+        if as_bytes:
+            return bounded_git(repo, *arguments, deadline=deadline, as_bytes=True)
+        return bounded_git(repo, *arguments, deadline=deadline)
+
+    monkeypatch.setattr(adapter_module, "_verification_git", index_output)
     index = git_repository / ".git" / "index"
     before = (index.read_bytes(), index.stat().st_mtime_ns, index.stat().st_ctime_ns)
 
@@ -787,15 +797,20 @@ def test_full_probe_rejects_incomplete_raw_record_framing(
     """Partial NUL records must fail closed rather than drop dirty paths."""
     (git_repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
 
-    def raw_diff(_git: Git, *arguments: object, **kwargs: object) -> object:
-        if "--name-only" in arguments:
-            return "tracked.txt\0"
-        if kwargs.get("stdout_as_string") is False:
-            assert "--raw" in arguments
-            return raw_output
-        return _git._call_process("diff", *arguments, **kwargs)
+    bounded_git = adapter_module._verification_git
 
-    monkeypatch.setattr(Git, "diff", raw_diff, raising=False)
+    def raw_diff(
+        repo: Repo, *arguments: str, deadline: float, as_bytes: bool = False
+    ) -> str | bytes:
+        if "--raw" in arguments:
+            assert arguments[0] == "diff"
+            assert as_bytes is True
+            return raw_output
+        if as_bytes:
+            return bounded_git(repo, *arguments, deadline=deadline, as_bytes=True)
+        return bounded_git(repo, *arguments, deadline=deadline)
+
+    monkeypatch.setattr(adapter_module, "_verification_git", raw_diff)
     index = git_repository / ".git" / "index"
     before = (index.read_bytes(), index.stat().st_mtime_ns)
 
@@ -823,11 +838,19 @@ def test_full_probe_rejects_colon_index_paths_before_raw_diff(
         else:
             repo.git.mv("--", "tracked.txt", ":target")
 
-    def forbid_diff(*_args: object, **_kwargs: object) -> str:
-        message = "Known unsupported colon path reached raw diff."
-        raise AssertionError(message)
+    bounded_git = adapter_module._verification_git
 
-    monkeypatch.setattr(Git, "diff", forbid_diff, raising=False)
+    def forbid_diff(
+        repo: Repo, *arguments: str, deadline: float, as_bytes: bool = False
+    ) -> str | bytes:
+        if arguments[0] == "diff":
+            message = "Known unsupported colon path reached raw diff."
+            raise AssertionError(message)
+        if as_bytes:
+            return bounded_git(repo, *arguments, deadline=deadline, as_bytes=True)
+        return bounded_git(repo, *arguments, deadline=deadline)
+
+    monkeypatch.setattr(adapter_module, "_verification_git", forbid_diff)
     index = git_repository / ".git" / "index"
     before = (index.read_bytes(), index.stat().st_mtime_ns)
 
@@ -983,7 +1006,18 @@ def test_completion_probe_git_failures_are_typed_and_do_not_leak_stderr(
         raise GitCommandError(command, 128, stderr="private raw error output")
 
     if operation == "topology":
-        monkeypatch.setattr(Git, "worktree", fail_git, raising=False)
+        bounded_git = adapter_module._verification_git
+
+        def fail_topology(
+            repo: Repo, *arguments: str, deadline: float, as_bytes: bool = False
+        ) -> str | bytes:
+            if arguments[0] == "worktree":
+                fail_git()
+            if as_bytes:
+                return bounded_git(repo, *arguments, deadline=deadline, as_bytes=True)
+            return bounded_git(repo, *arguments, deadline=deadline)
+
+        monkeypatch.setattr(adapter_module, "_verification_git", fail_topology)
     elif operation == "cheap":
         if os.name != "posix":
             monkeypatch.setattr(Git, "execute", fail_git)
@@ -1188,6 +1222,21 @@ def test_linked_worktree_uses_worktree_root_and_shared_common_dir(
     assert result.common_git_dir == str(git_repository / ".git")
 
 
+@pytest.mark.parametrize("remote_name", ["--help", "-x"])
+def test_configured_remote_name_cannot_be_parsed_as_an_option(
+    git_repository: Path, remote_name: str
+) -> None:
+    """Read config-defined remote names through an explicit option terminator."""
+    with Repo(git_repository) as repo, repo.config_writer() as configuration:
+        configuration.set_value(
+            f'remote "{remote_name}"', "url", "https://example.test/project.git"
+        )
+
+    result = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert result.remotes == ("https://example.test/project.git",)
+
+
 def test_zero_one_and_multiple_remote_urls_are_sorted(git_repository: Path) -> None:
     """Probe all configured remote URLs without network access."""
     repo = Repo(git_repository)
@@ -1290,45 +1339,19 @@ def test_probe_omits_local_and_malformed_remote_locations(
     ],
 )
 def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    git_repository: Path,
     raw_name: bytes,
 ) -> None:
     """Expose surrogateescaped Git status through the public probe result."""
     decoded_path = os.fsdecode(raw_name)
     unicode_path = "cafe\u00e9.txt"
-    worktree_path = str(tmp_path)
-    common_git_dir = str(tmp_path / ".git")
-    fake_repo = SimpleNamespace(
-        bare=False,
-        head=SimpleNamespace(
-            commit=SimpleNamespace(hexsha="a" * 40),
-            is_detached=False,
-            is_valid=lambda: True,
-        ),
-        index=SimpleNamespace(diff=lambda _other: ()),
-        untracked_files=(unicode_path, decoded_path),
-        remotes=(),
-        working_tree_dir=worktree_path,
-        common_dir=common_git_dir,
-        active_branch=SimpleNamespace(name="main"),
-        git=Git(tmp_path),
-    )
+    for name in (unicode_path, decoded_path):
+        (git_repository / name).write_text("untracked content\n", encoding="utf-8")
+    with Repo(git_repository) as repo:
+        head_sha = repo.head.commit.hexsha
+        branch_name = repo.active_branch.name
 
-    def repository_factory(*_args: object, **_kwargs: object) -> Repo:
-        return cast("Repo", fake_repo)
-
-    monkeypatch.setattr(adapter_module, "Repo", repository_factory)
-    monkeypatch.setattr(
-        Git,
-        "status",
-        lambda *_args, **_kwargs: f"?? {unicode_path}\0?? {decoded_path}\0",
-        raising=False,
-    )
-
-    result = GitPythonRepositoryProbe(_read_head_sha=lambda _repo: "a" * 40).inspect(
-        tmp_path
-    )
+    result = GitPythonRepositoryProbe().inspect(git_repository)
     expected_entries = tuple(
         sorted(
             (
@@ -1349,8 +1372,8 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
     expected_fingerprint = canonical_hash(
         {
             "probe_version": "agileforge.repository-probe.v1",
-            "head_sha": "a" * 40,
-            "branch_name": "main",
+            "head_sha": head_sha,
+            "branch_name": branch_name,
             "detached_head": False,
             "dirty": True,
             "status_entries": [
@@ -1561,7 +1584,6 @@ def test_completion_git_commands_use_phase_appropriate_deadline_ownership(
     )
     original_execute = cast("Callable[..., object]", Git.execute)
     commands: list[tuple[str, ...]] = []
-    verification = False
 
     def bounded_execute(
         git: Git,
@@ -1569,7 +1591,7 @@ def test_completion_git_commands_use_phase_appropriate_deadline_ownership(
         *args: object,
         **kwargs: object,
     ) -> object:
-        if verification and sys.platform != "win32":
+        if sys.platform != "win32":
             assert kwargs.get("as_process") is True, tuple(command)
             assert kwargs.get("start_new_session") is True, tuple(command)
             assert kwargs.get("shell") is False, tuple(command)
@@ -1578,9 +1600,6 @@ def test_completion_git_commands_use_phase_appropriate_deadline_ownership(
             assert "submodule.recurse=false" in command
         elif sys.platform == "win32":
             assert "kill_after_timeout" not in kwargs, tuple(command)
-        else:
-            assert kwargs.get("kill_after_timeout") == outside, tuple(command)
-            assert kwargs.get("as_process", False) is False, tuple(command)
         commands.append(tuple(str(part) for part in command))
         return original_execute(git, command, *args, **kwargs)
 
@@ -1596,16 +1615,17 @@ def test_completion_git_commands_use_phase_appropriate_deadline_ownership(
     assert any("remote" in command for command in commands)
     assert any("worktree" in command for command in commands)
     assert all("cat-file" not in command for command in commands)
-    verification = True
     assert probe.inspect_revision(git_repository).dirty is True
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Verification groups require POSIX.")
+@pytest.mark.parametrize("operation", ["inspect", "inspect_revision"])
 @pytest.mark.parametrize("parent_exits", [False, True])
 def test_verification_deadline_stops_owned_pipe_holding_descendants(
     git_repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
     *,
     parent_exits: bool,
 ) -> None:
@@ -1613,17 +1633,16 @@ def test_verification_deadline_stops_owned_pipe_holding_descendants(
     wrapper, records = _owned_pipe_git(tmp_path, parent_exits=parent_exits)
     owned_processes = _observe_owned_status_processes(monkeypatch, wrapper)
     monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
-    # The old watchdog invokes a sandbox-denied ps command. Disable only that
-    # legacy path so RED measures the six-second inherited-pipe stall safely.
-    monkeypatch.setattr(adapter_module, "_deadline_options", lambda _seconds: {})
     # Actual child/grandchild forks avoid interpreter-startup confounders. The
     # separate 0.4s overall-budget test independently exercises a tighter bound.
-    probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.75)
+    probe = GitPythonRepositoryProbe(
+        outside_timeout_seconds=0.75, verification_timeout_seconds=0.75
+    )
     caught: RepositoryProbeError | None = None
     started = monotonic()
     try:
         try:
-            probe.inspect_revision(git_repository)
+            getattr(probe, operation)(git_repository)
         except RepositoryProbeError as error:
             caught = error
         elapsed = monotonic() - started
@@ -1655,7 +1674,6 @@ def test_verification_uses_one_deadline_for_all_git_commands(
     )
     wrapper.chmod(0o700)
     monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
-    monkeypatch.setattr(adapter_module, "_deadline_options", lambda _seconds: {})
     probe = GitPythonRepositoryProbe(verification_timeout_seconds=0.4)
     started = monotonic()
     with pytest.raises(RepositoryProbeError) as caught:
