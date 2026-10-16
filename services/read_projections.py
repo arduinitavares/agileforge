@@ -126,6 +126,7 @@ if TYPE_CHECKING:
 
     from services.contracts.backlog import BacklogItem
     from services.contracts.roadmap import RoadmapBuilderOutput
+    from workflow.definitions.product_discovery import ProductDefinitionSelection
     from workflow.facts import (
         PlanningArtifactFact,
         ProductGoalArtifactDecisionFact,
@@ -1027,6 +1028,88 @@ def _specification_registry_data(
         "source_product_goal_fingerprint": (spec.source_product_goal_fingerprint),
         "supersedes_spec_version_id": spec.supersedes_spec_version_id,
         "candidate": candidate,
+    }
+
+
+def _specification_source_binding_data(
+    snapshot: WorkflowFactSnapshot,
+    selection: ProductDefinitionSelection,
+) -> JsonObject:
+    """Keep verified accepted-source history separate from source eligibility."""
+    accepted_source: SpecificationSourceFact | None = None
+    accepted_data: JsonObject | None = None
+    spec = selection.accepted_spec
+    if spec is not None:
+        candidates = [
+            candidate
+            for candidate in snapshot.specification_candidates
+            if (
+                candidate.specification_candidate_id,
+                candidate.candidate_fingerprint,
+            )
+            == (
+                spec.source_specification_candidate_id,
+                spec.source_specification_candidate_fingerprint,
+            )
+        ]
+        if len(candidates) != 1:
+            message = "Accepted Specification candidate identity is unavailable."
+            raise ValueError(message)
+        candidate = candidates[0]
+        sources = [
+            source
+            for source in snapshot.specification_sources
+            if (source.specification_source_id, source.source_fingerprint)
+            == (
+                candidate.specification_source_id,
+                candidate.specification_source_fingerprint,
+            )
+        ]
+        if len(sources) != 1:
+            message = "Accepted Specification source identity is unavailable."
+            raise ValueError(message)
+        accepted_source = sources[0]
+        if (
+            accepted_source.vision_artifact_id,
+            accepted_source.vision_fingerprint,
+            accepted_source.product_goal_artifact_id,
+            accepted_source.product_goal_fingerprint,
+        ) != (
+            candidate.vision_artifact_id,
+            candidate.vision_fingerprint,
+            candidate.product_goal_artifact_id,
+            candidate.product_goal_fingerprint,
+        ):
+            message = "Accepted Specification source lineage changed."
+            raise ValueError(message)
+        _specification_source_data(accepted_source)
+        accepted_data = {
+            "specification_source_id": accepted_source.specification_source_id,
+            "source_fingerprint": accepted_source.source_fingerprint,
+            "repository_binding_id": accepted_source.repository_binding_id,
+        }
+    binding_id = snapshot.project.active_repository_binding_id
+    if selection.has_conflict:
+        state = "conflict"
+    elif selection.specification_source is not None:
+        state = "current"
+    elif (
+        binding_id is None
+        or accepted_current_vision(snapshot) is None
+        or accepted_current_goal(snapshot) is None
+    ):
+        state = "not_ready"
+    elif (
+        accepted_source is not None
+        and accepted_source.repository_binding_id != binding_id
+    ):
+        state = "different_binding"
+    else:
+        state = "not_registered"
+    return {
+        "state": state,
+        "active_repository_binding_id": binding_id,
+        "accepted_source": accepted_data,
     }
 
 
@@ -2669,6 +2752,13 @@ class DurableReadProjectionService:
         if isinstance(snapshot, dict):
             return snapshot
         selection = select_product_definition_state(snapshot)
+        accepted_context = self._accepted_specification_context(
+            snapshot=snapshot,
+            selection=selection,
+        )
+        if isinstance(accepted_context, _SpecificationReadFailure):
+            return accepted_context.error
+        accepted_current, source_binding = accepted_context
         source = (
             None
             if selection.specification_source is None
@@ -2677,48 +2767,12 @@ class DurableReadProjectionService:
         candidate = selection.specification_candidate
         spec = selection.accepted_spec
         if candidate is None:
-            current: JsonObject | None = None
-            if spec is not None:
-                accepted_candidate = next(
-                    (
-                        item
-                        for item in snapshot.specification_candidates
-                        if (
-                            item.specification_candidate_id,
-                            item.candidate_fingerprint,
-                        )
-                        == (
-                            spec.source_specification_candidate_id,
-                            spec.source_specification_candidate_fingerprint,
-                        )
-                    ),
-                    None,
-                )
-                if accepted_candidate is None:
-                    return _error(
-                        "SPECIFICATION_CANDIDATE_UNAVAILABLE",
-                        "Accepted Specification candidate is unavailable.",
-                        project_id=project_id,
-                        spec_version_id=spec.spec_version_id,
-                    )
-                accepted_projection = self._specification_projection(
-                    project_id=project_id,
-                    candidate=accepted_candidate,
-                    spec=spec,
-                    decision_state="accepted",
-                )
-                if isinstance(accepted_projection, _SpecificationReadFailure):
-                    return accepted_projection.error
-                if accepted_projection.registry is not None:
-                    current = _specification_registry_data(
-                        accepted_projection.registry,
-                        candidate=accepted_projection.candidate,
-                    )
             return _success(
                 {
                     "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                     "source": source,
-                    "current": current,
+                    "source_binding": source_binding,
+                    "current": accepted_current,
                     "candidate": None,
                     "review": None,
                     "stale_reason": (
@@ -2769,6 +2823,7 @@ class DurableReadProjectionService:
             {
                 "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                 "source": source,
+                "source_binding": source_binding,
                 "current": (
                     None
                     if projection.registry is None
@@ -2793,6 +2848,13 @@ class DurableReadProjectionService:
         if isinstance(snapshot, dict):
             return snapshot
         selection = select_product_definition_state(snapshot)
+        accepted_context = self._accepted_specification_context(
+            snapshot=snapshot,
+            selection=selection,
+        )
+        if isinstance(accepted_context, _SpecificationReadFailure):
+            return accepted_context.error
+        accepted_current, source_binding = accepted_context
         source = (
             None
             if selection.specification_source is None
@@ -2804,6 +2866,8 @@ class DurableReadProjectionService:
                 {
                     "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                     "source": source,
+                    "source_binding": source_binding,
+                    "current": accepted_current,
                     "candidate": None,
                     "review": None,
                     "stale_reason": (
@@ -2853,6 +2917,15 @@ class DurableReadProjectionService:
             {
                 "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                 "source": source,
+                "source_binding": source_binding,
+                "current": (
+                    None
+                    if projection.registry is None
+                    else _specification_registry_data(
+                        projection.registry,
+                        candidate=projection.candidate,
+                    )
+                ),
                 "candidate": projection.candidate,
                 "review": review,
                 "stale_reason": (
@@ -4617,6 +4690,80 @@ class DurableReadProjectionService:
                 "project": _result_data(project),
                 "sprint": _result_data(sprint) if sprint.get("ok") is True else None,
             }
+        )
+
+    def _accepted_specification_context(
+        self,
+        *,
+        snapshot: WorkflowFactSnapshot,
+        selection: ProductDefinitionSelection,
+    ) -> tuple[JsonObject | None, JsonObject] | _SpecificationReadFailure:
+        """Share accepted-context validation and typed failures between read views."""
+        accepted_current = self._accepted_specification_current(
+            snapshot=snapshot,
+            spec=selection.accepted_spec,
+        )
+        if isinstance(accepted_current, _SpecificationReadFailure):
+            return accepted_current
+        try:
+            source_binding = _specification_source_binding_data(snapshot, selection)
+        except (TypeError, ValueError) as error:
+            return _SpecificationReadFailure(
+                _error(
+                    "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                    "Accepted Specification source evidence is unavailable.",
+                    project_id=snapshot.project.project_id,
+                    reason=str(error),
+                )
+            )
+        return accepted_current, source_binding
+
+    def _accepted_specification_current(
+        self,
+        *,
+        snapshot: WorkflowFactSnapshot,
+        spec: SpecVersionFact | None,
+    ) -> JsonObject | _SpecificationReadFailure | None:
+        """Resolve the accepted fallback through its exact persisted review packet."""
+        if spec is None:
+            return None
+        project_id = snapshot.project.project_id
+        accepted_candidate = next(
+            (
+                item
+                for item in snapshot.specification_candidates
+                if (item.specification_candidate_id, item.candidate_fingerprint)
+                == (
+                    spec.source_specification_candidate_id,
+                    spec.source_specification_candidate_fingerprint,
+                )
+            ),
+            None,
+        )
+        if accepted_candidate is None:
+            return _SpecificationReadFailure(
+                _error(
+                    "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                    "Accepted Specification candidate is unavailable.",
+                    project_id=project_id,
+                    spec_version_id=spec.spec_version_id,
+                )
+            )
+        projection = self._specification_projection(
+            project_id=project_id,
+            candidate=accepted_candidate,
+            spec=spec,
+            decision_state="accepted",
+        )
+        if isinstance(projection, _SpecificationReadFailure):
+            return projection
+        return (
+            None
+            if projection.registry is None
+            else _specification_registry_data(
+                projection.registry,
+                candidate=projection.candidate,
+            )
         )
 
     def _specification_projection(
