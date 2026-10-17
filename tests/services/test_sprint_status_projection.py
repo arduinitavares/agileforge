@@ -383,6 +383,16 @@ def _start_retry_through_application(
     )
 
 
+def _expected_unbound_completion(completion: object) -> dict[str, object]:
+    """Keep canonical expectations separate from additive read presentation."""
+    return {
+        **cast("dict[str, object]", completion),
+        "revision_recording": "not_bound",
+        "repository_warnings": ["REPOSITORY_NOT_BOUND"],
+        "repository_warning_messages": ["No repository was bound at Task completion."],
+    }
+
+
 def test_sprint_reads_use_the_current_retry_scope_without_rewriting_history(  # noqa: PLR0915
     engine: Engine,
 ) -> None:
@@ -448,7 +458,9 @@ def test_sprint_reads_use_the_current_retry_scope_without_rewriting_history(  # 
         **original_task,
         "instance_key": f"task:{task_id}",
     }
-    assert detail_data["original_completion"] == original_evidence["completion"]
+    assert detail_data["original_completion"] == _expected_unbound_completion(
+        original_evidence["completion"]
+    )
 
     history = reads.sprint_task_history(
         project_id=project_id,
@@ -459,7 +471,9 @@ def test_sprint_reads_use_the_current_retry_scope_without_rewriting_history(  # 
     history_data = cast("dict[str, object]", history["data"])
     assert history_data["current_retry"] == retry_scope
     assert cast("dict[str, object]", history_data["task"])["status"] == "To Do"
-    assert history_data["original_completion"] == original_evidence["completion"]
+    assert history_data["original_completion"] == _expected_unbound_completion(
+        original_evidence["completion"]
+    )
 
     review = reads.sprint_review(project_id=project_id, sprint_id=sprint_id)
     assert review["ok"] is True
@@ -495,7 +509,10 @@ def test_sprint_reads_use_the_current_retry_scope_without_rewriting_history(  # 
         if item["sprint_id"] == sprint_id and item["retry_attempt_id"] is None
     )
     assert original_attempt["start"] == original_evidence["start"]
-    assert original_attempt["task_completions"] == original_evidence["task_completions"]
+    assert original_attempt["task_completions"] == [
+        _expected_unbound_completion(item)
+        for item in cast("list[object]", original_evidence["task_completions"])
+    ]
     assert (
         original_attempt["story_completions"] == original_evidence["story_completions"]
     )

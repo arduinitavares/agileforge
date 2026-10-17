@@ -219,6 +219,7 @@ class SprintRetryTaskEvidence(SQLModel, table=True):
     evidence_fingerprint: str = Field(index=True)
     completed_by: str = Field(index=True)
     completed_at: datetime = Field(default_factory=utc_now, nullable=False)
+    repository_evidence_json: str | None = Field(default=None, sa_type=Text)
 
 
 class SprintRetryStoryClosure(SQLModel, table=True):

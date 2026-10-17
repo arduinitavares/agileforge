@@ -482,7 +482,13 @@ Callables own no transaction boundaries and must use only their supplied
 connection and frozen historical definitions. Fresh/development bootstrap is a
 separate readiness path.
 
-Issue #300 should append exactly one `SchemaRelease` and one `SchemaTransition`
+The current `issue289-task-repository-evidence` release appends nullable TEXT
+columns to original and retry Task completion records. Its transition follows
+`issue230-provider-indexes`, preserves historical rows without backfill, and
+retains the provider indexes. Fresh creation and the two reviewed upgrade DDL
+encodings have separately registered complete hashes.
+
+Future schema changes append one `SchemaRelease` and one `SchemaTransition`
 from the previous current release in `cli/production_schema_upgrade.py`. Declare
 the new independent structural fingerprint, complete hashes for its frozen DDL
 encodings, a typed migration callable, and exact hash pairs for every previous

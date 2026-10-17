@@ -118,7 +118,13 @@ def _install_later_release(
     monkeypatch: pytest.MonkeyPatch,
     migration: Callable[[Connection], None],
 ) -> None:
-    items = [_fixture(_LATER, encoding) for encoding in ("frozen", "sqlalchemy")]
+    current_id = upgrades.CURRENT_SCHEMA_ID
+    current = next(
+        release
+        for release in upgrades.SCHEMA_RELEASES
+        if release.identity == current_id
+    )
+    items = [_fixture(_LATER, variant.encoding) for variant in current.variants]
     future = upgrades.SchemaRelease(
         _LATER,
         str(items[0]["structural_sha256"]),
@@ -128,15 +134,11 @@ def _install_later_release(
         ),
     )
     transition = upgrades.SchemaTransition(
-        "issue230-provider-indexes",
+        current_id,
         _LATER,
         tuple(
             (
-                str(
-                    _fixture("issue230-provider-indexes", str(item["encoding"]))[
-                        "complete_sha256"
-                    ]
-                ),
+                str(_fixture(current_id, str(item["encoding"]))["complete_sha256"]),
                 str(item["complete_sha256"]),
             )
             for item in items
@@ -180,6 +182,7 @@ def _install_historical_table_change(
     change: str,
     migration: Callable[[Connection], None],
 ) -> None:
+    current_id = upgrades.CURRENT_SCHEMA_ID
     items = [item for item in _HISTORICAL_CHANGES if item["change"] == change]
     identity = f"simulated-{change}-historical-table"
     release = upgrades.SchemaRelease(
@@ -191,13 +194,11 @@ def _install_historical_table_change(
         ),
     )
     transition = upgrades.SchemaTransition(
-        "issue230-provider-indexes",
+        current_id,
         identity,
         tuple(
             (
-                _fixture("issue230-provider-indexes", item["encoding"])[
-                    "complete_sha256"
-                ],
+                _fixture(current_id, item["encoding"])["complete_sha256"],
                 item["complete_sha256"],
             )
             for item in items
@@ -205,7 +206,7 @@ def _install_historical_table_change(
         migration=migration,
     )
     database = tmp_path / "changed-release-fixture.sqlite3"
-    _materialize(database, _fixture("issue230-provider-indexes", "frozen"))
+    _materialize(database, _fixture(current_id, "frozen"))
     with sqlite3.connect(database) as connection:
         connection.execute(items[0]["migration_sql"])
     manifest = _all_observed_fixture_structures(database)
@@ -263,7 +264,9 @@ def test_historical_structure_survives_a_current_table_drop_or_rename(
         connection.exec_driver_sql(item["migration_sql"])
 
     monkeypatch.setattr(
-        upgrades, "SCHEMA_TRANSITIONS", (replace(historical, migration=issue230),)
+        upgrades,
+        "SCHEMA_TRANSITIONS",
+        (replace(historical, migration=issue230), *upgrades.SCHEMA_TRANSITIONS[1:]),
     )
     _install_historical_table_change(tmp_path, monkeypatch, change, later)
     upgrades.validate_schema_registry()
@@ -315,6 +318,7 @@ def test_historical_steps_execute_in_order_in_one_transaction(
     original_hash = source.business_schema_sha256
     seen: list[tuple[str, Connection]] = []
     historical = upgrades.SCHEMA_TRANSITIONS[0]
+    current_id = upgrades.CURRENT_SCHEMA_ID
 
     def reject_bootstrap(*_arguments: object, **_options: object) -> None:
         message = "production transitions dispatched through development bootstrap"
@@ -335,7 +339,7 @@ def test_historical_steps_execute_in_order_in_one_transaction(
         seen.append(("later", connection))
         assert (
             _connection_hash(connection)
-            == _fixture("issue230-provider-indexes", encoding)["complete_sha256"]
+            == _fixture(current_id, encoding)["complete_sha256"]
         )
         connection.exec_driver_sql(
             "CREATE TABLE schema_release_receipts (receipt_id INTEGER NOT NULL, "
@@ -343,7 +347,9 @@ def test_historical_steps_execute_in_order_in_one_transaction(
         )
 
     monkeypatch.setattr(
-        upgrades, "SCHEMA_TRANSITIONS", (replace(historical, migration=issue230),)
+        upgrades,
+        "SCHEMA_TRANSITIONS",
+        (replace(historical, migration=issue230), *upgrades.SCHEMA_TRANSITIONS[1:]),
     )
     _install_later_release(tmp_path, monkeypatch, later)
 
@@ -551,7 +557,9 @@ def test_failed_step_rolls_back_the_complete_chain(
     issue230, later = _failure_steps(historical, seen, failure)
 
     monkeypatch.setattr(
-        upgrades, "SCHEMA_TRANSITIONS", (replace(historical, migration=issue230),)
+        upgrades,
+        "SCHEMA_TRANSITIONS",
+        (replace(historical, migration=issue230), *upgrades.SCHEMA_TRANSITIONS[1:]),
     )
     _install_later_release(tmp_path, monkeypatch, later)
     if failure == "structural-fingerprint":
@@ -703,7 +711,14 @@ def test_registry_rejects_invalid_data_without_database_access(
     monkeypatch: pytest.MonkeyPatch, invalid: str
 ) -> None:
     """Registry mistakes fail before a production profile or connection is needed."""
-    master, current = upgrades.SCHEMA_RELEASES
+    # Keep the original invalid-data matrix on its fixed historical registry.
+    # Actual appended releases and every encoding are exercised independently.
+    historical_releases = upgrades.SCHEMA_RELEASES[:2]
+    historical_transitions = upgrades.SCHEMA_TRANSITIONS[:1]
+    monkeypatch.setattr(upgrades, "SCHEMA_RELEASES", historical_releases)
+    monkeypatch.setattr(upgrades, "SCHEMA_TRANSITIONS", historical_transitions)
+    master, current = historical_releases
+    monkeypatch.setattr(upgrades, "CURRENT_SCHEMA_ID", current.identity)
     transition = upgrades.SCHEMA_TRANSITIONS[0]
     first, second = transition.hash_pairs
     isolated_current = replace(

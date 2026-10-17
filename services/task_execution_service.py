@@ -13,10 +13,15 @@ from typing import TYPE_CHECKING, Any, Protocol, Self, TypedDict, Unpack
 from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
+from adapters.git.repository_probe import GitPythonRepositoryProbe
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import datetime
 
+    from services.contracts.task_repository_evidence import TaskRepositoryEvidence
+    from services.repository_probe import TaskRepositoryProbe
+    from services.task_repository_evidence import PreparedTaskRepositoryEvidence
     from workflow.contracts import JsonObject
 
 from models.core import Sprint, SprintStory, Task, UserStory
@@ -28,6 +33,15 @@ from models.sprint_retry import (
 )
 from models.workflow import TaskCompletionEvidence
 from repositories.workflow import WorkflowFactRepository
+from services.contracts.task_repository_evidence import (
+    canonical_task_repository_evidence_json,
+)
+from services.task_repository_evidence import (
+    TaskRepositoryEvidenceError,
+    TaskRepositoryVerificationTimeout,
+    validate_task_repository_policy,
+    verify_task_repository_evidence,
+)
 from utils.api_schemas import TaskExecutionLogEntry
 from utils.task_metadata import TaskMetadata, format_checklist_items
 from workflow.execution_integrity import (
@@ -96,6 +110,7 @@ class TaskCompletionInput:
     completed_by: str
     completed_at: datetime
     retry_attempt_id: int | None = None
+    uncommitted: bool = False
 
 
 class _TaskLike(Protocol):
@@ -369,6 +384,7 @@ class _ValidatedTaskCompletion:
     normalized_refs: tuple[str, ...]
     evidence_fingerprint: str
     retry_state: SprintRetryTaskState | None
+    repository_evidence_json: str
 
 
 def _task_open_message(command: TaskCompletionInput) -> str:
@@ -380,6 +396,7 @@ def _task_open_message(command: TaskCompletionInput) -> str:
 def _validate_task_completion(
     session: Session,
     command: TaskCompletionInput,
+    repository_evidence: TaskRepositoryEvidence,
 ) -> _ValidatedTaskCompletion:
     """Validate one attempt-scoped completion before choosing its persistence row."""
     sprint = session.get(Sprint, command.sprint_id)
@@ -434,6 +451,7 @@ def _validate_task_completion(
                 artifact_refs=normalized_refs,
                 acceptance_result=command.acceptance_result,
                 checklist_result=command.checklist_result,
+                repository_evidence=repository_evidence,
             ),
             scope=scope,
         )
@@ -446,6 +464,9 @@ def _validate_task_completion(
         normalized_refs=normalized_refs,
         evidence_fingerprint=evidence_fingerprint,
         retry_state=retry_state,
+        repository_evidence_json=canonical_task_repository_evidence_json(
+            repository_evidence
+        ),
     )
 
 
@@ -495,9 +516,33 @@ def _open_retry_task_state(
 def complete_task_in_session(
     session: Session,
     command: TaskCompletionInput,
+    *,
+    prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+    repository_probe: TaskRepositoryProbe | None = None,
 ) -> TaskCompletionEvidence | SprintRetryTaskEvidence:
     """Complete one exact Sprint Task inside the caller's transaction."""
-    validated = _validate_task_completion(session, command)
+    if type(command.uncommitted) is not bool:
+        message = (
+            "UNCOMMITTED_ACKNOWLEDGEMENT_INVALID: uncommitted must be a boolean. "
+            "A changed request requires a new idempotency key."
+        )
+        raise TaskExecutionServiceError(message, status_code=409)
+    try:
+        repository_evidence = verify_task_repository_evidence(
+            session,
+            project_id=command.project_id,
+            prepared=prepared_repository_evidence,
+            repository_probe=repository_probe or GitPythonRepositoryProbe(),
+            uncommitted=command.uncommitted,
+        )
+        validate_task_repository_policy(
+            repository_evidence, acceptance_result=command.acceptance_result
+        )
+    except TaskRepositoryVerificationTimeout:
+        raise
+    except TaskRepositoryEvidenceError as error:
+        raise TaskExecutionServiceError(str(error), status_code=409) from error
+    validated = _validate_task_completion(session, command, repository_evidence)
     if command.retry_attempt_id is not None:
         return _persist_retry_task_completion(session, command, validated)
     return _persist_original_task_completion(session, command, validated)
@@ -521,6 +566,7 @@ def _persist_original_task_completion(
         acceptance_result=command.acceptance_result,
         checklist_result_json=canonical_json(command.checklist_result),
         evidence_fingerprint=validated.evidence_fingerprint,
+        repository_evidence_json=validated.repository_evidence_json,
         completed_by=command.completed_by,
         completed_at=command.completed_at,
     )
@@ -571,6 +617,7 @@ def _persist_retry_task_completion(
         acceptance_result=command.acceptance_result,
         checklist_result_json=canonical_json(command.checklist_result),
         evidence_fingerprint=validated.evidence_fingerprint,
+        repository_evidence_json=validated.repository_evidence_json,
         completed_by=command.completed_by,
         completed_at=command.completed_at,
     )

@@ -1,3 +1,4 @@
+# workflow/definitions/execution.py
 """Pure Sprint execution, review, close, and triage graph rules."""
 
 from __future__ import annotations
@@ -275,6 +276,7 @@ def _task_completion_problem(
                 artifact_refs=completion.artifact_refs,
                 acceptance_result=completion.acceptance_result,
                 checklist_result=completion.checklist_result,
+                repository_evidence=completion.repository_evidence,
             ),
         )
     except ExecutionIntegrityError:

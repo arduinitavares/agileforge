@@ -57,6 +57,7 @@ EXPECTED_FIELDS: dict[type[SQLModel], set[str]] = {
         "evidence_fingerprint",
         "completed_by",
         "completed_at",
+        "repository_evidence_json",
     },
     SprintStart: {
         "sprint_start_id",

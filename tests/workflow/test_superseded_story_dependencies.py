@@ -82,7 +82,10 @@ from services.story_sprint_selection import (
     story_sprint_selection_fact_in_session,
 )
 from tests.test_story_dependencies import _story_set
-from tests.workflow.execution_fixtures import _accept_and_start_sprint
+from tests.workflow.execution_fixtures import (
+    _accept_and_start_sprint,
+    unbind_synthetic_execution_repository,
+)
 from tests.workflow.execution_retry_support import (
     _close_execution_sprint,
     _complete_task,
@@ -736,6 +739,7 @@ def _complete_fixture_story_sprint(
         project_id=scenario.project_id,
         plan_binding=binding,
         idempotency_suffix="-completed-membership",
+        engine=engine,
     )
     with Session(engine) as session:
         task_id = (
@@ -2056,6 +2060,7 @@ def test_completed_external_endpoint_history_does_not_block_review_or_readiness(
         project_id=scenario.project_id,
         plan_binding=binding,
         idempotency_suffix="-boundary",
+        engine=engine,
     )
     with Session(engine) as session:
         task_id = session.exec(select(Task).where(Task.story_id == x)).one().task_id
@@ -2777,6 +2782,7 @@ def _accepted_dependency_sprint(
         )
         assert result.ok
         assert result.output["sprint_id"] == sprint_id
+        unbind_synthetic_execution_repository(engine, scenario.project_id)
     with Session(engine) as session:
         task = session.exec(select(Task).where(Task.story_id == dependent)).one()
         assert task.task_id is not None
@@ -3313,6 +3319,7 @@ def test_done_task_completion_survives_current_prerequisite_regression(
                 artifact_refs=completion.artifact_refs,
                 acceptance_result=completion.acceptance_result,
                 checklist_result=completion.checklist_result,
+                repository_evidence=completion.repository_evidence,
             ),
         )
         == original_completion.evidence_fingerprint

@@ -44,6 +44,152 @@ function loadFrontend() {
     return context;
 }
 
+function completionDetail(completion) {
+    return {
+        kind: 'ready',
+        selection: { projectId: 7, sprintId: 31, taskId: 71, scopeKey: 'sprint:31' },
+        data: {
+            project_id: 7,
+            task: { task_id: 71, sprint_id: 31, status: 'Done', description: 'Retained Task' },
+            completion,
+            current_retry: null,
+            execution: { items: [] },
+        },
+    };
+}
+
+function repositoryCompletion(evidence, warnings = [], messages = []) {
+    return {
+        acceptance_result: 'fully_met',
+        checklist_result: { verification: 'passed' },
+        repository_evidence: evidence,
+        revision_recording: evidence?.state === 'captured' ? 'recorded' : (evidence?.state ?? 'not_recorded'),
+        repository_warnings: warnings,
+        repository_warning_messages: messages,
+    };
+}
+
+function capturedRepository(overrides = {}) {
+    return {
+        version: 'agileforge.task-repository-evidence.v1',
+        state: 'captured',
+        head_sha: 'a123456789abcdef0123456789abcdef012345678',
+        branch_name: 'delivery/main',
+        detached_head: false,
+        worktree_path: '/selected/checkout',
+        probed_path_matches_binding: true,
+        dirty: false,
+        dirty_path_count: 0,
+        dirty_paths: [],
+        dirty_paths_truncated: false,
+        uncommitted_acknowledged: false,
+        ...overrides,
+    };
+}
+
+test('selected Checks show the full clean completion revision and explicit acknowledgement', () => {
+    const context = loadFrontend();
+    vm.runInContext("workspaceView = { tab: 'checks' };", context);
+    const evidence = capturedRepository();
+    const markup = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion(evidence,
+        ['OTHER_WORKTREES_PRESENT'], ['Other worktrees are present.'])));
+    for (const text of ['Repository at completion', evidence.head_sha, 'Branch: delivery/main',
+        'Worktree: /selected/checkout', 'Bound checkout match: Yes', 'Dirty: No',
+        'Dirty path count: 0', 'Acknowledgement: No', 'Other worktrees are present.']) assert.ok(markup.includes(text), text);
+    assert.ok(!markup.includes('Revision not recorded'));
+});
+
+test('dirty completion shows retained fifty paths, total count, truncation and escaped warnings', () => {
+    const context = loadFrontend();
+    vm.runInContext("workspaceView = { tab: 'checks' };", context);
+    const paths = Array.from({ length: 50 }, (_, index) => `changed/${String(index).padStart(2, '0')}.txt`);
+    paths[0] = '<img src=x onerror=bad> & "dirty"';
+    const evidence = capturedRepository({ dirty: true, dirty_path_count: 51, dirty_paths: paths,
+        dirty_paths_truncated: true, uncommitted_acknowledged: true,
+        worktree_path: '/<script>bad</script>&"checkout"', branch_name: '<b>branch</b>' });
+    const markup = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion(evidence,
+        ['UNCOMMITTED_WORKTREE', 'OTHER_WORKTREES_PRESENT'],
+        ['Uncommitted <img> & "work" was acknowledged.', 'Other worktrees are present.'])));
+    for (const text of ['Dirty: Yes', 'Dirty path count: 51', 'Showing 50 of 51 dirty paths.',
+        'Dirty paths truncated: Yes', 'Acknowledgement: Yes', 'Other worktrees are present.',
+        '&lt;img src=x onerror=bad&gt; &amp; &quot;dirty&quot;',
+        'Worktree: /&lt;script&gt;bad&lt;/script&gt;&amp;&quot;checkout&quot;',
+        'Branch: &lt;b&gt;branch&lt;/b&gt;', 'Uncommitted &lt;img&gt; &amp; &quot;work&quot; was acknowledged.']) {
+        assert.ok(markup.includes(text), text);
+    }
+    for (const retained of paths.slice(1)) assert.ok(markup.includes(retained), retained);
+    for (const raw of ['<script>', '<img', '<b>']) assert.ok(!markup.includes(raw), raw);
+});
+
+test('detached and related worktree completion preserves the observed identity', () => {
+    const context = loadFrontend();
+    vm.runInContext("workspaceView = { tab: 'checks' };", context);
+    const evidence = capturedRepository({ branch_name: null, detached_head: true,
+        worktree_path: '/related/worktree', probed_path_matches_binding: false });
+    const markup = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion(evidence,
+        ['DETACHED_HEAD'], ['The selected worktree had a detached HEAD.'])));
+    for (const text of [evidence.head_sha, 'Branch: Detached HEAD', 'Worktree: /related/worktree',
+        'Bound checkout match: No', 'The selected worktree had a detached HEAD.']) {
+        assert.ok(markup.includes(text), text);
+    }
+});
+
+test('legacy, unbound, unavailable and absent completion remain distinct', () => {
+    const context = loadFrontend();
+    vm.runInContext("workspaceView = { tab: 'checks' };", context);
+    const legacy = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion(null)));
+    assert.ok(legacy.includes('Revision not recorded'));
+    assert.ok(!legacy.includes('Dirty: No'));
+    const unbound = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion({
+        state: 'not_bound', uncommitted_acknowledged: false,
+    }, ['REPOSITORY_NOT_BOUND'], ['No repository was bound.'])));
+    for (const text of ['Repository not bound', 'Acknowledgement: No', 'No repository was bound.']) {
+        assert.ok(unbound.includes(text), text);
+    }
+    assert.ok(!unbound.includes('HEAD:'));
+    const unavailable = context.workspaceTaskDetailMarkup(completionDetail(repositoryCompletion({
+        state: 'unavailable', worktree_path: '/missing/<repo>', probed_path_matches_binding: false,
+        uncommitted_acknowledged: true, probe_error_code: 'REPOSITORY_PATH_MISSING',
+        error_summary: 'Cannot read <repo> & "metadata".',
+    }, ['REPOSITORY_UNAVAILABLE'], ['Repository <unavailable>.'])));
+    for (const text of ['Repository unavailable', 'Worktree: /missing/&lt;repo&gt;',
+        'Bound checkout match: No', 'Acknowledgement: Yes',
+        'Cannot read &lt;repo&gt; &amp; &quot;metadata&quot;.', 'Repository &lt;unavailable&gt;.']) {
+        assert.ok(unavailable.includes(text), text);
+    }
+    for (const absent of ['HEAD:', 'Branch:', 'Dirty:', 'Dirty path count:', '<repo>', '<unavailable>']) {
+        assert.ok(!unavailable.includes(absent), absent);
+    }
+    const absent = context.workspaceTaskDetailMarkup(completionDetail(null));
+    assert.ok(absent.includes('No persisted completion result.'));
+    assert.ok(!absent.includes('Revision not recorded'));
+});
+
+test('completion repository evidence belongs only to the selected Checks tab', () => {
+    const context = loadFrontend();
+    const snapshot = completionDetail(repositoryCompletion(capturedRepository()));
+    for (const tab of ['details', 'activity']) {
+        vm.runInContext(`workspaceView = { tab: '${tab}' };`, context);
+        assert.ok(!context.workspaceTaskDetailMarkup(snapshot).includes('Repository at completion'));
+    }
+    vm.runInContext("workspaceView = { tab: 'checks' };", context);
+    assert.ok(context.workspaceTaskDetailMarkup(snapshot).includes(capturedRepository().head_sha));
+});
+
+test('completion form renders an unchecked semantic acknowledgement and optional path', () => {
+    const context = loadFrontend();
+    const markup = context.workspaceTaskCompletionForm({ task: { task_id: 71 },
+        action: { node_id: 'execution.task.complete', instance_key: 'task:71' } });
+    const acknowledgement = markup.match(/<input[^>]*id="workspace-task-delivery-ack"[^>]*>/)?.[0];
+    assert.ok(acknowledgement, 'rendered acknowledgement input');
+    assert.ok(acknowledgement.includes('type="checkbox"'));
+    assert.ok(acknowledgement.includes('name="uncommitted"'));
+    assert.ok(!acknowledgement.includes('checked'));
+    assert.ok(markup.includes('I acknowledge uncommitted changes or unavailable repository evidence.'));
+    assert.ok(markup.includes('id="workspace-task-worktree-path"'));
+    assert.ok(markup.includes('name="worktree_path"'));
+});
+
 function completedSprintRetryState() {
     const sprintId = 31;
     const retryAction = {

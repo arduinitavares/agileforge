@@ -29,6 +29,9 @@ from services.agent_workbench.sprint_phase import (
     close_sprint_in_session,
     review_sprint_in_session,
 )
+from services.contracts.task_repository_evidence import (
+    parse_task_repository_evidence_json,
+)
 from services.story_close_service import (
     StoryCloseInput,
     StoryCloseServiceError,
@@ -39,6 +42,7 @@ from services.task_execution_service import (
     TaskExecutionServiceError,
     complete_task_in_session,
 )
+from services.task_repository_evidence import task_repository_warnings
 from workflow.contracts import (
     NodeDecision,
     TransitionResult,
@@ -60,6 +64,8 @@ if TYPE_CHECKING:
 
     from sqlmodel import Session
 
+    from services.repository_probe import TaskRepositoryProbe
+    from services.task_repository_evidence import PreparedTaskRepositoryEvidence
 type ExecutionRequest = (
     CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
 )
@@ -126,11 +132,13 @@ def _retry_sprint_id(
     return scope.sprint_id
 
 
-def _execute_complete_task(
+def _execute_complete_task(  # noqa: PLR0913
     session: Session,
     request: CompleteTask,
     decision: NodeDecision,
     evaluated_at: datetime,
+    prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+    repository_probe: TaskRepositoryProbe | None = None,
 ) -> TransitionResult:
     identity = parse_execution_instance_key(request.instance_key)
     retry_attempt_id = identity.retry_attempt_id
@@ -146,21 +154,28 @@ def _execute_complete_task(
     if sprint_id is None or _reference(decision, "task", request.task_id) is None:
         return _conflict("CompleteTask does not target the selected Task fact.")
     try:
-        row = complete_task_in_session(
-            session,
-            TaskCompletionInput(
-                project_id=request.project_id,
-                sprint_id=sprint_id,
-                task_id=request.task_id,
-                outcome_summary=request.outcome_summary,
-                artifact_refs=request.artifact_refs,
-                acceptance_result=request.acceptance_result,
-                checklist_result=request.checklist_result,
-                completed_by=request.actor,
-                completed_at=evaluated_at,
-                retry_attempt_id=retry_attempt_id,
-            ),
+        command = TaskCompletionInput(
+            project_id=request.project_id,
+            sprint_id=sprint_id,
+            task_id=request.task_id,
+            outcome_summary=request.outcome_summary,
+            artifact_refs=request.artifact_refs,
+            acceptance_result=request.acceptance_result,
+            checklist_result=request.checklist_result,
+            completed_by=request.actor,
+            completed_at=evaluated_at,
+            retry_attempt_id=retry_attempt_id,
+            uncommitted=request.uncommitted is True,
         )
+        if prepared_repository_evidence is None:
+            row = complete_task_in_session(session, command)
+        else:
+            row = complete_task_in_session(
+                session,
+                command,
+                prepared_repository_evidence=prepared_repository_evidence,
+                repository_probe=repository_probe,
+            )
     except TaskExecutionServiceError as error:
         return _conflict(error.detail)
     return _task_completion_result(
@@ -218,6 +233,7 @@ def _retry_task_completion_result(
             "retry_attempt_id": retry_attempt_id,
             "sprint_retry_task_evidence_id": row.sprint_retry_task_evidence_id,
             "evidence_fingerprint": row.evidence_fingerprint,
+            **_repository_result(row),
         },
     )
 
@@ -241,8 +257,24 @@ def _original_task_completion_result(
             "sprint_id": sprint_id,
             "task_completion_evidence_id": row.task_completion_evidence_id,
             "evidence_fingerprint": row.evidence_fingerprint,
+            **_repository_result(row),
         },
     )
+
+
+def _repository_result(
+    row: TaskCompletionEvidence | SprintRetryTaskEvidence,
+) -> dict[str, object]:
+    """Derive replayable presentation fields from the stored canonical evidence."""
+    if row.repository_evidence_json is None:
+        return {}
+    evidence = parse_task_repository_evidence_json(row.repository_evidence_json)
+    warnings, messages = task_repository_warnings(evidence)
+    return {
+        "repository_evidence": evidence.model_dump(mode="json"),
+        "repository_warnings": warnings,
+        "repository_warning_messages": messages,
+    }
 
 
 def _execute_close_story(
@@ -593,15 +625,25 @@ def _triage_result(
     )
 
 
-def execute_execution_request(
+def execute_execution_request(  # noqa: PLR0913
     session: Session,
     request: ExecutionRequest,
     decision: NodeDecision,
     evaluated_at: datetime,
+    *,
+    prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+    repository_probe: TaskRepositoryProbe | None = None,
 ) -> TransitionResult:
     """Dispatch the closed five-request execution family."""
     if isinstance(request, CompleteTask):
-        return _execute_complete_task(session, request, decision, evaluated_at)
+        return _execute_complete_task(
+            session,
+            request,
+            decision,
+            evaluated_at,
+            prepared_repository_evidence,
+            repository_probe,
+        )
     if isinstance(request, CloseStory):
         return _execute_close_story(session, request, decision, evaluated_at)
     if isinstance(request, ReviewSprint):

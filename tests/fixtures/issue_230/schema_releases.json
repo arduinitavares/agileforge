@@ -4,41 +4,110 @@
     "encoding": "frozen",
     "complete_sha256": "3f1d81bbdec3c5f1f699877cc82f154c0b8e4fb1b2c3dd4824e51603098d0a88",
     "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
-    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql"]
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql"
+    ]
   },
   {
     "identity": "master-b3a4fb4",
     "encoding": "sqlalchemy",
     "complete_sha256": "d257a8ce162334434d2adc069228ef004db1eb04978db2543a410b7be4a8f29c",
     "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
-    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql"]
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql"
+    ]
   },
   {
     "identity": "issue230-provider-indexes",
     "encoding": "frozen",
     "complete_sha256": "f9bd5c17713d15174727cd79e235a1dd62a7e11bac5392c3fbdeb9bf85a339c2",
     "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
-    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql", "issue_230/issue230_provider_indexes.sql"]
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql"
+    ]
   },
   {
     "identity": "issue230-provider-indexes",
     "encoding": "sqlalchemy",
     "complete_sha256": "66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64",
     "structural_sha256": "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425",
-    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql", "issue_230/issue230_provider_indexes.sql"]
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql"
+    ]
+  },
+  {
+    "identity": "issue289-task-repository-evidence",
+    "encoding": "frozen",
+    "complete_sha256": "84bbb0830f539757244dc9a6d9b55184791cd8da61b90e62aee092fe28fa73e4",
+    "structural_sha256": "ddc08d45eaa11aa2051ad0db3b52a68318f455a1ac8930f9cdaa34bc2ec08c1c",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql"
+    ]
+  },
+  {
+    "identity": "issue289-task-repository-evidence",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2",
+    "structural_sha256": "ddc08d45eaa11aa2051ad0db3b52a68318f455a1ac8930f9cdaa34bc2ec08c1c",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql"
+    ]
+  },
+  {
+    "identity": "issue289-task-repository-evidence",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "c9728eb9278df812876bbc41203d5c714774aafca899aa3f99a965cbe0d7528a",
+    "structural_sha256": "ddc08d45eaa11aa2051ad0db3b52a68318f455a1ac8930f9cdaa34bc2ec08c1c",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql"
+    ]
   },
   {
     "identity": "simulated-later-release",
     "encoding": "frozen",
-    "complete_sha256": "dfe8255b3a91cb680a318a80e25b6d7ec68d737c408bbd91fdf97ed6acad93e3",
-    "structural_sha256": "ad8a9fefaa2141e1f9a3ef66ec557430d43f404892dea255d49ab02d19f696f8",
-    "sql_files": ["issue_260/pre_retry_business_schema_da3dbf63.sql", "issue_230/prior_current_retry_additions_8b4ee1f.sql", "issue_230/issue230_provider_indexes.sql", "issue_230/simulated_later_release.sql"]
+    "complete_sha256": "2661469558b78079865ecb1331679030f7de05ff5db671b5b967976b0136efe0",
+    "structural_sha256": "1fd01e017c2dfebb0bae9d39cff30681dbbdc886dbc57184b919896c783d621c",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
   },
   {
     "identity": "simulated-later-release",
     "encoding": "sqlalchemy",
-    "complete_sha256": "58132b24e9410d70dff5ee2eb4ff95e7b8aa2cfe558231c816e36abc06663c7c",
-    "structural_sha256": "ad8a9fefaa2141e1f9a3ef66ec557430d43f404892dea255d49ab02d19f696f8",
-    "sql_files": ["issue_230/master_b3a4fb4_raw_schema.sql", "issue_230/issue230_provider_indexes.sql", "issue_230/simulated_later_release.sql"]
+    "complete_sha256": "e9c731beab68da6dcdd6d80de185a4f6f8627f7a2b5eb3194579af66404c3881",
+    "structural_sha256": "1fd01e017c2dfebb0bae9d39cff30681dbbdc886dbc57184b919896c783d621c",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "a37c83d2e8c1fd741cae7a68674d46a1edacb30c7c2805002c74e9eadfbb3b9c",
+    "structural_sha256": "1fd01e017c2dfebb0bae9d39cff30681dbbdc886dbc57184b919896c783d621c",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
   }
 ]

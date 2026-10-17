@@ -278,6 +278,14 @@ def test_registered_schema_inspection_reads_committed_wal_schema(
         if current:
             for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
                 writer.execute(ddl)
+            writer.execute(
+                "ALTER TABLE task_completion_evidence "
+                "ADD COLUMN repository_evidence_json TEXT"
+            )
+            writer.execute(
+                "ALTER TABLE sprint_retry_task_evidence "
+                "ADD COLUMN repository_evidence_json TEXT"
+            )
         writer.commit()
         database.chmod(0o600)
         before = database.read_bytes()

@@ -112,6 +112,18 @@ def _migrate_issue230_provider_indexes(connection: Connection) -> None:
         connection.exec_driver_sql(ddl)
 
 
+_ISSUE289_EVIDENCE_DDL: tuple[str, ...] = (
+    "ALTER TABLE task_completion_evidence ADD COLUMN repository_evidence_json TEXT",
+    "ALTER TABLE sprint_retry_task_evidence ADD COLUMN repository_evidence_json TEXT",
+)
+
+
+def _migrate_issue289_repository_evidence(connection: Connection) -> None:
+    """Append nullable evidence without rewriting historical completion rows."""
+    for ddl in _ISSUE289_EVIDENCE_DDL:
+        connection.exec_driver_sql(ddl)
+
+
 SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
     SchemaRelease(
         "master-b3a4fb4",
@@ -141,6 +153,24 @@ SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
             ),
         ),
     ),
+    SchemaRelease(
+        "issue289-task-repository-evidence",
+        "ddc08d45eaa11aa2051ad0db3b52a68318f455a1ac8930f9cdaa34bc2ec08c1c",
+        (
+            SchemaVariant(
+                "frozen",
+                "84bbb0830f539757244dc9a6d9b55184791cd8da61b90e62aee092fe28fa73e4",
+            ),
+            SchemaVariant(
+                "sqlalchemy",
+                "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2",
+            ),
+            SchemaVariant(
+                "sqlalchemy-fresh",
+                "c9728eb9278df812876bbc41203d5c714774aafca899aa3f99a965cbe0d7528a",
+            ),
+        ),
+    ),
 )
 SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
     SchemaTransition(
@@ -158,8 +188,23 @@ SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
         ),
         migration=_migrate_issue230_provider_indexes,
     ),
+    SchemaTransition(
+        "issue230-provider-indexes",
+        "issue289-task-repository-evidence",
+        (
+            (
+                "f9bd5c17713d15174727cd79e235a1dd62a7e11bac5392c3fbdeb9bf85a339c2",
+                "84bbb0830f539757244dc9a6d9b55184791cd8da61b90e62aee092fe28fa73e4",
+            ),
+            (
+                "66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64",
+                "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2",
+            ),
+        ),
+        migration=_migrate_issue289_repository_evidence,
+    ),
 )
-CURRENT_SCHEMA_ID: str = "issue230-provider-indexes"
+CURRENT_SCHEMA_ID: str = "issue289-task-repository-evidence"
 _JOURNAL_NAME: str = "schema-upgrade.json"
 _HASH: str = r"^[0-9a-f]{64}$"
 

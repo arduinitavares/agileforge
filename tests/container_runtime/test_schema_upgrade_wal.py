@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX runtime fences")
 _MASTER_SHA256: str = "d257a8ce162334434d2adc069228ef004db1eb04978db2543a410b7be4a8f29c"
 _CURRENT_SHA256: str = (
-    "66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64"
+    "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2"
 )
 
 

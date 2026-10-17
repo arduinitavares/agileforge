@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
     from sqlmodel import Session
 
+    from services.repository_probe import TaskRepositoryProbe
+    from services.task_repository_evidence import PreparedTaskRepositoryEvidence
     from workflow.contracts import NodeDecision, TransitionResult
     from workflow.handlers.execution import ExecutionRequest
 
@@ -54,18 +56,28 @@ from workflow.handlers.vision import (
 )
 
 
-def execute_execution_request(
+def execute_execution_request(  # noqa: PLR0913
     session: Session,
     request: ExecutionRequest,
     decision: NodeDecision,
     evaluated_at: datetime,
+    *,
+    prepared_repository_evidence: PreparedTaskRepositoryEvidence | None = None,
+    repository_probe: TaskRepositoryProbe | None = None,
 ) -> TransitionResult:
     """Defer execution-service loading until an execution transition runs."""
     from workflow.handlers.execution import (  # noqa: PLC0415
         execute_execution_request as execute,
     )
 
-    return execute(session, request, decision, evaluated_at)
+    return execute(
+        session,
+        request,
+        decision,
+        evaluated_at,
+        prepared_repository_evidence=prepared_repository_evidence,
+        repository_probe=repository_probe,
+    )
 
 
 __all__ = [

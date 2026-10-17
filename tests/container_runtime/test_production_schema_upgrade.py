@@ -41,9 +41,13 @@ _SOURCES = (
     "3f1d81bbdec3c5f1f699877cc82f154c0b8e4fb1b2c3dd4824e51603098d0a88",
     "d257a8ce162334434d2adc069228ef004db1eb04978db2543a410b7be4a8f29c",
 )
-_TARGETS = (
+_ISSUE230_TARGETS = (
     "f9bd5c17713d15174727cd79e235a1dd62a7e11bac5392c3fbdeb9bf85a339c2",
     "66df69cc4eece12fe24d9645558682134454f1c69060f7d09966af3bb755fd64",
+)
+_TARGETS = (
+    "84bbb0830f539757244dc9a6d9b55184791cd8da61b90e62aee092fe28fa73e4",
+    "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2",
 )
 _STRUCTURE = "c99398b56ccd7871e6840a8cb218bf595970ee1f8aa492b12ec4053830923425"
 _ERROR_EXIT: int = 2
@@ -101,7 +105,7 @@ def test_append_only_registry_independently_pins_issue230_release(
     } == set(_SOURCES)
     assert {
         item.complete_sha256 for item in releases["issue230-provider-indexes"].variants
-    } == set(_TARGETS)
+    } == set(_ISSUE230_TARGETS)
     assert releases["master-b3a4fb4"].structural_sha256 == _STRUCTURE
     assert releases["issue230-provider-indexes"].structural_sha256 == _STRUCTURE
     database = tmp_path / "fresh.sqlite3"

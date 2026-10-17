@@ -547,6 +547,7 @@ class TaskCompletionEvidence(SQLModel, table=True):
     evidence_fingerprint: str = Field(index=True)
     completed_by: str = Field(index=True)
     completed_at: datetime = Field(nullable=False)
+    repository_evidence_json: str | None = Field(default=None, sa_type=Text)
 
 
 class StoryClosure(SQLModel, table=True):

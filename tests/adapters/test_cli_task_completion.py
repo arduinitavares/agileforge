@@ -457,6 +457,9 @@ def test_cli_retry_and_historical_index_replay_uses_retained_metadata(
     try:
         fixture = retry_transport_fixture(engine)
         source = fixture.source
+        original_output = json.loads(
+            json.dumps(source.original_first_task_output, default=dict)
+        )
         application = fixture.application
         original_command = _original_completion_command(source)
         metadata = _projected_task(
@@ -466,7 +469,7 @@ def test_cli_retry_and_historical_index_replay_uses_retained_metadata(
         assert main(original_command, application=application) == 0
         closed_replay = json.loads(capsys.readouterr().out)
         assert closed_replay["replayed"] is True
-        assert closed_replay["output"] == source.original_first_task_output
+        assert closed_replay["output"] == original_output
         assert durable_rows(engine) == closed_rows
 
         retry_id = _start_retry(
@@ -506,7 +509,7 @@ def test_cli_retry_and_historical_index_replay_uses_retained_metadata(
         assert main(original_command, application=application) == 0
         original_replay = json.loads(capsys.readouterr().out)
         assert original_replay["replayed"] is True
-        assert original_replay["output"] == source.original_first_task_output
+        assert original_replay["output"] == original_output
         assert durable_rows(engine) == after
         checklist_file = tmp_path / "retry-replay.json"
         checklist_file.write_text('{"Run focused tests": "passed"}', encoding="utf-8")

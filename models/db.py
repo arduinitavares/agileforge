@@ -7,7 +7,7 @@ import os
 import re
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -1666,7 +1666,9 @@ CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
     },
 )
 
-PRE_RETRY_BUSINESS_SCHEMA_MANIFEST = CURRENT_BUSINESS_SCHEMA_MANIFEST
+PRE_RETRY_BUSINESS_SCHEMA_MANIFEST: BusinessSchemaManifest = (
+    CURRENT_BUSINESS_SCHEMA_MANIFEST
+)
 
 _RETRY_TABLE_NAMES = frozenset(
     {
@@ -1941,6 +1943,32 @@ CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
     },
 )
 
+PRE_REVISION_BUSINESS_SCHEMA_MANIFEST: BusinessSchemaManifest = (
+    CURRENT_BUSINESS_SCHEMA_MANIFEST
+)
+_REPOSITORY_EVIDENCE_TABLE_NAMES: tuple[str, ...] = (
+    "task_completion_evidence",
+    "sprint_retry_task_evidence",
+)
+CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
+    table_names=PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names,
+    structures={
+        **PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.structures,
+        **{
+            table_name: replace(
+                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.structures[table_name],
+                columns=(
+                    *PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.structures[
+                        table_name
+                    ].columns,
+                    ("repository_evidence_json", True),
+                ),
+            )
+            for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES
+        },
+    },
+)
+
 _RETIRED_TABLES = frozenset(
     {
         "discovery_artifacts",
@@ -2125,7 +2153,7 @@ def _assert_current_business_schema(target_engine: Engine | Connection) -> None:
     if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         message = (
             "UNSUPPORTED_BUSINESS_SCHEMA: SQLModel metadata does not match the "
-            "reviewed issue #210 fresh-schema manifest."
+            "reviewed current business-schema manifest."
         )
         raise UnsupportedBusinessSchemaError(message)
     table_names = frozenset(inspect(target_engine).get_table_names())
@@ -2149,10 +2177,35 @@ def _assert_current_business_schema(target_engine: Engine | Connection) -> None:
         detail = "; ".join(dict.fromkeys(incompatible))
         message = (
             "UNSUPPORTED_BUSINESS_SCHEMA: the database does not match the "
-            f"issue #210 fresh schema ({detail}). Create a fresh AgileForge "
-            "profile/database; automatic migration is intentionally unsupported."
+            f"current business schema ({detail}). Only the exact pre-retry and "
+            "pre-revision schemas support automatic upgrades; other schemas "
+            "require a fresh AgileForge profile/database."
         )
         raise UnsupportedBusinessSchemaError(message)
+    _assert_repository_evidence_columns(target_engine)
+
+
+def _assert_repository_evidence_columns(target_engine: Engine | Connection) -> None:
+    """Fail closed on wrong evidence storage even when names match the manifest."""
+    inspector = inspect(target_engine)
+    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
+        column = next(
+            column
+            for column in inspector.get_columns(table_name)
+            if column["name"] == "repository_evidence_json"
+        )
+        default = column["default"]
+        if (
+            str(column["type"]) != "TEXT"
+            or not column["nullable"]
+            or "computed" in column
+            or (default is not None and _normalize_sql_expression(default) != "null")
+        ):
+            message = (
+                "UNSUPPORTED_BUSINESS_SCHEMA: repository_evidence_json in "
+                f"{table_name} must be writable nullable TEXT with a SQL NULL default."
+            )
+            raise UnsupportedBusinessSchemaError(message)
 
 
 def _is_pytest_running() -> bool:
@@ -2220,15 +2273,30 @@ def create_db_and_tables() -> None:
     logger.info("Tables created successfully.")
 
 
+def _upgrade_repository_evidence_columns(connection: Connection) -> None:
+    """Add columns only after the caller validates an exact old table baseline."""
+    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
+        columns = inspect(connection).get_columns(table_name)
+        if not any(column["name"] == "repository_evidence_json" for column in columns):
+            # Identifiers come only from the fixed reviewed table set.
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table_name} "  # nosec B608
+                "ADD COLUMN repository_evidence_json TEXT"
+            )
+
+
 def _upgrade_reviewed_business_schema(
     connection: Connection, observed: BusinessSchemaManifest
 ) -> None:
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
         _assert_current_business_schema(connection)
+    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        _assert_repository_evidence_columns(connection)
     indexes_present = provider_audit_indexes_present(connection)
     if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST and indexes_present:
         raise ProviderAuditIndexError
@@ -2243,6 +2311,11 @@ def _upgrade_reviewed_business_schema(
                 for table_name in sorted(_RETRY_TABLE_NAMES)
             ],
         )
+    if observed in (
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+    ):
+        _upgrade_repository_evidence_columns(connection)
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
             connection.exec_driver_sql(ddl)
@@ -2269,6 +2342,7 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_repository_evidence_columns(connection)
             _assert_complete_provider_audit_indexes(connection)
             connection.commit()
         except ProviderAuditIndexError:

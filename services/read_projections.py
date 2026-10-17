@@ -90,6 +90,7 @@ from services.sprint_ownership import (
 from services.story_artifact_lineage import build_story_artifact_lineage_nodes
 from services.story_dependencies import DependencyGraphIssue
 from services.story_evidence_scope import structural_evidence_scope_payload
+from services.task_repository_evidence import task_repository_warnings
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
     JsonObject,
@@ -150,6 +151,7 @@ if TYPE_CHECKING:
         SprintFact,
         SprintRetryFact,
         StoryFact,
+        TaskCompletionFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
         VisionInterviewTurnFact,
@@ -214,6 +216,30 @@ def _packet_read(packet: JsonObject, flavor: str | None) -> JsonObject:
 
 def _validated(value: object) -> JsonObject:
     return _JSON_OBJECT.validate_python(value)
+
+
+def _task_completion_projection(completion: TaskCompletionFact) -> JsonObject:
+    """Present the retained completion observation without changing canonical facts."""
+    data = _validated(completion.model_dump(mode="json"))
+    evidence = completion.repository_evidence
+    if evidence is None:
+        data.update(
+            repository_evidence=None,
+            revision_recording="not_recorded",
+            repository_warnings=[],
+            repository_warning_messages=[],
+        )
+    else:
+        warnings, messages = task_repository_warnings(evidence)
+        data.update(
+            repository_evidence=_validated(evidence.model_dump(mode="json")),
+            revision_recording=(
+                "recorded" if evidence.state == "captured" else evidence.state
+            ),
+            repository_warnings=cast("list[JsonValue]", warnings),
+            repository_warning_messages=cast("list[JsonValue]", messages),
+        )
+    return data
 
 
 def _iso(value: object) -> str | None:
@@ -353,7 +379,7 @@ def _execution_attempt_history(snapshot: WorkflowFactSnapshot) -> list[JsonValue
                     None,
                 ),
                 "task_completions": [
-                    _validated(item.model_dump(mode="json"))
+                    _task_completion_projection(item)
                     for item in snapshot.task_completions
                     if item.sprint_id == sprint.sprint_id
                 ],
@@ -412,8 +438,7 @@ def _execution_attempt_history(snapshot: WorkflowFactSnapshot) -> list[JsonValue
                     else _validated(retry.start.model_dump(mode="json"))
                 ),
                 "task_completions": [
-                    _validated(item.model_dump(mode="json"))
-                    for item in retry.task_completions
+                    _task_completion_projection(item) for item in retry.task_completions
                 ],
                 "story_completions": [
                     _validated(item.model_dump(mode="json"))
@@ -4547,7 +4572,7 @@ class DurableReadProjectionService:
                         scope,
                     ),
                     "completion": (
-                        _validated(completion.model_dump(mode="json"))
+                        _task_completion_projection(completion)
                         if completion is not None
                         else None
                     ),
@@ -4564,7 +4589,7 @@ class DurableReadProjectionService:
                     "original_completion": (
                         None
                         if original_completion is None
-                        else _validated(original_completion.model_dump(mode="json"))
+                        else _task_completion_projection(original_completion)
                     ),
                 }
             )

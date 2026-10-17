@@ -511,15 +511,31 @@ def _schema_preflight_is_exact(
 ) -> bool:
     canonical = ast.parse(
         '''
+def _upgrade_repository_evidence_columns(connection: Connection) -> None:
+    """Add columns only after the caller validates an exact old table baseline."""
+    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
+        columns = inspect(connection).get_columns(table_name)
+        if not any(
+            column["name"] == "repository_evidence_json" for column in columns
+        ):
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table_name} "
+                "ADD COLUMN repository_evidence_json TEXT"
+            )
+
+
 def _upgrade_reviewed_business_schema(
     connection: Connection, observed: BusinessSchemaManifest
 ) -> None:
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
         _assert_current_business_schema(connection)
+    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        _assert_repository_evidence_columns(connection)
     indexes_present = provider_audit_indexes_present(connection)
     if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST and indexes_present:
         raise ProviderAuditIndexError
@@ -534,6 +550,11 @@ def _upgrade_reviewed_business_schema(
                 for table_name in sorted(_RETRY_TABLE_NAMES)
             ],
         )
+    if observed in (
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+    ):
+        _upgrade_repository_evidence_columns(connection)
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
             connection.exec_driver_sql(ddl)
@@ -560,6 +581,7 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_repository_evidence_columns(connection)
             _assert_complete_provider_audit_indexes(connection)
             connection.commit()
         except ProviderAuditIndexError:
@@ -2236,6 +2258,7 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_repository_evidence_columns(connection)
             _assert_complete_provider_audit_indexes(connection)
             connection.commit()"""
     schema_guard_definition = "def _assert_current_business_schema("
@@ -2243,14 +2266,17 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
     mutations: tuple[tuple[str, str | None, str], ...] = (
         (
             "ddl-before-rejection",
-            "        _assert_current_business_schema(connection)\n    indexes_present",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
             "        SQLModel.metadata.create_all(connection)\n"
-            "        _assert_current_business_schema(connection)\n    indexes_present",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
         ),
         (
             "bypassed-unsupported-manifest-guard",
-            "        _assert_current_business_schema(connection)\n    indexes_present",
-            "        pass\n    indexes_present",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+            "        pass\n    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
         ),
         (
             "broadened-pre-retry-manifest",
@@ -2259,9 +2285,53 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             "PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.table_names:",
         ),
         (
+            "broadened-pre-revision-manifest",
+            "    if observed in (\n"
+            "        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
+            "        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
+            "    ):",
+            "    if observed.table_names <= "
+            "PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names:",
+        ),
+        (
             "unrestricted-retry-ddl",
             pre_retry_create,
             "        SQLModel.metadata.create_all(connection)",
+        ),
+        (
+            "unrestricted-evidence-ddl",
+            "def _upgrade_repository_evidence_columns("
+            "connection: Connection) -> None:\n"
+            '    """Add columns only after the caller validates '
+            'an exact old table baseline."""\n'
+            "    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:",
+            "def _upgrade_repository_evidence_columns("
+            "connection: Connection) -> None:\n"
+            '    """Add columns only after the caller validates '
+            'an exact old table baseline."""\n'
+            "    for table_name in SQLModel.metadata.tables:",
+        ),
+        (
+            "evidence-ddl-before-rejection",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+            "        connection.exec_driver_sql(\n"
+            "            'ALTER TABLE backlog_artifacts '\n"
+            "            'ADD COLUMN repository_evidence_json TEXT'\n"
+            "        )\n"
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+        ),
+        (
+            "missing-evidence-column-preflight",
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:\n"
+            "        _assert_repository_evidence_columns(connection)\n",
+            "",
+        ),
+        (
+            "missing-evidence-column-validation",
+            "            _assert_repository_evidence_columns(connection)\n",
+            "",
         ),
         (
             "bypassed-provider-index-preflight",
@@ -2277,6 +2347,11 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             "rebound-schema-upgrade-helper",
             None,
             "\n_upgrade_reviewed_business_schema = lambda *_args: None\n",
+        ),
+        (
+            "rebound-evidence-upgrade-helper",
+            None,
+            "\n_upgrade_repository_evidence_columns = lambda *_args: None\n",
         ),
         (
             "rebound-provider-index-postflight",

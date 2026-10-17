@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, field_validator, model_validator
 
 from workflow.contracts import JsonObject
 from workflow.execution_identity import parse_execution_instance_key
 from workflow.requests.base import PositionedRequest
+
+
+def _acknowledgement_absent(value: bool | None) -> bool:
+    """Keep default acknowledgement out of historical canonical request bytes."""
+    return value is None or value is False
+
+
+def _worktree_path_absent(value: str | None) -> bool:
+    """Omit only the new absent path field during recursive serialization."""
+    return value is None
 
 
 class CompleteTask(PositionedRequest):
@@ -22,6 +32,16 @@ class CompleteTask(PositionedRequest):
     artifact_refs: tuple[str, ...]
     acceptance_result: Literal["partially_met", "fully_met"]
     checklist_result: JsonObject
+    uncommitted: StrictBool | None = Field(
+        default=None, exclude_if=_acknowledgement_absent
+    )
+    worktree_path: str | None = Field(default=None, exclude_if=_worktree_path_absent)
+
+    @field_validator("uncommitted")
+    @classmethod
+    def normalize_acknowledgement(cls, value: bool | None) -> bool | None:
+        """Represent the literal default as the legacy absent acknowledgement."""
+        return True if value is True else None
 
     @model_validator(mode="after")
     def validate_task_instance(self) -> Self:

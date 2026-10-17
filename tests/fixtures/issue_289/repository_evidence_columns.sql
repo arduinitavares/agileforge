@@ -1,0 +1,2 @@
+ALTER TABLE task_completion_evidence ADD COLUMN repository_evidence_json TEXT;
+ALTER TABLE sprint_retry_task_evidence ADD COLUMN repository_evidence_json TEXT;
