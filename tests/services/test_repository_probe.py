@@ -81,12 +81,10 @@ def _owned_pipe_git(tmp_path: Path, *, parent_exits: bool) -> tuple[Path, Path]:
     real_git = shutil.which("git")
     assert real_git is not None
     wrapper = tmp_path / "pipe-holding-git"
+    status_helper = tmp_path / "pipe-holding-status.py"
     records = tmp_path / "pipe-holding-git-pids.jsonl"
-    wrapper.write_text(
-        f"#!{sys.executable}\n"
+    status_helper.write_text(
         "import os, sys\n"
-        "if 'status' not in sys.argv[1:]:\n"
-        f"    os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n"
         "import json, time\n"
         f"records = {str(records)!r}\n"
         "def record(role):\n"
@@ -109,6 +107,19 @@ def _owned_pipe_git(tmp_path: Path, *, parent_exits: bool) -> tuple[Path, Path]:
         f"    if {parent_exits!r}: os._exit(0)\n"
         "    time.sleep(6)\n"
         f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    # Metadata commands must not spend the short overall budget starting Python
+    # before the actual pipe-holding status scenario can establish its children.
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for part in "$@"; do\n'
+        '    if [ "$part" = status ]; then\n'
+        f"        exec {shlex.quote(sys.executable)} "
+        f'{shlex.quote(str(status_helper))} "$@"\n'
+        "    fi\n"
+        "done\n"
+        f'exec {shlex.quote(real_git)} "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o700)
@@ -1633,8 +1644,8 @@ def test_verification_deadline_stops_owned_pipe_holding_descendants(
     wrapper, records = _owned_pipe_git(tmp_path, parent_exits=parent_exits)
     owned_processes = _observe_owned_status_processes(monkeypatch, wrapper)
     monkeypatch.setattr(Git, "GIT_PYTHON_GIT_EXECUTABLE", str(wrapper))
-    # Actual child/grandchild forks avoid interpreter-startup confounders. The
-    # separate 0.4s overall-budget test independently exercises a tighter bound.
+    # Only the faulted status command starts Python; metadata goes straight to
+    # Git. The separate 0.4s test independently exercises the overall budget.
     probe = GitPythonRepositoryProbe(
         outside_timeout_seconds=0.75, verification_timeout_seconds=0.75
     )
