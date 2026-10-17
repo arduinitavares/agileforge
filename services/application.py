@@ -207,6 +207,7 @@ from workflow.requests import (
     RepairStoryReadiness,
     RetrySprint,
     ReviewSprint,
+    StartNodeAttempt,
     StartSprint,
     StartSprintRetry,
 )
@@ -219,6 +220,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from adapters.adk.recipes import AdkRecipeRegistry
+    from services.contracts.provider_retry import ProviderAttemptAudit
     from utils.spec_schemas import ValidationEvidence
     from workflow.facts import (
         PostSprintTriageFact,
@@ -257,6 +259,33 @@ class WorkflowDomainPort(Protocol):
         attempt_fingerprint: str,
     ) -> JsonObject:
         """Load trusted input for a durable node attempt."""
+        ...
+
+
+@runtime_checkable
+class ProviderWorkflowDomainPort(WorkflowDomainPort, Protocol):
+    """Optional durable host capabilities used only during provider execution."""
+
+    def replay_provider_attempt(
+        self, request: StartNodeAttempt
+    ) -> TransitionResult | None:
+        """Replay exact caller identity before current execution settings."""
+        ...
+
+    def provider_attempt_audit(self) -> ProviderAttemptAudit:
+        """Return the independently committed audit store."""
+        ...
+
+    def check_provider_attempt(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> WorkflowError | None:
+        """Check fresh durable validity before a physical send."""
+        ...
+
+    def provider_attempt_lease_remaining_seconds(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> float:
+        """Measure the persisted lease with the domain evaluation clock."""
         ...
 
 
@@ -2943,11 +2972,35 @@ class AgileForgeApplication:
             AdkWorkflowRunner,
         )
 
+        domain = self._workflow_domain
+        if not isinstance(domain, ProviderWorkflowDomainPort):
+            msg = "Agentic execution requires durable provider attempt capabilities."
+            raise TypeError(msg)
+        replay = domain.replay_provider_attempt(
+            StartNodeAttempt(
+                project_id=request.project_id,
+                graph_version=request.graph_version,
+                fact_fingerprint=request.fact_fingerprint,
+                decision_fingerprint=request.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                target_node_id=request.node_id,
+                target_instance_key=request.instance_key,
+                normalized_input=request.input_payload,
+                model_id=request.model_id,
+                execution_settings={},
+                lease_seconds=_LEASE_SECONDS,
+            )
+        )
+        if replay is not None:
+            return replay
+
         if self._recipe_registry is None:
             msg = "Agentic execution requires a production recipe registry."
             raise RuntimeError(msg)
         runner = AdkWorkflowRunner(
-            domain=self._workflow_domain,
+            domain=domain,
             registry=self._recipe_registry,
             config=AdkExecutionConfig(
                 project_id=request.project_id,

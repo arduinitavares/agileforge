@@ -394,11 +394,12 @@ def _maintenance_runtime_command(command: Sequence[str]) -> tuple[str, ...]:
         ("init",),
         ("backup",),
         ("restore",),
+        ("upgrade",),
         ("configure-models",),
         ("recover-models",),
     }:
         raise ValueError(
-            "production maintenance accepts only init, backup, restore, "
+            "production maintenance accepts only init, backup, restore, upgrade, "
             "configure-models, or recover-models"
         )
     return runtime_command

@@ -40,7 +40,12 @@ from workflow.contracts import (
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
-from workflow.requests import FailNodeAttempt, RecordBacklogDraft, StartNodeAttempt
+from workflow.requests import (
+    FailNodeAttempt,
+    RecordBacklogDraft,
+    RevalidateNodeAttempt,
+    StartNodeAttempt,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -803,6 +808,133 @@ def test_replay_query_returns_failure_stored_under_original_start_receipt(
     assert replay == expected
 
 
+def test_legacy_initial_start_replays_terminal_stale_revalidation(
+    engine: Engine,
+) -> None:
+    """A real first stale revalidation can own the only terminal receipt."""
+    with Session(engine) as session:
+        project = Project(name="Terminal Specification preflight")
+        session.add(project)
+        session.flush()
+        assert project.project_id is not None
+        project_id = project.project_id
+        request = StartNodeAttempt(
+            project_id=project_id,
+            graph_version=ROOT_GRAPH.graph_version,
+            fact_fingerprint=canonical_hash({"facts": "registered-source"}),
+            decision_fingerprint=canonical_hash({"decision": "structure"}),
+            idempotency_key="terminal-stale-preflight",
+            actor="operator@example.com",
+            target_node_id="specification.structure",
+            normalized_input={},
+            model_id=MODEL_ID,
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+        )
+        attempt = WorkflowNodeAttempt(
+            project_id=project_id,
+            node_id=request.target_node_id,
+            graph_version=request.graph_version,
+            fact_fingerprint=request.fact_fingerprint,
+            business_fact_fingerprint=canonical_hash({"business": "source"}),
+            decision_fingerprint=request.decision_fingerprint,
+            normalized_input_json=canonical_json(request.normalized_input),
+            input_fingerprint=canonical_hash(request.normalized_input),
+            model_id=request.model_id,
+            execution_settings_json=canonical_json(request.execution_settings),
+            idempotency_key=request.idempotency_key,
+            actor=request.actor,
+            started_at=EVALUATED_AT,
+            lease_expires_at=EVALUATED_AT + timedelta(seconds=LEASE_SECONDS),
+            attempt_fingerprint=canonical_hash({"synthetic_attempt": 1}),
+        )
+        session.add(attempt)
+        session.flush()
+        assert attempt.workflow_node_attempt_id is not None
+        attempt_id = attempt.workflow_node_attempt_id
+        fingerprint = attempt.attempt_fingerprint
+        initial = TransitionResult(
+            ok=True,
+            applied_node_id=request.target_node_id,
+            output={
+                "attempt_id": attempt_id,
+                "attempt_fingerprint": fingerprint,
+                "lease_expires_at": attempt.lease_expires_at.isoformat(),
+            },
+        )
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind=request.kind,
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=canonical_hash(request.model_dump(mode="json")),
+                request_json=canonical_json(request.model_dump(mode="json")),
+                result_json=canonical_json(initial.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+    domain = _domain(
+        engine,
+        MutableClock(EVALUATED_AT + timedelta(seconds=LEASE_SECONDS)),
+        _registry(),
+    )
+    terminal = domain.transition(
+        RevalidateNodeAttempt(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=fingerprint,
+            idempotency_key=f"{request.idempotency_key}:check",
+            actor=request.actor,
+        )
+    )
+    assert terminal.error is not None
+    assert terminal.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    expected = terminal.model_copy(update={"replayed": True})
+    replay = DurableNodeAttemptReplayService(engine=engine)
+    assert replay.replay_exact(request) == expected
+    with Session(engine) as session:
+        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        assert outcome.status == "obsolete"
+        start_receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == request.kind
+            )
+        ).one()
+        start_receipt.result_json = canonical_json(initial.model_dump(mode="json"))
+        session.add(start_receipt)
+        session.commit()
+        history_before = [
+            (row.request_json, row.request_fingerprint, row.result_json)
+            for row in session.exec(select(WorkflowTransitionReceipt)).all()
+        ]
+        outcome_before = (
+            session.exec(select(WorkflowNodeAttemptOutcome)).one().model_dump()
+        )
+    with engine.connect() as connection:
+        changes_before = connection.exec_driver_sql(
+            "SELECT total_changes()"
+        ).scalar_one()
+
+    assert replay.replay_exact(request) == expected
+    assert replay.replay(_replay_query(request)) == expected
+
+    with engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql("SELECT total_changes()").scalar_one()
+            == changes_before
+        )
+    with Session(engine) as session:
+        assert [
+            (row.request_json, row.request_fingerprint, row.result_json)
+            for row in session.exec(select(WorkflowTransitionReceipt)).all()
+        ] == history_before
+        assert session.exec(select(WorkflowNodeAttemptOutcome)).one().model_dump() == (
+            outcome_before
+        )
+        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
+
+
 def test_replay_query_returns_obsolete_result_from_original_start_receipt(
     engine: Engine,
 ) -> None:
@@ -1371,3 +1503,125 @@ def test_backlog_correction_replay_exact_and_conflicts(engine: Engine) -> None:
     with Session(engine) as session:
         attempts = session.exec(select(WorkflowNodeAttempt)).all()
         assert len(attempts) == 0
+
+
+def test_temporary_provider_failure_freezes_summary_in_original_receipt(
+    engine: Engine,
+) -> None:
+    """Typed temporary facts belong in the receipt while outcome output stays NULL."""
+    from services.contracts.provider_retry import (  # noqa: PLC0415
+        ProviderFailureSummary,
+    )
+
+    project_id, _, _ = _seed_accepted_specification_state(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id)
+    attempt_id, fingerprint = _attempt_identity(domain.transition(request))
+    summary = ProviderFailureSummary(
+        reason="unavailable",
+        termination_reason="attempts_exhausted",
+        http_status=503,
+        call_id="test_call",
+        attempts=3,
+        max_attempts=3,
+        manual_retry_requires_new_key=True,
+    )
+    failure = FailNodeAttempt(
+        project_id=project_id,
+        attempt_id=attempt_id,
+        attempt_fingerprint=fingerprint,
+        failure_code="EXTERNAL_PROVIDER_TEMPORARY",
+        failure_message="untrusted copy",
+        provider_failure=summary,
+        idempotency_key="temporary:failure",
+        actor="operator",
+    )
+    result = domain.transition(failure)
+    replay = domain.transition(request)
+    assert result.error is not None
+    assert result.error.code.value == "EXTERNAL_PROVIDER_TEMPORARY"
+    assert result.error.message == (
+        "OpenRouter is temporarily unavailable. Automatic retries stopped. "
+        "Retry this action with a new idempotency key."
+    )
+    assert result.output == {"provider_failure": summary.model_dump(mode="json")}
+    assert replay == result.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        outcome = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id
+            )
+        ).one()
+        assert outcome.output_json is None
+        assert outcome.failure_message == result.error.message
+
+
+@pytest.mark.parametrize(
+    ("code", "with_summary"),
+    [("EXTERNAL_PROVIDER_TEMPORARY", False), ("ADK_EXECUTION_FAILED", True)],
+)
+def test_provider_summary_code_pairing_fails_closed(
+    engine: Engine, code: str, with_summary: bool
+) -> None:
+    """A caller cannot label ordinary failures temporary or misattach provider facts."""
+    from services.contracts.provider_retry import (  # noqa: PLC0415
+        ProviderFailureSummary,
+    )
+
+    project_id, _, _ = _seed_accepted_specification_state(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id)
+    attempt_id, fingerprint = _attempt_identity(domain.transition(request))
+    summary = ProviderFailureSummary(
+        reason="unavailable",
+        termination_reason="attempts_exhausted",
+        http_status=503,
+        call_id="test_call",
+        attempts=3,
+        max_attempts=3,
+        manual_retry_requires_new_key=True,
+    )
+    result = domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=fingerprint,
+            failure_code=code,
+            failure_message="synthetic",
+            provider_failure=summary if with_summary else None,
+            idempotency_key="pairing:failure",
+            actor="operator",
+        )
+    )
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        assert not session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id
+            )
+        ).all()
+
+
+def test_ordinary_failure_serialization_keeps_legacy_fingerprint() -> None:
+    """Adding an optional summary must not alter old request identities."""
+    request = FailNodeAttempt(
+        project_id=1,
+        attempt_id=1,
+        attempt_fingerprint="fingerprint",
+        failure_code="ADK_EXECUTION_FAILED",
+        failure_message="synthetic",
+        idempotency_key="ordinary",
+        actor="operator",
+    )
+    assert request.model_dump(mode="json") == {
+        "kind": "fail_node_attempt",
+        "project_id": 1,
+        "attempt_id": 1,
+        "attempt_fingerprint": "fingerprint",
+        "failure_code": "ADK_EXECUTION_FAILED",
+        "failure_message": "synthetic",
+        "idempotency_key": "ordinary",
+        "actor": "operator",
+        "correlation_id": None,
+    }

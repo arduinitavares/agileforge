@@ -36,6 +36,8 @@ from workflow.fingerprints import canonical_hash
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
+    from models.db import BusinessSchemaManifest
+
 _FORMAT = "agileforge.transfer.v1"
 _MANIFEST_NAME = "manifest.json"
 _UNPUBLISHED_NAME = ".agileforge-unpublished"
@@ -512,7 +514,7 @@ def discover_registered_repositories(database: Path) -> tuple[Path, ...]:
     if validated is None:  # pragma: no cover - required above
         raise TransferError("business database is missing")
     try:
-        connection = sqlite3.connect(_sqlite_uri(validated, immutable=True), uri=True)
+        connection = sqlite3.connect(_sqlite_uri(validated, immutable=False), uri=True)
         tables = {
             cast("str", row[0])
             for row in connection.execute(
@@ -1508,8 +1510,10 @@ def _verify_repository_inventory(manifest: TransferManifest) -> None:
                 raise TransferError("transfer repository inventory is incomplete")
 
 
-def verify_current_business_schema(database: Path) -> None:
-    """Require the exact reviewed business schema without creating or migrating it."""
+def _inspect_owned_business_schema(
+    database: Path, *, immutable: bool = False
+) -> BusinessSchemaManifest:
+    """Inspect an owned DB read-only with a scoped schema-model import."""
     parent = _real_directory(database.parent, label="business database parent")
     validated = _regular_file(
         database,
@@ -1527,10 +1531,7 @@ def verify_current_business_schema(database: Path) -> None:
         from utils.runtime_config import get_business_db_target  # noqa: PLC0415
 
         get_business_db_target.cache_clear()
-        from models.db import (  # noqa: PLC0415
-            CURRENT_BUSINESS_SCHEMA_MANIFEST,
-            _inspect_business_schema_manifest,
-        )
+        from models.db import _inspect_business_schema_manifest  # noqa: PLC0415
     finally:
         if previous_database is None:
             os.environ.pop(_BUSINESS_DATABASE_ENV, None)
@@ -1545,7 +1546,7 @@ def verify_current_business_schema(database: Path) -> None:
     engine = create_engine(
         "sqlite://",
         creator=lambda: sqlite3.connect(
-            _sqlite_uri(validated, immutable=True),
+            _sqlite_uri(validated, immutable=immutable),
             uri=True,
         ),
     )
@@ -1555,6 +1556,14 @@ def verify_current_business_schema(database: Path) -> None:
         raise TransferError("current business schema inspection failed") from error
     finally:
         engine.dispose()
+    return observed
+
+
+def verify_current_business_schema(database: Path, *, immutable: bool = True) -> None:
+    """Require the exact reviewed business schema without creating or migrating it."""
+    observed = _inspect_owned_business_schema(database, immutable=immutable)
+    from models.db import CURRENT_BUSINESS_SCHEMA_MANIFEST  # noqa: PLC0415
+
     if observed != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         raise TransferError("unsupported current business schema")
 

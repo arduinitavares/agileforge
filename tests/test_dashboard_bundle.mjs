@@ -33,6 +33,34 @@ function harness(response) {
     return { context, requests };
 }
 
+test('failed action retains temporary provider code and frozen terminal summary', () => {
+    const summary = {
+        schema_version: 'agileforge.provider-failure.v1',
+        provider: 'openrouter', category: 'external_temporary', retryable: true,
+        reason: 'rate_limited', termination_reason: 'attempts_exhausted',
+        http_status: 429, call_id: 'dashboard-call', attempts: 3, max_attempts: 3,
+        retry_after_seconds: null, manual_retry_requires_new_key: true,
+    };
+    const message = 'OpenRouter is temporarily rate-limited. Automatic retries stopped. Retry this action with a new idempotency key.';
+    const payload = {
+        detail: {
+            ok: false, output: { provider_failure: summary },
+            error: { code: 'EXTERNAL_PROVIDER_TEMPORARY', message, blockers: [] },
+        },
+    };
+    const { context } = harness(bundle());
+    assert.throws(() => context.checkedResponsePayload(payload, 409, false), (error) => {
+        assert.equal(error.status, 409);
+        assert.equal(error.code, 'EXTERNAL_PROVIDER_TEMPORARY');
+        assert.equal(error.message, message);
+        assert.deepEqual(error.output, payload.detail.output);
+        return true;
+    });
+    assert.throws(() => context.checkedResponsePayload({ detail: { error: { code: 'FACT_CONFLICT', message: 'Facts changed.' } } }, 409, false), (error) => (
+        error.code === 'FACT_CONFLICT' && error.message === 'Facts changed.' && error.output === undefined
+    ));
+});
+
 test('dashboard loads every projection with one GET and preserves slot order', async () => {
     const { context, requests } = harness(bundle());
     const controller = new AbortController();

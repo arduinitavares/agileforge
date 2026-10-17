@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from sqlalchemy import (
     inspect,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SAWarning
 from sqlmodel import SQLModel, create_engine
 
 from models import (
@@ -28,6 +30,11 @@ from models import (
     specs,
     sprint_retry,
     workflow,
+)
+from models.provider_audit_indexes import (
+    PROVIDER_AUDIT_INDEX_DDL,
+    ProviderAuditIndexError,
+    provider_audit_indexes_present,
 )
 from utils.runtime_config import get_business_db_target, get_database_echo
 
@@ -2025,11 +2032,23 @@ def _inspected_table_structure(
     target_engine: Engine | Connection, table_name: str
 ) -> TableStructure:
     inspector = inspect(target_engine)
+    with warnings.catch_warnings():
+        if table_name == "workflow_events":
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    "^Skipped unsupported reflection of expression-based index "
+                    "ix_workflow_events_provider_(action|call)$"
+                ),
+                category=SAWarning,
+            )
+        unique_constraints = inspector.get_unique_constraints(table_name)
+        indexes = inspector.get_indexes(table_name)
     uniques: set[tuple[tuple[str, ...], str | None]] = {
         (tuple(str(column) for column in item["column_names"]), None)
-        for item in inspector.get_unique_constraints(table_name)
+        for item in unique_constraints
     }
-    for item in inspector.get_indexes(table_name):
+    for item in indexes:
         if not item["unique"]:
             continue
         dialect_options = item.get("dialect_options") or {}
@@ -2064,14 +2083,13 @@ def _inspected_table_structure(
 def _inspect_business_schema_manifest(
     target_engine: Engine | Connection,
 ) -> BusinessSchemaManifest:
-    """Inspect an existing database using the same normalized manifest shape."""
+    """Inspect all observed structures independently of the current release."""
     table_names = frozenset(inspect(target_engine).get_table_names())
     return BusinessSchemaManifest(
         table_names=table_names,
         structures={
             table_name: _inspected_table_structure(target_engine, table_name)
-            for table_name in CURRENT_BUSINESS_SCHEMA_MANIFEST.structures
-            if table_name in table_names
+            for table_name in sorted(table_names)
         },
     )
 
@@ -2202,8 +2220,41 @@ def create_db_and_tables() -> None:
     logger.info("Tables created successfully.")
 
 
+def _upgrade_reviewed_business_schema(
+    connection: Connection, observed: BusinessSchemaManifest
+) -> None:
+    """Install additive DDL only after the table and owned-index baseline gates."""
+    if observed.table_names and observed not in (
+        CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+    ):
+        _assert_current_business_schema(connection)
+    indexes_present = provider_audit_indexes_present(connection)
+    if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST and indexes_present:
+        raise ProviderAuditIndexError
+    if not observed.table_names:
+        SQLModel.metadata.create_all(connection)
+        return
+    if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
+        SQLModel.metadata.create_all(
+            connection,
+            tables=[
+                SQLModel.metadata.tables[table_name]
+                for table_name in sorted(_RETRY_TABLE_NAMES)
+            ],
+        )
+    if not indexes_present:
+        for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
+            connection.exec_driver_sql(ddl)
+
+
+def _assert_complete_provider_audit_indexes(connection: Connection) -> None:
+    if not provider_audit_indexes_present(connection):
+        raise ProviderAuditIndexError
+
+
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
-    """Create or atomically upgrade only the exact pre-retry business schema."""
+    """Atomically upgrade only reviewed table baselines and provider index states."""
     target_engine = engine_override or engine
     if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         _assert_current_business_schema(target_engine)
@@ -2212,26 +2263,18 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         try:
             observed = _inspect_business_schema_manifest(connection)
-            if not observed.table_names:
-                SQLModel.metadata.create_all(connection)
-            elif observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
-                pass
-            elif observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
-                SQLModel.metadata.create_all(
-                    connection,
-                    tables=[
-                        SQLModel.metadata.tables[table_name]
-                        for table_name in sorted(_RETRY_TABLE_NAMES)
-                    ],
-                )
-            else:
-                _assert_current_business_schema(connection)
+            _upgrade_reviewed_business_schema(connection, observed)
             if (
                 _inspect_business_schema_manifest(connection)
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
+            _assert_complete_provider_audit_indexes(connection)
             connection.commit()
+        except ProviderAuditIndexError:
+            connection.rollback()
+            message = "UNSUPPORTED_BUSINESS_SCHEMA: provider audit index mismatch."
+            raise UnsupportedBusinessSchemaError(message) from None
         except BaseException:
             connection.rollback()
             raise

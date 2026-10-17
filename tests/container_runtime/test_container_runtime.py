@@ -33,6 +33,7 @@ from cli.dev_server import CONTAINER_HOST, UIChild, UIRuntimeMismatchError
 from cli.production_state import (
     ProductionStateError,
     ProductionStateManifest,
+    database_schema_sha256,
     initialize_production_state,
     load_production_state,
 )
@@ -44,7 +45,6 @@ from cli.repository_transfer import (
 from cli.state_transfer import (
     _FORMAT,
     StateLayout,
-    TransferError,
     TransferManifest,
     _current_trace_schema_shape,
     _file_inventory,
@@ -711,15 +711,28 @@ def test_restore_rejects_unknown_schema_before_destination_publication(
     )
     with sqlite3.connect(source.business_database) as connection:
         connection.execute("CREATE TABLE unsupported_payload (value TEXT)")
-
-    bundle = backup_production_state(
-        source,
+    source = source.model_copy(
+        update={
+            "business_schema_sha256": database_schema_sha256(source.business_database)
+        }
+    )
+    source_manifest = source.profile_root / "runtime.json"
+    source_manifest.write_text(source.model_dump_json(indent=2), encoding="utf-8")
+    bundle = backup_state(
+        StateLayout(
+            root=source.profile_root,
+            business_database=source.business_database,
+            trace_database=source.trace_database,
+            artifacts=source.artifacts,
+            model_config=source.model_config_path,
+            maintenance_roots=(tmp_path,),
+            provenance_files=(source_manifest,),
+        ),
         tmp_path / "backup",
-        deployment_root=tmp_path,
     )
     destination = tmp_path / "profiles" / "rejected"
 
-    with pytest.raises(TransferError, match="unsupported current business schema"):
+    with pytest.raises(ProductionStateError, match="unregistered production database"):
         restore_production_state(
             bundle,
             destination,

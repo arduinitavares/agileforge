@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
+from adapters.adk.provider_retry import ProviderAttemptStopped
 from models.core import UserStory
 from models.db import get_engine
 from models.workflow import (
@@ -17,6 +18,11 @@ from models.workflow import (
     BacklogArtifactDecision,
     StoryArtifact,
     StoryArtifactDecision,
+)
+from services.contracts.provider_retry import (
+    ProviderAuditError,
+    ProviderTransientFailure,
+    provider_failure_message,
 )
 from services.contracts.specification_references import (
     AcceptedSpecificationReference,
@@ -40,6 +46,7 @@ from services.specs.accepted_specification import (
     load_accepted_specification,
     require_current_accepted_specification,
 )
+from utils.adk_runner import provider_action_context
 from utils.spec_schemas import StructuralValidationFailure, ValidationEvidence
 from workflow.fingerprints import canonical_hash, canonical_json
 
@@ -683,6 +690,31 @@ def _validation_source_stale_result(
     }
 
 
+def _provider_review_failure(
+    *, story_id: int, failure: ProviderTransientFailure | ProviderAuditError
+) -> JsonObject:
+    """Return safe transport failure without publishing new validation evidence."""
+    temporary = isinstance(failure, ProviderTransientFailure)
+    code = "EXTERNAL_PROVIDER_TEMPORARY" if temporary else "EXTERNAL_EXECUTION_FAILED"
+    message = (
+        provider_failure_message(failure.summary)
+        if isinstance(failure, ProviderTransientFailure)
+        else "Provider request audit could not be recorded. No new result was saved."
+    )
+    result: JsonObject = {
+        "success": False,
+        "story_id": story_id,
+        "mode": "hybrid",
+        "ready_for_sprint": False,
+        "error": {"code": code, "message": message},
+        "error_code": code,
+        "message": message,
+    }
+    if isinstance(failure, ProviderTransientFailure):
+        result["provider_failure"] = failure.summary.model_dump(mode="json")
+    return result
+
+
 def _validation_result(
     *,
     story_id: int,
@@ -875,12 +907,17 @@ def validate_story_with_specification(
         )
     else:
         try:
-            raw_text = review_adapter(review_input)
+            with provider_action_context(project_id=story.project_id, engine=engine):
+                raw_text = review_adapter(review_input)
             semantic = _SemanticOutcome(
                 state="valid",
                 findings=_parse_semantic_result(raw_text, context=context),
                 expected_input_payload=expected_input_payload,
             )
+        except (ProviderTransientFailure, ProviderAuditError) as failure:
+            return _provider_review_failure(story_id=parsed.story_id, failure=failure)
+        except ProviderAttemptStopped:
+            raise
         except Exception:  # noqa: BLE001
             semantic = _SemanticOutcome(
                 state="invalid",

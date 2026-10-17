@@ -21,7 +21,14 @@ from workflow.contracts import (
     WorkflowErrorCode,
 )
 from workflow.fingerprints import canonical_hash
-from workflow.requests import StartNodeAttempt, TransitionRequest
+from workflow.requests import (
+    FailNodeAttempt,
+    ObsoleteNodeAttempt,
+    RevalidateNodeAttempt,
+    StartNodeAttempt,
+    TransitionRequest,
+)
+from workflow.requests.base import PositionedRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _CALLER_OWNED_ATTEMPT_SELECTOR_NODES = frozenset({"planning.story.generate"})
@@ -65,6 +72,36 @@ class DurableNodeAttemptReplayService:
     """Recover persisted attempt results without rebuilding prepared input."""
 
     engine: Engine
+
+    def replay_exact(self, request: StartNodeAttempt) -> TransitionResult | None:
+        """Match every caller field before reusing captured host settings and lease."""
+        with Session(self.engine) as session:
+            receipt = session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == request.idempotency_key,
+                )
+            ).one_or_none()
+            if receipt is None:
+                return None
+            stored = StartNodeAttempt.model_validate_json(receipt.request_json)
+            expected = request.model_copy(
+                update={
+                    "execution_settings": stored.execution_settings,
+                    "lease_seconds": stored.lease_seconds,
+                }
+            )
+            if (
+                canonical_hash(expected.model_dump(mode="json"))
+                != receipt.request_fingerprint
+            ):
+                return _fact_conflict(
+                    "The idempotency key was already used for different input."
+                )
+            if receipt.result_json is None or receipt.completed_at is None:
+                return _fact_conflict("The idempotency receipt is incomplete.")
+            return _replay_attempt_result(session, receipt, stored)
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         """Return one matching in-flight or terminal receipt when it exists."""
@@ -239,11 +276,9 @@ def _sprint_replay_conflicts(
     if requested_kind not in _SPRINT_OWNER_KINDS:
         return True
     if stored_kind is None:
-        return (
-            requested_kind != "named_team"
-            or query.semantic_input.get("team_name")
-            != stored.normalized_input.get("team_name")
-        )
+        return requested_kind != "named_team" or query.semantic_input.get(
+            "team_name"
+        ) != stored.normalized_input.get("team_name")
     return stored_kind not in _SPRINT_OWNER_KINDS or stored_kind != requested_kind
 
 
@@ -331,17 +366,34 @@ def _replay_attempt_result(
     if outcome is None:
         return _replayed_result(receipt)
     start_result = _receipt_result(receipt)
-    if not start_result.ok:
+    if not _is_initial_start_result(start_result, attempt):
         return start_result.model_copy(update={"replayed": True})
-    completion_receipt = _terminal_receipt(session, attempt)
+    completion_receipt = _terminal_receipt(session, attempt, outcome)
     if completion_receipt is None:
         return _fact_conflict("The terminal node attempt has no completion receipt.")
     return _replayed_result(completion_receipt)
 
 
+def _is_initial_start_result(
+    result: TransitionResult,
+    attempt: WorkflowNodeAttempt,
+) -> bool:
+    """Identify legacy receipts retaining the exact in-flight Start output shape."""
+    return (
+        result.ok
+        and result.applied_node_id == attempt.node_id
+        and set(result.output)
+        == {"attempt_id", "attempt_fingerprint", "lease_expires_at"}
+        and result.output["attempt_id"] == attempt.workflow_node_attempt_id
+        and result.output["attempt_fingerprint"] == attempt.attempt_fingerprint
+        and isinstance(result.output["lease_expires_at"], str)
+    )
+
+
 def _terminal_receipt(
     session: Session,
     attempt: WorkflowNodeAttempt,
+    outcome: WorkflowNodeAttemptOutcome,
 ) -> WorkflowTransitionReceipt | None:
     """Return the persisted terminal transition matching one durable attempt."""
     attempt_id = attempt.workflow_node_attempt_id
@@ -355,12 +407,34 @@ def _terminal_receipt(
     for receipt in receipts:
         request = _TRANSITION_REQUEST.validate_json(receipt.request_json)
         if (
-            request.project_id == attempt.project_id
-            and getattr(request, "attempt_id", None) == attempt_id
-            and getattr(request, "attempt_fingerprint", None)
-            == attempt.attempt_fingerprint
+            request.project_id != attempt.project_id
+            or getattr(request, "attempt_id", None) != attempt_id
+            or getattr(request, "attempt_fingerprint", None)
+            != attempt.attempt_fingerprint
+        ):
+            continue
+        if isinstance(
+            request, (PositionedRequest, FailNodeAttempt, ObsoleteNodeAttempt)
         ):
             return receipt
+        if (
+            isinstance(request, RevalidateNodeAttempt)
+            and request.target_node_id == attempt.node_id
+            and outcome.status == "obsolete"
+            and receipt.completed_at == outcome.recorded_at
+        ):
+            result = _receipt_result(receipt)
+            if (
+                not result.ok
+                and not result.replayed
+                and result.applied_node_id is None
+                and not result.output
+                and result.position is not None
+                and result.position.project_id == attempt.project_id
+                and result.error is not None
+                and result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+            ):
+                return receipt
     return None
 
 

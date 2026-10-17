@@ -82,6 +82,8 @@ class WorkflowEventType(StrEnum):
     SPRINT_RETRY_PLANNED = "sprint_retry_planned"
     SPRINT_RETRY_STARTED = "sprint_retry_started"
     TLX_PROMPT_TRIGGERED = "tlx_prompt_triggered"
+    PROVIDER_TRY_STARTED = "provider_try_started"
+    PROVIDER_TRY_FINISHED = "provider_try_finished"
 
 
 class TimeFrame(StrEnum):

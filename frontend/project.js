@@ -5307,6 +5307,9 @@ function checkedResponsePayload(payload, status, ok) {
             ?? payload?.detail?.errors?.[0]?.code
             ?? payload?.code
             ?? null;
+        if (error.code === 'EXTERNAL_PROVIDER_TEMPORARY') {
+            error.output = payload?.detail?.output ?? payload?.output;
+        }
         error.repositoryRecovery = error.code === 'REPOSITORY_PROVENANCE_STALE'
             ? repositoryBindingRecoveryDisplay(payload?.detail?.output?.repository_recovery) : null;
         error.previewRepositoryRecovery = error.code === 'REPOSITORY_PROVENANCE_STALE'

@@ -1,9 +1,9 @@
 """Product Goal interview ADK agent."""
 
 from google.adk.agents import Agent
-from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
+from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
@@ -19,8 +19,8 @@ from utils.runtime_config import (
 )
 
 _model_id = get_model_id("product_goal")
-model: LiteLlm = LiteLlm(
-    model=_model_id,
+model: LiteLlm = create_openrouter_model(
+    model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),

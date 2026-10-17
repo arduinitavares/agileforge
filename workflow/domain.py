@@ -17,11 +17,18 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from repositories.provider_attempts import ProviderAttemptAuditRepository
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.contracts.provider_retry import (
+    ProviderAttemptAudit,
+    ProviderFailureSummary,
+    provider_failure_message,
+)
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     specification_structuring_input_fingerprint,
 )
+from services.node_attempt_replay import DurableNodeAttemptReplayService
 from services.specification_source_registration import (
     PreparedSpecificationSourceRegistration,
     SpecificationSourceRegistrationError,
@@ -302,6 +309,78 @@ class WorkflowDomain:
                 raise ValueError(message)
             normalized_input = json.loads(attempt.normalized_input_json)
             return _JSON_OBJECT.validate_python(normalized_input)
+
+    def replay_provider_attempt(
+        self, request: StartNodeAttempt
+    ) -> TransitionResult | None:
+        """Replay exact caller identity before evaluating live execution settings."""
+        return DurableNodeAttemptReplayService(engine=self._engine).replay_exact(
+            request
+        )
+
+    def provider_attempt_audit(self) -> ProviderAttemptAudit:
+        """Return an audit writer that owns each independently committed session."""
+        return ProviderAttemptAuditRepository(self._engine)
+
+    def provider_attempt_lease_remaining_seconds(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> float:
+        """Measure the persisted lease using the injected domain evaluation clock."""
+        evaluated_at = self.evaluation_time()
+        with Session(self._engine) as session:
+            row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
+            if row is None or row.attempt_fingerprint != attempt_fingerprint:
+                return 0.0
+            return max(
+                0.0, (as_utc(row.lease_expires_at) - evaluated_at).total_seconds()
+            )
+
+    def check_provider_attempt(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> WorkflowError | None:
+        """Read fresh host facts without keeping a transaction across provider waits."""
+        evaluated_at = self.evaluation_time()
+        with Session(self._engine) as session:
+            row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
+            snapshot = WorkflowFactRepository(session).load(project_id)
+            position = self._graph.evaluate(snapshot, evaluated_at)
+            latest = max(
+                (
+                    attempt.attempt_id
+                    for attempt in snapshot.node_attempts
+                    if row is not None
+                    and attempt.node_id == row.node_id
+                    and attempt.instance_key == row.instance_key
+                ),
+                default=None,
+            )
+            valid = (
+                row is not None
+                and row.attempt_fingerprint == attempt_fingerprint
+                and row.graph_version == self._graph.graph_version
+                and evaluated_at < as_utc(row.lease_expires_at)
+                and row.business_fact_fingerprint == business_fact_fingerprint(snapshot)
+                and self._attempt_input_matches(row)
+                and latest == row.workflow_node_attempt_id
+                and load_attempt_outcome(
+                    session, project_id=project_id, attempt_id=attempt_id
+                )
+                is None
+                and any(
+                    decision.node_id == row.node_id
+                    and decision.instance_key == row.instance_key
+                    and decision.category is NodeCategory.WAITING
+                    for decision in position.decisions
+                )
+            )
+        return (
+            None
+            if valid
+            else WorkflowError(
+                code=WorkflowErrorCode.ATTEMPT_OBSOLETE,
+                message="The node attempt is no longer authoritative.",
+            )
+        )
 
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Guard and apply one request inside its receipt transaction."""
@@ -1029,12 +1108,49 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> TransitionResult:
         """Record failure only while the exact attempt lease remains authoritative."""
+        is_temporary = (
+            request.failure_code == WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY.value
+        )
+        if is_temporary != (request.provider_failure is not None):
+            return self._fact_conflict(
+                "Provider failure details do not match the failure code."
+            )
+        if request.provider_failure is not None:
+            summary = ProviderFailureSummary.model_validate(
+                request.provider_failure.model_dump()
+            )
+            if not summary.manual_retry_requires_new_key:
+                return self._fact_conflict(
+                    "Graph provider failures require a new retry key."
+                )
+            request = request.model_copy(
+                update={"failure_message": provider_failure_message(summary)}
+            )
         row = load_attempt(
             session,
             project_id=request.project_id,
             attempt_id=request.attempt_id,
         )
         snapshot = WorkflowFactRepository(session).load(request.project_id)
+        outcome = load_attempt_outcome(
+            session, project_id=request.project_id, attempt_id=request.attempt_id
+        )
+        if (
+            row is not None
+            and outcome is not None
+            and row.attempt_fingerprint == request.attempt_fingerprint
+        ):
+            return self._replay_attempt_start_receipt(session, row)
+        latest = max(
+            (
+                attempt.attempt_id
+                for attempt in snapshot.node_attempts
+                if row is not None
+                and attempt.node_id == row.node_id
+                and attempt.instance_key == row.instance_key
+            ),
+            default=None,
+        )
         mismatch = (
             row is None
             or load_attempt_outcome(
@@ -1047,6 +1163,8 @@ class WorkflowDomain:
             or row.graph_version != self._graph.graph_version
             or evaluated_at >= as_utc(row.lease_expires_at)
             or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
+            or not self._attempt_input_matches(row)
+            or latest != row.workflow_node_attempt_id
         )
         if mismatch:
             return self._obsolete_attempt(
@@ -1069,6 +1187,7 @@ class WorkflowDomain:
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
             WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
             WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
+            WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY,
         }
         try:
             requested_code = WorkflowErrorCode(request.failure_code)
@@ -1089,6 +1208,11 @@ class WorkflowDomain:
             ok=False,
             position=position,
             error=error,
+            output=(
+                {"provider_failure": request.provider_failure.model_dump(mode="json")}
+                if request.provider_failure is not None
+                else {}
+            ),
         )
         self._complete_attempt_start_receipt(
             session,
@@ -1096,6 +1220,8 @@ class WorkflowDomain:
             command_result,
             evaluated_at,
         )
+        if request.provider_failure is not None:
+            return command_result
         return TransitionResult(
             ok=True,
             applied_node_id=row.node_id,

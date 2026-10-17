@@ -1,0 +1,30 @@
+[
+  {
+    "change": "drop",
+    "encoding": "frozen",
+    "complete_sha256": "6a6fd24496780af08f56699f8f451e9aa053a7e27c39ae24d994bfb7eb713ffb",
+    "structural_sha256": "fd002eb97133235736d92d76daa0b4fcdaf16ca239bfa7257472a9ef9cd27109",
+    "migration_sql": "DROP TABLE workflow_events"
+  },
+  {
+    "change": "drop",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "c9bb68df818d820561b432ed11d8ba8fb0b05426ecc057d4acf44fd4a9911048",
+    "structural_sha256": "fd002eb97133235736d92d76daa0b4fcdaf16ca239bfa7257472a9ef9cd27109",
+    "migration_sql": "DROP TABLE workflow_events"
+  },
+  {
+    "change": "rename",
+    "encoding": "frozen",
+    "complete_sha256": "3bcc2ded0ed90b4afbbb6d4f49fd79a4a2a78f9a4969aa006bc569487ba7e6df",
+    "structural_sha256": "5aac1a86c5f7aebe874a0b970f5f9d7e411d72e4789b06219709995f1f5440a4",
+    "migration_sql": "ALTER TABLE workflow_events RENAME TO archived_workflow_events"
+  },
+  {
+    "change": "rename",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "629cde6d03847d93dc58874aa9adf888dd2ec455249ed7537c5b1f6a24e3f4fa",
+    "structural_sha256": "5aac1a86c5f7aebe874a0b970f5f9d7e411d72e4789b06219709995f1f5440a4",
+    "migration_sql": "ALTER TABLE workflow_events RENAME TO archived_workflow_events"
+  }
+]

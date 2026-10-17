@@ -22,6 +22,7 @@ from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
     parse_json_payload,
+    provider_action_context,
 )
 from utils.failure_artifacts import (
     AgentInvocationError,
@@ -197,7 +198,8 @@ async def run_roadmap_agent_from_state(
         )
 
     try:
-        raw_text: str = await _invoke_roadmap_agent(payload)
+        with provider_action_context(project_id=project_id):
+            raw_text: str = await _invoke_roadmap_agent(payload)
     except AgentInvocationError as exc:
         return _failure(
             project_id=project_id,
