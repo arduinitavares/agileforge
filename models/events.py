@@ -15,6 +15,7 @@ from models.enums import (
     TaskStatus,
     WorkflowEventType,
 )
+from models.provider_audit_indexes import provider_audit_indexes
 
 
 class TaskExecutionLog(SQLModel, table=True):
@@ -67,6 +68,7 @@ class WorkflowEvent(SQLModel, table=True):
     """Workflow event metrics and audit history."""
 
     __tablename__ = "workflow_events"  # type: ignore[assignment]
+    __table_args__ = provider_audit_indexes()
     event_id: int | None = Field(default=None, primary_key=True)
     event_type: WorkflowEventType = Field(nullable=False, index=True)
     timestamp: datetime = Field(

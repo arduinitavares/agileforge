@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,7 +35,8 @@ def _run_async[T](coroutine: Coroutine[Any, Any, T]) -> T:
     except RuntimeError:
         return asyncio.run(coroutine)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        return cast("T", executor.submit(asyncio.run, coroutine).result())
+        context = copy_context()
+        return cast("T", executor.submit(context.run, asyncio.run, coroutine).result())
 
 
 def _production_semantic_review(review_input: StorySpecificationReviewInput) -> str:

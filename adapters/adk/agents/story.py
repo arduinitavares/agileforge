@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
-from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
+from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.story import (
     UserStoryWriterInput,
     UserStoryWriterOutput,
@@ -32,8 +32,8 @@ def _create_story_writer_model() -> LiteLlm:
     """Create the configured Story Writer model."""
     _max_tokens = get_story_writer_max_tokens()
     model_id = get_model_id("user_story_writer")
-    return LiteLlm(
-        model=model_id,
+    return create_openrouter_model(
+        model_id=model_id,
         api_key=get_openrouter_api_key(),
         drop_params=True,
         extra_body=get_openrouter_extra_body(),

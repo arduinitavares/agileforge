@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 from pydantic import TypeAdapter
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES, RETAINED_MODEL_ROLES
-from utils import model_config
+from utils import model_config, runtime_config
 from utils.model_config import (
     get_model_id,
     get_openrouter_extra_body,
     get_story_pipeline_mode,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from services.contracts.provider_retry import ProviderRetryConfig
 
 _RUNTIME_MODEL_KEYS = tuple(sorted(RETAINED_MODEL_ROLES))
 _TEST_MODEL_CONFIG_PATH: Path = (
@@ -155,13 +161,12 @@ def test_pure_model_parser_rejects_invalid_config(raw: str, error: str) -> None:
 
 def test_pure_model_parser_requires_all_roles_only_when_requested() -> None:
     """Maintenance enforces complete role coverage while old test configs stay valid."""
-    assert model_config.parse_model_config("models:\n  product_goal: test/model\n") == {
-        "models": {"product_goal": "test/model"}
+    raw = "models:\n  product_goal: openrouter/test-model\n"
+    assert model_config.parse_model_config(raw) == {
+        "models": {"product_goal": "openrouter/test-model"}
     }
     with pytest.raises(ValueError, match="product_vision"):
-        model_config.parse_model_config(
-            "models:\n  product_goal: test/model\n", require_all_roles=True
-        )
+        model_config.parse_model_config(raw, require_all_roles=True)
 
 
 def test_model_configs_exactly_match_live_production_roles() -> None:
@@ -170,6 +175,33 @@ def test_model_configs_exactly_match_live_production_roles() -> None:
 
     assert _configured_model_roles(_PRODUCTION_MODEL_CONFIG_PATH) == expected
     assert _configured_model_roles(_TEST_MODEL_CONFIG_PATH) == expected
+
+
+@pytest.mark.parametrize(
+    "model_id", ["openai/test-model", "other/test-model", "openrouter/"]
+)
+def test_complete_model_config_rejects_unsupported_providers(model_id: str) -> None:
+    """Reject unsupported routing before a complete configuration is installed."""
+    models = {**_EXPECTED_PRODUCTION_MODELS, "product_goal": model_id}
+    with pytest.raises(ValueError, match="openrouter/"):
+        model_config.parse_model_config(
+            yaml.safe_dump({"models": models}), require_all_roles=True
+        )
+
+
+def test_model_config_load_rejects_unsupported_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fail during configuration loading rather than after a node attempt starts."""
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  product_goal: other/test-model\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(path))
+    model_config.clear_config_cache()
+    try:
+        with pytest.raises(ValueError, match="openrouter/"):
+            get_model_id("product_goal")
+    finally:
+        model_config.clear_config_cache()
 
 
 def test_specification_structure_uses_the_structurer_model_role() -> None:
@@ -191,3 +223,94 @@ def test_relax_zdr_for_tests_toggles_privacy(monkeypatch: pytest.MonkeyPatch) ->
     assert provider["data_collection"] == "allow"
     assert provider["allow_fallbacks"] is True
     assert provider["require_parameters"] is False
+
+
+_RETRY_ENV_KEYS: tuple[str, ...] = (
+    "OPENROUTER_RETRY_MAX_ATTEMPTS",
+    "OPENROUTER_RETRY_BASE_DELAY_SECONDS",
+    "OPENROUTER_RETRY_MAX_DELAY_SECONDS",
+    "OPENROUTER_RETRY_MAX_ELAPSED_SECONDS",
+    "OPENROUTER_RETRY_MIN_REMAINING_SECONDS",
+)
+
+
+def _retry_config() -> ProviderRetryConfig:
+    return runtime_config.get_provider_retry_config()
+
+
+@pytest.fixture
+def clean_retry_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep retry policy inputs synthetic and independent of local .env."""
+    for key in _RETRY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    runtime_config.clear_runtime_config_cache()
+    yield
+    runtime_config.clear_runtime_config_cache()
+
+
+@pytest.mark.usefixtures("clean_retry_env")
+def test_retry_configuration_defaults_are_safe() -> None:
+    """Catch lost defaults or accidental disabling of bounded retries."""
+    config = _retry_config()
+    assert config.model_dump() == {
+        "max_attempts": 3,
+        "base_delay_seconds": 1.0,
+        "max_delay_seconds": 8.0,
+        "max_elapsed_seconds": 60.0,
+        "min_remaining_seconds": 1.0,
+    }
+
+
+@pytest.mark.usefixtures("clean_retry_env")
+def test_retry_configuration_overrides_are_cached_and_clearable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch ignored overrides or a retry cache omitted from the existing reset."""
+    for key, value in zip(_RETRY_ENV_KEYS, ("1", "2.5", "9", "90", "3"), strict=True):
+        monkeypatch.setenv(key, value)
+    config = _retry_config()
+    assert config.model_dump() == {
+        "max_attempts": 1,
+        "base_delay_seconds": 2.5,
+        "max_delay_seconds": 9.0,
+        "max_elapsed_seconds": 90.0,
+        "min_remaining_seconds": 3.0,
+    }
+    monkeypatch.setenv("OPENROUTER_RETRY_MAX_ATTEMPTS", "4")
+    assert _retry_config() is config
+    runtime_config.clear_runtime_config_cache()
+    assert _retry_config().model_dump() == {
+        "max_attempts": 4,
+        "base_delay_seconds": 2.5,
+        "max_delay_seconds": 9.0,
+        "max_elapsed_seconds": 90.0,
+        "min_remaining_seconds": 3.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("OPENROUTER_RETRY_MAX_ATTEMPTS", "true"),
+        ("OPENROUTER_RETRY_MAX_ATTEMPTS", "1.5"),
+        ("OPENROUTER_RETRY_MAX_ATTEMPTS", "0"),
+        ("OPENROUTER_RETRY_MAX_ATTEMPTS", "11"),
+        ("OPENROUTER_RETRY_BASE_DELAY_SECONDS", "nan"),
+        ("OPENROUTER_RETRY_BASE_DELAY_SECONDS", "0"),
+        ("OPENROUTER_RETRY_BASE_DELAY_SECONDS", "61"),
+        ("OPENROUTER_RETRY_MAX_DELAY_SECONDS", "inf"),
+        ("OPENROUTER_RETRY_MAX_DELAY_SECONDS", "0.5"),
+        ("OPENROUTER_RETRY_MAX_ELAPSED_SECONDS", "121"),
+        ("OPENROUTER_RETRY_MIN_REMAINING_SECONDS", "61"),
+        ("OPENROUTER_RETRY_MIN_REMAINING_SECONDS", "false"),
+        ("OPENROUTER_RETRY_MIN_REMAINING_SECONDS", ""),
+    ],
+)
+@pytest.mark.usefixtures("clean_retry_env")
+def test_retry_configuration_rejects_bad_environment_values(
+    monkeypatch: pytest.MonkeyPatch, key: str, value: str
+) -> None:
+    """Invalid retry inputs fail locally before a client can send anything."""
+    monkeypatch.setenv(key, value)
+    with pytest.raises(runtime_config.RuntimeConfigError, match=key):
+        _retry_config()

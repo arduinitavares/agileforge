@@ -120,6 +120,16 @@ class MissingModelRolesError(ValueError):
         super().__init__(f"models missing required roles: {', '.join(missing)}")
 
 
+class UnsupportedModelProviderError(ValueError):
+    """Raised before dispatch for routing unsupported by the provider boundary."""
+
+    def __init__(self, role: object) -> None:
+        """Identify the role without exposing the configured model or credentials."""
+        super().__init__(
+            f"models.{role} must use a nonempty openrouter/ model identifier"
+        )
+
+
 def is_zdr_routing_error(exception: BaseException) -> bool:
     """Check if an exception is a ZDR/privacy routing failure.
 
@@ -153,6 +163,11 @@ def _validate_model_roles(models: object, *, require_all_roles: bool) -> None:
     for role, model_id in models.items():
         if not isinstance(model_id, str) or not model_id.strip():
             raise ModelIdentifierError(role)
+        if (
+            not model_id.startswith("openrouter/")
+            or not model_id.removeprefix("openrouter/").strip()
+        ):
+            raise UnsupportedModelProviderError(role)
     if require_all_roles:
         from adapters.adk.model_roles import RETAINED_MODEL_ROLES  # noqa: PLC0415
 

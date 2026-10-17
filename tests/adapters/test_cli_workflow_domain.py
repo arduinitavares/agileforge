@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from adapters.adk.runner import AdkRunGuards
 from cli import main as cli_main
 from cli.main import (
     _invest_assessment_lines,
@@ -25,6 +26,7 @@ from cli.main import (
 from cli.workflow_commands import workflow_next
 from services.application import (
     BacklogCorrectionRequest,
+    DeliveryActionRequest,
     ExpectedPlanningReviewBinding,
     StoryReviewRequest,
     StorySetCorrectionRequest,
@@ -36,7 +38,14 @@ from services.vision_evidence import (
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.adapters.test_adk_workflow_runner import (
+    ProviderGraphClock,
+    _backlog_recipe_input,
+    _decision,
+    _provider_graph_system,
+)
 from tests.adapters.test_command_renderer import position_fixture
+from tests.services import test_specification_source_application as source_fixtures
 from tests.services.test_durable_product_definition_projections import (
     NOW,
     _add_goal_turn,
@@ -45,6 +54,13 @@ from tests.services.test_durable_product_definition_projections import (
     _seed_vision_candidate,
     _seeded_int,
 )
+from tests.services.test_specification_source_application import (
+    _block_source_capture,
+    _expected_stale_recovery,
+    _registered_source_fixture,
+)
+from tests.workflow.test_specification_rebinding import _accepted_rows
+from utils import runtime_ownership
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -70,6 +86,18 @@ if TYPE_CHECKING:
 SPRINT_CAPACITY_POINTS = 8
 ARGUMENT_ERROR_EXIT_CODE = 2
 PROJECT_ID = 41
+source_recovery_engine = source_fixtures.source_recovery_engine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_runtime_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise real runtime locking only within this test's disposable root."""
+    monkeypatch.setattr(
+        runtime_ownership, "runtime_roots", lambda: (tmp_path.resolve(),)
+    )
 
 
 _SEMANTIC_TEXT_COMMANDS = (
@@ -351,6 +379,47 @@ def test_specification_source_register_cli_sends_only_human_paths_and_metadata(
     assert '"ok": true' in capsys.readouterr().out
 
 
+def test_cli_stale_registration_serializes_recovery(
+    source_recovery_engine: "Engine",
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The existing injected CLI emits failure output without refreshing or writing."""
+    engine = source_recovery_engine
+    fixture = _registered_source_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    (fixture.repository / "SPECIFICATION.md").write_text("Changed source\n")
+    _block_source_capture(monkeypatch)
+    exit_code = cli_main.main(
+        [
+            "specification",
+            "source",
+            "register",
+            "--project-id",
+            str(fixture.project_id),
+            "--source-path",
+            "SPECIFICATION.md",
+            "--preparation-capability",
+            "grill-with-docs",
+            "--idempotency-key",
+            "stale-cli-registration",
+            "--actor",
+            "operator",
+        ],
+        application=fixture.application,
+    )
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "REPOSITORY_PROVENANCE_STALE"
+    assert payload["output"] == {
+        "repository_recovery": _expected_stale_recovery(fixture.binding_id)
+    }
+    assert fixture.probe.calls == 1
+    assert _accepted_rows(engine) == original_rows
+
+
 def test_specification_structure_cli_sends_only_transport_metadata(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -456,6 +525,74 @@ def test_vision_bootstrap_cli_preserves_precise_output_failure(
     payload = json.loads(capsys.readouterr().out)
     assert failure.error is not None
     assert payload["error"] == failure.error.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("statuses", [[429, 429, 429], [503, 503, 503], [503]])
+def test_provider_retry_cli_keeps_stdout_json_and_exit_conventions(
+    engine: "Engine",
+    capsys: pytest.CaptureFixture[str],
+    statuses: list[int],
+) -> None:
+    """Exhaustion exits one; a successful automatic retry exits zero."""
+    exhausted = len(statuses) == 3  # noqa: PLR2004
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=list(statuses), clock=ProviderGraphClock()
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+
+    class ProviderApplication:
+        def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult:
+            return runner.run(
+                decision,
+                _backlog_recipe_input(lineage),
+                guards=AdkRunGuards(
+                    position=position,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                ),
+            )
+
+    arguments = [
+        "backlog",
+        "generate",
+        "--project-id",
+        str(lineage.project_id),
+        "--idempotency-key",
+        "provider-cli",
+        "--actor",
+        "operator",
+    ]
+    payloads = []
+    for _ in range(2):
+        assert main(arguments, application=cast("Any", ProviderApplication())) == (
+            1 if exhausted else 0
+        )
+        captured = capsys.readouterr()
+        payloads.append(json.loads(captured.out))
+        assert captured.err == ""
+    first, replay = payloads
+    assert first["ok"] is not exhausted
+    assert first["replayed"] is False
+    assert replay == {**first, "replayed": True}
+    if exhausted:
+        state = "rate-limited" if statuses[0] == 429 else "unavailable"  # noqa: PLR2004
+        assert first["error"] == {
+            "code": "EXTERNAL_PROVIDER_TEMPORARY",
+            "message": (
+                f"OpenRouter is temporarily {state}. Automatic retries stopped. "
+                "Retry this action with a new idempotency key."
+            ),
+            "blockers": [],
+        }
+        summary = first["output"]["provider_failure"]
+        assert summary["http_status"] == statuses[0]
+        assert summary["attempts"] == summary["max_attempts"] == len(sends)
+        assert summary["manual_retry_requires_new_key"] is True
+    else:
+        assert first["error"] is None
+        assert "provider_failure" not in first["output"]
+        assert len(sends) == len(statuses) + 1
 
 
 def test_retired_specification_author_command_is_not_parseable() -> None:

@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pytest
-from sqlmodel import create_engine
+from sqlmodel import Session, col, create_engine, select
 
+from models.core import Project
+from models.workflow import WorkflowNodeAttempt, WorkflowTransitionReceipt
 from services.read_projections import DurableReadProjectionService
-from workflow.contracts import GRAPH_VERSION, JsonObject
+from workflow.contracts import (
+    GRAPH_VERSION,
+    JsonObject,
+    TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
+)
 from workflow.facts import (
     NodeAttemptFact,
     ProjectFact,
@@ -19,7 +27,15 @@ from workflow.facts import (
     VisionInterviewTurnFact,
     WorkflowFactSnapshot,
 )
-from workflow.fingerprints import business_fact_fingerprint
+from workflow.fingerprints import (
+    business_fact_fingerprint,
+    canonical_hash,
+    canonical_json,
+)
+from workflow.requests import StartNodeAttempt
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 NOW = datetime(2026, 9, 26, tzinfo=UTC)
 
@@ -255,3 +271,170 @@ def test_pending_or_accepted_candidate_hides_generation_failure(
     data = _status(attempted, monkeypatch)
     assert data["candidate"] is not None or data["current"] is not None
     assert "last_failure" not in data
+
+
+def _temporary_failure_read(
+    engine: Engine,
+    *,
+    interview: bool,
+    summary: JsonObject,
+    message: str,
+) -> DurableReadProjectionService:
+    base = _snapshot(interview=interview)
+    attempt = _attempt(base, attempt_id=21, code="EXTERNAL_PROVIDER_TEMPORARY")
+    if interview:
+        attempt = attempt.model_copy(
+            update={"node_id": "vision.interview", "instance_key": "after-turn:12"}
+        )
+    snapshot = base.model_copy(update={"node_attempts": (attempt,)})
+    start = StartNodeAttempt(
+        project_id=1,
+        graph_version=GRAPH_VERSION,
+        fact_fingerprint=attempt.fact_fingerprint,
+        decision_fingerprint=attempt.decision_fingerprint,
+        target_node_id=attempt.node_id,
+        target_instance_key=attempt.instance_key,
+        normalized_input={},
+        model_id=attempt.model_id,
+        execution_settings={},
+        lease_seconds=60,
+        idempotency_key="vision-temporary",
+        actor="operator",
+    )
+    result = TransitionResult(
+        ok=False,
+        applied_node_id=attempt.node_id,
+        output={"provider_failure": summary},
+        error=WorkflowError(
+            code=WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY, message=message
+        ),
+    )
+    with Session(engine) as session:
+        session.add(Project(project_id=1, name="Vision reload"))
+        session.add(
+            WorkflowNodeAttempt(
+                workflow_node_attempt_id=attempt.attempt_id,
+                project_id=1,
+                node_id=attempt.node_id,
+                instance_key=attempt.instance_key,
+                graph_version=GRAPH_VERSION,
+                fact_fingerprint=attempt.fact_fingerprint,
+                business_fact_fingerprint=attempt.business_fact_fingerprint,
+                decision_fingerprint=attempt.decision_fingerprint,
+                normalized_input_json="{}",
+                input_fingerprint=attempt.input_fingerprint,
+                model_id=attempt.model_id,
+                execution_settings_json="{}",
+                idempotency_key=start.idempotency_key,
+                actor="operator",
+                started_at=NOW,
+                lease_expires_at=attempt.lease_expires_at,
+                attempt_fingerprint=attempt.attempt_fingerprint,
+            )
+        )
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=start.idempotency_key,
+                request_fingerprint=canonical_hash(start.model_dump(mode="json")),
+                request_json=canonical_json(start.model_dump(mode="json")),
+                result_json=canonical_json(result.model_dump(mode="json")),
+                started_at=NOW,
+                completed_at=NOW,
+            )
+        )
+        session.commit()
+    return DurableReadProjectionService(engine=engine, snapshot=snapshot)
+
+
+def _provider_summary(*, status: int, reason: str) -> JsonObject:
+    return {
+        "schema_version": "agileforge.provider-failure.v1",
+        "provider": "openrouter",
+        "category": "external_temporary",
+        "retryable": True,
+        "reason": reason,
+        "termination_reason": "attempts_exhausted",
+        "http_status": status,
+        "call_id": "vision-original-call",
+        "attempts": 3,
+        "max_attempts": 3,
+        "retry_after_seconds": None,
+        "manual_retry_requires_new_key": True,
+    }
+
+
+@pytest.mark.parametrize("interview", [False, True])
+@pytest.mark.parametrize(
+    ("status", "reason", "state"),
+    [(429, "rate_limited", "rate-limited"), (503, "unavailable", "unavailable")],
+)
+def test_current_temporary_failure_reload_retains_original_summary_without_candidate(
+    engine: Engine, interview: bool, status: int, reason: str, state: str
+) -> None:
+    """The existing status read retains frozen provider facts after reload."""
+    summary = _provider_summary(status=status, reason=reason)
+    message = (
+        f"OpenRouter is temporarily {state}. Automatic retries stopped. "
+        "Retry this action with a new idempotency key."
+    )
+    reads = _temporary_failure_read(
+        engine, interview=interview, summary=summary, message=message
+    )
+    for _ in range(2):
+        result = reads.vision_status(project_id=1)
+        assert result["ok"] is True
+        data = result["data"]
+        assert isinstance(data, dict)
+        assert data["last_failure"] == {
+            "code": "EXTERNAL_PROVIDER_TEMPORARY",
+            "message": message,
+            "attempt_id": 21,
+            "provider_failure": summary,
+        }
+        assert data["candidate"] is None
+        assert data["current"] is None
+        assert (data["draft"] is not None) is interview
+
+
+@pytest.mark.parametrize("receipt_state", ["absent", "unsafe", "invalid", "wrong_code"])
+def test_temporary_failure_reload_never_fabricates_or_leaks_receipt_data(
+    engine: Engine, receipt_state: str
+) -> None:
+    """Missing or invalid terminal facts cannot create a temporary alert."""
+    summary = _provider_summary(status=429, reason="rate_limited")
+    message = (
+        "OpenRouter is temporarily rate-limited. Automatic retries stopped. "
+        "Retry this action with a new idempotency key."
+    )
+    if receipt_state == "invalid":
+        summary["http_status"] = 401
+    if receipt_state == "unsafe":
+        message = "untrusted provider body"
+    reads = _temporary_failure_read(
+        engine, interview=False, summary=summary, message=message
+    )
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key) == "vision-temporary"
+            )
+        ).one()
+        if receipt_state == "absent":
+            session.delete(receipt)
+        elif receipt_state == "wrong_code":
+            result = TransitionResult(
+                ok=False,
+                output={"provider_failure": summary},
+                error=WorkflowError(
+                    code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED, message=message
+                ),
+            )
+            receipt.result_json = canonical_json(result.model_dump(mode="json"))
+            session.add(receipt)
+        session.commit()
+    result = reads.vision_status(project_id=1)
+    data = result["data"]
+    assert isinstance(data, dict)
+    assert "last_failure" not in data
+    assert data["candidate"] is None

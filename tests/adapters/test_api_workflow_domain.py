@@ -1,6 +1,7 @@
 """API adapter tests for exact typed workflow requests."""
 
 import json
+import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -15,6 +16,7 @@ from sqlmodel import Session, col, select
 
 import api as api_module
 import services.application as application_module
+from adapters.adk.runner import AdkRunGuards
 from api import (
     CreateProjectRequest,
     SprintPlanningApiRequest,
@@ -79,7 +81,14 @@ from services.specification_source_registration import (
 from services.sprint_ownership import ResolvedSprintOwner
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from tests.adapters.sprint_retry_fixtures import durable_rows
+from tests.adapters.test_adk_workflow_runner import (
+    ProviderGraphClock,
+    _backlog_recipe_input,
+    _decision,
+    _provider_graph_system,
+)
 from tests.adapters.test_command_renderer import position_fixture
+from tests.services import test_specification_source_application as source_fixtures
 from tests.services.test_durable_product_definition_projections import (
     NOW,
     _add_goal_turn,
@@ -87,6 +96,12 @@ from tests.services.test_durable_product_definition_projections import (
     _GoalTurnSeed,
     _seed_vision_candidate,
     _seeded_int,
+)
+from tests.services.test_specification_source_application import (
+    _accepted_replacement_fixture,
+    _block_source_capture,
+    _expected_stale_recovery,
+    _registered_source_fixture,
 )
 from tests.test_create_user_story import (
     _intermediate_story_content,
@@ -133,6 +148,7 @@ from tests.workflow.test_planning_transitions import (
 from tests.workflow.test_planning_transitions import (
     _domain as planning_domain,
 )
+from tests.workflow.test_specification_rebinding import _accepted_rows
 from workflow.clock import FixedClock
 from workflow.contracts import (
     FactReference,
@@ -180,6 +196,9 @@ if TYPE_CHECKING:
     from workflow.requests.base import PositionedRequest
 
 PROJECT_ID = 41
+source_recovery_engine = source_fixtures.source_recovery_engine
+_EXPECTED_STALE_RESPONSE_PROBES = 4
+_EXPECTED_UNSUPPORTED_SOURCE_PROBES = 2
 DELIVERY_ARTIFACT_ID = 7
 DELIVERY_ARTIFACT_FINGERPRINT = "sha256:artifact-7"
 type DeliveryReviewRequest = (
@@ -5997,6 +6016,33 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
             self.requests.append(request)
             return prior_result
 
+        def replay_provider_attempt(
+            self, request: StartNodeAttempt
+        ) -> TransitionResult:
+            self.requests.append(request)
+            return prior_result
+
+        def provider_attempt_audit(self) -> None:
+            pytest.fail(
+                "replay unexpectedly opened provider audit"  # ty: ignore[invalid-argument-type]
+            )
+
+        def check_provider_attempt(
+            self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+        ) -> WorkflowError | None:
+            pytest.fail(
+                "replay unexpectedly checked provider attempt "
+                f"{project_id}:{attempt_id}:{attempt_fingerprint}"  # ty: ignore[invalid-argument-type]
+            )
+
+        def provider_attempt_lease_remaining_seconds(
+            self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+        ) -> float:
+            pytest.fail(
+                "replay unexpectedly checked provider lease "
+                f"{project_id}:{attempt_id}:{attempt_fingerprint}"  # ty: ignore[invalid-argument-type]
+            )
+
         def load_persisted_attempt_input(
             self,
             *,
@@ -6244,6 +6290,126 @@ def test_specification_source_preview_returns_empty_source_as_structured_error(
     detail = response.json()["detail"]
     assert detail["error"]["code"] == "EMPTY_SOURCE"
     assert detail["provider_run_performed"] is False
+    assert "repository_recovery" not in detail
+
+
+def test_locked_source_action_contains_same_sanitized_recovery(
+    source_recovery_engine: "Engine",
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locked replacement actions and failed submissions describe the same check."""
+    engine = source_recovery_engine
+    fixture = _accepted_replacement_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    (fixture.repository / "SPECIFICATION.md").write_text("Changed source\n")
+    _block_source_capture(monkeypatch)
+    monkeypatch.setattr(api_module, "_application", lambda: fixture.application)
+    client = TestClient(api_module.app)
+    decision = next(
+        item
+        for item in fixture.domain.position(fixture.project_id).decisions
+        if item.request_kind == "register_specification_source"
+    )
+    position = client.get(f"/api/projects/{fixture.project_id}/position")
+    assert position.status_code == HTTPStatus.OK
+    action = next(
+        item
+        for item in position.json()["actions"]
+        if item["request_kind"] == "register_specification_source"
+    )
+    assert action["availability"] == "locked"
+    assert action["reason_code"] == "REPOSITORY_PROVENANCE_STALE"
+    assert action["repository_recovery"] == _expected_stale_recovery(fixture.binding_id)
+    assert fixture.probe.calls == 1
+
+    preview = client.post(
+        f"/api/projects/{fixture.project_id}/specifications/source/preview",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "preparation_capability": "grill-with-docs",
+        },
+    )
+    assert preview.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    preview_detail = preview.json()["detail"]
+    assert preview_detail["repository_recovery"] == action["repository_recovery"]
+    assert preview_detail["provider_run_performed"] is False
+
+    response = client.post(
+        f"/api/projects/{fixture.project_id}/specifications/source",
+        headers={
+            "X-AgileForge-Expected-Decision": decision.decision_fingerprint,
+            "X-AgileForge-Expected-Source": "sha256:" + "a" * 64,
+        },
+        json={
+            "source_path": "SPECIFICATION.md",
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "stale-api-registration",
+            "actor": "operator",
+        },
+    )
+    assert response.status_code == HTTPStatus.CONFLICT
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "REPOSITORY_PROVENANCE_STALE"
+    assert detail["output"]["repository_recovery"] == action["repository_recovery"]
+    assert fixture.probe.calls == _EXPECTED_STALE_RESPONSE_PROBES
+    assert _accepted_rows(engine) == original_rows
+
+
+def test_stale_source_preview_contains_recovery_without_registration(
+    source_recovery_engine: "Engine",
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview reports the sanitized stale check without capture or durable writes."""
+    engine = source_recovery_engine
+    fixture = _registered_source_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    (fixture.repository / "SPECIFICATION.md").write_text("Changed source\n")
+    _block_source_capture(monkeypatch)
+    monkeypatch.setattr(api_module, "_application", lambda: fixture.application)
+    response = TestClient(api_module.app).post(
+        f"/api/projects/{fixture.project_id}/specifications/source/preview",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "preparation_capability": "grill-with-docs",
+        },
+    )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    detail = response.json()["detail"]
+    assert detail["error"]["code"] == "REPOSITORY_PROVENANCE_STALE"
+    assert detail["repository_recovery"] == _expected_stale_recovery(fixture.binding_id)
+    assert detail["provider_run_performed"] is False
+    assert fixture.probe.calls == 1
+    assert _accepted_rows(engine) == original_rows
+
+
+def test_unsupported_source_capture_keeps_action_locked_without_recovery(
+    source_recovery_engine: "Engine",
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unavailable safe-open support retains its separate capability treatment."""
+    engine = source_recovery_engine
+    fixture = _registered_source_fixture(engine, tmp_path)
+    original_rows = _accepted_rows(engine)
+    _block_source_capture(monkeypatch)
+    monkeypatch.delattr(os, "O_NOFOLLOW")
+    monkeypatch.setattr(api_module, "_application", lambda: fixture.application)
+    response = TestClient(api_module.app).get(
+        f"/api/projects/{fixture.project_id}/position"
+    )
+    assert response.status_code == HTTPStatus.OK
+    action = next(
+        item
+        for item in response.json()["actions"]
+        if item["request_kind"] == "register_specification_source"
+    )
+    assert action["availability"] == "locked"
+    assert action["reason_code"] == "REPOSITORY_EVIDENCE_CAPABILITY_UNAVAILABLE"
+    assert "repository_recovery" not in action
+    assert fixture.probe.calls == _EXPECTED_UNSUPPORTED_SOURCE_PROBES
+    assert _accepted_rows(engine) == original_rows
 
 
 def test_specification_source_preview_returns_not_found_for_a_missing_project(
@@ -6426,6 +6592,78 @@ def test_vision_bootstrap_api_preserves_precise_output_failure(
     assert response.status_code == HTTPStatus.CONFLICT
     assert failure.error is not None
     assert response.json()["detail"]["error"] == failure.error.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "state"),
+    [(429, "rate_limited", "rate-limited"), (503, "unavailable", "unavailable")],
+)
+def test_provider_exhaustion_api_preserves_terminal_failure_on_replay(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    reason: str,
+    state: str,
+) -> None:
+    """Retain the frozen terminal result while preserving the replay flag."""
+    runner, domain, lineage, sends = _provider_graph_system(
+        engine, statuses=[status] * 3, clock=ProviderGraphClock()
+    )
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
+
+    class ProviderApplication:
+        def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult:
+            return runner.run(
+                decision,
+                _backlog_recipe_input(lineage),
+                guards=AdkRunGuards(
+                    position=position,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                ),
+            )
+
+    monkeypatch.setattr(api_module, "_application", ProviderApplication)
+    client = TestClient(api_module.app)
+    responses = [
+        client.post(
+            f"/api/projects/{lineage.project_id}/backlog/generate",
+            json={"idempotency_key": "provider-api", "actor": "operator"},
+        )
+        for _ in range(2)
+    ]
+    assert all(response.status_code == HTTPStatus.CONFLICT for response in responses)
+    assert all("Retry-After" not in response.headers for response in responses)
+    first, replay = [response.json()["detail"] for response in responses]
+    assert first["error"] == {
+        "code": "EXTERNAL_PROVIDER_TEMPORARY",
+        "message": (
+            f"OpenRouter is temporarily {state}. Automatic retries stopped. "
+            "Retry this action with a new idempotency key."
+        ),
+        "blockers": [],
+    }
+    summary = first["output"]["provider_failure"]
+    assert summary == {
+        "schema_version": "agileforge.provider-failure.v1",
+        "provider": "openrouter",
+        "category": "external_temporary",
+        "retryable": True,
+        "reason": reason,
+        "termination_reason": "attempts_exhausted",
+        "http_status": status,
+        "call_id": summary["call_id"],
+        "attempts": 3,
+        "max_attempts": 3,
+        "retry_after_seconds": None,
+        "manual_retry_requires_new_key": True,
+    }
+    assert isinstance(summary["call_id"], str)
+    assert summary["call_id"]
+    assert first["replayed"] is False
+    assert replay == {**first, "replayed": True}
+    assert len(sends) == summary["attempts"]
 
 
 def test_retired_specification_author_endpoint_is_not_registered() -> None:

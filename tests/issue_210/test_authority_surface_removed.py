@@ -511,8 +511,62 @@ def _schema_preflight_is_exact(
 ) -> bool:
     canonical = ast.parse(
         '''
+def _upgrade_repository_evidence_columns(connection: Connection) -> None:
+    """Add columns only after the caller validates an exact old table baseline."""
+    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
+        columns = inspect(connection).get_columns(table_name)
+        if not any(
+            column["name"] == "repository_evidence_json" for column in columns
+        ):
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table_name} "
+                "ADD COLUMN repository_evidence_json TEXT"
+            )
+
+
+def _upgrade_reviewed_business_schema(
+    connection: Connection, observed: BusinessSchemaManifest
+) -> None:
+    """Install additive DDL only after the table and owned-index baseline gates."""
+    if observed.table_names and observed not in (
+        CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+    ):
+        _assert_current_business_schema(connection)
+    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        _assert_repository_evidence_columns(connection)
+    indexes_present = provider_audit_indexes_present(connection)
+    if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST and indexes_present:
+        raise ProviderAuditIndexError
+    if not observed.table_names:
+        SQLModel.metadata.create_all(connection)
+        return
+    if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
+        SQLModel.metadata.create_all(
+            connection,
+            tables=[
+                SQLModel.metadata.tables[table_name]
+                for table_name in sorted(_RETRY_TABLE_NAMES)
+            ],
+        )
+    if observed in (
+        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
+    ):
+        _upgrade_repository_evidence_columns(connection)
+    if not indexes_present:
+        for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
+            connection.exec_driver_sql(ddl)
+
+
+def _assert_complete_provider_audit_indexes(connection: Connection) -> None:
+    if not provider_audit_indexes_present(connection):
+        raise ProviderAuditIndexError
+
+
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
-    """Create or atomically upgrade only the two exact supported old schemas."""
+    """Atomically upgrade only reviewed table baselines and provider index states."""
     target_engine = engine_override or engine
     if _sqlmodel_business_schema_manifest() != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         _assert_current_business_schema(target_engine)
@@ -521,46 +575,30 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         try:
             observed = _inspect_business_schema_manifest(connection)
-            if not observed.table_names:
-                SQLModel.metadata.create_all(connection)
-            elif observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:
-                pass
-            elif observed in (
-                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
-                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
-            ):
-                if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:
-                    SQLModel.metadata.create_all(
-                        connection,
-                        tables=[
-                            SQLModel.metadata.tables[table_name]
-                            for table_name in sorted(_RETRY_TABLE_NAMES)
-                        ],
-                    )
-                for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:
-                    columns = inspect(connection).get_columns(table_name)
-                    if not any(
-                        column["name"] == "repository_evidence_json"
-                        for column in columns
-                    ):
-                        connection.exec_driver_sql(
-                            f"ALTER TABLE {table_name} "
-                            "ADD COLUMN repository_evidence_json TEXT"
-                        )
-            else:
-                _assert_current_business_schema(connection)
+            _upgrade_reviewed_business_schema(connection, observed)
             if (
                 _inspect_business_schema_manifest(connection)
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
             _assert_repository_evidence_columns(connection)
+            _assert_complete_provider_audit_indexes(connection)
             connection.commit()
+        except ProviderAuditIndexError:
+            connection.rollback()
+            message = "UNSUPPORTED_BUSINESS_SCHEMA: provider audit index mismatch."
+            raise UnsupportedBusinessSchemaError(message) from None
         except BaseException:
             connection.rollback()
             raise
 '''
-    ).body[0]
+    )
+    canonical_functions = {
+        node.name: node for node in canonical.body if isinstance(node, ast.FunctionDef)
+    }
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
     assertion_calls = [
         node
         for node in ast.walk(tree)
@@ -585,15 +623,24 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
     expected_schema_guard_load_count = 3
     expected_schema_ddl_call_count = 2
     if (
-        not isinstance(canonical, ast.FunctionDef)
-        or len(assertion_calls) != expected_schema_guard_call_count
+        len(assertion_calls) != expected_schema_guard_call_count
         or len(assertion_loads) != expected_schema_guard_load_count
         or len(create_calls) != expected_schema_ddl_call_count
     ):
         return False
     return bool(
-        ast.dump(ensure, include_attributes=False)
-        == ast.dump(canonical, include_attributes=False)
+        all(
+            name in functions
+            and ast.dump(functions[name], include_attributes=False)
+            == ast.dump(expected, include_attributes=False)
+            and [
+                node
+                for node in ast.walk(tree)
+                if _node_binds_module_name(node, name, parents)
+            ]
+            == [functions[name]]
+            for name, expected in canonical_functions.items()
+        )
         and all(call.func in assertion_loads for call in assertion_calls)
         and _models_db_schema_guard_binding_is_exact(tree, parents, ensure)
     )
@@ -2199,80 +2246,117 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
     assert findings == ()
     assert not unused
 
-    pre_retry_create = """                    SQLModel.metadata.create_all(
-                        connection,
-                        tables=[
-                            SQLModel.metadata.tables[table_name]
-                            for table_name in sorted(_RETRY_TABLE_NAMES)
-                        ],
-                    )"""
+    pre_retry_create = """        SQLModel.metadata.create_all(
+            connection,
+            tables=[
+                SQLModel.metadata.tables[table_name]
+                for table_name in sorted(_RETRY_TABLE_NAMES)
+            ],
+        )"""
     post_create_validation = """            if (
                 _inspect_business_schema_manifest(connection)
                 != CURRENT_BUSINESS_SCHEMA_MANIFEST
             ):
                 _assert_current_business_schema(connection)
             _assert_repository_evidence_columns(connection)
+            _assert_complete_provider_audit_indexes(connection)
             connection.commit()"""
     schema_guard_definition = "def _assert_current_business_schema("
     assert source.count(schema_guard_definition) == 1
     mutations: tuple[tuple[str, str | None, str], ...] = (
         (
             "ddl-before-rejection",
-            "            else:\n"
-            "                _assert_current_business_schema(connection)",
-            "            else:\n"
-            "                SQLModel.metadata.create_all(connection)\n"
-            "                _assert_current_business_schema(connection)",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+            "        SQLModel.metadata.create_all(connection)\n"
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
         ),
         (
             "bypassed-unsupported-manifest-guard",
-            "            else:\n"
-            "                _assert_current_business_schema(connection)",
-            "            else:\n                pass",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+            "        pass\n    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
         ),
         (
             "broadened-pre-retry-manifest",
-            "            elif observed in (\n"
-            "                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
-            "                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
-            "            ):",
-            "            elif observed.table_names <= "
+            "    if observed == PRE_RETRY_BUSINESS_SCHEMA_MANIFEST:",
+            "    if observed.table_names <= "
             "PRE_RETRY_BUSINESS_SCHEMA_MANIFEST.table_names:",
         ),
         (
             "broadened-pre-revision-manifest",
-            "            elif observed in (\n"
-            "                PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
-            "                PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
-            "            ):",
-            "            elif observed.table_names <= "
+            "    if observed in (\n"
+            "        PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,\n"
+            "        PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,\n"
+            "    ):",
+            "    if observed.table_names <= "
             "PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names:",
         ),
         (
             "unrestricted-retry-ddl",
             pre_retry_create,
-            "                    SQLModel.metadata.create_all(connection)",
+            "        SQLModel.metadata.create_all(connection)",
         ),
         (
             "unrestricted-evidence-ddl",
-            "                for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:",
-            "                for table_name in SQLModel.metadata.tables:",
+            "def _upgrade_repository_evidence_columns("
+            "connection: Connection) -> None:\n"
+            '    """Add columns only after the caller validates '
+            'an exact old table baseline."""\n'
+            "    for table_name in _REPOSITORY_EVIDENCE_TABLE_NAMES:",
+            "def _upgrade_repository_evidence_columns("
+            "connection: Connection) -> None:\n"
+            '    """Add columns only after the caller validates '
+            'an exact old table baseline."""\n'
+            "    for table_name in SQLModel.metadata.tables:",
         ),
         (
             "evidence-ddl-before-rejection",
-            "            else:\n"
-            "                _assert_current_business_schema(connection)",
-            "            else:\n"
-            "                connection.exec_driver_sql(\n"
-            "                    'ALTER TABLE backlog_artifacts '\n"
-            "                    'ADD COLUMN repository_evidence_json TEXT'\n"
-            "                )\n"
-            "                _assert_current_business_schema(connection)",
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+            "        connection.exec_driver_sql(\n"
+            "            'ALTER TABLE backlog_artifacts '\n"
+            "            'ADD COLUMN repository_evidence_json TEXT'\n"
+            "        )\n"
+            "        _assert_current_business_schema(connection)\n"
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:",
+        ),
+        (
+            "missing-evidence-column-preflight",
+            "    if observed == CURRENT_BUSINESS_SCHEMA_MANIFEST:\n"
+            "        _assert_repository_evidence_columns(connection)\n",
+            "",
         ),
         (
             "missing-evidence-column-validation",
             "            _assert_repository_evidence_columns(connection)\n",
             "",
+        ),
+        (
+            "bypassed-provider-index-preflight",
+            "    indexes_present = provider_audit_indexes_present(connection)",
+            "    indexes_present = False",
+        ),
+        (
+            "missing-provider-index-postflight",
+            "            _assert_complete_provider_audit_indexes(connection)",
+            "            pass",
+        ),
+        (
+            "rebound-schema-upgrade-helper",
+            None,
+            "\n_upgrade_reviewed_business_schema = lambda *_args: None\n",
+        ),
+        (
+            "rebound-evidence-upgrade-helper",
+            None,
+            "\n_upgrade_repository_evidence_columns = lambda *_args: None\n",
+        ),
+        (
+            "rebound-provider-index-postflight",
+            None,
+            "\n_assert_complete_provider_audit_indexes = lambda *_args: None\n",
         ),
         (
             "missing-post-create-validation",

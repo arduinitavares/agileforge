@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import event, inspect
 from sqlmodel import Session, select
 
+from cli.production_schema_upgrade import upgrade_registered_database
 from models.db import (
     CURRENT_BUSINESS_SCHEMA_MANIFEST,
     PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
@@ -18,6 +19,7 @@ from models.db import (
     _inspect_business_schema_manifest,
     ensure_business_db_ready,
 )
+from models.provider_audit_indexes import PROVIDER_AUDIT_INDEX_DDL
 from models.sprint_retry import SprintRetryTaskEvidence
 from models.workflow import TaskCompletionEvidence
 from repositories.workflow import WorkflowFactRepository
@@ -75,11 +77,18 @@ def _schema_sql(engine: Engine) -> tuple[tuple[object, ...], ...]:
         )
 
 
+@pytest.mark.parametrize("installed", [False, True])
 def test_pre_revision_upgrade_preserves_existing_completion_history(
     tmp_path: Path,
+    installed: bool,
 ) -> None:
-    """Adding columns must preserve every old payload, hash, log, and receipt."""
-    engine = _frozen_completed_history(tmp_path / "pre-revision.sqlite")
+    """Startup and registered upgrades preserve every historical completion byte."""
+    database = tmp_path / "pre-revision.sqlite"
+    engine = _frozen_completed_history(database)
+    if installed:
+        with engine.begin() as connection:
+            for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
+                connection.exec_driver_sql(ddl)
     old_columns = _original_table_columns(engine)
     before = _snapshot_original_rows(engine, old_columns)
     assert (
@@ -90,7 +99,10 @@ def test_pre_revision_upgrade_preserves_existing_completion_history(
     assert before["sprint_retry_task_evidence"]
     assert before["workflow_transition_receipts"]
 
-    ensure_business_db_ready(engine)
+    if installed:
+        upgrade_registered_database(database)
+    else:
+        ensure_business_db_ready(engine)
 
     assert _snapshot_original_rows(engine, old_columns) == before
     assert _inspect_business_schema_manifest(engine) == CURRENT_BUSINESS_SCHEMA_MANIFEST
@@ -255,10 +267,24 @@ def test_unknown_or_partial_schema_fails_closed(
     before_sql = _schema_sql(engine)
     old_columns = _original_table_columns(engine)
     before_rows = _snapshot_original_rows(engine, old_columns)
+    ddl: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record_ddl(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith(("CREATE ", "ALTER ", "DROP ")):
+            ddl.append(statement)
 
     with pytest.raises(RuntimeError, match="UNSUPPORTED_BUSINESS_SCHEMA"):
         ensure_business_db_ready(engine)
 
+    assert ddl == []
     assert _schema_sql(engine) == before_sql
     assert _snapshot_original_rows(engine, old_columns) == before_rows
 

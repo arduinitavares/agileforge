@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from hashlib import sha256
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import uuid4
 
 from google.adk.apps import App, ResumabilityConfig
@@ -33,6 +35,11 @@ from adapters.adk.preflight import (
     SpecificationAttemptRevalidator,
     bind_specification_attempt_revalidator,
 )
+from adapters.adk.provider_retry import (
+    ProviderActionContext,
+    ProviderAttemptStopped,
+    bind_provider_action,
+)
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
@@ -40,10 +47,20 @@ from adapters.adk.recipes import (
     RecipeInput,
     RecipeOutput,
 )
+from services.contracts.provider_retry import (
+    ProviderAttemptAudit,
+    ProviderAuditError,
+    ProviderFailureSummary,
+    ProviderRetryClock,
+    ProviderRetryConfig,
+    ProviderTransientFailure,
+    provider_failure_message,
+)
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     RunnerIdentity,
     get_adk_execution_trace_db_target,
+    get_provider_retry_config,
 )
 from workflow.contracts import (
     JsonObject,
@@ -63,6 +80,9 @@ from workflow.requests import (
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
 
 class WorkflowDomainRunnerPort(Protocol):
     """Domain methods required by durable ADK execution."""
@@ -73,6 +93,28 @@ class WorkflowDomainRunnerPort(Protocol):
 
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Apply one typed transition."""
+        ...
+
+    def replay_provider_attempt(
+        self, request: StartNodeAttempt
+    ) -> TransitionResult | None:
+        """Replay complete caller identity with persisted host settings."""
+        ...
+
+    def provider_attempt_audit(self) -> ProviderAttemptAudit:
+        """Return an independently committed audit port."""
+        ...
+
+    def check_provider_attempt(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> WorkflowError | None:
+        """Check fresh durable validity and close its read session."""
+        ...
+
+    def provider_attempt_lease_remaining_seconds(
+        self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
+    ) -> float:
+        """Measure the persisted lease against the domain evaluation clock."""
         ...
 
     def load_persisted_attempt_input(
@@ -181,6 +223,34 @@ class _AttemptFailure:
     transport_message: str
 
 
+class _ProviderHostStopped(ProviderAttemptStopped):
+    """Carry a safe host reason through the provider boundary's stop signal."""
+
+    def __init__(self, error: WorkflowError) -> None:
+        self.host_error = error
+        super().__init__()
+
+
+def _execution_exception_chain(error: BaseException) -> Iterator[BaseException]:
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend(
+            linked
+            for linked in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "error", None),
+            )
+            if isinstance(linked, BaseException)
+        )
+
+
 class AdkWorkflowRunner:
     """Execute an available decision while durable facts remain authoritative.
 
@@ -190,7 +260,7 @@ class AdkWorkflowRunner:
     state remains optional execution trace and is never recovery authority.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         domain: WorkflowDomainRunnerPort,
@@ -198,6 +268,7 @@ class AdkWorkflowRunner:
         config: AdkExecutionConfig,
         session_service: BaseSessionService | None = None,
         specification_source_check: SpecificationSourceCheck | None = None,
+        provider_clock: ProviderRetryClock | None = None,
     ) -> None:
         """Retain domain, recipe, execution, and trace-store dependencies."""
         self._domain = domain
@@ -205,6 +276,9 @@ class AdkWorkflowRunner:
         self._config = config
         self._session_service = session_service
         self._specification_source_check = specification_source_check
+        self._monotonic: Callable[[], float] = (
+            time.monotonic if provider_clock is None else provider_clock.monotonic
+        )
 
     def run(
         self,
@@ -275,6 +349,19 @@ class AdkWorkflowRunner:
             execution_settings=self._config.execution_settings,
             lease_seconds=self._config.lease_seconds,
         )
+        replay = self._domain.replay_provider_attempt(start_request)
+        if replay is not None:
+            return replay
+        settings: JsonObject = dict(start_request.execution_settings)
+        policy = (
+            ProviderRetryConfig.model_validate(settings["provider_retry"])
+            if "provider_retry" in settings
+            else get_provider_retry_config()
+        )
+        settings["provider_retry"] = policy.model_dump(mode="json")
+        start_request = start_request.model_copy(
+            update={"execution_settings": settings}
+        )
         started = self._domain.transition(start_request)
         if not started.ok or started.replayed:
             return started
@@ -309,7 +396,17 @@ class AdkWorkflowRunner:
         )
         try:
             recipe = self._registry.require(request.node_id)
-            with bind_specification_attempt_revalidator(pre_provider_check):
+            provider_context = self._provider_action_context(
+                start_request=start_request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                persisted_input=persisted_input,
+                policy=policy,
+            )
+            with (
+                bind_provider_action(provider_context),
+                bind_specification_attempt_revalidator(pre_provider_check),
+            ):
                 output = asyncio.run(
                     self._run_recipe(
                         recipe,
@@ -326,6 +423,73 @@ class AdkWorkflowRunner:
                 error=error,
             )
         return self._domain.transition(_TRANSITION_REQUEST.validate_python(completion))
+
+    def _provider_action_context(
+        self,
+        *,
+        start_request: StartNodeAttempt,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        persisted_input: JsonObject,
+        policy: ProviderRetryConfig,
+    ) -> ProviderActionContext:
+        def check() -> None:
+            try:
+                error = self._domain.check_provider_attempt(
+                    project_id=start_request.project_id,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                )
+                if (
+                    error is None
+                    and start_request.target_node_id == "specification.structure"
+                    and self._specification_source_check is not None
+                ):
+                    error = self._specification_source_check(
+                        start_request.project_id, persisted_input
+                    )
+                    if error is not None:
+                        self._require_stale_source_error(error)
+            except Exception as cause:
+                raise _ProviderHostStopped(
+                    WorkflowError(
+                        code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                        message="ADK recipe execution or output validation failed.",
+                    )
+                ) from cause
+            if error is not None:
+                raise _ProviderHostStopped(error)
+
+        now = self._monotonic()
+        remaining_lease = self._domain.provider_attempt_lease_remaining_seconds(
+            project_id=start_request.project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+        )
+        timeout = start_request.execution_settings.get("timeout_seconds", 120.0)
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or timeout <= 0
+        ):
+            msg = "The action timeout must be a positive number."
+            raise ValueError(msg)
+        return ProviderActionContext(
+            project_id=start_request.project_id,
+            action_id=f"node-attempt:{attempt_id}",
+            policy=policy,
+            audit=self._domain.provider_attempt_audit(),
+            action_deadline=now + timeout,
+            lease_deadline=now + remaining_lease,
+            pre_try_check=check,
+            workflow_node_attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            node_id=start_request.target_node_id,
+            instance_key=start_request.target_instance_key,
+            idempotency_key_digest=sha256(
+                start_request.idempotency_key.encode()
+            ).hexdigest(),
+        )
 
     def _specification_attempt_revalidator(
         self,
@@ -428,6 +592,14 @@ class AdkWorkflowRunner:
         error: BaseException,
     ) -> TransitionResult:
         """Map one recipe failure without changing non-Specification semantics."""
+        provider_result = self._handle_provider_failure(
+            request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            error=error,
+        )
+        if provider_result is not None:
+            return provider_result
         if isinstance(error, AttemptRevalidationError):
             return error.result
         if isinstance(error, AttemptRevalidationInfrastructureError):
@@ -509,6 +681,86 @@ class AdkWorkflowRunner:
             ),
         )
 
+    def _handle_provider_failure(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        error: BaseException,
+    ) -> TransitionResult | None:
+        for cause in _execution_exception_chain(error):
+            if isinstance(cause, _ProviderHostStopped):
+                if cause.host_error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT:
+                    return self._domain.transition(
+                        ObsoleteNodeAttempt(
+                            project_id=self._config.project_id,
+                            attempt_id=attempt_id,
+                            attempt_fingerprint=attempt_fingerprint,
+                            error_message=cause.host_error.message,
+                            idempotency_key=f"{request.idempotency_key}:provider-source-obsolete",
+                            actor=request.actor,
+                            correlation_id=request.correlation_id,
+                        )
+                    )
+                return self._fail_attempt(
+                    request=request,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    failure=_AttemptFailure(
+                        durable_code="ADK_EXECUTION_FAILED",
+                        durable_message=cause.host_error.message,
+                        transport_code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                        transport_message=(
+                            "ADK recipe execution or output validation failed."
+                        ),
+                    ),
+                )
+            if isinstance(cause, (ProviderTransientFailure, ProviderAuditError)):
+                summary: ProviderFailureSummary | None = None
+                if isinstance(cause, ProviderTransientFailure):
+                    try:
+                        summary = ProviderFailureSummary.model_validate(
+                            cause.summary.model_dump()
+                        )
+                        audited = (
+                            self._domain.provider_attempt_audit().terminal_failure(
+                                project_id=self._config.project_id,
+                                action_id=f"node-attempt:{attempt_id}",
+                                call_id=summary.call_id,
+                                expected_summary=summary,
+                            )
+                        )
+                        if audited != summary:
+                            summary = None
+                    except (ProviderAuditError, ValueError):
+                        summary = None
+                code = (
+                    WorkflowErrorCode.EXTERNAL_PROVIDER_TEMPORARY
+                    if summary is not None
+                    else WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+                )
+                message = (
+                    provider_failure_message(summary)
+                    if summary is not None
+                    else "ADK recipe execution or output validation failed."
+                )
+                return self._fail_attempt(
+                    request=request,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    failure=_AttemptFailure(
+                        durable_code=code.value
+                        if summary is not None
+                        else "ADK_EXECUTION_FAILED",
+                        durable_message=message,
+                        transport_code=code,
+                        transport_message=message,
+                    ),
+                    provider_failure=summary,
+                )
+        return None
+
     def _fail_specification_attempt(
         self,
         *,
@@ -538,6 +790,7 @@ class AdkWorkflowRunner:
         attempt_id: int,
         attempt_fingerprint: str,
         failure: _AttemptFailure,
+        provider_failure: ProviderFailureSummary | None = None,
     ) -> TransitionResult:
         """Close one exact attempt and retain its transport error contract."""
         failed = self._domain.transition(
@@ -550,12 +803,10 @@ class AdkWorkflowRunner:
                 idempotency_key=f"{request.idempotency_key}:failure",
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+                provider_failure=provider_failure,
             )
         )
-        if (
-            failed.error is not None
-            and failed.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
-        ):
+        if not failed.ok or failed.replayed:
             return failed
         return TransitionResult(
             ok=False,

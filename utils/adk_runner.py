@@ -4,16 +4,75 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
+from enum import Enum
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from uuid import uuid4
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from sqlalchemy.engine import Engine
 
+from adapters.adk.provider_retry import (
+    ProviderActionContext,
+    ProviderAttemptStopped,
+    bind_provider_action,
+    get_provider_action_context,
+)
+from services.contracts.provider_retry import (
+    PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
+    ProviderAuditError,
+    ProviderTransientFailure,
+)
 from utils.failure_artifacts import AgentInvocationError
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Iterator
+
+    from sqlalchemy.engine import Connection
+
+
+class _DefaultEngine(Enum):
+    RESOLVE = "resolve"
+
+
+@contextmanager
+def provider_action_context(
+    *,
+    project_id: int,
+    engine: Engine | Connection | None | _DefaultEngine = _DefaultEngine.RESOLVE,
+) -> Iterator[ProviderActionContext]:
+    """Reuse one same-project host action or capture a new explicit helper action."""
+    current = get_provider_action_context()
+    if project_id <= 0 or (current is not None and current.project_id != project_id):
+        raise ProviderAttemptStopped()
+    if current is not None:
+        yield current
+        return
+
+    if engine is _DefaultEngine.RESOLVE:
+        from models import db  # noqa: PLC0415
+
+        engine = db.get_engine()
+    if not isinstance(engine, Engine):
+        raise ProviderAuditError()
+    from repositories.provider_attempts import (  # noqa: PLC0415
+        ProviderAttemptAuditRepository,
+    )
+    from utils.runtime_config import get_provider_retry_config  # noqa: PLC0415
+
+    context = ProviderActionContext(
+        project_id=project_id,
+        action_id=uuid4().hex,
+        policy=get_provider_retry_config(),
+        audit=ProviderAttemptAuditRepository(engine),
+        action_deadline=monotonic() + PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
+        pre_try_check=lambda: None,
+    )
+    with bind_provider_action(context):
+        yield context
 
 
 class RunnerIdentityLike(Protocol):
@@ -214,6 +273,8 @@ async def invoke_agent_to_text(
                 )
             ]
         )
+    except (ProviderTransientFailure, ProviderAuditError, ProviderAttemptStopped):
+        raise
     except Exception as exc:  # pylint: disable=broad-except
         partial_output = extract_partial_response_text(events) or None
         raise AgentInvocationError(
