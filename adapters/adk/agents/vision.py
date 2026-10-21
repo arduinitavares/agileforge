@@ -23,14 +23,12 @@ from services.contracts.vision import (
 )
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
 from utils.runtime_config import (
     get_openrouter_api_key,
     get_vision_generation_config,
 )
-from utils.runtime_controls import VISION_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -89,15 +87,12 @@ repair_instructions = load_prompt("vision_repair.txt")
 
 # --- Initialize Model with drop_params to prevent logging issues ---
 _generation_config = get_vision_generation_config()
-_max_tokens = _generation_config["max_output_tokens"]
 _model_id = get_model_id("product_vision")
 model: LiteLlm = create_openrouter_model(
     model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,  # Prevent passing unsupported params that trigger logging
     extra_body=get_openrouter_extra_body(),
-    timeout=VISION_TIMEOUT_SECONDS,
-    **get_model_token_limit_args(_model_id, _max_tokens),
 )
 
 

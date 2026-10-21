@@ -15,7 +15,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from sqlalchemy.engine import Engine
 
-from adapters.adk.errors import GenerationOutputValidationError
+from adapters.adk.errors import GenerationExecutionError
 from adapters.adk.generation_output import validate_generation_output
 from adapters.adk.provider_retry import (
     ProviderActionContext,
@@ -283,7 +283,7 @@ async def invoke_agent_to_text(
         response_text = extract_final_response_text(events)
     except (ProviderTransientFailure, ProviderAuditError, ProviderAttemptStopped):
         raise
-    except GenerationOutputValidationError as exc:
+    except GenerationExecutionError as exc:
         raise AgentInvocationError(
             str(exc), event_count=len(events), output_diagnostic=exc.diagnostic
         ) from exc

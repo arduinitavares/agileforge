@@ -69,8 +69,8 @@ class VisionOutputValidationError(RuntimeError):
 
 
 @dataclass
-class GenerationOutputValidationError(RuntimeError):
-    """Safe downstream output failure before ADK schema conversion."""
+class GenerationExecutionError(RuntimeError):
+    """Safe generation failure with allowlisted nonsecret diagnostics."""
 
     code: str
     message: str
@@ -79,6 +79,14 @@ class GenerationOutputValidationError(RuntimeError):
     def __str__(self) -> str:
         """Exclude generated content and arbitrary provider metadata."""
         return self.message
+
+
+class GenerationOutputValidationError(GenerationExecutionError):
+    """Safe downstream output failure before ADK schema conversion."""
+
+
+class GenerationProviderError(GenerationExecutionError):
+    """Safe provider capability or request-constraint failure."""
 
 
 @dataclass
@@ -97,7 +105,9 @@ class ProductGoalOutputValidationError(RuntimeError):
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
+    "GenerationExecutionError",
     "GenerationOutputValidationError",
+    "GenerationProviderError",
     "ProductGoalOutputValidationError",
     "SpecificationAgenticExecutionError",
     "SpecificationOutputValidationError",

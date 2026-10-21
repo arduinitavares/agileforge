@@ -15,10 +15,9 @@ from services.contracts.story import (
 )
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
-from utils.runtime_config import get_openrouter_api_key, get_story_writer_max_tokens
+from utils.runtime_config import get_openrouter_api_key
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -31,14 +30,12 @@ USER_STORY_PATCH_INSTRUCTIONS = load_prompt("story_patch.txt")
 
 def _create_story_writer_model() -> LiteLlm:
     """Create the configured Story Writer model."""
-    _max_tokens = get_story_writer_max_tokens()
     model_id = get_model_id("user_story_writer")
     return create_openrouter_model(
         model_id=model_id,
         api_key=get_openrouter_api_key(),
         drop_params=True,
         extra_body=get_openrouter_extra_body(),
-        **get_model_token_limit_args(model_id, _max_tokens),
     )
 
 

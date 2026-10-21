@@ -554,7 +554,6 @@ def test_profile_environment_contains_only_runtime_controls(checkout: Path) -> N
             f"sqlite:///{profile.trace_database.as_posix()}"
         ),
         "MODEL_CONFIG_PATH": str(profile.model_config_path),
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
 
 
@@ -634,3 +633,12 @@ def test_reset_removes_only_owned_profile_and_reports_paths(checkout: Path) -> N
     assert paths.root in removed
     assert not paths.root.exists()
     assert profile_paths(checkout, "keep-me").root.is_dir()
+
+
+def test_profile_does_not_inject_retired_specification_limit(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy shell value cannot become a launcher-owned generation cap."""
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "1")
+    profile = initialize_profile_record(checkout, "legacy-cap")
+    assert "SPECIFICATION_STRUCTURER_MAX_TOKENS" not in profile_environment(profile)

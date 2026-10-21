@@ -278,7 +278,7 @@ def test_cli_forwarding_installs_only_profile_environment(
         dev_main._resolve_git_executable()
     )
     assert child_environment == expected_environment
-    assert child_environment["SPECIFICATION_STRUCTURER_MAX_TOKENS"] == "24576"
+    assert "SPECIFICATION_STRUCTURER_MAX_TOKENS" not in child_environment
 
 
 def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(

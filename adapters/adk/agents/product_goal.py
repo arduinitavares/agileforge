@@ -13,31 +13,27 @@ from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
 )
+from utils.generation_policy import get_generation_policy
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
 from utils.runtime_config import (
     get_openrouter_api_key,
-    get_vision_interviewer_max_tokens,
 )
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models.llm_response import LlmResponse
 
-    from workflow.contracts import JsonObject
+    from utils.generation_policy import JsonObject
 
 _model_id = get_model_id("product_goal")
-_token_limit_args = get_model_token_limit_args(
-    _model_id, get_vision_interviewer_max_tokens()
-)
 
 
 def get_generation_settings() -> JsonObject:
     """Expose the current constructed model's nonsecret output configuration."""
-    return {"generation_config": dict(_token_limit_args)}
+    return {"generation_config": {}, "generation_policy": get_generation_policy()}
 
 
 def validate_product_goal_response(
@@ -71,7 +67,6 @@ model: LiteLlm = create_openrouter_model(
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),
-    **_token_limit_args,
 )
 
 root_agent: Agent = Agent(

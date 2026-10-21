@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
-from adapters.adk.errors import GenerationOutputValidationError
+from adapters.adk.errors import GenerationExecutionError
 from adapters.adk.provider_retry import ProviderAttemptStopped
 from models.core import UserStory
 from models.db import get_engine
@@ -105,12 +105,12 @@ class _SemanticOutcome:
 
 
 def _invalid_semantic_output(
-    error: GenerationOutputValidationError | AgentInvocationError,
+    error: GenerationExecutionError | AgentInvocationError,
     expected_input_payload: JsonObject | None,
 ) -> _SemanticOutcome:
     diagnostic = (
         error.diagnostic
-        if isinstance(error, GenerationOutputValidationError)
+        if isinstance(error, GenerationExecutionError)
         else error.output_diagnostic
     )
     return _SemanticOutcome(
@@ -882,7 +882,7 @@ def validate_story_with_specification_in_session(
                 findings=_parse_semantic_result(raw_text, context=context),
                 expected_input_payload=expected_input_payload,
             )
-        except (GenerationOutputValidationError, AgentInvocationError) as failure:
+        except (GenerationExecutionError, AgentInvocationError) as failure:
             semantic = _invalid_semantic_output(failure, expected_input_payload)
         except Exception:  # noqa: BLE001
             semantic = _SemanticOutcome(
@@ -946,7 +946,7 @@ def validate_story_with_specification(
             return _provider_review_failure(story_id=parsed.story_id, failure=failure)
         except ProviderAttemptStopped:
             raise
-        except (GenerationOutputValidationError, AgentInvocationError) as failure:
+        except (GenerationExecutionError, AgentInvocationError) as failure:
             semantic = _invalid_semantic_output(failure, expected_input_payload)
         except Exception:  # noqa: BLE001
             semantic = _SemanticOutcome(

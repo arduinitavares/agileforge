@@ -12,6 +12,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 from adapters.adk.provider_retry import (
     _MAX_HTTP_STATUS,
+    _OWNED_CONTEXT_LIMIT_ATTRIBUTE,
     _OWNED_STATUS_ATTRIBUTE,
     ProviderAttemptStopped,
     ProviderDeadlineExceeded,
@@ -53,6 +54,35 @@ def _response_status(response: httpx.Response) -> int:
         code
         if code is not None and HTTPStatus.CONTINUE <= code <= _MAX_HTTP_STATUS
         else response.status_code
+    )
+
+
+def _context_limit_response(response: httpx.Response) -> bool:
+    """Use structured codes from this owned response, never provider prose/counts."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return False
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    codes = (
+        error.get("code"),
+        error.get("type"),
+        metadata.get("error_type"),
+        metadata.get("provider_code"),
+    )
+    return any(
+        isinstance(code, str)
+        and code
+        in (
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "max_context_length_exceeded",
+        )
+        for code in codes
     )
 
 
@@ -210,6 +240,12 @@ class OpenRouterOneSendCompletion:
                 # None is authoritative: SDK preparation and historical causes
                 # cannot establish a current provider response that did not exist.
                 setattr(projected, _OWNED_STATUS_ATTRIBUTE, status)
+                setattr(
+                    projected,
+                    _OWNED_CONTEXT_LIMIT_ATTRIBUTE,
+                    handler.response is not None
+                    and _context_limit_response(handler.response),
+                )
                 if handler.response_headers is not None:
                     guidance = handler.response_headers.get("retry-after")
                     if guidance is not None:

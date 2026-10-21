@@ -13,7 +13,6 @@ from utils.runtime_config import (
     get_business_db_target,
     get_database_echo,
     get_specification_structurer_generation_config,
-    get_specification_structurer_max_tokens,
     is_spec_compiler_schema_disabled,
     resolve_database_target,
 )
@@ -189,24 +188,10 @@ def test_spec_compiler_agent_schema_can_be_reenabled(
     assert is_spec_compiler_schema_disabled() is False
 
 
-def test_specification_structurer_has_a_dedicated_generation_budget(
+def test_specification_structurer_ignores_retired_generation_budgets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Do not inherit the smaller Vision interview response budget."""
-    monkeypatch.delenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", raising=False)
-    monkeypatch.setenv("VISION_INTERVIEWER_MAX_TOKENS", "1024")
-
-    assert (
-        get_specification_structurer_max_tokens()
-        == DEFAULT_SPECIFICATION_STRUCTURER_TOKENS
-    )
-
-    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "24576")
-
-    assert (
-        get_specification_structurer_max_tokens()
-        == OVERRIDDEN_SPECIFICATION_STRUCTURER_TOKENS
-    )
-    assert get_specification_structurer_generation_config() == {
-        "max_output_tokens": OVERRIDDEN_SPECIFICATION_STRUCTURER_TOKENS
-    }
+    """Legacy environment values cannot restore application output ceilings."""
+    monkeypatch.setenv("VISION_INTERVIEWER_MAX_TOKENS", "1")
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "1")
+    assert get_specification_structurer_generation_config() == {}

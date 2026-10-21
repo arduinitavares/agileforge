@@ -14,6 +14,7 @@ from services.application import (
     _agentic_execution_settings,
 )
 from utils import model_config
+from utils.generation_policy import get_generation_policy
 from workflow.contracts import (
     FactReference,
     NodeCategory,
@@ -216,14 +217,16 @@ def test_structuring_persists_its_effective_generation_config(
 
     assert _agentic_execution_settings("specification.structure") == {
         "timeout_seconds": None,
+        "generation_policy": get_generation_policy(),
         "max_attempts": 2,
-        "generation_config": {"max_output_tokens": 24_576},
+        "generation_config": {},
     }
     assert _agentic_execution_settings("vision.interview") == {
         "timeout_seconds": None,
+        "generation_policy": get_generation_policy(),
         "max_attempts": 1,
         "max_semantic_repairs": 1,
-        "generation_config": {"max_output_tokens": 128_000},
+        "generation_config": {},
     }
 
 
@@ -238,18 +241,20 @@ def test_new_attempt_settings_capture_effective_reasoning(
     try:
         assert _agentic_execution_settings("vision.interview") == {
             "timeout_seconds": None,
+            "generation_policy": get_generation_policy(),
             "max_attempts": 1,
             "max_semantic_repairs": 1,
-            "generation_config": {"max_output_tokens": 128_000},
+            "generation_config": {},
             "reasoning": {"effort": "max"},
         }
         config.write_text("models: {}\n", encoding="utf-8")
         model_config.clear_config_cache()
         assert _agentic_execution_settings("vision.interview") == {
             "timeout_seconds": None,
+            "generation_policy": get_generation_policy(),
             "max_attempts": 1,
             "max_semantic_repairs": 1,
-            "generation_config": {"max_output_tokens": 128_000},
+            "generation_config": {},
         }
     finally:
         model_config.clear_config_cache()
@@ -267,8 +272,9 @@ def test_structuring_uses_the_composed_agent_config_after_environment_drift(
         specification_generation_config=composed_config,
     ) == {
         "timeout_seconds": None,
+        "generation_policy": get_generation_policy(),
         "max_attempts": 2,
-        "generation_config": composed_config,
+        "generation_config": {},
     }
 
 
@@ -286,14 +292,15 @@ def test_vision_uses_composed_budget_after_environment_drift(
     )
     assert settings == {
         "timeout_seconds": None,
+        "generation_policy": get_generation_policy(),
         "max_attempts": 1,
         "max_semantic_repairs": 1,
-        "generation_config": {"max_output_tokens": 11111},
+        "generation_config": {},
     }
     goal_settings = _agentic_execution_settings("goal.interview")
     assert goal_settings["timeout_seconds"] is None
     assert goal_settings["max_attempts"] == EXPECTED_WORKFLOW_MAX_ATTEMPTS
-    assert goal_settings["generation_config"] != settings["generation_config"]
+    assert goal_settings["generation_config"] == settings["generation_config"] == {}
 
 
 def test_vision_attempt_lease_is_longer_without_affecting_other_roles(
@@ -360,9 +367,7 @@ def test_vision_attempt_lease_is_longer_without_affecting_other_roles(
             )
         )
     assert [config.lease_seconds for config in captured] == [660, 300]
-    assert captured[0].execution_settings["generation_config"] == {
-        "max_output_tokens": 11111
-    }
+    assert captured[0].execution_settings["generation_config"] == {}
 
 
 def test_structuring_replays_before_reading_current_position(

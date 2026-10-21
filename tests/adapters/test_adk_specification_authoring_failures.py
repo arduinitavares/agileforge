@@ -75,6 +75,7 @@ from services.specs.candidate_contract import load_candidate_contract
 from tests.adapters.test_adk_workflow_runner import EXPECTED_PROVIDER_RETRY
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
+from utils.generation_policy import get_generation_policy
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.contracts import (
     RecommendationKind,
@@ -1124,9 +1125,10 @@ def test_incomplete_realistic_response_uses_actionable_durable_failure(
     assert result.error is not None
     assert result.error.code.value == "SPECIFICATION_OUTPUT_INCOMPLETE"
     assert result.error.message == (
-        "Specification structurer returned incomplete output. Increase "
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can return "
-        "the complete structured payload, then retry Structure Specification."
+        "Specification structurer returned incomplete output. Inspect the effective "
+        "generation policy and provider finish/usage evidence, then retry Structure "
+        "Specification with the current recovery command and a new idempotency key. "
+        "The same key replays this failure."
     )
     assert model.calls == ["provider"]
 
@@ -1141,7 +1143,12 @@ def test_incomplete_realistic_response_uses_actionable_durable_failure(
         assert outcome.failure_message == result.error.message
         attempt = _latest_attempt(session, project_id=project_id)
         assert attempt.execution_settings_json == canonical_json(
-            {**ISSUE_200_EXECUTION_SETTINGS, "provider_retry": EXPECTED_PROVIDER_RETRY}
+            {
+                **ISSUE_200_EXECUTION_SETTINGS,
+                "provider_retry": EXPECTED_PROVIDER_RETRY,
+                "generation_policy": get_generation_policy(),
+                "generation_config": {},
+            }
         )
         assert not session.exec(select(SpecificationCandidate)).all()
 
@@ -1227,7 +1234,12 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
         assert canonical_spec_json(payload) == canonical_spec_json(expected.payload)
         attempt = _latest_attempt(session, project_id=project_id)
         assert attempt.execution_settings_json == canonical_json(
-            {**ISSUE_200_EXECUTION_SETTINGS, "provider_retry": EXPECTED_PROVIDER_RETRY}
+            {
+                **ISSUE_200_EXECUTION_SETTINGS,
+                "provider_retry": EXPECTED_PROVIDER_RETRY,
+                "generation_policy": get_generation_policy(),
+                "generation_config": {},
+            }
         )
         assert envelope.attempt_fingerprint == attempt.attempt_fingerprint
         assert envelope.model_configuration_fingerprint == canonical_hash(
@@ -1236,6 +1248,8 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
                 "execution_settings": {
                     **ISSUE_200_EXECUTION_SETTINGS,
                     "provider_retry": EXPECTED_PROVIDER_RETRY,
+                    "generation_policy": get_generation_policy(),
+                    "generation_config": {},
                 },
             }
         )

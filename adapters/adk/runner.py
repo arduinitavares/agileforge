@@ -26,7 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
-    GenerationOutputValidationError,
+    GenerationExecutionError,
     ProductGoalOutputValidationError,
     SpecificationAgenticExecutionError,
     SpecificationOutputValidationError,
@@ -57,6 +57,7 @@ from services.contracts.provider_retry import (
     ProviderTransientFailure,
     provider_failure_message,
 )
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS, get_generation_policy
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     RunnerIdentity,
@@ -378,6 +379,14 @@ class AdkWorkflowRunner:
             else get_provider_retry_config()
         )
         settings["provider_retry"] = policy.model_dump(mode="json")
+        settings["generation_policy"] = get_generation_policy()
+        generation_config = settings.get("generation_config")
+        if isinstance(generation_config, dict):
+            settings["generation_config"] = {
+                key: value
+                for key, value in generation_config.items()
+                if key not in RETIRED_GENERATION_ARGUMENTS
+            }
         settings["timeout_seconds"] = None
         start_request = start_request.model_copy(
             update={"execution_settings": settings}
@@ -724,7 +733,7 @@ class AdkWorkflowRunner:
             (
                 VisionOutputValidationError,
                 ProductGoalOutputValidationError,
-                GenerationOutputValidationError,
+                GenerationExecutionError,
             ),
         ):
             return self._fail_attempt(
@@ -981,7 +990,7 @@ class AdkWorkflowRunner:
             except (
                 VisionOutputValidationError,
                 ProductGoalOutputValidationError,
-                GenerationOutputValidationError,
+                GenerationExecutionError,
             ) as error:
                 prefix = (
                     "product_goal"

@@ -851,7 +851,7 @@ def test_default_factory_does_not_parse_retry_environment(
         model_id="openrouter/test-model", max_tokens=17
     )
     assert isinstance(model.llm_client, boundary().RetryingOpenRouterClient)
-    assert model._additional_args["max_tokens"] == 17
+    assert "max_tokens" not in model._additional_args
 
 
 def _fake_production_tree(

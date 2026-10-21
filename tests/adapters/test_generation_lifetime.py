@@ -7,6 +7,7 @@ import inspect
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
@@ -14,11 +15,13 @@ from sqlmodel import Session, select
 
 from adapters.adk import provider_retry
 from adapters.adk.agents.product_goal import root_agent
+from adapters.adk.generation_allowance import resolve_generation_allowance
 from adapters.adk.provider_transport import OpenRouterOneSendCompletion
 from adapters.adk.recipes import AGENTIC_NODE_IDS, build_agentic_recipe_registry
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.product_definition import ProductGoalInterviewTurn
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOwnership
+from services.contracts.generation_policy import GenerationAllowance  # noqa: TC001
 from tests.adapters.test_adk_graph_recipes import _agentic_nodes
 from tests.adapters.test_adk_workflow_runner import (
     EVALUATED_AT,
@@ -29,6 +32,7 @@ from tests.adapters.test_adk_workflow_runner import (
     _goal_runner_input,
     _goal_runner_system,
 )
+from tests.adapters.test_generation_allowance import _descriptor
 from tests.adapters.test_provider_boundary_routes import (
     Audit,
     Clock,
@@ -48,7 +52,6 @@ MINIMUM_RENEWALS = 3
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable
 
-    import httpx
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
@@ -239,3 +242,103 @@ def test_real_runner_renews_and_cancels_its_provider_scope(
             assert owner is not None
             assert owner.renewal_revision >= MINIMUM_RENEWALS
             assert mutable.now_value.replace(tzinfo=None) > attempt.lease_expires_at
+
+
+@pytest.mark.parametrize("phase", ["metadata", "inference", "backoff"])
+def test_lost_owner_cancels_real_metadata_inference_and_backoff(  # noqa: C901 - end-to-end ownership/transport scenario
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Ownership encloses metadata resolution, the owned HTTP send and retry sleep."""
+    entered: list[str] = []
+    cancelled: list[str] = []
+    closed: list[bool] = []
+    model_id = "openrouter/openai/gpt-6-sol"
+
+    async def wait_at(name: str) -> None:
+        entered.append(name)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(name)
+
+    class PhaseWire(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            name = "metadata" if request.method == "GET" else "inference"
+            if phase == name:
+                await wait_at(name)
+            if name == "metadata":
+                return httpx.Response(200, json=_descriptor(model_id), request=request)
+            return httpx.Response(
+                503, json={"error": {"code": 503, "message": "retry"}}, request=request
+            )
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    async def resolve(selected: str) -> GenerationAllowance:
+        return await resolve_generation_allowance(selected, transport=PhaseWire())
+
+    monkeypatch.setattr(provider_retry, "resolve_generation_allowance", resolve)
+
+    class RetryClock(Clock):
+        async def sleep(self, seconds: float) -> None:
+            del seconds
+            await wait_at("backoff")
+
+    retry_clock = RetryClock()
+    client = provider_retry.RetryingOpenRouterClient(
+        clock=retry_clock,
+        completion=OpenRouterOneSendCompletion(transport_factory=PhaseWire),
+        uniform=lambda _a, _b: 0,
+    )
+
+    class CallingLlm(RawVisionLlm):
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            del llm_request, stream
+            await client.acompletion(
+                model=model_id,
+                tools=[],
+                api_key="synthetic-key",
+                messages=[{"role": "user", "content": "unchanged input"}],
+            )
+            yield self.response
+
+    model = CallingLlm(model=model_id, response=LlmResponse())
+    agent = root_agent.model_copy(update={"model": model})
+    _, domain, project_id = _goal_runner_system(engine, agent)
+    renew = domain.renew_provider_attempt
+
+    def lose_when_waiting(guard: AttemptOwnershipGuard) -> object:
+        if entered:
+            message = "synthetic ownership loss"
+            raise OSError(message)
+        return renew(guard)
+
+    monkeypatch.setattr(domain, "renew_provider_attempt", lose_when_waiting)
+
+    async def ownership_tick(_seconds: float) -> None:
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=_goal_registry(agent),
+        session_service=TrackingSessionService(),
+        ownership_sleep=ownership_tick,
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id=model_id,
+            execution_settings={"max_attempts": 1},
+            lease_seconds=60,
+            actor="operator@example.com",
+        ),
+    )
+    result = runner.run(_goal_decision(domain, project_id), _goal_runner_input())
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    assert entered == cancelled == [phase]
+    assert closed

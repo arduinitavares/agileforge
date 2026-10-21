@@ -141,6 +141,7 @@ from services.vision_evidence import (
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from services.vision_input import VisionInputService
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS, get_generation_policy
 from utils.model_config import get_model_id, get_model_reasoning_config
 from utils.runtime_config import (
     get_specification_structurer_generation_config,
@@ -1820,6 +1821,7 @@ def _agentic_execution_settings(
 ) -> JsonObject:
     """Return effective non-secret settings included in attempt identity."""
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
+    settings["generation_policy"] = get_generation_policy()
     reasoning = get_model_reasoning_config()
     if reasoning:
         settings["reasoning"] = _JSON_OBJECT.validate_python(reasoning)
@@ -1834,7 +1836,11 @@ def _agentic_execution_settings(
             "timeout_seconds": None,
             "max_attempts": 1,
             "max_semantic_repairs": 1,
-            "generation_config": generation_config,
+            "generation_config": {
+                k: v
+                for k, v in generation_config.items()
+                if k not in RETIRED_GENERATION_ARGUMENTS
+            },
         }
     if node_id == "specification.structure":
         generation_config = _JSON_OBJECT.validate_python(
@@ -1842,7 +1848,14 @@ def _agentic_execution_settings(
             if specification_generation_config is None
             else specification_generation_config
         )
-        settings = {**settings, "generation_config": generation_config}
+        settings = {
+            **settings,
+            "generation_config": {
+                k: v
+                for k, v in generation_config.items()
+                if k not in RETIRED_GENERATION_ARGUMENTS
+            },
+        }
     if node_id == "goal.interview":
         from adapters.adk.agents.product_goal import (  # noqa: PLC0415
             get_generation_settings,

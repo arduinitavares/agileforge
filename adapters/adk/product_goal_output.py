@@ -13,6 +13,7 @@ from pydantic_core import from_json
 
 from adapters.adk.errors import ProductGoalOutputValidationError
 from services.contracts.product_goal import ProductGoalInterviewOutput
+from utils.generation_policy import get_generation_policy
 from workflow.contracts import WorkflowErrorCode
 
 if TYPE_CHECKING:
@@ -32,7 +33,10 @@ def _safe_generation_settings(settings: JsonObject) -> JsonObject:
             count = _safe_count(config.get(key))
             if count is not None:
                 limits[key] = count
-    return {"generation_config": limits}
+    safe: JsonObject = {"generation_config": limits}
+    if settings.get("generation_policy") == get_generation_policy():
+        safe["generation_policy"] = get_generation_policy()
+    return safe
 
 
 def validate_product_goal_output(
