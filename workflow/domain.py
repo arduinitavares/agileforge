@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol, assert_never
+from uuid import uuid4
 
 from pydantic import TypeAdapter
-from sqlalchemy import event
+from sqlalchemy import event, update
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
@@ -16,6 +18,7 @@ from models.product_definition import SpecificationCandidate
 from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowNodeAttemptOwnership,
     WorkflowTransitionReceipt,
 )
 from repositories.provider_attempts import ProviderAttemptAuditRepository
@@ -37,6 +40,16 @@ from services.specification_source_registration import (
 from services.task_repository_evidence import (
     TaskRepositoryVerificationTimeout,
     prepare_task_repository_evidence,
+)
+from workflow.attempt_ownership import (
+    AttemptOwnershipGuard,
+    AttemptOwnershipLostError,
+    bind_attempt_ownership,
+    current_attempt_ownership,
+    effective_attempt_expiry,
+    immutable_attempt_matches,
+    load_attempt_ownership,
+    owner_guard_matches,
 )
 from workflow.contracts import (
     JsonObject,
@@ -343,46 +356,21 @@ class WorkflowDomain:
             if row is None or row.attempt_fingerprint != attempt_fingerprint:
                 return 0.0
             return max(
-                0.0, (as_utc(row.lease_expires_at) - evaluated_at).total_seconds()
+                0.0,
+                (effective_attempt_expiry(session, row) - evaluated_at).total_seconds(),
             )
 
     def check_provider_attempt(
         self, *, project_id: int, attempt_id: int, attempt_fingerprint: str
     ) -> WorkflowError | None:
         """Read fresh host facts without keeping a transaction across provider waits."""
-        evaluated_at = self.evaluation_time()
         with Session(self._engine) as session:
-            row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
-            snapshot = WorkflowFactRepository(session).load(project_id)
-            position = self._graph.evaluate(snapshot, evaluated_at)
-            latest = max(
-                (
-                    attempt.attempt_id
-                    for attempt in snapshot.node_attempts
-                    if row is not None
-                    and attempt.node_id == row.node_id
-                    and attempt.instance_key == row.instance_key
-                ),
-                default=None,
-            )
-            valid = (
-                row is not None
-                and row.attempt_fingerprint == attempt_fingerprint
-                and row.graph_version == self._graph.graph_version
-                and evaluated_at < as_utc(row.lease_expires_at)
-                and row.business_fact_fingerprint == business_fact_fingerprint(snapshot)
-                and self._attempt_input_matches(row)
-                and latest == row.workflow_node_attempt_id
-                and load_attempt_outcome(
-                    session, project_id=project_id, attempt_id=attempt_id
-                )
-                is None
-                and any(
-                    decision.node_id == row.node_id
-                    and decision.instance_key == row.instance_key
-                    and decision.category is NodeCategory.WAITING
-                    for decision in position.decisions
-                )
+            valid = self._provider_attempt_valid(
+                session,
+                project_id=project_id,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                evaluated_at=self._clock.now(),
             )
         return (
             None
@@ -392,6 +380,136 @@ class WorkflowDomain:
                 message="The node attempt is no longer authoritative.",
             )
         )
+
+    def _provider_attempt_valid(
+        self,
+        session: Session,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        evaluated_at: datetime,
+    ) -> bool:
+        row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        position = self._graph.evaluate(snapshot, evaluated_at)
+        latest = max(
+            (
+                attempt.attempt_id
+                for attempt in snapshot.node_attempts
+                if row is not None
+                and attempt.node_id == row.node_id
+                and attempt.instance_key == row.instance_key
+            ),
+            default=None,
+        )
+        return (
+            row is not None
+            and row.attempt_fingerprint == attempt_fingerprint
+            and immutable_attempt_matches(row)
+            and owner_guard_matches(session, row)
+            and row.graph_version == self._graph.graph_version
+            and evaluated_at < effective_attempt_expiry(session, row)
+            and row.business_fact_fingerprint == business_fact_fingerprint(snapshot)
+            and self._attempt_input_matches(row)
+            and latest == row.workflow_node_attempt_id
+            and load_attempt_outcome(
+                session, project_id=project_id, attempt_id=attempt_id
+            )
+            is None
+            and any(
+                decision.node_id == row.node_id
+                and decision.instance_key == row.instance_key
+                and decision.category is NodeCategory.WAITING
+                for decision in position.decisions
+            )
+        )
+
+    def claim_provider_attempt(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> AttemptOwnershipGuard:
+        """Claim a live reserved attempt once, under the common writer lock."""
+        with Session(self._engine) as session:
+            self._begin_write(session)
+            now = self._clock.now()
+            row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
+            if (
+                row is None
+                or load_attempt_ownership(session, row) is not None
+                or not self._provider_attempt_valid(
+                    session,
+                    project_id=project_id,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    evaluated_at=now,
+                )
+            ):
+                raise AttemptOwnershipLostError
+            ttl = (
+                as_utc(row.lease_expires_at) - as_utc(row.started_at)
+            ).total_seconds()
+            guard = AttemptOwnershipGuard(
+                project_id, attempt_id, attempt_fingerprint, uuid4().hex, ttl
+            )
+            session.add(
+                WorkflowNodeAttemptOwnership(
+                    project_id=project_id,
+                    workflow_node_attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    owner_generation=guard.owner_generation,
+                    acquired_at=now,
+                    expires_at=now + timedelta(seconds=ttl),
+                )
+            )
+            session.commit()
+            return guard
+
+    def renew_provider_attempt(self, guard: AttemptOwnershipGuard) -> None:
+        """Renew exact live authority without changing immutable attempt history."""
+        with Session(self._engine) as session, bind_attempt_ownership(guard):
+            self._begin_write(session)
+            now = self._clock.now()
+            row = load_attempt(
+                session, project_id=guard.project_id, attempt_id=guard.attempt_id
+            )
+            if row is None:
+                raise AttemptOwnershipLostError
+            owner = load_attempt_ownership(session, row)
+            if owner is None or not self._provider_attempt_valid(
+                session,
+                project_id=guard.project_id,
+                attempt_id=guard.attempt_id,
+                attempt_fingerprint=guard.attempt_fingerprint,
+                evaluated_at=now,
+            ):
+                raise AttemptOwnershipLostError
+            # Derive TTL from the immutable original lease, never caller input.
+            ttl = (
+                as_utc(row.lease_expires_at) - as_utc(row.started_at)
+            ).total_seconds()
+            changed = session.connection().execute(
+                update(WorkflowNodeAttemptOwnership)
+                .where(
+                    col(WorkflowNodeAttemptOwnership.workflow_node_attempt_id)
+                    == guard.attempt_id,
+                    col(WorkflowNodeAttemptOwnership.owner_generation)
+                    == guard.owner_generation,
+                    col(WorkflowNodeAttemptOwnership.renewal_revision)
+                    == owner.renewal_revision,
+                    col(WorkflowNodeAttemptOwnership.expires_at) > now,
+                )
+                .values(
+                    expires_at=now + timedelta(seconds=ttl),
+                    renewal_revision=owner.renewal_revision + 1,
+                )
+            )
+            if changed.rowcount != 1:
+                raise AttemptOwnershipLostError
+            session.commit()
 
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Guard and apply one request inside its receipt transaction."""
@@ -478,6 +596,8 @@ class WorkflowDomain:
     ) -> TransitionResult:
         """Own receipt claim, handler facts, and completion in one transaction."""
         self._begin_write(session)
+        if current_attempt_ownership() is not None:
+            evaluated_at = self._clock.now()
         if isinstance(
             request,
             DecideVisionReview
@@ -511,7 +631,7 @@ class WorkflowDomain:
             "request_fingerprint": receipt.request_fingerprint,
         }
         try:
-            result = self._execute_request(
+            result = self._execute_owned_request(
                 session, request, evaluated_at, prepared_repository_evidence
             )
         finally:
@@ -521,6 +641,39 @@ class WorkflowDomain:
                 session.info["agileforge.active_transition_receipt"] = previous_marker
         self._complete_receipt(session, receipt, result, evaluated_at)
         return result
+
+    def _execute_owned_request(
+        self,
+        session: Session,
+        request: TransitionRequest,
+        evaluated_at: datetime,
+        prepared_repository_evidence: PreparedTaskRepositoryEvidence | None,
+    ) -> TransitionResult:
+        attempt_id = getattr(request, "attempt_id", None)
+        project_id = getattr(request, "project_id", None)
+        if isinstance(attempt_id, int) and isinstance(project_id, int):
+            row = load_attempt(session, project_id=project_id, attempt_id=attempt_id)
+            if (
+                row is not None
+                and load_attempt_outcome(
+                    session, project_id=project_id, attempt_id=attempt_id
+                )
+                is None
+                and not owner_guard_matches(session, row)
+            ):
+                return TransitionResult(
+                    ok=False,
+                    position=self._position_in_session(
+                        session, project_id, evaluated_at
+                    ),
+                    error=WorkflowError(
+                        code=WorkflowErrorCode.ATTEMPT_OBSOLETE,
+                        message="The node attempt owner is no longer authoritative.",
+                    ),
+                )
+        return self._execute_request(
+            session, request, evaluated_at, prepared_repository_evidence
+        )
 
     def _configure_busy_timeout(self) -> None:
         """Configure current and future SQLite connections before transitions."""
@@ -794,7 +947,8 @@ class WorkflowDomain:
             or row.attempt_fingerprint != request.attempt_fingerprint
             or row.node_id != request.target_node_id
             or row.graph_version != self._graph.graph_version
-            or evaluated_at >= as_utc(row.lease_expires_at)
+            or evaluated_at >= effective_attempt_expiry(session, row)
+            or not immutable_attempt_matches(row)
             or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
             or not self._attempt_input_matches(row)
             or latest_attempt is None
@@ -953,7 +1107,7 @@ class WorkflowDomain:
             if item.node_id == request.target_node_id
             and item.instance_key == request.target_instance_key
             and item.outcome is None
-            and evaluated_at >= item.lease_expires_at
+            and evaluated_at >= item.effective_lease_expires_at
         )
         if not expired:
             return None
@@ -991,7 +1145,8 @@ class WorkflowDomain:
             or row.graph_version != self._graph.graph_version
             or row.fact_fingerprint != request.fact_fingerprint
             or row.decision_fingerprint != request.decision_fingerprint
-            or evaluated_at >= as_utc(row.lease_expires_at)
+            or evaluated_at >= effective_attempt_expiry(session, row)
+            or not immutable_attempt_matches(row)
             or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
         )
         if mismatch:
@@ -1206,7 +1361,8 @@ class WorkflowDomain:
             is not None
             or row.attempt_fingerprint != request.attempt_fingerprint
             or row.graph_version != self._graph.graph_version
-            or evaluated_at >= as_utc(row.lease_expires_at)
+            or evaluated_at >= effective_attempt_expiry(session, row)
+            or not immutable_attempt_matches(row)
             or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
             or not self._attempt_input_matches(row)
             or latest != row.workflow_node_attempt_id

@@ -66,6 +66,7 @@ class OneSendAsyncHTTPHandler(AsyncHTTPHandler):
         """Capture this instance's injected deterministic seams."""
         self.client = client
         self.timeout = client.timeout
+        self._unlimited_read = client.timeout.read is None
         self.event_hooks = {}
         self.transport_error: httpx.TransportError | None = None
         self.response_headers: httpx.Headers | None = None
@@ -103,7 +104,9 @@ class OneSendAsyncHTTPHandler(AsyncHTTPHandler):
             json=json,
             params=cast("QueryParamTypes | None", params),
             headers=cast("HeaderTypes | None", headers),
-            timeout=self.timeout if timeout is None else timeout,
+            timeout=self.timeout
+            if timeout is None or self._unlimited_read
+            else timeout,
             files=cast("RequestFiles | None", files),
             content=cast("RequestContent | None", content),
         )
@@ -174,7 +177,11 @@ class OpenRouterOneSendCompletion:
             follow_redirects=False,
             trust_env=False,
             event_hooks={},
-            timeout=cast("float", kwargs.get("timeout", 600.0)),
+            timeout=(
+                httpx.Timeout(None, connect=10.0, pool=10.0)
+                if kwargs.get("timeout") is None
+                else cast("float", kwargs["timeout"])
+            ),
         ) as client:
             handler = OneSendAsyncHTTPHandler(client, on_dispatch)
             try:

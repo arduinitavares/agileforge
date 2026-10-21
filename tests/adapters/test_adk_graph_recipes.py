@@ -185,7 +185,7 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     assert registered_recipe_ids == registry.node_ids
     for node_id in registry.node_ids:
         recipe = registry.require(node_id)
-        assert recipe.workflow.timeout == RECIPE_TIMEOUT_SECONDS
+        assert recipe.workflow.timeout is None
         assert recipe.workflow.retry_config is not None
         expected_attempts = (
             1
@@ -203,7 +203,7 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert not hasattr(recipe, "next_command")
 
 
-def test_vision_registry_deadline_is_scoped_to_vision() -> None:
+def test_registry_ignores_legacy_shared_and_vision_deadlines() -> None:
     """A long Vision generation cannot be cut off by the shared recipe limit."""
     vision_timeout = 600
     other_timeout = 120
@@ -215,10 +215,10 @@ def test_vision_registry_deadline_is_scoped_to_vision() -> None:
             "max_attempts": 1,
         },
     )
-    assert registry.require("vision.bootstrap").workflow.timeout == vision_timeout
-    assert registry.require("vision.interview").workflow.timeout == vision_timeout
-    assert registry.require("goal.interview").workflow.timeout == other_timeout
-    assert registry.require("specification.structure").workflow.timeout == other_timeout
+    assert registry.require("vision.bootstrap").workflow.timeout is None
+    assert registry.require("vision.interview").workflow.timeout is None
+    assert registry.require("goal.interview").workflow.timeout is None
+    assert registry.require("specification.structure").workflow.timeout is None
 
 
 def test_structuring_recipe_has_no_authoring_compatibility_alias() -> None:
@@ -495,7 +495,7 @@ def test_recipe_contains_execution_only_without_business_prerequisites() -> None
         "workflow",
         "output_adapter",
     }
-    assert workflow.timeout == RECIPE_TIMEOUT_SECONDS
+    assert workflow.timeout is None
     assert workflow.retry_config is not None
     assert workflow.retry_config.max_attempts == RECIPE_MAX_ATTEMPTS
     assert not hasattr(recipe, "prerequisites")

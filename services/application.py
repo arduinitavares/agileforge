@@ -146,7 +146,7 @@ from utils.runtime_config import (
     get_specification_structurer_generation_config,
     get_vision_generation_config,
 )
-from utils.runtime_controls import VISION_LEASE_SECONDS, VISION_TIMEOUT_SECONDS
+from utils.runtime_controls import VISION_LEASE_SECONDS
 from workflow.contracts import (
     Blocker,
     FactReference,
@@ -222,6 +222,7 @@ if TYPE_CHECKING:
     from adapters.adk.recipes import AdkRecipeRegistry
     from services.contracts.provider_retry import ProviderAttemptAudit
     from utils.spec_schemas import ValidationEvidence
+    from workflow.attempt_ownership import AttemptOwnershipGuard
     from workflow.facts import (
         PostSprintTriageFact,
         SprintFact,
@@ -270,6 +271,20 @@ class ProviderWorkflowDomainPort(WorkflowDomainPort, Protocol):
         self, request: StartNodeAttempt
     ) -> TransitionResult | None:
         """Replay exact caller identity before current execution settings."""
+        ...
+
+    def claim_provider_attempt(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> AttemptOwnershipGuard:
+        """Acquire one live host generation after reservation."""
+        ...
+
+    def renew_provider_attempt(self, guard: AttemptOwnershipGuard) -> None:
+        """Extend only the exact authoritative unexpired generation."""
         ...
 
     def provider_attempt_audit(self) -> ProviderAttemptAudit:
@@ -1787,7 +1802,7 @@ class _ReadProjectionPort(Protocol):
 
 
 _EXECUTION_SETTINGS: JsonObject = {
-    "timeout_seconds": 120,
+    "timeout_seconds": None,
     "max_attempts": 2,
 }
 _LEASE_SECONDS = 300
@@ -1816,7 +1831,7 @@ def _agentic_execution_settings(
         )
         settings = {
             **settings,
-            "timeout_seconds": VISION_TIMEOUT_SECONDS,
+            "timeout_seconds": None,
             "max_attempts": 1,
             "max_semantic_repairs": 1,
             "generation_config": generation_config,

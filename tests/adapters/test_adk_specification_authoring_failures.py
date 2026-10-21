@@ -94,7 +94,6 @@ if TYPE_CHECKING:
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
-    from services.contracts.provider_retry import ProviderRetryClock
     from workflow.contracts import (
         JsonObject,
         NodeDecision,
@@ -131,7 +130,7 @@ def _issue_245_fixture_bytes() -> bytes:
 
 ISSUE_200_MAX_OUTPUT_TOKENS: int = 32_768
 ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
-    "timeout_seconds": 5.0,
+    "timeout_seconds": None,
     "max_attempts": 1,
     "generation_config": {"max_output_tokens": ISSUE_200_MAX_OUTPUT_TOKENS},
 }
@@ -383,7 +382,6 @@ def _system(  # noqa: PLR0913
     *,
     session_service: BaseSessionService | None = None,
     source_check: SpecificationSourceCheck | None = None,
-    provider_clock: ProviderRetryClock | None = None,
     execution_settings: JsonObject = EXECUTION_SETTINGS,
     source_bytes: bytes = b"# Exact external Specification\n",
     context_bytes: bytes | None = None,
@@ -525,7 +523,6 @@ def _system(  # noqa: PLR0913
             InMemorySessionService() if session_service is None else session_service
         ),
         specification_source_check=runner_source_check,
-        provider_clock=provider_clock,
         config=AdkExecutionConfig(
             project_id=project_id,
             model_id="fake/specification-structurer",
@@ -2883,7 +2880,6 @@ def test_successful_specification_retry_replays_terminal_candidate_after_preflig
         tmp_path,
         leaf,
         source_check=unchanged_source,
-        provider_clock=clock,
         structuring_time=clock.now_value,
     )
 

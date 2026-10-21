@@ -6,10 +6,10 @@ import json
 import re
 from contextlib import contextmanager
 from enum import Enum
-from time import monotonic
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
+from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -24,7 +24,6 @@ from adapters.adk.provider_retry import (
     get_provider_action_context,
 )
 from services.contracts.provider_retry import (
-    PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
     ProviderAuditError,
     ProviderTransientFailure,
 )
@@ -70,7 +69,7 @@ def provider_action_context(
         action_id=uuid4().hex,
         policy=get_provider_retry_config(),
         audit=ProviderAttemptAuditRepository(engine),
-        action_deadline=monotonic() + PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
+        action_deadline=None,
         pre_try_check=lambda: None,
     )
     with bind_provider_action(context):
@@ -277,6 +276,7 @@ async def invoke_agent_to_text(
                     user_id=runner_identity.user_id,
                     session_id=session.id,
                     new_message=message,
+                    run_config=RunConfig(max_llm_calls=0),
                 )
             ]
         )

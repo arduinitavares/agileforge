@@ -325,7 +325,7 @@ class ProviderActionContext:
     action_id: str
     policy: ProviderRetryConfig
     audit: ProviderAttemptAudit
-    action_deadline: float
+    action_deadline: float | None
     pre_try_check: Callable[[], None]
     lease_deadline: float | None = None
     workflow_node_attempt_id: int | None = None
@@ -540,14 +540,18 @@ def _remaining(
     retry_deadline: float | None,
 ) -> float:
     """Remaining."""
-    deadlines = [context.action_deadline - _UNWIND_RESERVE_SECONDS]
+    deadlines = (
+        []
+        if context.action_deadline is None
+        else [context.action_deadline - _UNWIND_RESERVE_SECONDS]
+    )
     if context.lease_deadline is not None:
         deadlines.append(context.lease_deadline)
     if retry_deadline is not None:
         deadlines.append(retry_deadline)
     if not all(math.isfinite(deadline) for deadline in deadlines):
         raise ProviderAttemptStopped()
-    return min(deadlines) - clock.monotonic()
+    return min(deadlines) - clock.monotonic() if deadlines else math.inf
 
 
 def _confirmed_status(error: BaseException) -> int | None:
@@ -736,7 +740,9 @@ class RetryingOpenRouterClient(LiteLLMClient):
         existing_timeout = request.get(
             "timeout", getattr(litellm, "request_timeout", 600.0)
         )
-        if (
+        if context.action_deadline is None:
+            existing_timeout = None
+        if existing_timeout is not None and (
             isinstance(existing_timeout, bool)
             or not isinstance(existing_timeout, (float, int))
             or not math.isfinite(existing_timeout)
@@ -746,7 +752,14 @@ class RetryingOpenRouterClient(LiteLLMClient):
         for ordinal in range(1, context.policy.max_attempts + 1):
             start, start_time, remaining = self._reserve_try(call, ordinal, request)
             result = await self._execute_try(
-                call, start, start_time, request, (float(existing_timeout), remaining)
+                call,
+                start,
+                start_time,
+                request,
+                (
+                    None if existing_timeout is None else float(existing_timeout),
+                    remaining,
+                ),
             )
             if result is not _RETRY_SCHEDULED:
                 return cast("ModelResponse", result)
@@ -802,10 +815,17 @@ class RetryingOpenRouterClient(LiteLLMClient):
         start: ProviderTryAuditRecord,
         start_time: float,
         request: dict[str, object],
-        limits: tuple[float, float],
+        limits: tuple[float | None, float],
     ) -> object:
         existing_timeout, remaining = limits
-        timeout = min(existing_timeout, remaining)
+        timeout = (
+            None
+            if call.context.action_deadline is None
+            else min(
+                existing_timeout if existing_timeout is not None else math.inf,
+                remaining,
+            )
+        )
         previous_sends = call.sends
         dispatch = _TryDispatch(call, start.try_ordinal, request)
         completion = self._completion
@@ -827,9 +847,10 @@ class RetryingOpenRouterClient(LiteLLMClient):
             if not owns_dispatch:
                 # Injected completion seam promises one invocation = one send.
                 dispatch()
-            result = await self._timeout_runner(
-                completion(**send_request),
-                timeout,
+            result = (
+                await completion(**send_request)
+                if timeout is None
+                else await self._timeout_runner(completion(**send_request), timeout)
             )
             dispatch.require_dispatched()
         except asyncio.CancelledError:
@@ -844,6 +865,7 @@ class RetryingOpenRouterClient(LiteLLMClient):
             if (
                 start.try_ordinal > 1
                 and call.last_response is not None
+                and existing_timeout is not None
                 and remaining <= existing_timeout
             ):
                 reason = "retry_budget_exhausted"
@@ -878,7 +900,7 @@ class RetryingOpenRouterClient(LiteLLMClient):
             return _RETRY_SCHEDULED
         call.finish(start, start_time, disposition="success")
         call.context.pre_try_check()
-        if _remaining(call.context, self._clock, call.retry_deadline) <= 0:
+        if _remaining(call.context, self._clock, None) <= 0:
             raise ProviderAttemptStopped()
         return result
 

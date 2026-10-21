@@ -53,6 +53,7 @@ from models.workflow import (
     TaskCompletionEvidence,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowNodeAttemptOwnership,
     WorkflowTransitionReceipt,
 )
 from repositories.sprint_retry import SprintRetryFactLoadError, load_sprint_retry_facts
@@ -115,6 +116,7 @@ from utils.agileforge_spec_profile_v2 import (
 )
 from utils.spec_schemas import ValidationEvidence
 from utils.task_metadata import parse_task_metadata, serialize_task_metadata
+from workflow.attempt_ownership import AttemptOwnershipLostError, load_attempt_ownership
 from workflow.contracts import JsonObject, JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
@@ -4128,6 +4130,10 @@ class WorkflowFactRepository:
             )
             self._attempt_outcome(outcome.status)
             outcomes_by_attempt[outcome.workflow_node_attempt_id] = outcome
+        ownership = {
+            row.workflow_node_attempt_id: self._attempt_ownership(row)
+            for row in attempts
+        }
         return tuple(
             NodeAttemptFact(
                 attempt_id=self._required_id(
@@ -4144,6 +4150,12 @@ class WorkflowFactRepository:
                 attempt_fingerprint=row.attempt_fingerprint,
                 model_id=row.model_id,
                 lease_expires_at=row.lease_expires_at,
+                ownership_expires_at=(
+                    owner.expires_at
+                    if (owner := ownership[row.workflow_node_attempt_id]) is not None
+                    else None
+                ),
+                owner_generation=None if owner is None else owner.owner_generation,
                 outcome=self._outcome_for_attempt(row, outcomes_by_attempt),
                 failure_code=(
                     None
@@ -4161,6 +4173,15 @@ class WorkflowFactRepository:
             )
             for row in attempts
         )
+
+    def _attempt_ownership(
+        self, row: WorkflowNodeAttempt
+    ) -> WorkflowNodeAttemptOwnership | None:
+        try:
+            return load_attempt_ownership(self._session, row)
+        except AttemptOwnershipLostError as error:
+            message = "Workflow attempt ownership integrity failed."
+            raise self._error(message) from error
 
     def _sprint_plan_generation_guards(
         self, project_id: int

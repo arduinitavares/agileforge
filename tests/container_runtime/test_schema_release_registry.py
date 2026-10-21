@@ -64,7 +64,7 @@ class FrozenHistoricalChange(TypedDict):
 _HISTORICAL_CHANGES: list[FrozenHistoricalChange] = cast(
     "list[FrozenHistoricalChange]",
     json.loads(
-        (_FIXTURES / "issue_230" / "historical_table_changes.json").read_text(
+        (_FIXTURES / "issue_302" / "historical_table_changes.json").read_text(
             encoding="utf-8"
         )
     ),
@@ -78,6 +78,15 @@ _CATALOG: list[FrozenReleaseFixture] = cast(
     ),
 )
 
+# Keep historical release oracles unchanged; the new release and its hypothetical
+# successor have separate captured DDL/hash fixtures.
+_CATALOG = [item for item in _CATALOG if item["identity"] != _LATER] + cast(
+    "list[FrozenReleaseFixture]",
+    json.loads(
+        (_FIXTURES / "issue_302" / "schema_releases.json").read_text(encoding="utf-8")
+    ),
+)
+
 
 def _fixture(identity: str, encoding: str) -> FrozenReleaseFixture:
     return next(
@@ -87,13 +96,20 @@ def _fixture(identity: str, encoding: str) -> FrozenReleaseFixture:
     )
 
 
+def _fixture_sql(sql_file: str) -> str:
+    """Decode exact captured DDL whose significant spaces cannot be reformatted."""
+    raw = (_FIXTURES / sql_file).read_text(encoding="utf-8")
+    if sql_file.endswith(".sql.json"):
+        decoded = json.loads(raw)
+        assert isinstance(decoded, str)
+        return decoded
+    return raw
+
+
 def _materialize(database: Path, item: FrozenReleaseFixture) -> None:
     with sqlite3.connect(database) as connection:
         connection.executescript(
-            "\n".join(
-                (_FIXTURES / sql_file).read_text(encoding="utf-8")
-                for sql_file in item["sql_files"]
-            )
+            "\n".join(_fixture_sql(sql_file) for sql_file in item["sql_files"])
         )
 
 

@@ -4587,7 +4587,6 @@ def _provider_graph_system(
             actor="operator",
         ),
         session_service=TrackingSessionService(),
-        provider_clock=clock,
     )
     return runner, domain, lineage, sends
 
@@ -4637,10 +4636,7 @@ def test_graph_provider_retry_has_one_durable_action_and_exact_replay(
         for send in sends
     ]
     assert all(body == bodies[0] for body in bodies)
-    assert all(
-        isinstance(send["timeout"], float) and 0 < send["timeout"] <= 5.0  # noqa: PLR2004
-        for send in sends
-    )
+    assert all(send["timeout"] is None for send in sends)
     with Session(engine) as session:
         attempts = _node_attempts(session, "backlog.generate")
         outcomes = _node_outcomes(session, "backlog.generate")
@@ -5113,18 +5109,18 @@ def test_runner_reads_legacy_completed_receipt_without_backfilling_policy(
 
 
 @pytest.mark.parametrize("vision", [False, True])
-def test_graph_provider_clock_caps_general_and_vision_deadlines(
+def test_graph_general_and_vision_generation_have_no_deadlines(
     engine: Engine, vision: bool
 ) -> None:
-    """Retain general and Vision bounds on the injected monotonic origin."""
+    """Legacy role/request values cannot add a healthy generation deadline."""
     from tests.adapters.test_vision_recipe import _bootstrap_input  # noqa: PLC0415
 
     clock = ProviderGraphClock(ticks=100.0)
-    timeouts: list[float] = []
+    timeouts: list[None] = []
 
     async def completion(**kwargs: object) -> object:
         timeout = kwargs["timeout"]
-        assert isinstance(timeout, float)
+        assert timeout is None
         timeouts.append(timeout)
         error = GraphProviderResponseError(503, "synthetic", "openrouter", "test-model")
         error.agileforge_response_status = 503
@@ -5170,7 +5166,6 @@ def test_graph_provider_clock_caps_general_and_vision_deadlines(
         domain=domain,
         registry=registry,
         session_service=TrackingSessionService(),
-        provider_clock=clock,
         config=AdkExecutionConfig(
             project_id=project_id,
             model_id="fake/model",
@@ -5190,7 +5185,7 @@ def test_graph_provider_clock_caps_general_and_vision_deadlines(
     result = runner.run(decision, payload)
     assert result.error is not None
     assert result.error.code.value == "EXTERNAL_PROVIDER_TEMPORARY"
-    assert timeouts == ([598.0, 60.0, 60.0] if vision else [118.0, 60.0, 60.0])
+    assert timeouts == [None, None, None]
     assert clock.waits == [0.0, 0.0]
 
 
@@ -5215,13 +5210,12 @@ def test_graph_budget_stop_after_scheduled_finish_is_verified_and_replayed(
         domain=domain,
         registry=runner._registry,
         session_service=TrackingSessionService(),
-        provider_clock=clock,
         config=replace(runner._config, execution_settings=settings, lease_seconds=300),
     )
 
     def oversleep() -> None:
-        clock.ticks += 118.0
-        clock.now_value += timedelta(seconds=118)
+        clock.ticks += 120.0
+        clock.now_value += timedelta(seconds=120)
 
     clock.on_sleep = oversleep
     position = domain.position(lineage.project_id)

@@ -1,0 +1,79 @@
+[
+  {
+    "identity": "issue302-attempt-ownership",
+    "encoding": "frozen",
+    "complete_sha256": "0ef823b56a9171ee91e2c91cf2c2fc6aa449d2ec498d37ab14fcb3b959ffa8f8",
+    "structural_sha256": "740a293ef263638070e06698f179bf6d9f5773f17288304e3929ad03935a2063",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "frozen",
+    "complete_sha256": "7d31b0d848d72f20244801039240d4f976a245d083a9061962800333abaa7610",
+    "structural_sha256": "97aa2275ed66a21b5419f9cacb9f31e76b3a65c2d8a97ee1953c3b9e56e26b14",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_230/simulated_later_release.sql"
+    ]
+  },
+  {
+    "identity": "issue302-attempt-ownership",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "d28265c28deb4346745e6c0fb3d1357b8261beb7a31e4011544529acb728c9d3",
+    "structural_sha256": "740a293ef263638070e06698f179bf6d9f5773f17288304e3929ad03935a2063",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "65c6a776c54784a5555a987fc7e3290f4e64ae4461efb3e6bf91a226fb2d73b7",
+    "structural_sha256": "97aa2275ed66a21b5419f9cacb9f31e76b3a65c2d8a97ee1953c3b9e56e26b14",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_230/simulated_later_release.sql"
+    ]
+  },
+  {
+    "identity": "issue302-attempt-ownership",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "4f611f7e81fb97069a61af5b8f29a47443d7cdd7c74137adda462698bd4205ec",
+    "structural_sha256": "740a293ef263638070e06698f179bf6d9f5773f17288304e3929ad03935a2063",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql",
+      "issue_302/attempt_ownership.sql.json"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "2385ba91e10746ed0f25962fc5aa396a9f419843eb9c1e3ad07a5cdfd63d6ccf",
+    "structural_sha256": "97aa2275ed66a21b5419f9cacb9f31e76b3a65c2d8a97ee1953c3b9e56e26b14",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_230/simulated_later_release.sql"
+    ]
+  }
+]
