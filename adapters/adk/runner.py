@@ -483,29 +483,26 @@ class AdkWorkflowRunner:
         if guard is None:
             raise AttemptOwnershipLostError
 
-        async def execute() -> TransitionResult:
-            output = await self._run_recipe(
+        async def execute() -> RecipeOutput:
+            # The child may suppress cancellation. It must never publish output.
+            return await self._run_recipe(
                 recipe,
                 attempt_fingerprint=context.attempt_fingerprint,
                 input_payload=context.normalized_input,
             )
-            completion = recipe.output_adapter(output, context)
-            return self._domain.transition(
-                _TRANSITION_REQUEST.validate_python(completion)
-            )
 
         async def heartbeat() -> None:
-            while True:
-                await self._sleep(guard.lease_seconds / 3)
-                # Keep injected schedulers cooperative as well as real timers.
-                await asyncio.sleep(0)
-                try:
+            try:
+                while True:
+                    await self._sleep(guard.lease_seconds / 3)
+                    # Keep injected schedulers cooperative as well as real timers.
+                    await asyncio.sleep(0)
                     provider_context.pre_try_check()
                     self._domain.renew_provider_attempt(guard)
-                except ProviderAttemptStopped:
-                    raise
-                except Exception as error:
-                    raise AttemptOwnershipLostError from error
+            except Exception as error:
+                # Revoke before the supervisor or cancellation-unwind work runs.
+                guard.revoke()
+                raise AttemptOwnershipLostError from error
 
         work = asyncio.create_task(execute())
         renewal = asyncio.create_task(heartbeat())
@@ -513,10 +510,22 @@ class AdkWorkflowRunner:
             done, _ = await asyncio.wait(
                 (work, renewal), return_when=asyncio.FIRST_COMPLETED
             )
-            if work in done:
-                return await work
-            await renewal
-            raise AttemptOwnershipLostError
+            # Failed renewal wins even when both tasks finished in one turn.
+            if renewal in done:
+                await renewal
+                raise AttemptOwnershipLostError
+            output = await work
+            if not guard.is_live:
+                raise AttemptOwnershipLostError
+            # No await separates arbitration, output adaptation and final write.
+            # The domain rechecks durable authority under its serialized writer.
+            completion = recipe.output_adapter(output, context)
+            return self._domain.transition(
+                _TRANSITION_REQUEST.validate_python(completion)
+            )
+        except asyncio.CancelledError:
+            guard.revoke()
+            raise
         finally:
             work.cancel()
             renewal.cancel()

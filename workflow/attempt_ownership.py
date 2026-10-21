@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import Event
 from typing import TYPE_CHECKING
 
 from models.workflow import WorkflowNodeAttemptOwnership
@@ -43,6 +44,18 @@ class AttemptOwnershipGuard:
     attempt_fingerprint: str
     owner_generation: str
     lease_seconds: float
+    _revoked: Event = field(
+        default_factory=Event, init=False, compare=False, repr=False
+    )
+
+    def revoke(self) -> None:
+        """Permanently fence this local generation before cancelling its work."""
+        self._revoked.set()
+
+    @property
+    def is_live(self) -> bool:
+        """Return local authority; a persisted unexpired lease cannot restore it."""
+        return not self._revoked.is_set()
 
 
 _OWNER: ContextVar[AttemptOwnershipGuard | None] = ContextVar(
@@ -126,9 +139,13 @@ def owner_guard_matches(session: Session, row: WorkflowNodeAttempt) -> bool:
     if owner is None:
         return True
     guard = current_attempt_ownership()
-    return guard is not None and (
-        guard.project_id == row.project_id
-        and guard.attempt_id == row.workflow_node_attempt_id
-        and guard.attempt_fingerprint == row.attempt_fingerprint
-        and guard.owner_generation == owner.owner_generation
+    return (
+        guard is not None
+        and guard.is_live
+        and (
+            guard.project_id == row.project_id
+            and guard.attempt_id == row.workflow_node_attempt_id
+            and guard.attempt_fingerprint == row.attempt_fingerprint
+            and guard.owner_generation == owner.owner_generation
+        )
     )

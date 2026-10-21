@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from contextlib import suppress
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -17,10 +18,19 @@ from adapters.adk import provider_retry
 from adapters.adk.agents.product_goal import root_agent
 from adapters.adk.generation_allowance import resolve_generation_allowance
 from adapters.adk.provider_transport import OpenRouterOneSendCompletion
-from adapters.adk.recipes import AGENTIC_NODE_IDS, build_agentic_recipe_registry
+from adapters.adk.recipes import (
+    AGENTIC_NODE_IDS,
+    RecipeOutput,
+    build_agentic_recipe_registry,
+)
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.product_definition import ProductGoalInterviewTurn
-from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOwnership
+from models.workflow import (
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+    WorkflowNodeAttemptOwnership,
+    WorkflowTransitionReceipt,
+)
 from services.contracts.generation_policy import GenerationAllowance  # noqa: TC001
 from tests.adapters.test_adk_graph_recipes import _agentic_nodes
 from tests.adapters.test_adk_workflow_runner import (
@@ -342,3 +352,72 @@ def test_lost_owner_cancels_real_metadata_inference_and_backoff(  # noqa: C901 -
     assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
     assert entered == cancelled == [phase]
     assert closed
+
+
+@pytest.mark.parametrize("completion_race", ["same_turn", "cancellation_unwind"])
+def test_failed_renewal_cannot_publish_a_late_goal(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_race: str,
+) -> None:
+    """Failed renewal fences same-turn output and cancellation-unwind output."""
+    ready = asyncio.Event()
+    returned: list[bool] = []
+    runner, domain, project_id = _goal_runner_system(engine, root_agent)
+
+    async def late_recipe(_recipe: object, **_kwargs: object) -> RecipeOutput:
+        if completion_race == "same_turn":
+            await ready.wait()
+        else:
+            with suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+        returned.append(True)
+        return RecipeOutput(payload=_goal_output().model_dump(mode="json"))
+
+    async def tick(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    def failed_renewal(_guard: AttemptOwnershipGuard) -> None:
+        if completion_race == "same_turn":
+            ready.set()
+        message = "synthetic storage failure before lease expiry"
+        raise OSError(message)
+
+    monkeypatch.setattr(runner, "_run_recipe", late_recipe)
+    monkeypatch.setattr(runner, "_sleep", tick)
+    monkeypatch.setattr(domain, "renew_provider_attempt", failed_renewal)
+    key = "failed-renewal-" + completion_race
+    result = runner.run(
+        _goal_decision(domain, project_id),
+        _goal_runner_input(),
+        guards=AdkRunGuards(
+            position=domain.position(project_id), idempotency_key=key, actor="operator"
+        ),
+    )
+    assert returned == [True]
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    with Session(engine) as session:
+        attempt = session.exec(
+            select(WorkflowNodeAttempt).where(
+                WorkflowNodeAttempt.idempotency_key == key
+            )
+        ).one()
+        assert not session.exec(
+            select(ProductGoalInterviewTurn).where(
+                ProductGoalInterviewTurn.attempt_fingerprint
+                == attempt.attempt_fingerprint
+            )
+        ).all()
+        outcomes = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                WorkflowNodeAttemptOutcome.workflow_node_attempt_id
+                == attempt.workflow_node_attempt_id
+            )
+        ).all()
+        assert all(outcome.status != "success" for outcome in outcomes)
+        assert not session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.idempotency_key == key + ":completion"
+            )
+        ).all()

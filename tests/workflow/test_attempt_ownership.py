@@ -355,3 +355,29 @@ def test_failed_renewal_transaction_cannot_extend_dead_owner_recovery(
         )
     finally:
         database.dispose()
+
+
+def test_locally_revoked_owner_cannot_renew_or_record_an_outcome(
+    engine: Engine,
+) -> None:
+    """An unexpired database lease cannot restore revoked local authority."""
+    domain, _clock, project_id, _request, _started, guard = _system(engine)
+    before = _immutable_history(engine)
+    guard.revoke()
+    with bind_attempt_ownership(guard):
+        with pytest.raises(AttemptOwnershipLostError):
+            domain.renew_provider_attempt(guard)
+        refused = domain.transition(_fail(project_id, guard))
+        assert refused.error is not None
+        assert refused.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    with Session(engine) as session:
+        attempt = session.get(WorkflowNodeAttempt, guard.attempt_id)
+        assert attempt is not None
+        assert attempt.model_dump_json() == before[0]
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.idempotency_key == "owned-start"
+            )
+        ).one()
+        assert receipt.model_dump_json() == before[1]
+        assert not session.exec(select(WorkflowNodeAttemptOutcome)).all()
