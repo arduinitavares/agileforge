@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
+from adapters.adk.errors import GenerationOutputValidationError
 from adapters.adk.provider_retry import ProviderAttemptStopped
 from models.core import UserStory
 from models.db import get_engine
@@ -47,6 +48,7 @@ from services.specs.accepted_specification import (
     require_current_accepted_specification,
 )
 from utils.adk_runner import provider_action_context
+from utils.failure_artifacts import AgentInvocationError
 from utils.spec_schemas import StructuralValidationFailure, ValidationEvidence
 from workflow.fingerprints import canonical_hash, canonical_json
 
@@ -98,7 +100,29 @@ class _SemanticOutcome:
     state: Literal["not_requested", "valid", "invalid"]
     findings: tuple[StorySpecificationFinding, ...] = ()
     error: str | None = None
+    output_diagnostic: JsonObject | None = None
     expected_input_payload: JsonObject | None = None
+
+
+def _invalid_semantic_output(
+    error: GenerationOutputValidationError | AgentInvocationError,
+    expected_input_payload: JsonObject | None,
+) -> _SemanticOutcome:
+    diagnostic = (
+        error.diagnostic
+        if isinstance(error, GenerationOutputValidationError)
+        else error.output_diagnostic
+    )
+    return _SemanticOutcome(
+        state="invalid",
+        error=(
+            str(diagnostic["code"])
+            if diagnostic
+            else "STORY_SPECIFICATION_REVIEW_INVALID"
+        ),
+        output_diagnostic=diagnostic,
+        expected_input_payload=expected_input_payload,
+    )
 
 
 def utc_now() -> datetime:
@@ -742,6 +766,8 @@ def _validation_result(
     }
     if semantic.error is not None:
         result["semantic_error"] = semantic.error
+    if semantic.output_diagnostic is not None:
+        result["generation_output_diagnostic"] = semantic.output_diagnostic
     return result
 
 
@@ -856,6 +882,8 @@ def validate_story_with_specification_in_session(
                 findings=_parse_semantic_result(raw_text, context=context),
                 expected_input_payload=expected_input_payload,
             )
+        except (GenerationOutputValidationError, AgentInvocationError) as failure:
+            semantic = _invalid_semantic_output(failure, expected_input_payload)
         except Exception:  # noqa: BLE001
             semantic = _SemanticOutcome(
                 state="invalid",
@@ -918,6 +946,8 @@ def validate_story_with_specification(
             return _provider_review_failure(story_id=parsed.story_id, failure=failure)
         except ProviderAttemptStopped:
             raise
+        except (GenerationOutputValidationError, AgentInvocationError) as failure:
+            semantic = _invalid_semantic_output(failure, expected_input_payload)
         except Exception:  # noqa: BLE001
             semantic = _SemanticOutcome(
                 state="invalid",

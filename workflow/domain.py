@@ -1230,6 +1230,8 @@ class WorkflowDomain:
             WorkflowErrorCode.INVALID_VISION_PAYLOAD,
             WorkflowErrorCode.PRODUCT_GOAL_OUTPUT_INCOMPLETE,
             WorkflowErrorCode.INVALID_PRODUCT_GOAL_PAYLOAD,
+            WorkflowErrorCode.GENERATION_OUTPUT_INCOMPLETE,
+            WorkflowErrorCode.INVALID_GENERATION_OUTPUT,
             WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
             WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,

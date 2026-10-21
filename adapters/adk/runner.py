@@ -26,6 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
+    GenerationOutputValidationError,
     ProductGoalOutputValidationError,
     SpecificationAgenticExecutionError,
     SpecificationOutputValidationError,
@@ -633,7 +634,12 @@ class AdkWorkflowRunner:
                 ),
             )
         if isinstance(
-            error, (VisionOutputValidationError, ProductGoalOutputValidationError)
+            error,
+            (
+                VisionOutputValidationError,
+                ProductGoalOutputValidationError,
+                GenerationOutputValidationError,
+            ),
         ):
             return self._fail_attempt(
                 request=request,
@@ -820,7 +826,7 @@ class AdkWorkflowRunner:
             ),
         )
 
-    async def _run_recipe(  # noqa: C901
+    async def _run_recipe(
         self,
         recipe: AdkRecipe,
         *,
@@ -858,7 +864,7 @@ class AdkWorkflowRunner:
             is_specification = recipe.node_id == "specification.structure"
             is_vision = recipe.node_id in ("vision.bootstrap", "vision.interview")
             is_goal = recipe.node_id == "goal.interview"
-            capture_invocation = is_specification or is_vision or is_goal
+            capture_invocation = True
             invocation_id = ""
             output: object | None = None
             try:
@@ -888,17 +894,23 @@ class AdkWorkflowRunner:
             except (
                 VisionOutputValidationError,
                 ProductGoalOutputValidationError,
+                GenerationOutputValidationError,
             ) as error:
-                if is_vision or is_goal:
-                    prefix = "product_goal" if is_goal else "vision"
-                    await self._append_output_diagnostic(
-                        session_service=session_service,
-                        session_id=session_id,
-                        invocation_id=invocation_id,
-                        diagnostic=error.diagnostic,
-                        author=f"{prefix}_output_validator",
-                        state_key=f"{prefix}_output_diagnostic",
-                    )
+                prefix = (
+                    "product_goal"
+                    if is_goal
+                    else "vision"
+                    if is_vision
+                    else "generation"
+                )
+                await self._append_output_diagnostic(
+                    session_service=session_service,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    diagnostic=error.diagnostic,
+                    author=f"{prefix}_output_validator",
+                    state_key=f"{prefix}_output_diagnostic",
+                )
                 raise
             if output is None:
                 msg = "ADK recipe completed without structured output."
@@ -940,6 +952,7 @@ class AdkWorkflowRunner:
             "vision_output_diagnostic": "Vision",
             "product_goal_output_diagnostic": "Product Goal",
             "specification_output_diagnostic": "Specification",
+            "generation_output_diagnostic": "Generation",
         }[state_key]
         try:
             session = await session_service.get_session(

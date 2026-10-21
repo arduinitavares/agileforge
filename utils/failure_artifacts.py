@@ -89,12 +89,14 @@ class AgentInvocationError(RuntimeError):
         partial_output: str | None = None,
         event_count: int = 0,
         validation_errors: list[dict[str, object]] | None = None,
+        output_diagnostic: dict[str, JsonValue] | None = None,
     ) -> None:
         """Store partial output and validation context alongside the error."""
         super().__init__(message)
         self.partial_output = partial_output
         self.event_count = event_count
         self.validation_errors = validation_errors
+        self.output_diagnostic = output_diagnostic
 
 
 def _now_iso() -> str:

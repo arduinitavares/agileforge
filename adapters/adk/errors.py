@@ -69,6 +69,19 @@ class VisionOutputValidationError(RuntimeError):
 
 
 @dataclass
+class GenerationOutputValidationError(RuntimeError):
+    """Safe downstream output failure before ADK schema conversion."""
+
+    code: str
+    message: str
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        """Exclude generated content and arbitrary provider metadata."""
+        return self.message
+
+
+@dataclass
 class ProductGoalOutputValidationError(RuntimeError):
     """Safe Product Goal output failure before ADK dictionary conversion."""
 
@@ -84,6 +97,7 @@ class ProductGoalOutputValidationError(RuntimeError):
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
+    "GenerationOutputValidationError",
     "ProductGoalOutputValidationError",
     "SpecificationAgenticExecutionError",
     "SpecificationOutputValidationError",

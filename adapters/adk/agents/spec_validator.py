@@ -2,6 +2,7 @@
 
 from google.adk.agents import LlmAgent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.specification_validation import StorySpecificationReviewOutput
@@ -32,6 +33,7 @@ def build_spec_validator_agent() -> LlmAgent:
         model=_spec_validator_model(),
         instruction=load_prompt("spec_validator.txt"),
         description="Reviews one accepted Story against its exact Specification.",
+        after_model_callback=validate_generation_response,
         output_key="spec_validation_result",
         output_schema=StorySpecificationReviewOutput,
         disallow_transfer_to_parent=True,

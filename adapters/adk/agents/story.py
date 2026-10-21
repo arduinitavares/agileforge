@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from google.adk.agents import Agent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.story import (
@@ -63,6 +64,7 @@ def create_user_story_writer_agent() -> Agent:
         model=model,
         input_schema=UserStoryWriterInput,
         before_model_callback=preserve_story_output_schema,
+        after_model_callback=validate_generation_response,
         instruction=USER_STORY_WRITER_INSTRUCTIONS,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -81,6 +83,7 @@ def create_user_story_patch_agent() -> Agent:
         model=model,
         input_schema=UserStoryWriterInput,
         before_model_callback=preserve_story_output_schema,
+        after_model_callback=validate_generation_response,
         instruction=USER_STORY_PATCH_INSTRUCTIONS,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,

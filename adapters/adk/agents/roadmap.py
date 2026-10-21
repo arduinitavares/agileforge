@@ -2,6 +2,7 @@
 
 from google.adk.agents import Agent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
@@ -33,6 +34,7 @@ root_agent: Agent = Agent(
         "Specification root."
     ),
     model=model,
+    after_model_callback=validate_generation_response,
     input_schema=RoadmapBuilderInput,
     output_schema=RoadmapBuilderOutput,
     output_key="roadmap_result",
