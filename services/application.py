@@ -1828,6 +1828,12 @@ def _agentic_execution_settings(
             else specification_generation_config
         )
         settings = {**settings, "generation_config": generation_config}
+    if node_id == "goal.interview":
+        from adapters.adk.agents.product_goal import (  # noqa: PLC0415
+            get_generation_settings,
+        )
+
+        settings = {**settings, **get_generation_settings()}
     return settings
 
 

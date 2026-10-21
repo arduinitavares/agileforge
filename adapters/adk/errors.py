@@ -68,9 +68,23 @@ class VisionOutputValidationError(RuntimeError):
         return self.message
 
 
+@dataclass
+class ProductGoalOutputValidationError(RuntimeError):
+    """Safe Product Goal output failure before ADK dictionary conversion."""
+
+    code: str
+    message: str
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        """Exclude model output and arbitrary provider metadata from error copy."""
+        return self.message
+
+
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
+    "ProductGoalOutputValidationError",
     "SpecificationAgenticExecutionError",
     "SpecificationOutputValidationError",
     "VisionAgenticPreflightError",

@@ -26,6 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
+    ProductGoalOutputValidationError,
     SpecificationAgenticExecutionError,
     SpecificationOutputValidationError,
     VisionAgenticPreflightError,
@@ -631,7 +632,9 @@ class AdkWorkflowRunner:
                     transport_message=error.message,
                 ),
             )
-        if isinstance(error, VisionOutputValidationError):
+        if isinstance(
+            error, (VisionOutputValidationError, ProductGoalOutputValidationError)
+        ):
             return self._fail_attempt(
                 request=request,
                 attempt_id=attempt_id,
@@ -854,6 +857,8 @@ class AdkWorkflowRunner:
             )
             is_specification = recipe.node_id == "specification.structure"
             is_vision = recipe.node_id in ("vision.bootstrap", "vision.interview")
+            is_goal = recipe.node_id == "goal.interview"
+            capture_invocation = is_specification or is_vision or is_goal
             invocation_id = ""
             output: object | None = None
             try:
@@ -861,10 +866,10 @@ class AdkWorkflowRunner:
                     user_id=self._config.identity.user_id,
                     session_id=session_id,
                     new_message=message,
-                    yield_user_message=is_specification or is_vision,
+                    yield_user_message=capture_invocation,
                 ):
                     if (
-                        (is_specification or is_vision)
+                        capture_invocation
                         and event.author == "user"
                         and not invocation_id
                     ):
@@ -880,15 +885,19 @@ class AdkWorkflowRunner:
                         diagnostic=error.diagnostic,
                     )
                 raise
-            except VisionOutputValidationError as error:
-                if is_vision:
+            except (
+                VisionOutputValidationError,
+                ProductGoalOutputValidationError,
+            ) as error:
+                if is_vision or is_goal:
+                    prefix = "product_goal" if is_goal else "vision"
                     await self._append_output_diagnostic(
                         session_service=session_service,
                         session_id=session_id,
                         invocation_id=invocation_id,
                         diagnostic=error.diagnostic,
-                        author="vision_output_validator",
-                        state_key="vision_output_diagnostic",
+                        author=f"{prefix}_output_validator",
+                        state_key=f"{prefix}_output_diagnostic",
                     )
                 raise
             if output is None:
@@ -927,9 +936,11 @@ class AdkWorkflowRunner:
         state_key: str,
     ) -> None:
         """Append bounded diagnostic metadata without changing the original error."""
-        diagnostic_kind = (
-            "Vision" if state_key == "vision_output_diagnostic" else "Specification"
-        )
+        diagnostic_kind = {
+            "vision_output_diagnostic": "Vision",
+            "product_goal_output_diagnostic": "Product Goal",
+            "specification_output_diagnostic": "Specification",
+        }[state_key]
         try:
             session = await session_service.get_session(
                 app_name=self._config.identity.app_name,
