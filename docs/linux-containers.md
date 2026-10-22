@@ -37,6 +37,20 @@ compatibility before switching an existing profile. Retain the previous image
 and Compose configuration. Architecture metadata alone does not establish
 runtime or data compatibility.
 
+Run both synthetic lifecycle rehearsals against the same reviewed ARM64 image:
+
+```sh
+uv run --no-project --python 3.13.15 python scripts/verify_container.py --platform linux/arm64 --image agileforge-production:arm64 --expect-sha "$(git rev-parse HEAD)"
+uv run --no-project --python 3.13.15 python scripts/verify_compose.py --platform linux/arm64 --image agileforge-production:arm64 --expect-sha "$(git rev-parse HEAD)"
+```
+
+Both scripts default to `linux/amd64` when `--platform` is omitted. The Compose
+rehearsal explicitly sets its selected platform in its subprocess environment,
+so an ambient `AGILEFORGE_PRODUCTION_PLATFORM` cannot change the rehearsal.
+These rehearsals create and delete only their disposable synthetic state; they
+do not authorize a deployment or replace a full native release-suite check.
+CI runs them on a native ARM64 runner in addition to the existing AMD64 gates.
+
 ## Run the packaged app
 
 Everyday startup needs Docker Engine with Compose. Python, `uv`, a source import,

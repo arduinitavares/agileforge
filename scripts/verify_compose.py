@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 _SUCCESS = 0
 _STARTUP_TIMEOUT = 60.0
 _PROFILE = "default"
+_PLATFORMS: tuple[str, ...] = ("linux/amd64", "linux/arm64")
 
 
 def _run(
@@ -71,7 +72,7 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def _compose_environment(image: str) -> dict[str, str]:
+def _compose_environment(image: str, platform: str) -> dict[str, str]:
     environment = os.environ.copy()
     for name in (
         "AGILEFORGE_CONTAINER_PROJECT",
@@ -81,6 +82,7 @@ def _compose_environment(image: str) -> dict[str, str]:
     ):
         environment.pop(name, None)
     environment["AGILEFORGE_PRODUCTION_IMAGE"] = image
+    environment["AGILEFORGE_PRODUCTION_PLATFORM"] = platform
     environment["AGILEFORGE_PORT"] = "0"
     return environment
 
@@ -92,6 +94,7 @@ class ComposeRehearsal:
     image: str
     revision: str
     compose_file: Path
+    platform: str = field(default="linux/amd64", kw_only=True)
     project: str = field(
         default_factory=lambda: f"agileforge-compose-verify-{uuid4().hex[:12]}"
     )
@@ -99,12 +102,15 @@ class ComposeRehearsal:
 
     def __post_init__(self) -> None:
         """Resolve the reviewed configuration and isolate the test namespace."""
+        if self.platform not in _PLATFORMS:
+            message = f"unsupported production platform: {self.platform}"
+            raise ValueError(message)
         self.compose_file = self.compose_file.resolve(strict=True)
         _require(
             self.project.startswith("agileforge-compose-verify-"),
             "refusing a non-verification Compose project",
         )
-        self.environment = _compose_environment(self.image)
+        self.environment = _compose_environment(self.image, self.platform)
 
     @property
     def volumes(self) -> tuple[str, str, str]:
@@ -160,6 +166,9 @@ class ComposeRehearsal:
         _require(set(services) == {"production"}, "default Compose services changed")
         production = _mapping(services.get("production"), label="production service")
         _require(production.get("image") == self.image, "unexpected Compose image")
+        _require(
+            production.get("platform") == self.platform, "unexpected Compose platform"
+        )
         mounts = production.get("volumes")
         _require(isinstance(mounts, list), "production mounts are missing")
         actual: dict[str, object] = {}
@@ -379,6 +388,7 @@ raise SystemExit(0 if actual == b'synthetic-compose-artifact\\n' else 1)
                 "status": "passed",
                 "project": self.project,
                 "image": self.image,
+                "platform": self.platform,
                 "revision": self.revision,
                 "state_id": state_id,
                 "data": "synthetic only",
@@ -393,6 +403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--expect-sha", required=True)
+    parser.add_argument("--platform", choices=_PLATFORMS, default="linux/amd64")
     parser.add_argument(
         "--compose-file",
         type=Path,
@@ -403,6 +414,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         image=arguments.image,
         revision=arguments.expect_sha,
         compose_file=arguments.compose_file,
+        platform=arguments.platform,
     ).run()
     print(json.dumps(result, indent=2, sort_keys=True))  # noqa: T201
     return _SUCCESS
