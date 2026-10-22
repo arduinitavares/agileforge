@@ -16,6 +16,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_RESOURCE = files("config").joinpath("models.yaml")
 _OPENROUTER_OPENAI_GPT_5_PREFIX = "openrouter/openai/gpt-5"
 _OPENROUTER_OPENAI_GPT_6_PREFIX = "openrouter/openai/gpt-6"
+_REASONING_EFFORTS: frozenset[str] = frozenset(
+    {"low", "medium", "high", "xhigh", "max"}
+)
 
 load_runtime_env()
 
@@ -100,8 +103,12 @@ class ReasoningEffortError(ValueError):
     """Raised when the configured reasoning effort is unsupported."""
 
     def __init__(self) -> None:
-        """Describe the supported deployment effort."""
-        super().__init__("reasoning.effort must be 'max' in models.yaml")
+        """Describe the supported fallback and role override settings."""
+        super().__init__(
+            "reasoning.effort and reasoning.by_role must use low, medium, high, "
+            "xhigh, or max; by_role must map retained model roles to efforts, "
+            "with complete coverage when a complete profile has no fallback"
+        )
 
 
 class ModelIdentifierError(ValueError):
@@ -176,6 +183,37 @@ def _validate_model_roles(models: object, *, require_all_roles: bool) -> None:
             raise MissingModelRolesError(missing)
 
 
+def _validate_reasoning_config(reasoning: object, *, require_all_roles: bool) -> None:
+    """Reject ambiguous effort settings before constructing any provider client."""
+    from adapters.adk.model_roles import RETAINED_MODEL_ROLES  # noqa: PLC0415
+
+    if not isinstance(reasoning, dict):
+        raise ReasoningSectionMappingError
+    settings: dict[object, object] = dict(reasoning.items())
+    fallback = settings.get("effort")
+    overrides = settings.get("by_role", {})
+    if not settings or set(settings).difference({"effort", "by_role"}):
+        raise ReasoningEffortError
+    if "effort" in settings and (
+        not isinstance(fallback, str) or fallback not in _REASONING_EFFORTS
+    ):
+        raise ReasoningEffortError
+    if not isinstance(overrides, dict):
+        raise ReasoningEffortError
+    for role, effort in overrides.items():
+        if (
+            role not in RETAINED_MODEL_ROLES
+            or not isinstance(effort, str)
+            or effort not in _REASONING_EFFORTS
+        ):
+            raise ReasoningEffortError
+    if "effort" not in settings and (
+        not overrides
+        or (require_all_roles and RETAINED_MODEL_ROLES.difference(overrides))
+    ):
+        raise ReasoningEffortError
+
+
 def parse_model_config(raw: str, *, require_all_roles: bool = False) -> dict[str, Any]:
     """Parse and validate model YAML without reading environment or cached state."""
     data = yaml.safe_load(raw)
@@ -185,11 +223,9 @@ def parse_model_config(raw: str, *, require_all_roles: bool = False) -> dict[str
         raise ModelConfigMappingError
     _validate_model_roles(data.get("models", {}), require_all_roles=require_all_roles)
     if "reasoning" in data:
-        reasoning = data["reasoning"]
-        if not isinstance(reasoning, dict):
-            raise ReasoningSectionMappingError
-        if reasoning.get("effort") != "max" or len(reasoning) != 1:
-            raise ReasoningEffortError
+        _validate_reasoning_config(
+            data["reasoning"], require_all_roles=require_all_roles
+        )
     return data
 
 
@@ -229,10 +265,18 @@ def get_model_id(key: str) -> str:
     return str(model_id)
 
 
-def get_model_reasoning_config() -> dict[str, str]:
-    """Return the validated optional reasoning setting for new requests."""
+def get_model_reasoning_config(role: str | None = None) -> dict[str, str]:
+    """Resolve a role override before the optional shared effort fallback."""
+    if role is not None:
+        from adapters.adk.model_roles import RETAINED_MODEL_ROLES  # noqa: PLC0415
+
+        if role not in RETAINED_MODEL_ROLES:
+            raise ModelKeyNotFoundError(role)
     reasoning = _load_config().get("reasoning")
-    return {} if reasoning is None else {"effort": reasoning["effort"]}
+    if reasoning is None:
+        return {}
+    effort = reasoning.get("by_role", {}).get(role, reasoning.get("effort"))
+    return {} if effort is None else {"effort": effort}
 
 
 def _get_provider_config() -> dict[str, Any]:
@@ -252,10 +296,10 @@ def _get_provider_config() -> dict[str, Any]:
     return relaxed_provider
 
 
-def get_openrouter_extra_body() -> dict[str, Any]:
+def get_openrouter_extra_body(role: str | None = None) -> dict[str, Any]:
     """Return privacy routing and optional reasoning for OpenRouter requests."""
     body: dict[str, Any] = {"provider": _get_provider_config()}
-    reasoning = get_model_reasoning_config()
+    reasoning = get_model_reasoning_config(role)
     if reasoning:
         body["reasoning"] = reasoning
     return body

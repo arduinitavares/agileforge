@@ -1,6 +1,8 @@
-FROM ghcr.io/astral-sh/uv:0.12.8@sha256:d82243909a4a5d6360fe707db12247554d05f143938aabea2017a91477e83e24 AS uv
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.8@sha256:d82243909a4a5d6360fe707db12247554d05f143938aabea2017a91477e83e24
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
+FROM ${UV_IMAGE} AS uv
 
-FROM ubuntu:24.04@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4 AS certificate-bootstrap
+FROM ${UBUNTU_IMAGE} AS certificate-bootstrap
 # The immutable Ubuntu base has no CA bundle. Its default Ubuntu archive uses
 # signed APT metadata, so it can bootstrap this exact CA package before the
 # snapshot stages make their TLS-only requests.
@@ -9,7 +11,7 @@ RUN apt-get update \
        ca-certificates=20240203 \
     && rm -rf /var/lib/apt/lists/*
 
-FROM ubuntu:24.04@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4 AS runtime-base
+FROM ${UBUNTU_IMAGE} AS runtime-base
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --from=certificate-bootstrap /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN printf '%s\n' 'Types: deb' \
@@ -23,13 +25,14 @@ RUN printf '%s\n' 'Types: deb' \
        ca-certificates curl git procps tini xz-utils libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_BIN_DIR=/opt/python/bin \
     UV_TOOL_DIR=/opt/tools \
     UV_TOOL_BIN_DIR=/opt/bin \
     UV_CACHE_DIR=/cache/uv \
     UV_LINK_MODE=copy \
     UV_NO_PROGRESS=1 \
-    PATH=/opt/bin:/opt/python/cpython-3.13.15-linux-x86_64-gnu/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-RUN uv python install 3.13.15 \
+    PATH=/opt/bin:/opt/python/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN uv python install --default 3.13.15 \
     && groupadd --gid 10001 agileforge \
     && useradd --uid 10001 --gid 10001 --create-home agileforge \
     && mkdir -p /workspace /cache /var/lib/agileforge /opt/agileforge \

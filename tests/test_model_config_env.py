@@ -77,21 +77,31 @@ def test_model_config_path_env_overrides(
 
 
 _EXPECTED_PRODUCTION_MODELS = {
-    "product_vision": "openrouter/openai/gpt-5.6-luna",
-    "product_goal": "openrouter/openai/gpt-5.6-luna",
-    "specification_structurer": "openrouter/openai/gpt-6-sol",
-    "spec_validator": "openrouter/openai/gpt-6-sol",
-    "backlog_primer": "openrouter/openai/gpt-5.6-luna",
-    "roadmap_builder": "openrouter/openai/gpt-6-sol",
-    "user_story_writer": "openrouter/openai/gpt-5.6-luna",
-    "sprint_planner": "openrouter/openai/gpt-5.6-luna",
+    "product_vision": "openrouter/openai/gpt-6.1-sol",
+    "product_goal": "openrouter/openai/gpt-6.1-sol",
+    "specification_structurer": "openrouter/openai/gpt-6.1-sol",
+    "spec_validator": "openrouter/openai/gpt-6.1-sol",
+    "backlog_primer": "openrouter/openai/gpt-6.1-sol",
+    "roadmap_builder": "openrouter/openai/gpt-6.1-sol",
+    "user_story_writer": "openrouter/openai/gpt-6.1-sol",
+    "sprint_planner": "openrouter/openai/gpt-6.1-sol",
+}
+_EXPECTED_PRODUCTION_EFFORTS: dict[str, str] = {
+    "product_vision": "medium",
+    "product_goal": "medium",
+    "specification_structurer": "xhigh",
+    "spec_validator": "high",
+    "backlog_primer": "high",
+    "roadmap_builder": "xhigh",
+    "user_story_writer": "high",
+    "sprint_planner": "high",
 }
 
 
-def test_default_model_config_assigns_all_eight_roles_and_max_reasoning(
+def test_default_model_config_assigns_all_eight_roles_and_task_reasoning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catch a wrong role assignment or lost shared reasoning setting."""
+    """Resolve every application role to Sol 6.1 and its task-specific effort."""
     monkeypatch.delenv("MODEL_CONFIG_PATH", raising=False)
     model_config.clear_config_cache()
 
@@ -99,7 +109,9 @@ def test_default_model_config_assigns_all_eight_roles_and_max_reasoning(
         assert {key: get_model_id(key) for key in _EXPECTED_PRODUCTION_MODELS} == (
             _EXPECTED_PRODUCTION_MODELS
         )
-        assert model_config.get_model_reasoning_config() == {"effort": "max"}
+        assert model_config.get_model_reasoning_config() == {"effort": "high"}
+        for role, effort in _EXPECTED_PRODUCTION_EFFORTS.items():
+            assert model_config.get_model_reasoning_config(role) == {"effort": effort}
     finally:
         model_config.clear_config_cache()
 
@@ -149,7 +161,7 @@ def test_reasoning_config_does_not_leak_between_config_paths(
         ("models:\n  product_goal: ''", "models.product_goal"),
         ("models:\n  product_goal: 42", "models.product_goal"),
         ("reasoning: max", "reasoning must be a mapping"),
-        ("reasoning:\n  effort: low", "reasoning.effort"),
+        ("reasoning:\n  effort: unsupported", "reasoning.effort"),
         ("reasoning:\n  effort: 1", "reasoning.effort"),
     ],
 )
@@ -167,6 +179,85 @@ def test_pure_model_parser_requires_all_roles_only_when_requested() -> None:
     }
     with pytest.raises(ValueError, match="product_vision"):
         model_config.parse_model_config(raw, require_all_roles=True)
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_reasoning_parser_accepts_supported_efforts(effort: str) -> None:
+    """Valid task effort must not be rejected by the old max-only validator."""
+    raw = yaml.safe_dump({"models": {}, "reasoning": {"effort": effort}})
+    assert model_config.parse_model_config(raw)["reasoning"] == {"effort": effort}
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {},
+        {"effort": "high", "unknown": "medium"},
+        {"effort": []},
+        {"by_role": "high"},
+        {"by_role": {}},
+        {"by_role": {"typo_role": "high"}},
+        {"by_role": {1: "high"}},
+        {"by_role": {"product_goal": "unsupported"}},
+        {"by_role": {"product_goal": []}},
+    ],
+)
+def test_reasoning_parser_rejects_malformed_role_overrides(reasoning: object) -> None:
+    """A typo or malformed override must fail before any provider request."""
+    raw = yaml.safe_dump({"models": {}, "reasoning": reasoning})
+    with pytest.raises(ValueError, match="reasoning"):
+        model_config.parse_model_config(raw)
+
+
+def test_complete_reasoning_without_fallback_requires_every_role() -> None:
+    """A complete profile cannot silently omit reasoning for an active role."""
+    raw = yaml.safe_dump(
+        {
+            "models": _EXPECTED_PRODUCTION_MODELS,
+            "reasoning": {"by_role": {"product_goal": "medium"}},
+        }
+    )
+    with pytest.raises(ValueError, match="reasoning"):
+        model_config.parse_model_config(raw, require_all_roles=True)
+    complete = yaml.safe_dump(
+        {
+            "models": _EXPECTED_PRODUCTION_MODELS,
+            "reasoning": {"by_role": _EXPECTED_PRODUCTION_EFFORTS},
+        }
+    )
+    assert model_config.parse_model_config(complete, require_all_roles=True)
+
+
+def test_role_reasoning_override_fallback_and_profile_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Overrides win without changing another role or leaking into a new profile."""
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        "models: {}\nreasoning:\n  effort: high\n"
+        "  by_role:\n    product_goal: medium\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(config))
+    model_config.clear_config_cache()
+    try:
+        assert model_config.get_model_reasoning_config("product_goal") == {
+            "effort": "medium"
+        }
+        assert model_config.get_model_reasoning_config("backlog_primer") == {
+            "effort": "high"
+        }
+        assert get_openrouter_extra_body("product_goal")["reasoning"] == {
+            "effort": "medium"
+        }
+        with pytest.raises(KeyError, match="typo_role"):
+            model_config.get_model_reasoning_config("typo_role")
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(_TEST_MODEL_CONFIG_PATH))
+        model_config.clear_config_cache()
+        assert model_config.get_model_reasoning_config("product_goal") == {}
+        assert "reasoning" not in get_openrouter_extra_body("product_goal")
+    finally:
+        model_config.clear_config_cache()
 
 
 def test_model_configs_exactly_match_live_production_roles() -> None:

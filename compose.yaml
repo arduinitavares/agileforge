@@ -14,7 +14,7 @@ services:
     stop_grace_period: 15s
   production:
     image: ${AGILEFORGE_PRODUCTION_IMAGE:-agileforge-production:local}
-    platform: linux/amd64
+    platform: ${AGILEFORGE_PRODUCTION_PLATFORM:-linux/amd64}
     volumes:
       - production-state:/var/lib/agileforge
       - workspace:/workspace

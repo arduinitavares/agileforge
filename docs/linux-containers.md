@@ -1,12 +1,41 @@
 # Linux containers: operator runbook
 
-This is the supported Linux/amd64 container workflow for AgileForge #263. It
+This is the supported Linux container workflow for AgileForge #263. It
 uses pinned images, named Linux volumes, and a fixed non-root runtime user.
 
 Use the recorded validation evidence for the tested revision. These commands
 describe the operator workflow and do not authorize a live-data cutover.
 An amd64 image run on an ARM64 Docker VM is functional emulation only; it is
 not a native amd64 performance baseline.
+
+### Native ARM64 production on Apple Silicon
+
+The production target also supports `linux/arm64`. The development and test
+targets retain their AMD64 toolchain. AMD64 remains the default for existing
+commands. The controller selects immutable Ubuntu and uv base images for the
+requested production architecture from `containers/pins.json`; Python, uv,
+the Ubuntu snapshot date, and locked Python dependencies remain pinned.
+
+Build from a clean committed checkout with the host transport:
+
+```sh
+controller build --target production --platform linux/arm64 \
+  --tag agileforge-production:arm64
+```
+
+Set `AGILEFORGE_PRODUCTION_PLATFORM=linux/arm64` and select that image when using
+the repository Compose configuration. An existing private deployment can instead
+set `production.platform: linux/arm64` in its override. Preserve its profile,
+volume names, command, restart policy and port bindings during an image switch.
+Use `production-maintenance --platform linux/arm64 --image <native-image>` for
+subsequent installed-runtime maintenance. The controller checks the resolved
+image's architecture before mounting durable volumes and refuses mismatches.
+
+Validate the image metadata (`linux/arm64`), running Python (`aarch64`), packaged
+native dependencies, synthetic profile lifecycle and prior-architecture state
+compatibility before switching an existing profile. Retain the previous image
+and Compose configuration. Architecture metadata alone does not establish
+runtime or data compatibility.
 
 ## Run the packaged app
 

@@ -20,7 +20,7 @@ def _spec_validator_model() -> LiteLlm:
         model_id=model_id,
         api_key=get_openrouter_api_key(),
         drop_params=True,
-        extra_body=get_openrouter_extra_body(),
+        extra_body=get_openrouter_extra_body("spec_validator"),
         **get_model_token_limit_args(model_id, get_spec_validator_max_tokens()),
     )
 

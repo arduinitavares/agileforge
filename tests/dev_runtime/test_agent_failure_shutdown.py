@@ -65,7 +65,7 @@ _MODEL_DEFINITION: str = """model: LiteLlm = create_openrouter_model(
     model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
-    extra_body=get_openrouter_extra_body(),
+    extra_body=get_openrouter_extra_body("specification_structurer"),
 )
 """
 _RUNTIME_SNAPSHOT_ROOTS: tuple[str, ...] = (
