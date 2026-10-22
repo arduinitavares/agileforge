@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 WORKSPACE = "/workspace/repos/agileforge"
 DEFAULT_PROJECT_NAME = os.environ.get("AGILEFORGE_CONTAINER_PROJECT", "agileforge")
 PIN_PATH = Path("containers/pins.json")
+PRODUCTION_PLATFORMS: tuple[str, ...] = ("linux/amd64", "linux/arm64")
 GIT_SHA_LENGTH = 40
 SHA256_HEX_LENGTH = 64
 REMOTE_TEMPORARY_DIRECTORY = Path(os.sep, "tmp")
@@ -194,10 +195,36 @@ def export_source(
     return target
 
 
-def build(checkout: Path, *, target: str, tag: str) -> None:
+def _validate_platform(platform: str) -> None:
+    if platform not in PRODUCTION_PLATFORMS:
+        raise ValueError(f"unsupported production platform: {platform}")
+
+
+def _base_image_arguments(context: Path, platform: str) -> tuple[str, ...]:
+    pins = json.loads((context / PIN_PATH).read_text(encoding="utf-8"))
+    images = pins.get("production_images", {}).get(platform)
+    if images is None and platform == "linux/amd64":
+        images = {"ubuntu": pins["ubuntu"], "uv": pins["uv"]}
+    if not isinstance(images, dict):
+        raise TypeError(f"missing pinned base images for {platform}")
+    arguments: list[str] = []
+    for key in ("ubuntu", "uv"):
+        image = images.get(key)
+        if not isinstance(image, str) or "@sha256:" not in image:
+            raise ValueError(f"missing immutable {key} base for {platform}")
+        arguments.extend(("--build-arg", f"{key.upper()}_IMAGE={image}"))
+    return tuple(arguments)
+
+
+def build(
+    checkout: Path, *, target: str, tag: str, platform: str = "linux/amd64"
+) -> None:
     """Build a target from an explicit Git export, never the working directory."""
     if target not in {"development", "test", "production"}:
         raise ValueError(f"unsupported build target: {target}")
+    _validate_platform(platform)
+    if platform == "linux/arm64" and target != "production":
+        raise ValueError("ARM64 builds are qualified only for the production target")
     with tempfile.TemporaryDirectory(
         prefix="agileforge-container-"
     ) as temporary_directory:
@@ -213,7 +240,7 @@ def build(checkout: Path, *, target: str, tag: str) -> None:
                 "docker",
                 "build",
                 "--platform",
-                "linux/amd64",
+                platform,
                 "--file",
                 str(context / "Dockerfile"),
                 "--target",
@@ -226,6 +253,7 @@ def build(checkout: Path, *, target: str, tag: str) -> None:
                 f"SOURCE_SHA256={identity['source_sha256']}",
                 "--build-arg",
                 f"LOCK_SHA256={identity['lock_sha256']}",
+                *_base_image_arguments(context, platform),
                 str(context),
             )
         )
@@ -422,8 +450,11 @@ def production_maintenance(
     project_name: str,
     image: str,
     command: Sequence[str],
+    *,
+    platform: str = "linux/amd64",
 ) -> None:
     """Run one fenced installed-runtime maintenance command in a fresh container."""
+    _validate_platform(platform)
     runtime_command = _maintenance_runtime_command(command)
     resources = project_resources(project_name)
     consumers = _maintenance_consumers(resources)
@@ -431,6 +462,21 @@ def production_maintenance(
         names = ", ".join(consumers)
         raise RuntimeError(f"maintenance refused; writable volume consumers: {names}")
     resolved_image = _resolved_image(image)
+    actual_platform = _run(
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+            resolved_image,
+        )
+    ).stdout.strip()
+    if actual_platform != platform:
+        raise ValueError(
+            f"production image platform mismatch: requested {platform}, "
+            f"observed {actual_platform}"
+        )
     _forward(
         (
             "docker",
@@ -438,7 +484,7 @@ def production_maintenance(
             "--rm",
             "--interactive",
             "--platform",
-            "linux/amd64",
+            platform,
             "--mount",
             f"type=volume,source={resources['workspace_volume']},target=/workspace",
             "--mount",
@@ -549,6 +595,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=("development", "test", "production"),
     )
     build_parser.add_argument("--tag", required=True)
+    build_parser.add_argument(
+        "--platform", choices=PRODUCTION_PLATFORMS, default="linux/amd64"
+    )
     subparsers.add_parser("up")
     subparsers.add_parser("import-source")
     exec_parser = subparsers.add_parser("exec")
@@ -556,6 +605,9 @@ def _parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("command", nargs=argparse.REMAINDER)
     production_maintenance_parser = subparsers.add_parser("production-maintenance")
     production_maintenance_parser.add_argument("--image", required=True)
+    production_maintenance_parser.add_argument(
+        "--platform", choices=PRODUCTION_PLATFORMS, default="linux/amd64"
+    )
     production_maintenance_parser.add_argument("command", nargs=argparse.REMAINDER)
     subparsers.add_parser("stop")
     subparsers.add_parser("metadata")
@@ -574,7 +626,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         )
     elif parsed.action == "build":
-        build(parsed.checkout, target=parsed.target, tag=parsed.tag)
+        build(
+            parsed.checkout,
+            target=parsed.target,
+            tag=parsed.tag,
+            platform=parsed.platform,
+        )
     elif parsed.action == "up":
         up(parsed.project_name)
     elif parsed.action == "import-source":
@@ -586,7 +643,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
             maintenance=parsed.maintenance,
         )
     elif parsed.action == "production-maintenance":
-        production_maintenance(parsed.project_name, parsed.image, parsed.command)
+        production_maintenance(
+            parsed.project_name, parsed.image, parsed.command, platform=parsed.platform
+        )
     elif parsed.action == "stop":
         stop(parsed.project_name)
     else:

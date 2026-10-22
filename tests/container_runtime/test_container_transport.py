@@ -81,6 +81,8 @@ def test_production_maintenance_transports_only_the_resolved_image(
 
     def inspect_image(arguments: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
         inspections.append(arguments)
+        if "{{.Os}}/{{.Architecture}}" in arguments:
+            return SimpleNamespace(stdout="linux/amd64\n")
         return SimpleNamespace(stdout=f"{resolved_image}\n")
 
     monkeypatch.setattr(container, "_run", inspect_image)
@@ -132,7 +134,15 @@ def test_production_maintenance_transports_only_the_resolved_image(
             "--format",
             "{{.Id}}",
             "agileforge-production:reviewed",
-        )
+        ),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+            resolved_image,
+        ),
     ]
 
 
@@ -159,7 +169,11 @@ def test_profile_maintenance_uses_exact_image_and_writable_consumer_check(
     resolved = f"sha256:{'a' * 64}"
     monkeypatch.setattr(container, "_maintenance_consumers", lambda _resources: [])
     monkeypatch.setattr(
-        container, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout=resolved)
+        container,
+        "_run",
+        lambda args, **_kwargs: SimpleNamespace(
+            stdout="linux/amd64" if "{{.Os}}/{{.Architecture}}" in args else resolved
+        ),
     )
     monkeypatch.setattr(
         container, "_forward", lambda argv: commands.append(tuple(argv))

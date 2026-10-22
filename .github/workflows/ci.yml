@@ -55,6 +55,29 @@ jobs:
       - name: Verify normal Compose startup and persistent state
         run: uv run --no-project --python 3.13.15 python scripts/verify_compose.py --image agileforge-production:ci --expect-sha "$GITHUB_SHA"
 
+  linux-arm64-production:
+    name: Native ARM64 production rehearsal
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.12.8"
+          python-version: "3.13.15"
+      - name: Build native ARM64 production image
+        run: uv run --no-project --python 3.13.15 python scripts/container.py build --target production --platform linux/arm64 --tag agileforge-production:arm64-ci
+      - name: Verify native runner, image and installed Python
+        run: |
+          test "$(uname -m)" = aarch64
+          test "$(docker image inspect agileforge-production:arm64-ci --format '{{.Os}}/{{.Architecture}}')" = linux/arm64
+          docker run --rm --platform linux/arm64 --network none --entrypoint /build/.venv/bin/python agileforge-production:arm64-ci \
+            -c 'import platform; print(platform.machine()); assert platform.machine() == "aarch64"'
+      - name: Rehearse the installed ARM64 production image
+        run: uv run --no-project --python 3.13.15 python scripts/verify_container.py --platform linux/arm64 --image agileforge-production:arm64-ci --expect-sha "$GITHUB_SHA"
+      - name: Verify ARM64 Compose startup and persistent state
+        run: uv run --no-project --python 3.13.15 python scripts/verify_compose.py --platform linux/arm64 --image agileforge-production:arm64-ci --expect-sha "$GITHUB_SHA"
+
   python-313:
     name: Python 3.13 full gate
     runs-on: ubuntu-latest

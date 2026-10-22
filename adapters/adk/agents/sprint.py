@@ -15,7 +15,7 @@ model: LiteLlm = create_openrouter_model(
     model_id=get_model_id("sprint_planner"),
     api_key=get_openrouter_api_key(),
     drop_params=True,
-    extra_body=get_openrouter_extra_body(),
+    extra_body=get_openrouter_extra_body("sprint_planner"),
 )
 
 root_agent: Agent = Agent(

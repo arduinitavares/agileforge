@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 _SUCCESS = 0
 _STARTUP_TIMEOUT = 60.0
+_PLATFORMS: tuple[str, ...] = ("linux/amd64", "linux/arm64")
 
 
 def _docker(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -61,8 +62,15 @@ class ImageRehearsal:
 
     image: str
     revision: str
+    platform: str = field(default="linux/amd64", kw_only=True)
     prefix: str = field(default_factory=lambda: f"agileforge-verify-{uuid4().hex[:12]}")
     containers: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Reject an unsupported architecture before allocating any resources."""
+        if self.platform not in _PLATFORMS:
+            message = f"unsupported production platform: {self.platform}"
+            raise ValueError(message)
 
     @property
     def volume(self) -> str:
@@ -77,7 +85,7 @@ class ImageRehearsal:
             "run",
             "--rm",
             "--platform",
-            "linux/amd64",
+            self.platform,
             "--network",
             "none",
             "--mount",
@@ -102,7 +110,7 @@ with runtime_fence(root, exclusive=True):
             "run",
             "--rm",
             "--platform",
-            "linux/amd64",
+            self.platform,
             "--network",
             "none",
             "--mount",
@@ -132,7 +140,7 @@ raise SystemExit(main(['cli', '--profile', 'source', '--secrets-file',
             "run",
             "--rm",
             "--platform",
-            "linux/amd64",
+            self.platform,
             "--network",
             "none",
             "--mount",
@@ -167,7 +175,7 @@ with runtime_fence(root):
             "run",
             "--rm",
             "--platform",
-            "linux/amd64",
+            self.platform,
             "--network",
             "none",
             "--mount",
@@ -195,7 +203,7 @@ with runtime_fence(root):
             "--name",
             name,
             "--platform",
-            "linux/amd64",
+            self.platform,
             "--publish",
             "127.0.0.1::8765",
             "--mount",
@@ -341,6 +349,7 @@ with runtime_fence(root):
             return {
                 "status": "passed",
                 "image": self.image,
+                "platform": self.platform,
                 "revision": self.revision,
                 "state_id": state.get("state_id"),
                 "containers": [first_id, second_id],
@@ -361,8 +370,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--expect-sha", required=True)
+    parser.add_argument("--platform", choices=_PLATFORMS, default="linux/amd64")
     arguments = parser.parse_args(argv)
-    result = ImageRehearsal(arguments.image, arguments.expect_sha).run()
+    result = ImageRehearsal(
+        arguments.image, arguments.expect_sha, platform=arguments.platform
+    ).run()
     print(json.dumps(result, indent=2, sort_keys=True))  # noqa: T201
     return 0
 

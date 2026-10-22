@@ -1822,7 +1822,7 @@ def _agentic_execution_settings(
     """Return effective non-secret settings included in attempt identity."""
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
     settings["generation_policy"] = get_generation_policy()
-    reasoning = get_model_reasoning_config()
+    reasoning = get_model_reasoning_config(AGENTIC_MODEL_ROLES[node_id])
     if reasoning:
         settings["reasoning"] = _JSON_OBJECT.validate_python(reasoning)
     if node_id in ("vision.bootstrap", "vision.interview"):

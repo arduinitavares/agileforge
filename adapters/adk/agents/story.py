@@ -35,7 +35,7 @@ def _create_story_writer_model() -> LiteLlm:
         model_id=model_id,
         api_key=get_openrouter_api_key(),
         drop_params=True,
-        extra_body=get_openrouter_extra_body(),
+        extra_body=get_openrouter_extra_body("user_story_writer"),
     )
 
 

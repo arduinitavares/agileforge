@@ -27,17 +27,28 @@ TOKEN_LIMIT = 4096
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_id",
-    ["openrouter/openai/gpt-5.6-luna", "openrouter/openai/gpt-6-sol"],
+    ("role", "effort"),
+    [
+        ("product_vision", "medium"),
+        ("product_goal", "medium"),
+        ("specification_structurer", "xhigh"),
+        ("spec_validator", "high"),
+        ("backlog_primer", "high"),
+        ("roadmap_builder", "xhigh"),
+        ("user_story_writer", "high"),
+        ("sprint_planner", "high"),
+    ],
 )
 async def test_adk_litellm_sends_reasoning_and_budget_to_openrouter(
-    model_id: str,
+    role: str,
+    effort: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catch loss of model, effort, privacy, or limit before SDK HTTP send."""
     monkeypatch.delenv("MODEL_CONFIG_PATH", raising=False)
     monkeypatch.setenv("RELAX_ZDR_FOR_TESTS", "false")
     model_config.clear_config_cache()
+    model_id = model_config.get_model_id(role)
     requests: list[dict[str, object]] = []
 
     async def capture_send(
@@ -72,7 +83,7 @@ async def test_adk_litellm_sends_reasoning_and_budget_to_openrouter(
         model=model_id,
         api_key="dummy-key",
         drop_params=True,
-        extra_body=get_openrouter_extra_body(),
+        extra_body=get_openrouter_extra_body(role),
         **get_model_token_limit_args(model_id, TOKEN_LIMIT),
     )
     request = LlmRequest(
@@ -87,8 +98,8 @@ async def test_adk_litellm_sends_reasoning_and_budget_to_openrouter(
     assert len(responses) == 1
     assert len(requests) == 1
     body = requests[0]
-    assert body["model"] == model_id.removeprefix("openrouter/")
-    assert body["reasoning"] == {"effort": "max"}
+    assert body["model"] == "openai/gpt-6.1-sol"
+    assert body["reasoning"] == {"effort": effort}
     assert body["max_completion_tokens"] == TOKEN_LIMIT
     assert "max_tokens" not in body
     assert body["provider"] == {

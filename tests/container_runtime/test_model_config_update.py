@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+import yaml
 from git import Actor, Repo
 from google.adk.sessions import DatabaseSessionService
 
@@ -103,10 +104,17 @@ def _call(
     return result, json.loads(capsys.readouterr().out)
 
 
+def _different_model_config(source: bytes, *, role: str) -> bytes:
+    """Change one role independently of the shipped production model name."""
+    config = yaml.safe_load(source)
+    config["models"][role] = "openrouter/openai/gpt-oss-20b:free"
+    return yaml.safe_dump(config).encode("utf-8")
+
+
 def _candidate(tmp_path: Path, profile: Path) -> Path:
     source = (profile / "config" / "models.yaml").read_bytes()
     candidate = tmp_path / "candidate.yaml"
-    candidate.write_bytes(source.replace(b"gpt-5.6-luna", b"gpt-6-sol", 1))
+    candidate.write_bytes(_different_model_config(source, role="product_vision"))
     candidate.chmod(0o600)
     return candidate
 
@@ -499,7 +507,7 @@ def test_new_update_supersedes_old_recovery_authorization(
     )
     assert code == 0
     second = tmp_path / "second.yaml"
-    second.write_bytes(first.read_bytes().replace(b"gpt-5.6-luna", b"gpt-6-sol", 1))
+    second.write_bytes(_different_model_config(first.read_bytes(), role="product_goal"))
     second_recovery = deployment / "second-recovery"
     code, _ = _call(
         _update_arguments(second, second_recovery), deployment, build_file, capsys

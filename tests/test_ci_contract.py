@@ -113,6 +113,7 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
     expected = {
         "python-313": ("ubuntu-latest", CANONICAL_PYTHON),
         "linux-container": ("ubuntu-latest", CANONICAL_PYTHON),
+        "linux-arm64-production": ("ubuntu-24.04-arm", CANONICAL_PYTHON),
     }
     assert set(_mapping(workflow["jobs"])) == {*expected, "frontend"}
     for name, (runner, python_version) in expected.items():
@@ -135,6 +136,7 @@ def test_python_jobs_install_canonical_python_before_use(
     first_consumers = {
         "python-313": "Install pyrepo-check controller",
         "linux-container": "Build pinned Linux test image",
+        "linux-arm64-production": "Build native ARM64 production image",
     }
     install_command = f"uv python install {CANONICAL_PYTHON}"
 
@@ -164,6 +166,44 @@ def test_python_jobs_install_canonical_python_before_use(
             assert str(steps[consumer_index]["run"]).startswith(
                 f"uv run --no-project --python {CANONICAL_PYTHON} python "
             )
+
+
+def test_native_arm64_job_rehearses_the_built_platform(
+    workflow: dict[str, object],
+) -> None:
+    """An ARM job must exercise its own image rather than defaulting to AMD64."""
+    commands = [
+        shlex.split(line)
+        for line in _runs(_job(workflow, "linux-arm64-production")).splitlines()
+        if line.strip().startswith("uv run ")
+    ]
+    for script in (
+        "scripts/container.py",
+        "scripts/verify_container.py",
+        "scripts/verify_compose.py",
+    ):
+        command = next(command for command in commands if script in command)
+        assert command[:7] == [
+            "uv",
+            "run",
+            "--no-project",
+            "--python",
+            CANONICAL_PYTHON,
+            "python",
+            script,
+        ]
+        assert command[command.index("--platform") + 1] == "linux/arm64"
+        if script == "scripts/container.py":
+            assert command[command.index("--target") + 1] == "production"
+            assert (
+                command[command.index("--tag") + 1] == "agileforge-production:arm64-ci"
+            )
+        else:
+            assert (
+                command[command.index("--image") + 1]
+                == "agileforge-production:arm64-ci"
+            )
+            assert command[command.index("--expect-sha") + 1] == "$GITHUB_SHA"
 
 
 def test_python_jobs_install_playwright_chromium_before_gate(
