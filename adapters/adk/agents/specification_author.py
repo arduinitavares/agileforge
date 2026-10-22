@@ -41,9 +41,10 @@ if TYPE_CHECKING:
     from services.contracts.specification_authoring import JsonObject
 
 _INCOMPLETE_OUTPUT_MESSAGE: str = (
-    "Specification structurer returned incomplete output. Increase "
-    "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can return "
-    "the complete structured payload, then retry Structure Specification."
+    "Specification structurer returned incomplete output. Inspect the effective "
+    "generation policy and provider finish/usage evidence, then retry Structure "
+    "Specification with the current recovery command and a new idempotency key. "
+    "The same key replays this failure."
 )
 _INCOMPLETE_OUTPUT_CODE: str = "SPECIFICATION_OUTPUT_INCOMPLETE"
 

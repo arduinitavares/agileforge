@@ -2,27 +2,25 @@
 
 from google.adk.agents import Agent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
-from utils.runtime_config import get_openrouter_api_key, get_roadmap_builder_max_tokens
+from utils.runtime_config import get_openrouter_api_key
 
 ROADMAP_INSTRUCTIONS = load_prompt("roadmap.txt")
 
 # Initialize Model
-_max_tokens = get_roadmap_builder_max_tokens()
 _model_id = get_model_id("roadmap_builder")
 model: LiteLlm = create_openrouter_model(
     model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body("roadmap_builder"),
-    **get_model_token_limit_args(_model_id, _max_tokens),
 )
 
 # Initialize Agent
@@ -33,6 +31,7 @@ root_agent: Agent = Agent(
         "Specification root."
     ),
     model=model,
+    after_model_callback=validate_generation_response,
     input_schema=RoadmapBuilderInput,
     output_schema=RoadmapBuilderOutput,
     output_key="roadmap_result",

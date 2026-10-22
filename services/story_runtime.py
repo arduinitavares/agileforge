@@ -309,6 +309,21 @@ async def _run_validated_story_request(  # noqa: C901, PLR0912, PLR0915
                 else _invoke_story_agent(attempt_payload)
             )
         except AgentInvocationError as exc:
+            if exc.output_diagnostic is not None:
+                return _failure_result(
+                    _failure(
+                        project_id=project_id,
+                        input_context=attempt_context,
+                        failure_stage="output_validation",
+                        details=_FailureDetails(
+                            message=str(exc),
+                            extra={
+                                "generation_output_diagnostic": exc.output_diagnostic
+                            },
+                        ),
+                    ),
+                    request_payload=attempt_context,
+                )
             validation_errors = exc.validation_errors
             sentinel_fields = _sentinel_fields_from_raw_text(exc.partial_output)
             if not sentinel_fields:

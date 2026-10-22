@@ -54,9 +54,10 @@ pytestmark = pytest.mark.skipif(
     reason="executes the real launcher, which refuses non-Linux hosts",
 )
 _ISSUE_200_INCOMPLETE_MESSAGE: str = (
-    "Specification structurer returned incomplete output. Increase "
-    "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can return "
-    "the complete structured payload, then retry Structure Specification."
+    "Specification structurer returned incomplete output. Inspect the effective "
+    "generation policy and provider finish/usage evidence, then retry Structure "
+    "Specification with the current recovery command and a new idempotency key. "
+    "The same key replays this failure."
 )
 _MODEL_IMPORT: str = (
     "from adapters.adk.provider_models import LiteLlm, create_openrouter_model\n"

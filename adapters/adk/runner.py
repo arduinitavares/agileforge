@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import uuid4
 
+from google.adk.agents.run_config import RunConfig
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event, EventActions
@@ -26,6 +26,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
+    GenerationExecutionError,
+    ProductGoalOutputValidationError,
     SpecificationAgenticExecutionError,
     SpecificationOutputValidationError,
     VisionAgenticPreflightError,
@@ -51,16 +53,22 @@ from services.contracts.provider_retry import (
     ProviderAttemptAudit,
     ProviderAuditError,
     ProviderFailureSummary,
-    ProviderRetryClock,
     ProviderRetryConfig,
     ProviderTransientFailure,
     provider_failure_message,
 )
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS, get_generation_policy
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     RunnerIdentity,
     get_adk_execution_trace_db_target,
     get_provider_retry_config,
+)
+from workflow.attempt_ownership import (
+    AttemptOwnershipGuard,
+    AttemptOwnershipLostError,
+    bind_attempt_ownership,
+    current_attempt_ownership,
 )
 from workflow.contracts import (
     JsonObject,
@@ -81,11 +89,25 @@ from workflow.requests import (
 logger: logging.Logger = logging.getLogger(name=__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
 
 class WorkflowDomainRunnerPort(Protocol):
     """Domain methods required by durable ADK execution."""
+
+    def claim_provider_attempt(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> AttemptOwnershipGuard:
+        """Acquire one host generation after durable reservation."""
+        ...
+
+    def renew_provider_attempt(self, guard: AttemptOwnershipGuard) -> None:
+        """Renew exact live authority under the domain transaction boundary."""
+        ...
 
     def position(self, project_id: int) -> WorkflowPosition:
         """Return the current durable position."""
@@ -268,7 +290,7 @@ class AdkWorkflowRunner:
         config: AdkExecutionConfig,
         session_service: BaseSessionService | None = None,
         specification_source_check: SpecificationSourceCheck | None = None,
-        provider_clock: ProviderRetryClock | None = None,
+        ownership_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Retain domain, recipe, execution, and trace-store dependencies."""
         self._domain = domain
@@ -276,9 +298,7 @@ class AdkWorkflowRunner:
         self._config = config
         self._session_service = session_service
         self._specification_source_check = specification_source_check
-        self._monotonic: Callable[[], float] = (
-            time.monotonic if provider_clock is None else provider_clock.monotonic
-        )
+        self._sleep = ownership_sleep
 
     def run(
         self,
@@ -359,6 +379,15 @@ class AdkWorkflowRunner:
             else get_provider_retry_config()
         )
         settings["provider_retry"] = policy.model_dump(mode="json")
+        settings["generation_policy"] = get_generation_policy()
+        generation_config = settings.get("generation_config")
+        if isinstance(generation_config, dict):
+            settings["generation_config"] = {
+                key: value
+                for key, value in generation_config.items()
+                if key not in RETIRED_GENERATION_ARGUMENTS
+            }
+        settings["timeout_seconds"] = None
         start_request = start_request.model_copy(
             update={"execution_settings": settings}
         )
@@ -388,6 +417,27 @@ class AdkWorkflowRunner:
             correlation_id=start_request.correlation_id,
             normalized_input=persisted_input,
         )
+        try:
+            guard = self._domain.claim_provider_attempt(
+                project_id=context.project_id,
+                attempt_id=context.attempt_id,
+                attempt_fingerprint=context.attempt_fingerprint,
+            )
+        except AttemptOwnershipLostError:
+            return self._ownership_lost_result()
+        with bind_attempt_ownership(guard):
+            return self._execute_admitted(request, start_request, context, policy)
+
+    def _execute_admitted(
+        self,
+        request: AdkRunRequest,
+        start_request: StartNodeAttempt,
+        context: AttemptCompletionContext,
+        policy: ProviderRetryConfig,
+    ) -> TransitionResult:
+        attempt_id = context.attempt_id
+        attempt_fingerprint = context.attempt_fingerprint
+        persisted_input = context.normalized_input
         pre_provider_check = self._specification_attempt_revalidator(
             request=request,
             attempt_id=attempt_id,
@@ -407,22 +457,92 @@ class AdkWorkflowRunner:
                 bind_provider_action(provider_context),
                 bind_specification_attempt_revalidator(pre_provider_check),
             ):
-                output = asyncio.run(
-                    self._run_recipe(
-                        recipe,
-                        attempt_fingerprint=attempt_fingerprint,
-                        input_payload=persisted_input,
-                    )
+                return asyncio.run(
+                    self._run_with_ownership(recipe, context, provider_context)
                 )
-            completion = recipe.output_adapter(output, context)
+        except AttemptOwnershipLostError:
+            return self._ownership_lost_result()
         except _AGENTIC_EXECUTION_ERRORS as error:
-            return self._handle_execution_failure(
-                request=request,
-                attempt_id=attempt_id,
-                attempt_fingerprint=attempt_fingerprint,
-                error=error,
+            try:
+                return self._handle_execution_failure(
+                    request=request,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    error=error,
+                )
+            except AttemptOwnershipLostError:
+                return self._ownership_lost_result()
+
+    async def _run_with_ownership(
+        self,
+        recipe: AdkRecipe,
+        context: AttemptCompletionContext,
+        provider_context: ProviderActionContext,
+    ) -> TransitionResult:
+        guard = current_attempt_ownership()
+        if guard is None:
+            raise AttemptOwnershipLostError
+
+        async def execute() -> RecipeOutput:
+            # The child may suppress cancellation. It must never publish output.
+            return await self._run_recipe(
+                recipe,
+                attempt_fingerprint=context.attempt_fingerprint,
+                input_payload=context.normalized_input,
             )
-        return self._domain.transition(_TRANSITION_REQUEST.validate_python(completion))
+
+        async def heartbeat() -> None:
+            try:
+                while True:
+                    await self._sleep(guard.lease_seconds / 3)
+                    # Keep injected schedulers cooperative as well as real timers.
+                    await asyncio.sleep(0)
+                    provider_context.pre_try_check()
+                    self._domain.renew_provider_attempt(guard)
+            except Exception as error:
+                # Revoke before the supervisor or cancellation-unwind work runs.
+                guard.revoke()
+                raise AttemptOwnershipLostError from error
+
+        work = asyncio.create_task(execute())
+        renewal = asyncio.create_task(heartbeat())
+        try:
+            done, _ = await asyncio.wait(
+                (work, renewal), return_when=asyncio.FIRST_COMPLETED
+            )
+            # Failed renewal wins even when both tasks finished in one turn.
+            if renewal in done:
+                await renewal
+                raise AttemptOwnershipLostError
+            output = await work
+            if not guard.is_live:
+                raise AttemptOwnershipLostError
+            # No await separates arbitration, output adaptation and final write.
+            # The domain rechecks durable authority under its serialized writer.
+            completion = recipe.output_adapter(output, context)
+            return self._domain.transition(
+                _TRANSITION_REQUEST.validate_python(completion)
+            )
+        except asyncio.CancelledError:
+            guard.revoke()
+            raise
+        finally:
+            work.cancel()
+            renewal.cancel()
+            await asyncio.gather(work, renewal, return_exceptions=True)
+
+    def _ownership_lost_result(self) -> TransitionResult:
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.ATTEMPT_OBSOLETE,
+                message=(
+                    "Generation was cancelled because attempt ownership could not "
+                    "be renewed. No output was published; inspect the current workflow "
+                    "and retry after its recovery gate."
+                ),
+            ),
+        )
 
     def _provider_action_context(
         self,
@@ -460,27 +580,13 @@ class AdkWorkflowRunner:
             if error is not None:
                 raise _ProviderHostStopped(error)
 
-        now = self._monotonic()
-        remaining_lease = self._domain.provider_attempt_lease_remaining_seconds(
-            project_id=start_request.project_id,
-            attempt_id=attempt_id,
-            attempt_fingerprint=attempt_fingerprint,
-        )
-        timeout = start_request.execution_settings.get("timeout_seconds", 120.0)
-        if (
-            not isinstance(timeout, (int, float))
-            or isinstance(timeout, bool)
-            or timeout <= 0
-        ):
-            msg = "The action timeout must be a positive number."
-            raise ValueError(msg)
         return ProviderActionContext(
             project_id=start_request.project_id,
             action_id=f"node-attempt:{attempt_id}",
             policy=policy,
             audit=self._domain.provider_attempt_audit(),
-            action_deadline=now + timeout,
-            lease_deadline=now + remaining_lease,
+            action_deadline=None,
+            lease_deadline=None,
             pre_try_check=check,
             workflow_node_attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
@@ -631,7 +737,14 @@ class AdkWorkflowRunner:
                     transport_message=error.message,
                 ),
             )
-        if isinstance(error, VisionOutputValidationError):
+        if isinstance(
+            error,
+            (
+                VisionOutputValidationError,
+                ProductGoalOutputValidationError,
+                GenerationExecutionError,
+            ),
+        ):
             return self._fail_attempt(
                 request=request,
                 attempt_id=attempt_id,
@@ -817,7 +930,7 @@ class AdkWorkflowRunner:
             ),
         )
 
-    async def _run_recipe(  # noqa: C901
+    async def _run_recipe(
         self,
         recipe: AdkRecipe,
         *,
@@ -854,6 +967,8 @@ class AdkWorkflowRunner:
             )
             is_specification = recipe.node_id == "specification.structure"
             is_vision = recipe.node_id in ("vision.bootstrap", "vision.interview")
+            is_goal = recipe.node_id == "goal.interview"
+            capture_invocation = True
             invocation_id = ""
             output: object | None = None
             try:
@@ -861,10 +976,11 @@ class AdkWorkflowRunner:
                     user_id=self._config.identity.user_id,
                     session_id=session_id,
                     new_message=message,
-                    yield_user_message=is_specification or is_vision,
+                    yield_user_message=capture_invocation,
+                    run_config=RunConfig(max_llm_calls=0),
                 ):
                     if (
-                        (is_specification or is_vision)
+                        capture_invocation
                         and event.author == "user"
                         and not invocation_id
                     ):
@@ -880,16 +996,26 @@ class AdkWorkflowRunner:
                         diagnostic=error.diagnostic,
                     )
                 raise
-            except VisionOutputValidationError as error:
-                if is_vision:
-                    await self._append_output_diagnostic(
-                        session_service=session_service,
-                        session_id=session_id,
-                        invocation_id=invocation_id,
-                        diagnostic=error.diagnostic,
-                        author="vision_output_validator",
-                        state_key="vision_output_diagnostic",
-                    )
+            except (
+                VisionOutputValidationError,
+                ProductGoalOutputValidationError,
+                GenerationExecutionError,
+            ) as error:
+                prefix = (
+                    "product_goal"
+                    if is_goal
+                    else "vision"
+                    if is_vision
+                    else "generation"
+                )
+                await self._append_output_diagnostic(
+                    session_service=session_service,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    diagnostic=error.diagnostic,
+                    author=f"{prefix}_output_validator",
+                    state_key=f"{prefix}_output_diagnostic",
+                )
                 raise
             if output is None:
                 msg = "ADK recipe completed without structured output."
@@ -927,9 +1053,12 @@ class AdkWorkflowRunner:
         state_key: str,
     ) -> None:
         """Append bounded diagnostic metadata without changing the original error."""
-        diagnostic_kind = (
-            "Vision" if state_key == "vision_output_diagnostic" else "Specification"
-        )
+        diagnostic_kind = {
+            "vision_output_diagnostic": "Vision",
+            "product_goal_output_diagnostic": "Product Goal",
+            "specification_output_diagnostic": "Specification",
+            "generation_output_diagnostic": "Generation",
+        }[state_key]
         try:
             session = await session_service.get_session(
                 app_name=self._config.identity.app_name,

@@ -15,8 +15,6 @@ from services.contracts.provider_retry import ProviderRetryConfig
 from utils.runtime_controls import (
     LAUNCHER_CHILD_ENV,
     LAUNCHER_CHILD_VALUE,
-    SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
-    VISION_MAX_TOKENS_DEFAULT,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -306,55 +304,14 @@ def get_database_echo() -> bool:
     return get_bool_env("AGILEFORGE_DB_ECHO", default=False)
 
 
-def get_spec_validator_max_tokens(default: int = 4096) -> int:
-    """Return the max token budget for the spec validator."""
-    return get_int_env("SPEC_VALIDATOR_MAX_TOKENS", default)
-
-
-def get_vision_interviewer_max_tokens(default: int = 4096) -> int:
-    """Return the max token budget for the vision interviewer."""
-    return get_int_env("VISION_INTERVIEWER_MAX_TOKENS", default)
-
-
 def get_vision_generation_config() -> dict[str, int]:
-    """Return the Vision-only output budget, preserving explicit overrides."""
-    return {
-        "max_output_tokens": get_vision_interviewer_max_tokens(
-            VISION_MAX_TOKENS_DEFAULT
-        )
-    }
-
-
-def get_specification_structurer_max_tokens(
-    default: int = SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
-) -> int:
-    """Return the dedicated max output budget for Specification structuring."""
-    return get_int_env("SPECIFICATION_STRUCTURER_MAX_TOKENS", default)
+    """Delegate completion capacity to the shared provider boundary."""
+    return {}
 
 
 def get_specification_structurer_generation_config() -> dict[str, int]:
-    """Return the effective non-secret Specification generation configuration."""
-    return {"max_output_tokens": get_specification_structurer_max_tokens()}
-
-
-def get_backlog_primer_max_tokens(default: int = 8192) -> int:
-    """Return the max token budget for the backlog primer."""
-    return get_int_env("BACKLOG_PRIMER_MAX_TOKENS", default)
-
-
-def get_roadmap_builder_max_tokens(default: int = 8192) -> int:
-    """Return the max token budget for the roadmap builder."""
-    return get_int_env("ROADMAP_BUILDER_MAX_TOKENS", default)
-
-
-def get_story_writer_max_tokens(default: int = 16384) -> int:
-    """Return the max token budget for the user story writer."""
-    return get_int_env("STORY_WRITER_MAX_TOKENS", default)
-
-
-def get_sprint_planner_max_tokens(default: int = 8192) -> int:
-    """Return the max token budget for the sprint planner."""
-    return get_int_env("SPRINT_PLANNER_MAX_TOKENS", default)
+    """Keep structured output settings free of application token budgets."""
+    return {}
 
 
 def is_spec_compiler_schema_disabled() -> bool:

@@ -128,7 +128,10 @@ def _overlay_agentic_attempt(
             valid_until=None,
             recommendation_kind=RecommendationKind.RECOVERY,
         )
-    if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
+    if (
+        latest.outcome == "obsolete"
+        or evaluated_at >= latest.effective_lease_expires_at
+    ):
         return replace(
             evaluation,
             reason_code=recovery_reason,
@@ -139,7 +142,7 @@ def _overlay_agentic_attempt(
         evaluation,
         category=RuleCategory.WAITING,
         reason_code=active_reason,
-        valid_until=latest.lease_expires_at,
+        valid_until=latest.effective_lease_expires_at,
         recommendation_kind=None,
     )
 
@@ -366,7 +369,8 @@ class WorkflowGraph:
             and (
                 attempt.outcome in {"failure", "obsolete"}
                 or (
-                    attempt.outcome is None and evaluated_at >= attempt.lease_expires_at
+                    attempt.outcome is None
+                    and evaluated_at >= attempt.effective_lease_expires_at
                 )
             )
         )

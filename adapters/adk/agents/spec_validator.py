@@ -2,15 +2,15 @@
 
 from google.adk.agents import LlmAgent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.specification_validation import StorySpecificationReviewOutput
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
-from utils.runtime_config import get_openrouter_api_key, get_spec_validator_max_tokens
+from utils.runtime_config import get_openrouter_api_key
 
 
 def _spec_validator_model() -> LiteLlm:
@@ -21,7 +21,6 @@ def _spec_validator_model() -> LiteLlm:
         api_key=get_openrouter_api_key(),
         drop_params=True,
         extra_body=get_openrouter_extra_body("spec_validator"),
-        **get_model_token_limit_args(model_id, get_spec_validator_max_tokens()),
     )
 
 
@@ -32,6 +31,7 @@ def build_spec_validator_agent() -> LlmAgent:
         model=_spec_validator_model(),
         instruction=load_prompt("spec_validator.txt"),
         description="Reviews one accepted Story against its exact Specification.",
+        after_model_callback=validate_generation_response,
         output_key="spec_validation_result",
         output_schema=StorySpecificationReviewOutput,
         disallow_transfer_to_parent=True,

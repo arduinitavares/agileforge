@@ -16,7 +16,6 @@ import adapters.adk.agents.vision as vision_module
 from utils import model_config
 from utils.runtime_config import (
     get_vision_generation_config,
-    get_vision_interviewer_max_tokens,
 )
 
 if TYPE_CHECKING:
@@ -68,10 +67,10 @@ class _CaptureClient(LiteLLMClient):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("index", [0, 1])
-async def test_composed_vision_request_uses_full_budget_and_timeout(
+async def test_composed_vision_request_delegates_budget_and_lifetime(
     configured_agents: tuple[Agent, Agent], index: int
 ) -> None:
-    """Primary and repair send the same output budget through installed ADK."""
+    """Primary and repair preserve effort while delegating budget and lifetime."""
     agent = configured_agents[index]
     client = _CaptureClient()
     assert isinstance(agent.model, LiteLlm)
@@ -85,24 +84,23 @@ async def test_composed_vision_request_uses_full_budget_and_timeout(
     )
     _responses = [item async for item in model.generate_content_async(request)]
 
-    assert client.kwargs["max_completion_tokens"] == TOKEN_BUDGET
-    assert client.kwargs["timeout"] == REQUEST_TIMEOUT
+    assert "max_completion_tokens" not in client.kwargs
+    assert "timeout" not in client.kwargs
     assert "max_tokens" not in client.kwargs
-    assert config.max_output_tokens == TOKEN_BUDGET
+    assert config.max_output_tokens is None
     extra_body = cast("dict[str, object]", client.kwargs["extra_body"])
     assert extra_body["reasoning"] == {"effort": "medium"}
 
 
-def test_product_goal_retains_its_previous_default(
+def test_vision_config_has_no_application_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vision's new default does not raise Product Goal's shared getter value."""
+    """Vision's default delegates the output allowance to provider policy."""
     monkeypatch.delenv("VISION_INTERVIEWER_MAX_TOKENS", raising=False)
-    assert get_vision_generation_config() == {"max_output_tokens": TOKEN_BUDGET}
-    assert get_vision_interviewer_max_tokens() == GOAL_DEFAULT
+    assert get_vision_generation_config() == {}
 
 
-def test_explicit_vision_override_still_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A configured limit changes only the Vision generation accessor."""
+def test_retired_vision_override_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retired environment setting cannot restore the old limit."""
     monkeypatch.setenv("VISION_INTERVIEWER_MAX_TOKENS", "8192")
-    assert get_vision_generation_config() == {"max_output_tokens": 8192}
+    assert get_vision_generation_config() == {}

@@ -2,6 +2,7 @@
 
 from google.adk.agents import Agent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.sprint import SprintPlannerInput, SprintPlannerOutput
@@ -24,6 +25,7 @@ root_agent: Agent = Agent(
         "accepted-Specification evidence."
     ),
     model=model,
+    after_model_callback=validate_generation_response,
     input_schema=SprintPlannerInput,
     output_schema=SprintPlannerOutput,
     output_key="sprint_plan",

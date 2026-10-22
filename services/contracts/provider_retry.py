@@ -16,6 +16,8 @@ from pydantic import (
     model_validator,
 )
 
+from services.contracts.generation_policy import GenerationAllowance  # noqa: TC001
+
 PROVIDER_RETRY_MAX_ELAPSED_SECONDS: float = 120.0
 _TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
@@ -160,6 +162,9 @@ class ProviderTryAuditRecord(BaseModel):
         Field(min_length=1, max_length=256, pattern=r"^openrouter/[A-Za-z0-9_./:-]+$"),
     ]
     request_fingerprint: _AuditDigest
+    generation_allowance: GenerationAllowance | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     try_ordinal: Annotated[int, Field(ge=1, le=10)]
     max_attempts: Annotated[int, Field(ge=1, le=10)]
     retry_config: ProviderRetryConfig

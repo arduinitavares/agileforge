@@ -141,12 +141,13 @@ from services.vision_evidence import (
 )
 from services.vision_evidence_reader import RepositoryEvidenceCapability
 from services.vision_input import VisionInputService
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS, get_generation_policy
 from utils.model_config import get_model_id, get_model_reasoning_config
 from utils.runtime_config import (
     get_specification_structurer_generation_config,
     get_vision_generation_config,
 )
-from utils.runtime_controls import VISION_LEASE_SECONDS, VISION_TIMEOUT_SECONDS
+from utils.runtime_controls import VISION_LEASE_SECONDS
 from workflow.contracts import (
     Blocker,
     FactReference,
@@ -222,6 +223,7 @@ if TYPE_CHECKING:
     from adapters.adk.recipes import AdkRecipeRegistry
     from services.contracts.provider_retry import ProviderAttemptAudit
     from utils.spec_schemas import ValidationEvidence
+    from workflow.attempt_ownership import AttemptOwnershipGuard
     from workflow.facts import (
         PostSprintTriageFact,
         SprintFact,
@@ -270,6 +272,20 @@ class ProviderWorkflowDomainPort(WorkflowDomainPort, Protocol):
         self, request: StartNodeAttempt
     ) -> TransitionResult | None:
         """Replay exact caller identity before current execution settings."""
+        ...
+
+    def claim_provider_attempt(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> AttemptOwnershipGuard:
+        """Acquire one live host generation after reservation."""
+        ...
+
+    def renew_provider_attempt(self, guard: AttemptOwnershipGuard) -> None:
+        """Extend only the exact authoritative unexpired generation."""
         ...
 
     def provider_attempt_audit(self) -> ProviderAttemptAudit:
@@ -1787,7 +1803,7 @@ class _ReadProjectionPort(Protocol):
 
 
 _EXECUTION_SETTINGS: JsonObject = {
-    "timeout_seconds": 120,
+    "timeout_seconds": None,
     "max_attempts": 2,
 }
 _LEASE_SECONDS = 300
@@ -1805,6 +1821,7 @@ def _agentic_execution_settings(
 ) -> JsonObject:
     """Return effective non-secret settings included in attempt identity."""
     settings: JsonObject = dict(_EXECUTION_SETTINGS)
+    settings["generation_policy"] = get_generation_policy()
     reasoning = get_model_reasoning_config(AGENTIC_MODEL_ROLES[node_id])
     if reasoning:
         settings["reasoning"] = _JSON_OBJECT.validate_python(reasoning)
@@ -1816,10 +1833,14 @@ def _agentic_execution_settings(
         )
         settings = {
             **settings,
-            "timeout_seconds": VISION_TIMEOUT_SECONDS,
+            "timeout_seconds": None,
             "max_attempts": 1,
             "max_semantic_repairs": 1,
-            "generation_config": generation_config,
+            "generation_config": {
+                k: v
+                for k, v in generation_config.items()
+                if k not in RETIRED_GENERATION_ARGUMENTS
+            },
         }
     if node_id == "specification.structure":
         generation_config = _JSON_OBJECT.validate_python(
@@ -1827,7 +1848,20 @@ def _agentic_execution_settings(
             if specification_generation_config is None
             else specification_generation_config
         )
-        settings = {**settings, "generation_config": generation_config}
+        settings = {
+            **settings,
+            "generation_config": {
+                k: v
+                for k, v in generation_config.items()
+                if k not in RETIRED_GENERATION_ARGUMENTS
+            },
+        }
+    if node_id == "goal.interview":
+        from adapters.adk.agents.product_goal import (  # noqa: PLC0415
+            get_generation_settings,
+        )
+
+        settings = {**settings, **get_generation_settings()}
     return settings
 
 

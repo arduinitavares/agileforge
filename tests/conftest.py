@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -178,3 +178,41 @@ def create_symlink() -> Callable[[Path, Path | str], None]:
         link.symlink_to(target)
 
     return _create_symlink
+
+
+@pytest.fixture(autouse=True)
+def _published_capacity_for_offline_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep unit inference seams offline; transport tests override with real resolution.
+
+    Resolver unit tests call the real module directly. Public-network integration
+    tests retain real lookup. This patches only the retry client's imported seam.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from adapters.adk import provider_retry  # noqa: PLC0415
+    from services.contracts.generation_policy import (  # noqa: PLC0415
+        GenerationAllowance,
+    )
+    from utils.model_config import get_model_token_limit_args  # noqa: PLC0415
+
+    async def published(model: str) -> GenerationAllowance:
+        return GenerationAllowance(
+            model_id=model,
+            completion_tokens=128_000,
+            maximum_published_context=1_050_000,
+            known_capacity_endpoints=1,
+            unknown_capacity_endpoints=0,
+            request_parameter=cast(
+                'Literal["max_tokens", "max_completion_tokens"]',
+                next(iter(get_model_token_limit_args(model, 128_000))),
+            ),
+            source_url="https://openrouter.ai/api/v1/models/test/offline/endpoints",
+            snapshot_sha256="sha256:" + "a" * 64,
+            retrieved_at=datetime(2026, 10, 21, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(provider_retry, "resolve_generation_allowance", published)
