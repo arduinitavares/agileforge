@@ -324,10 +324,11 @@ def test_goal_safe_diagnostic_rejects_untrusted_metadata() -> None:
             "secret-output",
             finish_reason="untrusted-private-reason",
             usage={
-                "prompt_token_count": True,
+                # These are adversarial count values, not credentials.
+                "prompt_token_count": True,  # nosec B105
                 "thoughts_token_count": -1,
-                "candidates_token_count": "secret-count",
-                "total_token_count": 0,
+                "candidates_token_count": "secret-count",  # nosec B105
+                "total_token_count": 0,  # nosec B105
             },
             generation_settings={
                 "api_key": "secret-key",
