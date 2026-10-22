@@ -136,7 +136,7 @@ def _owned_process_is_executing(pid: int) -> bool:
         process_stat = Path(f"/proc/{pid}/stat")
         try:
             return process_stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return False
     if sys.platform == "darwin":
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
@@ -154,6 +154,49 @@ def _owned_process_is_executing(pid: int) -> bool:
             raise AssertionError(message)
         return struct.unpack_from("I", info.raw, 4)[0] != _DARWIN_ZOMBIE_STATUS
     return True
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Process stat requires Linux.")
+@pytest.mark.parametrize(
+    ("stat_state", "read_error", "expected_execution"),
+    [
+        ("S", None, True),
+        ("Z", None, False),
+        ("S", FileNotFoundError, False),
+        ("S", ProcessLookupError, False),
+        ("S", PermissionError, None),
+        ("S", OSError, None),
+    ],
+)
+def test_owned_process_oracle_handles_proc_stat_read_races(
+    monkeypatch: pytest.MonkeyPatch,
+    stat_state: str,
+    read_error: type[OSError] | None,
+    expected_execution: bool | None,
+) -> None:
+    """A vanished stat means exit; unrelated read failures must remain visible."""
+    pid = os.getpid()
+    process_stat = Path(f"/proc/{pid}/stat")
+
+    def initially_exists(observed_pid: int, signal_number: int) -> None:
+        assert observed_pid == pid
+        assert signal_number == 0
+
+    def read_stat(path: Path) -> str:
+        assert path == process_stat
+        if read_error is not None:
+            message = "Synthetic procfs stat read failure."
+            raise read_error(message)
+        return f"{pid} (owned process) {stat_state} 0"
+
+    monkeypatch.setattr(os, "kill", initially_exists)
+    monkeypatch.setattr(Path, "read_text", read_stat)
+    if expected_execution is None:
+        assert read_error is not None
+        with pytest.raises(read_error, match="Synthetic procfs stat read failure"):
+            _owned_process_is_executing(pid)
+    else:
+        assert _owned_process_is_executing(pid) is expected_execution
 
 
 def _observe_owned_status_processes(
