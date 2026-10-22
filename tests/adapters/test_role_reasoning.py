@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from importlib import import_module, reload
+from pathlib import Path
+from runpy import run_path
 from typing import TYPE_CHECKING
 
 from utils import model_config
 
 if TYPE_CHECKING:
-    from types import ModuleType
+    from typing import Any
 
     import pytest
 
@@ -29,16 +30,17 @@ def test_every_adk_builder_uses_its_own_role_reasoning(
         ("story", "create_user_story_patch_agent", "high"),
         ("sprint", "root_agent", "high"),
     ]
-    modules: dict[str, ModuleType] = {}
+    agents_dir = Path(__file__).resolve().parents[2] / "adapters" / "adk" / "agents"
+    modules: dict[str, dict[str, Any]] = {}
     try:
         with monkeypatch.context() as scoped:
             scoped.delenv("MODEL_CONFIG_PATH", raising=False)
             model_config.clear_config_cache()
             for name, agent_name, effort in cases:
                 if name not in modules:
-                    module = import_module(f"adapters.adk.agents.{name}")
-                    modules[name] = reload(module)
-                agent = getattr(modules[name], agent_name)
+                    # Keep collected tests' canonical modules and callbacks intact.
+                    modules[name] = run_path(str(agents_dir / f"{name}.py"))
+                agent = modules[name][agent_name]
                 if callable(agent):
                     agent = agent()
                 assert agent.model.model == "openrouter/openai/gpt-6.1-sol"
@@ -47,5 +49,3 @@ def test_every_adk_builder_uses_its_own_role_reasoning(
                 }
     finally:
         model_config.clear_config_cache()
-        for module in modules.values():
-            reload(module)

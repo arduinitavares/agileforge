@@ -32,7 +32,7 @@ GOAL_DEFAULT = 4096
 
 @pytest.fixture
 def configured_agents(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Agent, Agent]]:
-    """Compose Vision under the packaged Luna/max profile for one test."""
+    """Compose Vision under the packaged Sol/medium profile for one test."""
     profile = Path(__file__).parents[2] / "config" / "models.yaml"
     with monkeypatch.context() as scoped:
         scoped.setenv("MODEL_CONFIG_PATH", str(profile))
@@ -90,7 +90,7 @@ async def test_composed_vision_request_uses_full_budget_and_timeout(
     assert "max_tokens" not in client.kwargs
     assert config.max_output_tokens == TOKEN_BUDGET
     extra_body = cast("dict[str, object]", client.kwargs["extra_body"])
-    assert extra_body["reasoning"] == {"effort": "max"}
+    assert extra_body["reasoning"] == {"effort": "medium"}
 
 
 def test_product_goal_retains_its_previous_default(
