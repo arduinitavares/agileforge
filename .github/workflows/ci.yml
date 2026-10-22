@@ -18,7 +18,8 @@ jobs:
   linux-container:
     name: Linux container canonical gate
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Full tests take about two hours; allow setup and installed-image rehearsals.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -57,8 +58,8 @@ jobs:
   python-313:
     name: Python 3.13 full gate
     runs-on: ubuntu-latest
-    # Two 90-minute runs stopped near 92% of the unchanged full test selection.
-    timeout-minutes: 120
+    # The unchanged full test selection has exceeded the two-hour CI budget.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
