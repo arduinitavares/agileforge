@@ -309,16 +309,9 @@ class AdkRecipeRegistry:
             raise UnknownAdkRecipeError(node_id) from exc
 
 
-def _execution_limits(execution_settings: JsonObject) -> tuple[float, int]:
-    timeout_value = execution_settings.get("timeout_seconds")
+def _execution_limits(execution_settings: JsonObject) -> tuple[None, int]:
+    """Retain bounded repair protocols; legacy generation timers are ignored."""
     attempts_value = execution_settings.get("max_attempts")
-    if (
-        isinstance(timeout_value, bool)
-        or not isinstance(timeout_value, int | float)
-        or timeout_value <= 0
-    ):
-        msg = "execution_settings.timeout_seconds must be a positive number."
-        raise ValueError(msg)
     if (
         isinstance(attempts_value, bool)
         or not isinstance(attempts_value, int)
@@ -326,7 +319,7 @@ def _execution_limits(execution_settings: JsonObject) -> tuple[float, int]:
     ):
         msg = "execution_settings.max_attempts must be a positive integer."
         raise ValueError(msg)
-    return float(timeout_value), attempts_value
+    return None, attempts_value
 
 
 def validate_structured_output(output: object) -> JsonObject:

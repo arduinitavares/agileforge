@@ -42,6 +42,7 @@ _CALL_IDENTITY_FIELDS: frozenset[str] = frozenset(
         "idempotency_key_digest",
         "model_id",
         "request_fingerprint",
+        "generation_allowance",
         "max_attempts",
         "retry_config",
     }

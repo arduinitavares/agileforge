@@ -27,6 +27,10 @@ from openai import APIError as OpenAIAPIError
 from openai import APIStatusError
 from pydantic import ValidationError
 
+from adapters.adk.generation_allowance import (
+    request_rejection,
+    resolve_generation_allowance,
+)
 from services.contracts.provider_retry import (
     PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
     ProviderAttemptAudit,
@@ -37,9 +41,12 @@ from services.contracts.provider_retry import (
     ProviderTransientFailure,
     ProviderTryAuditRecord,
 )
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS
 
 if TYPE_CHECKING:
     from litellm import ModelResponse
+
+    from services.contracts.generation_policy import GenerationAllowance
 
 _TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _OPENROUTER_HOSTS: frozenset[str] = frozenset({"openrouter.ai", "api.openrouter.ai"})
@@ -52,6 +59,7 @@ _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.HTTPError,
 )
 _OWNED_STATUS_ATTRIBUTE: str = "agileforge_response_status"
+_OWNED_CONTEXT_LIMIT_ATTRIBUTE: str = "agileforge_context_limit"
 _MAX_HTTP_STATUS: int = 599
 _RETRY_SCHEDULED: object = object()
 
@@ -325,7 +333,7 @@ class ProviderActionContext:
     action_id: str
     policy: ProviderRetryConfig
     audit: ProviderAttemptAudit
-    action_deadline: float
+    action_deadline: float | None
     pre_try_check: Callable[[], None]
     lease_deadline: float | None = None
     workflow_node_attempt_id: int | None = None
@@ -540,14 +548,18 @@ def _remaining(
     retry_deadline: float | None,
 ) -> float:
     """Remaining."""
-    deadlines = [context.action_deadline - _UNWIND_RESERVE_SECONDS]
+    deadlines = (
+        []
+        if context.action_deadline is None
+        else [context.action_deadline - _UNWIND_RESERVE_SECONDS]
+    )
     if context.lease_deadline is not None:
         deadlines.append(context.lease_deadline)
     if retry_deadline is not None:
         deadlines.append(retry_deadline)
     if not all(math.isfinite(deadline) for deadline in deadlines):
         raise ProviderAttemptStopped()
-    return min(deadlines) - clock.monotonic()
+    return min(deadlines) - clock.monotonic() if deadlines else math.inf
 
 
 def _confirmed_status(error: BaseException) -> int | None:
@@ -581,6 +593,7 @@ class _ProviderCall:
     call_id: str
     model_id: str
     fingerprint: str
+    generation_allowance: GenerationAllowance | None = None
     sends: int = 0
     retry_deadline: float | None = None
     last_response: TransientProviderResponse | None = None
@@ -600,6 +613,7 @@ class _ProviderCall:
             idempotency_key_digest=context.idempotency_key_digest,
             model_id=self.model_id,
             request_fingerprint=self.fingerprint,
+            generation_allowance=self.generation_allowance,
             try_ordinal=ordinal,
             max_attempts=context.policy.max_attempts,
             retry_config=context.policy,
@@ -680,6 +694,28 @@ class _TryDispatch:
             raise ProviderAttemptStopped()
 
 
+def _apply_generation_allowance(
+    request: dict[str, object], allowance: GenerationAllowance
+) -> None:
+    """Replace retired budgets; preserve every other frozen request semantic."""
+    for key in RETIRED_GENERATION_ARGUMENTS:
+        request.pop(key, None)
+    body = request.get("extra_body")
+    if isinstance(body, Mapping):
+        body = dict(body)
+        for key in RETIRED_GENERATION_ARGUMENTS:
+            body.pop(key, None)
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, Mapping):
+            body["reasoning"] = {
+                key: value
+                for key, value in reasoning.items()
+                if key not in {"max_tokens", "max_completion_tokens", "budget_tokens"}
+            }
+        request["extra_body"] = body
+    request[allowance.request_parameter] = allowance.completion_tokens
+
+
 class RetryingOpenRouterClient(LiteLLMClient):
     """One audited transport attempt per bounded retry, bound to the host action."""
 
@@ -730,13 +766,25 @@ class RetryingOpenRouterClient(LiteLLMClient):
         import litellm  # noqa: PLC0415
 
         request.update(num_retries=0, max_retries=0, caching=False)
+        allowance = None
+        if context.action_deadline is None:
+            context.pre_try_check()
+            allowance = await resolve_generation_allowance(model)
+            _apply_generation_allowance(request, allowance)
         call = _ProviderCall(
-            context, self._clock, uuid4().hex, model, _request_fingerprint(request)
+            context,
+            self._clock,
+            uuid4().hex,
+            model,
+            _request_fingerprint(request),
+            generation_allowance=allowance,
         )
         existing_timeout = request.get(
             "timeout", getattr(litellm, "request_timeout", 600.0)
         )
-        if (
+        if context.action_deadline is None:
+            existing_timeout = None
+        if existing_timeout is not None and (
             isinstance(existing_timeout, bool)
             or not isinstance(existing_timeout, (float, int))
             or not math.isfinite(existing_timeout)
@@ -746,7 +794,14 @@ class RetryingOpenRouterClient(LiteLLMClient):
         for ordinal in range(1, context.policy.max_attempts + 1):
             start, start_time, remaining = self._reserve_try(call, ordinal, request)
             result = await self._execute_try(
-                call, start, start_time, request, (float(existing_timeout), remaining)
+                call,
+                start,
+                start_time,
+                request,
+                (
+                    None if existing_timeout is None else float(existing_timeout),
+                    remaining,
+                ),
             )
             if result is not _RETRY_SCHEDULED:
                 return cast("ModelResponse", result)
@@ -796,16 +851,23 @@ class RetryingOpenRouterClient(LiteLLMClient):
             raise call.exhausted(reason) from None
         raise ProviderAttemptStopped()
 
-    async def _execute_try(
+    async def _execute_try(  # noqa: C901 - one audited send including distinct cancellation paths
         self,
         call: _ProviderCall,
         start: ProviderTryAuditRecord,
         start_time: float,
         request: dict[str, object],
-        limits: tuple[float, float],
+        limits: tuple[float | None, float],
     ) -> object:
         existing_timeout, remaining = limits
-        timeout = min(existing_timeout, remaining)
+        timeout = (
+            None
+            if call.context.action_deadline is None
+            else min(
+                existing_timeout if existing_timeout is not None else math.inf,
+                remaining,
+            )
+        )
         previous_sends = call.sends
         dispatch = _TryDispatch(call, start.try_ordinal, request)
         completion = self._completion
@@ -827,9 +889,10 @@ class RetryingOpenRouterClient(LiteLLMClient):
             if not owns_dispatch:
                 # Injected completion seam promises one invocation = one send.
                 dispatch()
-            result = await self._timeout_runner(
-                completion(**send_request),
-                timeout,
+            result = (
+                await completion(**send_request)
+                if timeout is None
+                else await self._timeout_runner(completion(**send_request), timeout)
             )
             dispatch.require_dispatched()
         except asyncio.CancelledError:
@@ -844,6 +907,7 @@ class RetryingOpenRouterClient(LiteLLMClient):
             if (
                 start.try_ordinal > 1
                 and call.last_response is not None
+                and existing_timeout is not None
                 and remaining <= existing_timeout
             ):
                 reason = "retry_budget_exhausted"
@@ -873,12 +937,22 @@ class RetryingOpenRouterClient(LiteLLMClient):
                     retry_classification="non_retryable",
                     http_status=_confirmed_status(error),
                 )
+                status = _confirmed_status(error)
+                if call.generation_allowance is not None and status in (400, 413, 422):
+                    raise request_rejection(
+                        call.generation_allowance,
+                        status,
+                        context_limit=getattr(
+                            error, _OWNED_CONTEXT_LIMIT_ATTRIBUTE, False
+                        )
+                        is True,
+                    ) from None
                 raise
             await self._schedule_retry(call, start, start_time, eligible)
             return _RETRY_SCHEDULED
         call.finish(start, start_time, disposition="success")
         call.context.pre_try_check()
-        if _remaining(call.context, self._clock, call.retry_deadline) <= 0:
+        if _remaining(call.context, self._clock, None) <= 0:
             raise ProviderAttemptStopped()
         return result
 

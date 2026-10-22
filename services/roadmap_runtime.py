@@ -46,6 +46,7 @@ class _FailureDetails:
     raw_text: str | None = None
     validation_errors: ValidationErrors | None = None
     exception: BaseException | None = None
+    extra: Mapping[str, object] | None = None
 
 
 def _normalize_prior_roadmap_state(value: object) -> str:
@@ -132,6 +133,7 @@ def _failure(
         },
         validation_errors=details.validation_errors,
         exception=details.exception,
+        extra=details.extra,
     )
     metadata: FailureMetadataDict = artifact_result["metadata"]
     if details.exception is not None:
@@ -208,7 +210,12 @@ async def run_roadmap_agent_from_state(
             details=_FailureDetails(
                 message=f"Roadmap runtime failed: {exc}",
                 raw_text=exc.partial_output,
-                exception=exc,
+                exception=None if exc.output_diagnostic is not None else exc,
+                extra=(
+                    {"generation_output_diagnostic": exc.output_diagnostic}
+                    if exc.output_diagnostic is not None
+                    else None
+                ),
             ),
         )
     except ValueError as exc:

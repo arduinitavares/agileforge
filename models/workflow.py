@@ -674,6 +674,36 @@ class WorkflowNodeAttempt(SQLModel, table=True):
     attempt_fingerprint: str = Field(index=True)
 
 
+class WorkflowNodeAttemptOwnership(SQLModel, table=True):
+    """Renewable host authority kept separate from immutable attempt evidence."""
+
+    __tablename__ = "workflow_node_attempt_ownership"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "workflow_node_attempt_id", "attempt_fingerprint"],
+            [
+                "workflow_node_attempts.project_id",
+                "workflow_node_attempts.workflow_node_attempt_id",
+                "workflow_node_attempts.attempt_fingerprint",
+            ],
+            name="fk_workflow_attempt_owner_identity",
+        ),
+        CheckConstraint("renewal_revision >= 0", name="ck_attempt_owner_revision"),
+        CheckConstraint("expires_at > acquired_at", name="ck_attempt_owner_expiry"),
+        CheckConstraint(
+            "length(owner_generation) > 0", name="ck_attempt_owner_generation"
+        ),
+    )
+
+    workflow_node_attempt_id: int = Field(primary_key=True)
+    project_id: int
+    attempt_fingerprint: str
+    owner_generation: str
+    acquired_at: datetime = Field(nullable=False)
+    expires_at: datetime = Field(nullable=False)
+    renewal_revision: int = 0
+
+
 class WorkflowNodeAttemptOutcome(SQLModel, table=True):
     """Single terminal outcome for one same-Project node attempt."""
 

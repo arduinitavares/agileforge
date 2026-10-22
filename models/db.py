@@ -1969,6 +1969,41 @@ CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
     },
 )
 
+PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST: BusinessSchemaManifest = (
+    CURRENT_BUSINESS_SCHEMA_MANIFEST
+)
+_OWNER_TABLE_NAME = "workflow_node_attempt_ownership"
+CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
+    table_names=PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST.table_names
+    | {_OWNER_TABLE_NAME},
+    structures={
+        **PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST.structures,
+        _OWNER_TABLE_NAME: _structure(
+            columns=(
+                ("workflow_node_attempt_id", False),
+                ("project_id", False),
+                ("attempt_fingerprint", False),
+                ("owner_generation", False),
+                ("acquired_at", False),
+                ("expires_at", False),
+                ("renewal_revision", False),
+            ),
+            foreign_keys=(
+                (
+                    ("project_id", "workflow_node_attempt_id", "attempt_fingerprint"),
+                    "workflow_node_attempts",
+                    ("project_id", "workflow_node_attempt_id", "attempt_fingerprint"),
+                ),
+            ),
+            checks=(
+                "renewal_revision >= 0",
+                "expires_at > acquired_at",
+                "length(owner_generation) > 0",
+            ),
+        ),
+    },
+)
+
 _RETIRED_TABLES = frozenset(
     {
         "discovery_artifacts",
@@ -2291,6 +2326,7 @@ def _upgrade_reviewed_business_schema(
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,
         PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
@@ -2316,6 +2352,10 @@ def _upgrade_reviewed_business_schema(
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
         _upgrade_repository_evidence_columns(connection)
+    if observed != CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        SQLModel.metadata.create_all(
+            connection, tables=[SQLModel.metadata.tables[_OWNER_TABLE_NAME]]
+        )
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
             connection.exec_driver_sql(ddl)

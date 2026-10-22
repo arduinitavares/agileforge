@@ -52,6 +52,7 @@ from cli.dev_server import (
     wait_for_readiness,
 )
 from utils.cli_output import emit
+from utils.generation_policy import get_generation_policy
 from utils.platform_support import (
     UNSUPPORTED_PLATFORM_EXIT_CODE,
     UnsupportedPlatformError,
@@ -218,10 +219,6 @@ class ChildRuntimeEnvironment(BaseModel):
     )
     launcher_child: Literal["1"] = Field(alias=LAUNCHER_CHILD_ENV)
     model_config_path: str = Field(alias="MODEL_CONFIG_PATH", min_length=1)
-    specification_structurer_max_tokens: int = Field(
-        alias="SPECIFICATION_STRUCTURER_MAX_TOKENS",
-        gt=0,
-    )
     git_executable: str | None = Field(
         default=None,
         alias="GIT_PYTHON_GIT_EXECUTABLE",
@@ -238,6 +235,7 @@ class InfoResult(BaseModel):
     current_commit: str
     profile: RuntimeProfile
     configured_models: tuple[ConfiguredModel, ...]
+    generation_policy: JsonObject = Field(default_factory=get_generation_policy)
     provider_credentials: ProviderCredentialPresence
     child_runtime_environment: ChildRuntimeEnvironment
     schema_validation: SchemaValidation = Field(serialization_alias="schema")

@@ -8,26 +8,24 @@ Defines a Google ADK agent that builds an initial high-level product backlog.
 
 from google.adk.agents import Agent
 
+from adapters.adk.generation_output import validate_generation_response
 from adapters.adk.prompts import load_prompt
 from adapters.adk.provider_models import LiteLlm, create_openrouter_model
 from services.contracts.backlog import BacklogAgentOutput, BacklogBuilderInput
 from utils.model_config import (
     get_model_id,
-    get_model_token_limit_args,
     get_openrouter_extra_body,
 )
-from utils.runtime_config import get_backlog_primer_max_tokens, get_openrouter_api_key
+from utils.runtime_config import get_openrouter_api_key
 
 BACKLOG_INSTRUCTIONS = load_prompt("backlog.txt")
 
-_max_tokens = get_backlog_primer_max_tokens()
 _model_id = get_model_id("backlog_primer")
 model: LiteLlm = create_openrouter_model(
     model_id=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),
-    **get_model_token_limit_args(_model_id, _max_tokens),
 )
 
 root_agent: Agent = Agent(
@@ -37,6 +35,7 @@ root_agent: Agent = Agent(
         "from the exact accepted Specification, Vision, and Product Goal."
     ),
     model=model,
+    after_model_callback=validate_generation_response,
     input_schema=BacklogBuilderInput,
     output_schema=BacklogAgentOutput,
     output_key="product_backlog",

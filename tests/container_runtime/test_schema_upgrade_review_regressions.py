@@ -286,6 +286,14 @@ def test_registered_schema_inspection_reads_committed_wal_schema(
                 "ALTER TABLE sprint_retry_task_evidence "
                 "ADD COLUMN repository_evidence_json TEXT"
             )
+            # Independent frozen current release, not the migration implementation.
+            ownership_ddl = (
+                Path(__file__).parents[1]
+                / "fixtures"
+                / "issue_302"
+                / "attempt_ownership.sql.json"
+            )
+            writer.execute(json.loads(ownership_ddl.read_text(encoding="utf-8")))
         writer.commit()
         database.chmod(0o600)
         before = database.read_bytes()

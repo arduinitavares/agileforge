@@ -5982,7 +5982,7 @@ def test_structured_conflict_advertises_actions_for_returned_position(
     )
 
 
-def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() -> None:
+def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() -> None:  # noqa: C901 - complete replay-only protocol double
     """Bypass fresh-position preflight for an exact transport replay key."""
     stale_position = WorkflowPosition(
         project_id=41,
@@ -6021,6 +6021,16 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
         ) -> TransitionResult:
             self.requests.append(request)
             return prior_result
+
+        def claim_provider_attempt(self, **kwargs: object) -> object:
+            del kwargs
+            message = "replay unexpectedly claimed provider ownership"
+            raise AssertionError(message)
+
+        def renew_provider_attempt(self, guard: object) -> None:
+            del guard
+            message = "replay unexpectedly renewed provider ownership"
+            raise AssertionError(message)
 
         def provider_attempt_audit(self) -> None:
             pytest.fail(

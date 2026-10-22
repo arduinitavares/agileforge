@@ -4,6 +4,7 @@
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.provider_retry import RetryingOpenRouterClient
+from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS
 
 
 def create_openrouter_model(*, model_id: str, **completion_kwargs: object) -> LiteLlm:
@@ -11,6 +12,11 @@ def create_openrouter_model(*, model_id: str, **completion_kwargs: object) -> Li
     if "llm_client" in completion_kwargs:
         message = "The provider model factory owns its completion client."
         raise ValueError(message)
+    completion_kwargs = {
+        key: value
+        for key, value in completion_kwargs.items()
+        if key not in RETIRED_GENERATION_ARGUMENTS
+    }
     return LiteLlm(
         model=model_id,
         llm_client=RetryingOpenRouterClient(),

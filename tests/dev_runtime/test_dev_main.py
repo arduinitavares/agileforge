@@ -633,7 +633,6 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         ),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
     expected_environment["GIT_PYTHON_GIT_EXECUTABLE"] = module._resolve_git_executable()
     assert schema_environment is not None
@@ -800,6 +799,8 @@ def test_info_json_is_complete_redacted_and_validated(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["generation_policy"]["actual_prompt_allowance"] == "unverified"
+    assert payload["generation_policy"]["application_output_cap"] is None
     assert payload["validation_status"] == "valid"
     assert payload["current_commit"] == _git(checkout, "rev-parse", "HEAD")
     assert payload["profile"]["name"] == "local"
@@ -814,7 +815,6 @@ def test_info_json_is_complete_redacted_and_validated(
         ),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
-        "SPECIFICATION_STRUCTURER_MAX_TOKENS": 32_768,
     }
     serialized = json.dumps(payload).lower()
     assert serialized.count("open_router_api_key") == 1

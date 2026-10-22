@@ -6,15 +6,17 @@ import json
 import re
 from contextlib import contextmanager
 from enum import Enum
-from time import monotonic
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
+from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from sqlalchemy.engine import Engine
 
+from adapters.adk.errors import GenerationExecutionError
+from adapters.adk.generation_output import validate_generation_output
 from adapters.adk.provider_retry import (
     ProviderActionContext,
     ProviderAttemptStopped,
@@ -22,7 +24,6 @@ from adapters.adk.provider_retry import (
     get_provider_action_context,
 )
 from services.contracts.provider_retry import (
-    PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
     ProviderAuditError,
     ProviderTransientFailure,
 )
@@ -68,7 +69,7 @@ def provider_action_context(
         action_id=uuid4().hex,
         policy=get_provider_retry_config(),
         audit=ProviderAttemptAuditRepository(engine),
-        action_deadline=monotonic() + PROVIDER_RETRY_MAX_ELAPSED_SECONDS,
+        action_deadline=None,
         pre_try_check=lambda: None,
     )
     with bind_provider_action(context):
@@ -106,14 +107,23 @@ def _extract_validation_errors(exc: BaseException) -> list[dict[str, Any]] | Non
 
 
 def extract_final_response_text(events: list[object]) -> str:
-    """Return the last non-empty text payload emitted by a runner event stream."""
+    """Return final text only after checking raw finish metadata."""
     for event in reversed(events):
+        if getattr(event, "partial", False):
+            continue
         content = getattr(event, "content", None)
         if not content:
+            if getattr(event, "finish_reason", None) is not None:
+                validate_generation_output(event, require_json=False)
             continue
         parts = getattr(content, "parts", None) or []
+        validate_generation_output(event, require_json=False)
+        if any(getattr(part, "function_call", None) for part in parts):
+            continue
         text_parts = [
-            getattr(part, "text", "") for part in parts if getattr(part, "text", "")
+            getattr(part, "text", "")
+            for part in parts
+            if getattr(part, "text", "") and not getattr(part, "thought", False)
         ]
         merged = "\n".join(text_parts).strip()
         if merged:
@@ -123,10 +133,6 @@ def extract_final_response_text(events: list[object]) -> str:
 
 def extract_partial_response_text(events: list[object]) -> str:
     """Return any text fragments collected before a runner failed."""
-    final = extract_final_response_text(events)
-    if final:
-        return final
-
     fragments: list[str] = []
     for event in events:
         content = getattr(event, "content", None)
@@ -270,11 +276,17 @@ async def invoke_agent_to_text(
                     user_id=runner_identity.user_id,
                     session_id=session.id,
                     new_message=message,
+                    run_config=RunConfig(max_llm_calls=0),
                 )
             ]
         )
+        response_text = extract_final_response_text(events)
     except (ProviderTransientFailure, ProviderAuditError, ProviderAttemptStopped):
         raise
+    except GenerationExecutionError as exc:
+        raise AgentInvocationError(
+            str(exc), event_count=len(events), output_diagnostic=exc.diagnostic
+        ) from exc
     except Exception as exc:  # pylint: disable=broad-except
         partial_output = extract_partial_response_text(events) or None
         raise AgentInvocationError(
@@ -284,7 +296,6 @@ async def invoke_agent_to_text(
             validation_errors=_extract_validation_errors(exc),
         ) from exc
 
-    response_text = extract_final_response_text(events)
     if not response_text:
         raise ValueError(no_text_error)
     return response_text

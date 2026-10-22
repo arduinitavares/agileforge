@@ -530,6 +530,7 @@ def _upgrade_reviewed_business_schema(
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,
         PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
@@ -555,6 +556,10 @@ def _upgrade_reviewed_business_schema(
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
     ):
         _upgrade_repository_evidence_columns(connection)
+    if observed != CURRENT_BUSINESS_SCHEMA_MANIFEST:
+        SQLModel.metadata.create_all(
+            connection, tables=[SQLModel.metadata.tables[_OWNER_TABLE_NAME]]
+        )
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
             connection.exec_driver_sql(ddl)
@@ -621,7 +626,7 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
     ]
     expected_schema_guard_call_count = 3
     expected_schema_guard_load_count = 3
-    expected_schema_ddl_call_count = 2
+    expected_schema_ddl_call_count = 3
     if (
         len(assertion_calls) != expected_schema_guard_call_count
         or len(assertion_loads) != expected_schema_guard_load_count
@@ -2292,6 +2297,19 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             "    ):",
             "    if observed.table_names <= "
             "PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names:",
+        ),
+        (
+            "broadened-pre-ownership-manifest",
+            "        PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,",
+            "        observed,",
+        ),
+        (
+            "unrestricted-ownership-ddl",
+            "        SQLModel.metadata.create_all(\n"
+            "            connection, "
+            "tables=[SQLModel.metadata.tables[_OWNER_TABLE_NAME]]\n"
+            "        )",
+            "        SQLModel.metadata.create_all(connection)",
         ),
         (
             "unrestricted-retry-ddl",

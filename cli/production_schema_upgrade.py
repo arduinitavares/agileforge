@@ -124,6 +124,35 @@ def _migrate_issue289_repository_evidence(connection: Connection) -> None:
         connection.exec_driver_sql(ddl)
 
 
+_ISSUE302_OWNERSHIP_DDL: str = (
+    "CREATE TABLE workflow_node_attempt_ownership (\n"
+    "\tworkflow_node_attempt_id INTEGER NOT NULL, \n"
+    "\tproject_id INTEGER NOT NULL, \n"
+    "\tattempt_fingerprint VARCHAR NOT NULL, \n"
+    "\towner_generation VARCHAR NOT NULL, \n"
+    "\tacquired_at DATETIME NOT NULL, \n"
+    "\texpires_at DATETIME NOT NULL, \n"
+    "\trenewal_revision INTEGER NOT NULL, \n"
+    "\tPRIMARY KEY (workflow_node_attempt_id), \n"
+    "\tCONSTRAINT fk_workflow_attempt_owner_identity FOREIGN KEY(p"
+    "roject_id, workflow_node_attempt_id, attempt_fingerprint) RE"
+    "FERENCES workflow_node_attempts (project_id, workflow_node_a"
+    "ttempt_id, attempt_fingerprint), \n"
+    "\tCONSTRAINT ck_attempt_owner_revision CHECK (renewal_revisio"
+    "n >= 0), \n"
+    "\tCONSTRAINT ck_attempt_owner_expiry CHECK (expires_at > acqu"
+    "ired_at), \n"
+    "\tCONSTRAINT ck_attempt_owner_generation CHECK (length(owner_"
+    "generation) > 0)\n"
+    ")"
+)
+
+
+def _migrate_issue302_attempt_ownership(connection: Connection) -> None:
+    """Add separate renewable authority without changing original attempt rows."""
+    connection.exec_driver_sql(_ISSUE302_OWNERSHIP_DDL)
+
+
 SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
     SchemaRelease(
         "master-b3a4fb4",
@@ -171,6 +200,24 @@ SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
             ),
         ),
     ),
+    SchemaRelease(
+        "issue302-attempt-ownership",
+        "740a293ef263638070e06698f179bf6d9f5773f17288304e3929ad03935a2063",
+        (
+            SchemaVariant(
+                "frozen",
+                "0ef823b56a9171ee91e2c91cf2c2fc6aa449d2ec498d37ab14fcb3b959ffa8f8",
+            ),
+            SchemaVariant(
+                "sqlalchemy",
+                "d28265c28deb4346745e6c0fb3d1357b8261beb7a31e4011544529acb728c9d3",
+            ),
+            SchemaVariant(
+                "sqlalchemy-fresh",
+                "4f611f7e81fb97069a61af5b8f29a47443d7cdd7c74137adda462698bd4205ec",
+            ),
+        ),
+    ),
 )
 SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
     SchemaTransition(
@@ -203,8 +250,27 @@ SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
         ),
         migration=_migrate_issue289_repository_evidence,
     ),
+    SchemaTransition(
+        "issue289-task-repository-evidence",
+        "issue302-attempt-ownership",
+        (
+            (
+                "84bbb0830f539757244dc9a6d9b55184791cd8da61b90e62aee092fe28fa73e4",
+                "0ef823b56a9171ee91e2c91cf2c2fc6aa449d2ec498d37ab14fcb3b959ffa8f8",
+            ),
+            (
+                "285b34931cc3df72586e0f1815f8feecf90197dae58167f5c0b991507349fbf2",
+                "d28265c28deb4346745e6c0fb3d1357b8261beb7a31e4011544529acb728c9d3",
+            ),
+            (
+                "c9728eb9278df812876bbc41203d5c714774aafca899aa3f99a965cbe0d7528a",
+                "4f611f7e81fb97069a61af5b8f29a47443d7cdd7c74137adda462698bd4205ec",
+            ),
+        ),
+        migration=_migrate_issue302_attempt_ownership,
+    ),
 )
-CURRENT_SCHEMA_ID: str = "issue289-task-repository-evidence"
+CURRENT_SCHEMA_ID: str = "issue302-attempt-ownership"
 _JOURNAL_NAME: str = "schema-upgrade.json"
 _HASH: str = r"^[0-9a-f]{64}$"
 

@@ -636,8 +636,25 @@ class NodeAttemptFact(FrozenModel):
     attempt_fingerprint: str
     model_id: str
     lease_expires_at: _DATETIME
+    ownership_expires_at: _DATETIME | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    owner_generation: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     outcome: Literal["success", "failure", "obsolete"] | None
     failure_code: str | None = None
+
+    @property
+    def effective_lease_expires_at(self) -> _DATETIME:
+        """Use renewable authority without changing immutable historical lease."""
+        return self.ownership_expires_at or self.lease_expires_at
+
+    @field_validator("ownership_expires_at", mode="after")
+    @classmethod
+    def normalize_ownership_timezone(cls, value: _DATETIME | None) -> _DATETIME | None:
+        """Normalize optional separate owner expiry to UTC."""
+        return None if value is None else _normalize_utc(value)
 
     @field_validator("lease_expires_at", mode="after")
     @classmethod

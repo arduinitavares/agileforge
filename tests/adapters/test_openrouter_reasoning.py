@@ -110,4 +110,5 @@ def test_reasoning_exhaustion_or_no_visible_content_is_actionable(
             cast("CallbackContext", object()), LlmResponse(finish_reason=finish_reason)
         )
     assert error.value.code == "SPECIFICATION_OUTPUT_INCOMPLETE"
-    assert "SPECIFICATION_STRUCTURER_MAX_TOKENS" in error.value.message
+    assert "generation policy" in error.value.message
+    assert "new idempotency key" in error.value.message

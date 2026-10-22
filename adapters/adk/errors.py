@@ -68,9 +68,47 @@ class VisionOutputValidationError(RuntimeError):
         return self.message
 
 
+@dataclass
+class GenerationExecutionError(RuntimeError):
+    """Safe generation failure with allowlisted nonsecret diagnostics."""
+
+    code: str
+    message: str
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        """Exclude generated content and arbitrary provider metadata."""
+        return self.message
+
+
+class GenerationOutputValidationError(GenerationExecutionError):
+    """Safe downstream output failure before ADK schema conversion."""
+
+
+class GenerationProviderError(GenerationExecutionError):
+    """Safe provider capability or request-constraint failure."""
+
+
+@dataclass
+class ProductGoalOutputValidationError(RuntimeError):
+    """Safe Product Goal output failure before ADK dictionary conversion."""
+
+    code: str
+    message: str
+    diagnostic: JsonObject = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        """Exclude model output and arbitrary provider metadata from error copy."""
+        return self.message
+
+
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
+    "GenerationExecutionError",
+    "GenerationOutputValidationError",
+    "GenerationProviderError",
+    "ProductGoalOutputValidationError",
     "SpecificationAgenticExecutionError",
     "SpecificationOutputValidationError",
     "VisionAgenticPreflightError",

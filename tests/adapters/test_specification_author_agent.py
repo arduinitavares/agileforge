@@ -116,8 +116,8 @@ def test_structurer_agent_imports_in_a_clean_process() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_structurer_uses_explicit_dedicated_adk_generation_config() -> None:
-    """Expose the effective budget on the ADK request instead of LiteLLM internals."""
+def test_structurer_ignores_retired_adk_generation_cap() -> None:
+    """Retired environment values cannot impose an ADK output cap."""
     completed = subprocess.run(  # nosec B603
         (
             sys.executable,
@@ -147,7 +147,7 @@ def test_structurer_uses_explicit_dedicated_adk_generation_config() -> None:
 
     assert completed.returncode == 0, completed.stderr
     config = json.loads(completed.stdout)
-    assert config["max_output_tokens"] == DEDICATED_TOKEN_BUDGET
+    assert config["max_output_tokens"] is None
     assert "max_tokens" not in config["model_args"]
     assert "max_completion_tokens" not in config["model_args"]
 

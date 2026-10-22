@@ -12,6 +12,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 from adapters.adk.provider_retry import (
     _MAX_HTTP_STATUS,
+    _OWNED_CONTEXT_LIMIT_ATTRIBUTE,
     _OWNED_STATUS_ATTRIBUTE,
     ProviderAttemptStopped,
     ProviderDeadlineExceeded,
@@ -56,6 +57,35 @@ def _response_status(response: httpx.Response) -> int:
     )
 
 
+def _context_limit_response(response: httpx.Response) -> bool:
+    """Use structured codes from this owned response, never provider prose/counts."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return False
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    codes = (
+        error.get("code"),
+        error.get("type"),
+        metadata.get("error_type"),
+        metadata.get("provider_code"),
+    )
+    return any(
+        isinstance(code, str)
+        and code
+        in (
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "max_context_length_exceeded",
+        )
+        for code in codes
+    )
+
+
 class OneSendAsyncHTTPHandler(AsyncHTTPHandler):
     """Keep the pinned typed client seam while replacing its implicit retry path."""
 
@@ -66,6 +96,7 @@ class OneSendAsyncHTTPHandler(AsyncHTTPHandler):
         """Capture this instance's injected deterministic seams."""
         self.client = client
         self.timeout = client.timeout
+        self._unlimited_read = client.timeout.read is None
         self.event_hooks = {}
         self.transport_error: httpx.TransportError | None = None
         self.response_headers: httpx.Headers | None = None
@@ -103,7 +134,9 @@ class OneSendAsyncHTTPHandler(AsyncHTTPHandler):
             json=json,
             params=cast("QueryParamTypes | None", params),
             headers=cast("HeaderTypes | None", headers),
-            timeout=self.timeout if timeout is None else timeout,
+            timeout=self.timeout
+            if timeout is None or self._unlimited_read
+            else timeout,
             files=cast("RequestFiles | None", files),
             content=cast("RequestContent | None", content),
         )
@@ -174,7 +207,11 @@ class OpenRouterOneSendCompletion:
             follow_redirects=False,
             trust_env=False,
             event_hooks={},
-            timeout=cast("float", kwargs.get("timeout", 600.0)),
+            timeout=(
+                httpx.Timeout(None, connect=10.0, pool=10.0)
+                if kwargs.get("timeout") is None
+                else cast("float", kwargs["timeout"])
+            ),
         ) as client:
             handler = OneSendAsyncHTTPHandler(client, on_dispatch)
             try:
@@ -203,6 +240,12 @@ class OpenRouterOneSendCompletion:
                 # None is authoritative: SDK preparation and historical causes
                 # cannot establish a current provider response that did not exist.
                 setattr(projected, _OWNED_STATUS_ATTRIBUTE, status)
+                setattr(
+                    projected,
+                    _OWNED_CONTEXT_LIMIT_ATTRIBUTE,
+                    handler.response is not None
+                    and _context_limit_response(handler.response),
+                )
                 if handler.response_headers is not None:
                     guidance = handler.response_headers.get("retry-after")
                     if guidance is not None:
