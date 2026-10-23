@@ -195,10 +195,11 @@ def validate_specification_response(
         if is_truncation:
             code = WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE.value
             message = (
-                "Specification structurer returned incomplete output. Increase "
-                "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can "
-                "return the complete structured payload, then retry Structure "
-                "Specification."
+                "Specification structurer returned incomplete output. Inspect the "
+                "recorded finish reason and usage, and verify the selected provider "
+                "can return the complete payload. AgileForge ignores legacy token "
+                "limits. Retry Structure Specification with a new idempotency key "
+                "after resolving the failure."
             )
         else:
             code = WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD.value

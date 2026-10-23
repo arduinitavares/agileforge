@@ -43,6 +43,33 @@ not to a graph/status read or a mutable global setting. Existing attempt and
 receipt bytes are retained; replay consults durable receipts before live policy
 or capacity resolution.
 
+## Argument normalization
+
+The model factory and the final owned provider boundary use the same normalizer.
+It removes `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `timeout`
+and `request_timeout` from the root arguments and `extra_body`. It also removes
+`max_tokens`, `max_completion_tokens`, `max_output_tokens` and `budget_tokens`
+from mapping-valued `reasoning` and `extra_body.reasoning`.
+
+The normalizer returns a new outer mapping. It copies nested mappings that it
+changes. Caller-owned objects and aliases remain unchanged. It does not traverse
+messages, tools, schemas or unrelated metadata that happen to use the same names.
+Non-budget controls such as `effort`, `enabled` and `exclude` retain their values.
+
+An empty reasoning map cannot mask nonempty controls at the other supported
+location. A map emptied by budget removal is omitted without inventing an effort.
+When both cleaned maps remain nonempty, the pinned SDK retains its whole-object
+precedence: `extra_body.reasoning` wins. Disjoint controls are not merged, and
+conflicting efforts are not reconciled into a new setting. Existing validation
+and pass-through behavior for nonmapping values remains in place. Unsupported
+`thinking` combined with explicit effort still fails in the pinned SDK.
+
+For current host-owned calls, final normalization runs after ADK composition and
+before insertion of the resolved published provider ceiling and fingerprinting.
+An explicitly finite legacy `ProviderActionContext` retains its prior low-level
+request behavior. Such a context is a caller-selected application exception,
+not a provider constraint or proof of universal uncapped generation.
+
 ## Published capacities and the remaining limitation
 
 For each new OpenRouter model call, AgileForge reads the public endpoint metadata
@@ -117,6 +144,24 @@ for callers that deliberately supply them; new host-owned generation uses none.
 Semantic repair counts, schema validation, transient retry counts/backoff and
 bounded diagnostic excerpts remain validation/recovery controls.
 
+The remaining bounds serve distinct purposes:
+
+| Control | Scope |
+| --- | --- |
+| Published completion ceiling | Selected model endpoint metadata; actual-input allowance and route eligibility remain unverified |
+| Connection and pool bounds | Transport establishment and resource acquisition |
+| Metadata deadline | Public capacity lookup availability |
+| Retry counts, admission window and backoff | Recovery after a failed physical call |
+| Semantic repair counts | Separate workflow validation/repair calls, including Vision and Story repair |
+| Evidence budgets and diagnostic excerpts | Repository trust, bounded evidence collection and safe failure reporting |
+| Ownership renewal and cancellation | Current authority to continue and publish a workflow attempt |
+| Explicit finite legacy context | Deliberate low-level caller contract; current product hosts supply no finite action deadline |
+
+These controls are not interchangeable with generation token budgets. In
+particular, semantic repair and evidence limits are application contracts,
+not external provider limits. The Story repair diagnostic helper retains its
+existing unmarked 2,000-character excerpts; this change does not alter them.
+
 A separate durable ownership record renews a live attempt's recovery lease.
 It does not rewrite the immutable attempt, original lease, fingerprint or receipt.
 Acquire, renewal and final publication share the serialized database writer
@@ -131,7 +176,8 @@ use isolated databases; they do not migrate or recover any production database.
 
 ## Documentation evidence
 
-Public provider contracts were checked on 2026-10-21 against the OpenRouter
+Public provider contracts were checked on 2026-10-21 and refreshed on 2026-10-23
+against the OpenRouter
 [OpenAPI schema](https://openrouter.ai/openapi.json),
 [endpoint metadata API](https://openrouter.ai/api/v1/models/openai/gpt-6-sol/endpoints).
 Those sources describe published capacities, shared context and request fields;

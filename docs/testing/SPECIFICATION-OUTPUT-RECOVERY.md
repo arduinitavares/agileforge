@@ -15,7 +15,7 @@ AgileForge maintains a strict boundary between external specification preparatio
        │ (Stores exact UTF-8 bytes, Lineage & ADR bindings)
        ▼
 [AgileForge: Internal Structurer (ADK Leaf)]
-       │ (At most one model dispatch, strict output schema, validation callback)
+       │ (One logical model call, strict output schema, validation callback)
        ▼
 [AgileForge: Human-Accepted Specification (agileforge.spec.v2)]
        │ (Human review & formal acceptance)
@@ -39,11 +39,16 @@ When specification structuring fails, the outcome is classified into one of four
 | :--- | :--- | :--- | :--- |
 | `INVALID_SPECIFICATION_PAYLOAD` | 409 Conflict | The model returned output that could not be validated as a valid v2 Specification payload. This covers: (1) semantic domain violations (e.g. unknown relation endpoint, missing items, unanchored relations); (2) malformed non-EOF JSON syntax; (3) missing wrapper or required fields, or top-level schema validation errors; and (4) empty model responses with explicit provider non-truncation finish reasons (`SAFETY` or `OTHER`). | **Definitive Failure:** Informs the user that structuring failed with the specific error message, confirms no new candidate was produced, and indicates whether the registered source or prior candidate/feedback remains current. |
 | `UNSUPPORTED_SPECIFICATION_SCHEMA` | 409 Conflict | The model returned an explicit, non-null `payload.schema_version` that differs from `agileforge.spec.v2` (for example, `agileforge.spec.v1`). It does not mean a malformed wrapper. | **Definitive Failure:** Informs the user that an unsupported schema version was returned and no new candidate was produced. |
-| `SPECIFICATION_OUTPUT_INCOMPLETE` | 409 Conflict | The model output was truncated before completion. Detection uses ADK `MAX_TOKENS`, or absent/`STOP` finish metadata with empty text or an EOF-truncated JSON stream (`_contains_incomplete_json`). This classification indicates truncated output; it does not claim every incomplete response proves token exhaustion. | **Definitive Failure:** Advises the operator to increase `SPECIFICATION_STRUCTURER_MAX_TOKENS` or select a provider that can return the complete structured payload. |
+| `SPECIFICATION_OUTPUT_INCOMPLETE` | 409 Conflict | The model output was truncated before completion. Detection uses ADK `MAX_TOKENS`, or absent/`STOP` finish metadata with empty text or an EOF-truncated JSON stream (`_contains_incomplete_json`). This classification indicates truncated output; it does not claim every incomplete response proves token exhaustion. | **Definitive Failure:** Inspect the recorded finish reason and usage. Verify that the selected provider can return the complete payload. After resolving the failure, retry Structure Specification with a new idempotency key. Legacy token settings are ignored. |
 | `SPECIFICATION_PRODUCER_FAILED` | 409 Conflict | Model provider execution failure, API error, or unhandled exception during the model dispatch. | **Definitive Failure:** Reports that the structurer provider execution failed. |
 
 ### Note on Timeouts
-A timeout during model execution is an **execution failure** (`SPECIFICATION_PRODUCER_FAILED`). It is **not** evidence that the provider was offline or that a network outage occurred. In Phase 1, timeouts remain classified as execution failures and are not conflated with network outages.
+New host-owned generation has no application read/write/total deadline. Connection,
+pool acquisition and metadata access retain separate bounds. A transport timeout
+can produce an execution failure (`SPECIFICATION_PRODUCER_FAILED`); it does not
+prove that the provider was offline. Lost or superseded recovery ownership cancels
+local work and prevents late publication. See the
+[generation lifetime and ownership policy](../generation-policy.md#generation-lifetime-and-recovery-ownership).
 
 ### Precedence of Revalidation and Authority Errors
 The four codes above do not represent every possible structuring failure. Source revalidation (`STALE_SPECIFICATION_INPUT`), attempt revalidation, cancellation, and superseding authority failures take precedence before or during structuring and exit without leaf output diagnostics.
@@ -165,13 +170,22 @@ The user prompt event (`author = 'user'`), the leaf execution event (`author = '
 - **Producer Version:** `1.0.2`
 - **Prompt Version:** `agileforge.specification-structurer.prompt.v3`
 - **Prompt Hash:** `sha256:ecc68026d01a9ade96707e345c47d2fe07acf3fcf37da82b7a739f9cfed6d00f`
-- **Dispatch Limit:** **At most one structurer dispatch** occurs per structuring attempt. Pre-provider rejection (such as stale input drift or invalid guards) or replay can result in zero dispatches. No hidden automated retries or token-escalation loops exist in Phase 1.
+- **Logical Call Limit:** At most one logical structurer call occurs per structuring attempt. Pre-provider rejection (such as stale input drift or invalid guards) or replay can result in zero calls. The shared provider boundary owns bounded transient HTTP retries. There is no token-escalation loop or automatic semantic structuring repair.
+- **Generation Policy:** The selected model and reasoning effort remain unchanged. The shared boundary removes legacy application token/reasoning budgets and requests a published provider completion ceiling. This does not prove the remaining allowance for the actual input. `SPECIFICATION_STRUCTURER_MAX_TOKENS` is retired and ignored. See the [generation policy](../generation-policy.md).
 - **Prompt Guidance Scope:** The prompt v3 instructions explicitly instruct the model to preserve typed item IDs, include all relation endpoints, and distinguish historical implementation facts from target requirements. However, **prompt instructions reduce ambiguity but do not guarantee that the model will produce valid or complete output.**
 - **Validation Scope Limitations:** Schema and graph validation check structural validity (ID format, closed relations, required fields), but do **not** prove semantic completeness or preservation of every source requirement. Host checks and human semantic review remain necessary before candidate acceptance.
 
 ---
 
 ## 7. Recovery Scope & Limitations
+
+Inspect the typed failure and recorded finish/usage metadata before retrying.
+Resolve the provider or request constraint while retaining the selected model,
+reasoning effort and privacy route. Use a **new idempotency key** for the new
+attempt. The failed key replays its durable failure without another provider
+call. A complete new result creates only a reviewable candidate and still needs
+human acceptance. The direct validator and primary callback give current recovery
+advice; changing an ignored legacy cap cannot repair the failure.
 
 ### Phase 1 Verified Scope
 - Deterministic reproduction of leaf failure classification.
