@@ -65,6 +65,45 @@ def test_valid_specification_response_returns_model() -> None:
     assert result.payload.items[0].id == "REQ.first-item"
 
 
+@pytest.mark.parametrize("finish_reason", [None, "STOP", "MAX_TOKENS"])
+@pytest.mark.parametrize("response_text", [None, "", " \n"])
+def test_incomplete_response_guides_recovery_without_ignored_cap(
+    finish_reason: str | None,
+    response_text: str | None,
+) -> None:
+    """Typed incomplete output gives effective recovery steps and bounded evidence."""
+    # Synthetic usage counts are metadata, not credentials.
+    usage: JsonObject = {
+        "prompt_token_count": 1411,  # nosec B105
+        "candidates_token_count": 4096,  # nosec B105
+    }
+    with pytest.raises(SpecificationOutputValidationError) as captured:
+        validate_specification_response(
+            response_text, finish_reason=finish_reason, usage=usage
+        )
+    error = captured.value
+    assert error.code == "SPECIFICATION_OUTPUT_INCOMPLETE"
+    diagnostic = error.diagnostic
+    assert diagnostic["finish_reason"] == finish_reason
+    assert diagnostic["prompt_token_count"] == usage["prompt_token_count"]
+    assert diagnostic["candidates_token_count"] == usage["candidates_token_count"]
+    encoded = None if response_text is None else response_text.encode("utf-8")
+    assert diagnostic["response_bytes"] == (None if encoded is None else len(encoded))
+    assert diagnostic["response_sha256"] == (
+        None if encoded is None else "sha256:" + hashlib.sha256(encoded).hexdigest()
+    )
+    assert diagnostic["item_ids"] == diagnostic["missing_item_ids"] == []
+    guidance = str(error).lower()
+    assert "finish reason" in guidance
+    assert "usage" in guidance
+    assert "provider" in guidance
+    assert "complete payload" in guidance
+    assert "new idempotency key" in guidance
+    assert "structure specification" in guidance
+    assert "ignores legacy token limits" in guidance
+    assert "specification_structurer_max_tokens" not in guidance
+
+
 @pytest.mark.parametrize(
     ("raw", "expected_code"),
     [
@@ -109,7 +148,7 @@ def test_valid_specification_response_returns_model() -> None:
             "INVALID_SPECIFICATION_PAYLOAD",
         ),
         (
-            '[1, 2, 3]',
+            "[1, 2, 3]",
             "INVALID_SPECIFICATION_PAYLOAD",
         ),
         (
@@ -280,8 +319,8 @@ def test_empty_provider_response_with_non_truncation_is_invalid_payload(
     with pytest.raises(SpecificationOutputValidationError) as raised:
         validate_specification_response("", finish_reason=finish_reason, usage={})
     assert raised.value.code == "INVALID_SPECIFICATION_PAYLOAD"
-    assert (
-        "Specification structurer returned an invalid v2 payload." in str(raised.value)
+    assert "Specification structurer returned an invalid v2 payload." in str(
+        raised.value
     )
 
 

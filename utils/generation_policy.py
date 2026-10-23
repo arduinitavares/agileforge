@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import cast
+
 from pydantic import JsonValue
 
 type JsonObject = dict[str, JsonValue]
@@ -25,6 +28,54 @@ RETIRED_GENERATION_ARGUMENTS: frozenset[str] = frozenset(
         "request_timeout",
     }
 )
+_RETIRED_REASONING_ARGUMENTS: frozenset[str] = frozenset(
+    {"max_tokens", "max_completion_tokens", "max_output_tokens", "budget_tokens"}
+)
+
+
+def _clean_generation_container(
+    arguments: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Copy a supported container only when a retired argument changes it."""
+    cleaned = {
+        key: value
+        for key, value in arguments.items()
+        if key not in RETIRED_GENERATION_ARGUMENTS
+    }
+    reasoning = arguments.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        controls = {
+            key: value
+            for key, value in reasoning.items()
+            if key not in _RETIRED_REASONING_ARGUMENTS
+        }
+        if len(controls) != len(reasoning):
+            if controls:
+                cleaned["reasoning"] = controls
+            else:
+                cleaned.pop("reasoning", None)
+    if len(cleaned) == len(arguments) and cleaned.get("reasoning") is reasoning:
+        return arguments
+    return cleaned
+
+
+def remove_generation_limits(arguments: Mapping[str, object]) -> dict[str, object]:
+    """Remove legacy caps without mutating payloads or masking selected controls."""
+    normalized = dict(_clean_generation_container(arguments))
+    body = arguments.get("extra_body")
+    if isinstance(body, Mapping):
+        cleaned_body = _clean_generation_container(cast("Mapping[str, object]", body))
+        root_reasoning = normalized.get("reasoning")
+        body_reasoning = cleaned_body.get("reasoning")
+        if isinstance(root_reasoning, Mapping) and isinstance(body_reasoning, Mapping):
+            if root_reasoning and not body_reasoning:
+                cleaned_body = dict(cleaned_body)
+                cleaned_body.pop("reasoning")
+            elif body_reasoning and not root_reasoning:
+                normalized.pop("reasoning")
+        if cleaned_body is not body:
+            normalized["extra_body"] = cleaned_body
+    return normalized
 
 
 def get_generation_policy() -> JsonObject:

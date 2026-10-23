@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 from typing import TYPE_CHECKING, cast
@@ -11,6 +12,7 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 
+from adapters.adk.provider_models import create_openrouter_model
 from services.application import _agentic_execution_settings
 from services.contracts.story import UserStoryWriterOutput
 from tests.adapters.test_product_goal_generation import _CaptureClient
@@ -161,6 +163,97 @@ async def test_real_role_request_has_no_application_cap_and_preserves_configurat
     response_format = composed["response_format"]
     assert isinstance(response_format, dict)
     assert cast("dict[str, object]", response_format)["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", MODELS)
+async def test_factory_removes_budgets_before_adk_composition(model_id: str) -> None:
+    """The factory strips supported caps without touching aliased business payloads."""
+    reasoning: dict[str, object] = {
+        "effort": "max",
+        "enabled": True,
+        "exclude": True,
+        "max_tokens": 4096,
+        "max_completion_tokens": 1,
+        "max_output_tokens": 2,
+        "budget_tokens": 3,
+    }
+    business = {"reasoning": reasoning, "max_tokens": 4096, "timeout": 1}
+    body: dict[str, object] = {
+        "reasoning": reasoning,
+        "provider": {"zdr": True},
+        "metadata": business,
+        "max_tokens": 1,
+        "max_completion_tokens": 2,
+        "max_output_tokens": 3,
+        "timeout": 1,
+        "request_timeout": 1,
+    }
+    arguments: dict[str, object] = {
+        "reasoning": reasoning,
+        "extra_body": body,
+        "max_tokens": 1,
+        "max_completion_tokens": 2,
+        "max_output_tokens": 3,
+        "timeout": 1,
+        "request_timeout": 1,
+    }
+    before = copy.deepcopy(arguments)
+    client = _CaptureClient()
+    model = create_openrouter_model(model_id=model_id, **arguments).model_copy(
+        update={"llm_client": client}
+    )
+    request = LlmRequest(
+        model=model_id,
+        contents=[
+            types.Content(
+                role="user", parts=[types.Part(text="Unchanged input: max_tokens=4096")]
+            )
+        ],
+        config=types.GenerateContentConfig(),
+    )
+    responses = [item async for item in model.generate_content_async(request)]
+    assert len(responses) == len(client.requests) == 1
+    composed = client.requests[0]
+    expected = {"effort": "max", "enabled": True, "exclude": True}
+    assert composed["reasoning"] == expected
+    assert composed["extra_body"] == {
+        "reasoning": expected,
+        "provider": {"zdr": True},
+        "metadata": business,
+    }
+    for key in (
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "timeout",
+        "request_timeout",
+    ):
+        assert composed.get(key) is None
+    assert arguments == before
+    assert arguments["reasoning"] is body["reasoning"] is reasoning
+    assert business["reasoning"] is reasoning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning", [None, "unsupported-value", ["effort", "max"]])
+async def test_factory_preserves_nonmapping_reasoning_for_existing_validation(
+    reasoning: object,
+) -> None:
+    """Normalization does not invent a general reasoning schema validator."""
+    client = _CaptureClient()
+    model = create_openrouter_model(
+        model_id=MODELS[0], reasoning=reasoning, extra_body={"reasoning": reasoning}
+    ).model_copy(update={"llm_client": client})
+    request = LlmRequest(
+        model=MODELS[0],
+        contents=[types.Content(role="user", parts=[types.Part(text="input")])],
+        config=types.GenerateContentConfig(),
+    )
+    responses = [item async for item in model.generate_content_async(request)]
+    assert len(responses) == 1
+    assert client.requests[0]["reasoning"] == reasoning
+    assert client.requests[0]["extra_body"] == {"reasoning": reasoning}
 
 
 @pytest.mark.parametrize(

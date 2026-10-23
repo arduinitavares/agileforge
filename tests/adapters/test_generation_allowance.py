@@ -12,12 +12,16 @@ from typing import cast
 import httpx
 import pytest
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.models.llm_request import LlmRequest
+from google.genai import types
+from litellm.exceptions import UnsupportedParamsError
 from sqlalchemy.engine import Engine  # noqa: TC002
 from sqlmodel import Session, select
 
 from adapters.adk import provider_retry
 from adapters.adk.agents.product_goal import root_agent
 from adapters.adk.errors import GenerationProviderError
+from adapters.adk.provider_models import create_openrouter_model
 from adapters.adk.provider_transport import OpenRouterOneSendCompletion
 from adapters.adk.runner import AdkRunGuards
 from models.product_definition import ProductGoalInterviewTurn
@@ -37,6 +41,77 @@ from workflow.contracts import NodeCategory, WorkflowErrorCode
 PUBLISHED_LARGE_CAPACITY = 128_000
 PUBLISHED_SMALL_CAPACITY = 64_000
 EXPECTED_METADATA_GETS = 2
+
+_ALIASED_REASONING: dict[str, object] = {"effort": "max", "budget_tokens": 4096}
+_REASONING_CASES = [
+    pytest.param(
+        {
+            "effort": "max",
+            "max_tokens": 4096,
+            "max_completion_tokens": 1,
+            "max_output_tokens": 2,
+            "budget_tokens": 3,
+        },
+        None,
+        {"effort": "max"},
+        id="root-budgets",
+    ),
+    pytest.param(
+        None,
+        {
+            "effort": "max",
+            "max_tokens": 4096,
+            "max_completion_tokens": 1,
+            "max_output_tokens": 2,
+            "budget_tokens": 3,
+        },
+        {"effort": "max"},
+        id="nested-budgets",
+    ),
+    pytest.param(
+        {"max_tokens": 4096}, {"effort": "max"}, {"effort": "max"}, id="cap-only-root"
+    ),
+    pytest.param(
+        {"effort": "max"}, {"max_tokens": 4096}, {"effort": "max"}, id="cap-only-nested"
+    ),
+    pytest.param({}, {"effort": "max"}, {"effort": "max"}, id="empty-root"),
+    pytest.param({"effort": "max"}, {}, {"effort": "max"}, id="empty-nested"),
+    pytest.param(
+        _ALIASED_REASONING,
+        _ALIASED_REASONING,
+        {"effort": "max"},
+        id="aliased-locations",
+    ),
+    pytest.param(
+        {"effort": "max", "enabled": True, "exclude": True},
+        {"effort": "max", "enabled": True, "exclude": True},
+        {"effort": "max", "enabled": True, "exclude": True},
+        id="identical-controls",
+    ),
+    pytest.param(
+        {"enabled": True}, {"effort": "max"}, {"effort": "max"}, id="disjoint-controls"
+    ),
+    pytest.param(
+        {"effort": "max"},
+        {"exclude": True},
+        {"exclude": True},
+        id="reverse-disjoint-controls",
+    ),
+    pytest.param(
+        {"effort": "medium"},
+        {"effort": "max"},
+        {"effort": "max"},
+        id="conflicting-effort",
+    ),
+    pytest.param(
+        {"effort": "max"},
+        {"effort": "medium"},
+        {"effort": "medium"},
+        id="reverse-conflicting-effort",
+    ),
+    pytest.param({"max_tokens": 4096}, None, None, id="only-root-budget"),
+    pytest.param(None, {"budget_tokens": 4096}, None, id="only-nested-budget"),
+]
 
 
 def _descriptor(
@@ -78,6 +153,202 @@ def _metadata_transport(
         return httpx.Response(200, json=payload, request=request)
 
     return httpx.MockTransport(get)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        "openrouter/openai/gpt-5.6-luna",
+        "openrouter/openai/gpt-6.1-sol",
+        "openrouter/anthropic/claude-sonnet-4.5",
+    ],
+)
+async def test_unsupported_thinking_with_effort_still_fails_before_http_send(
+    model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing legacy reasoning caps does not hide the pinned SDK rejection."""
+    transport = _metadata_transport(_descriptor(model), [])
+
+    async def resolve(selected: str) -> GenerationAllowance:
+        resolver = importlib.import_module("adapters.adk.generation_allowance")
+        return await resolver.resolve_generation_allowance(
+            selected, transport=transport
+        )
+
+    monkeypatch.setattr(provider_retry, "resolve_generation_allowance", resolve)
+    sends: list[httpx.Request] = []
+    clock = Clock()
+    audit = Audit(clock)
+    client = provider_retry.RetryingOpenRouterClient(
+        completion=OpenRouterOneSendCompletion(
+            transport_factory=lambda: Wire([(200, SUCCESS, {})], sends, [])
+        ),
+        clock=clock,
+    )
+    with (
+        provider_retry.bind_provider_action(
+            context(clock, audit, action_deadline=None)
+        ),
+        pytest.raises(UnsupportedParamsError),
+    ):
+        await client.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": "complete input"}],
+            tools=[],
+            api_key="synthetic-key",
+            thinking={"type": "enabled", "budget_tokens": 4096},
+            extra_body={"reasoning": {"effort": "medium"}},
+        )
+    assert sends == []
+    assert audit.finishes[-1].disposition == "non_retryable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        "openrouter/openai/gpt-5.6-luna",
+        "openrouter/openai/gpt-6.1-sol",
+        "openrouter/anthropic/claude-sonnet-4.5",
+    ],
+)
+@pytest.mark.parametrize("route", ["factory", "late-kwargs"])
+@pytest.mark.parametrize(
+    ("root_reasoning", "nested_reasoning", "expected"), _REASONING_CASES
+)
+async def test_real_wire_discards_reasoning_caps_in_both_locations(  # noqa: PLR0913
+    model: str,
+    route: str,
+    root_reasoning: dict[str, object] | None,
+    nested_reasoning: dict[str, object] | None,
+    expected: dict[str, object] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budgets and empty masks cannot change effective reasoning or caller data."""
+    metadata_gets: list[httpx.Request] = []
+    transport = _metadata_transport(_descriptor(model), metadata_gets)
+
+    async def resolve(selected: str) -> GenerationAllowance:
+        resolver = importlib.import_module("adapters.adk.generation_allowance")
+        return await resolver.resolve_generation_allowance(
+            selected, transport=transport
+        )
+
+    monkeypatch.setattr(provider_retry, "resolve_generation_allowance", resolve)
+    sends: list[httpx.Request] = []
+    clock = Clock()
+    audit = Audit(clock)
+    client = provider_retry.RetryingOpenRouterClient(
+        completion=OpenRouterOneSendCompletion(
+            transport_factory=lambda: Wire([(200, SUCCESS, {})], sends, [])
+        ),
+        clock=clock,
+    )
+    privacy = {
+        "data_collection": "deny",
+        "zdr": True,
+        "allow_fallbacks": True,
+        "require_parameters": True,
+        "sort": "price",
+    }
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Complete",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"max_tokens": {"type": "integer"}},
+                "required": ["max_tokens"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    body: dict[str, object] = {
+        "provider": privacy,
+        "max_tokens": 1,
+        "max_completion_tokens": 2,
+        "max_output_tokens": 3,
+        "timeout": 1,
+        "request_timeout": 1,
+    }
+    arguments: dict[str, object] = {
+        "extra_body": body,
+        "api_key": "synthetic-key",
+        "response_format": schema,
+        "max_tokens": 1,
+        "max_completion_tokens": 2,
+        "max_output_tokens": 3,
+        "timeout": 1,
+        "request_timeout": 1,
+    }
+    if root_reasoning is not None:
+        arguments["reasoning"] = root_reasoning
+    if nested_reasoning is not None:
+        body["reasoning"] = nested_reasoning
+    before = copy.deepcopy(arguments)
+    messages = [{"role": "user", "content": "Exact input: max_tokens=4096"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "retain",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"budget_tokens": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    with provider_retry.bind_provider_action(
+        context(clock, audit, action_deadline=None)
+    ):
+        if route == "factory":
+            llm = create_openrouter_model(model_id=model, **arguments).model_copy(
+                update={"llm_client": client}
+            )
+            request = LlmRequest(
+                model=model,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text="Exact input: max_tokens=4096")],
+                    )
+                ],
+                config=types.GenerateContentConfig(),
+            )
+            responses = [item async for item in llm.generate_content_async(request)]
+            assert len(responses) == 1
+        else:
+            await client.acompletion(
+                model=model, messages=messages, tools=tools, **arguments
+            )
+    assert arguments == before
+    assert arguments.get("reasoning") is root_reasoning
+    assert body.get("reasoning") is nested_reasoning
+    assert len(sends) == len(metadata_gets) == 1
+    sent = json.loads(sends[0].content)
+    assert sent.get("reasoning") == expected
+    if expected is None:
+        assert "reasoning" not in sent
+    parameter = "max_completion_tokens" if "/openai/gpt-" in model else "max_tokens"
+    assert sent[parameter] == PUBLISHED_LARGE_CAPACITY
+    other = (
+        "max_tokens"
+        if parameter == "max_completion_tokens"
+        else "max_completion_tokens"
+    )
+    assert other not in sent
+    assert "max_output_tokens" not in sent
+    assert "timeout" not in sent
+    assert "request_timeout" not in sent
+    assert sent["model"] == model.removeprefix("openrouter/")
+    assert sent["messages"] == messages
+    assert sent["response_format"] == schema
+    assert sent["provider"] == privacy
+    if route == "late-kwargs":
+        assert sent["tools"] == tools
 
 
 @pytest.mark.asyncio
@@ -304,15 +575,20 @@ async def test_transient_retry_reuses_resolved_request_but_new_input_resolves_ag
                 tools=[],
                 api_key="synthetic-key",
                 messages=[{"role": "user", "content": content}],
+                reasoning={"effort": "max", "max_tokens": 4096, "max_output_tokens": 1},
+                extra_body={"reasoning": {"budget_tokens": 4096}},
             )
     assert len(gets) == EXPECTED_METADATA_GETS
     bodies = [json.loads(send.content) for send in sends]
     assert bodies[0] == bodies[1]
+    assert bodies[0]["reasoning"] == bodies[2]["reasoning"] == {"effort": "max"}
     assert bodies[0]["max_completion_tokens"] == PUBLISHED_LARGE_CAPACITY
     assert bodies[2]["max_completion_tokens"] == PUBLISHED_SMALL_CAPACITY
     assert bodies[2]["messages"][0]["content"] == "original plus full repair feedback"
     assert audit.starts[0].generation_allowance == audit.starts[1].generation_allowance
     assert audit.starts[2].generation_allowance != audit.starts[0].generation_allowance
+    assert audit.starts[0].request_fingerprint == audit.starts[1].request_fingerprint
+    assert audit.starts[2].request_fingerprint != audit.starts[0].request_fingerprint
 
 
 @pytest.mark.parametrize("rejected", [False, True])
