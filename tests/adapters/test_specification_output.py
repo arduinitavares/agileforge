@@ -72,7 +72,11 @@ def test_incomplete_response_guides_recovery_without_ignored_cap(
     response_text: str | None,
 ) -> None:
     """Typed incomplete output gives effective recovery steps and bounded evidence."""
-    usage: JsonObject = {"prompt_token_count": 1411, "candidates_token_count": 4096}
+    # Synthetic usage counts are metadata, not credentials.
+    usage: JsonObject = {
+        "prompt_token_count": 1411,  # nosec B105
+        "candidates_token_count": 4096,  # nosec B105
+    }
     with pytest.raises(SpecificationOutputValidationError) as captured:
         validate_specification_response(
             response_text, finish_reason=finish_reason, usage=usage
