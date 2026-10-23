@@ -41,7 +41,7 @@ from services.contracts.provider_retry import (
     ProviderTransientFailure,
     ProviderTryAuditRecord,
 )
-from utils.generation_policy import RETIRED_GENERATION_ARGUMENTS
+from utils.generation_policy import remove_generation_limits
 
 if TYPE_CHECKING:
     from litellm import ModelResponse
@@ -698,21 +698,9 @@ def _apply_generation_allowance(
     request: dict[str, object], allowance: GenerationAllowance
 ) -> None:
     """Replace retired budgets; preserve every other frozen request semantic."""
-    for key in RETIRED_GENERATION_ARGUMENTS:
-        request.pop(key, None)
-    body = request.get("extra_body")
-    if isinstance(body, Mapping):
-        body = dict(body)
-        for key in RETIRED_GENERATION_ARGUMENTS:
-            body.pop(key, None)
-        reasoning = body.get("reasoning")
-        if isinstance(reasoning, Mapping):
-            body["reasoning"] = {
-                key: value
-                for key, value in reasoning.items()
-                if key not in {"max_tokens", "max_completion_tokens", "budget_tokens"}
-            }
-        request["extra_body"] = body
+    normalized = remove_generation_limits(request)
+    request.clear()
+    request.update(normalized)
     request[allowance.request_parameter] = allowance.completion_tokens
 
 
