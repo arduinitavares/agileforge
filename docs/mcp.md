@@ -78,6 +78,12 @@ and [configuration guidance](https://developers.openai.com/codex/config-advanced
 
 ## Connect AGY
 
+Actual AGY compatibility is **pending verification on the maintainer's Mac**.
+The maintainer uses their existing AGY installation and sign-in for this external
+check. They must verify authenticated initialization, tool discovery, and a read
+of the same synthetic Project used by Codex. AGY is not installed or run inside
+the service container for this check.
+
 AGY uses `serverUrl` and an explicit Authorization header for a remote server.
 The field names differ from Codex:
 
@@ -97,8 +103,8 @@ The field names differ from Codex:
 Replace the placeholder only in private client settings. Treat the resulting
 file as a credential: restrict access, keep it outside version control and do
 not paste it into diagnostics. This example does not assume AGY expands shell
-environment expressions inside header values. Use isolated test settings or a
-disposable client environment for qualification, preserving installed settings.
+environment expressions inside header values. Keep the two clients' settings
+separate. Agent verification must not change personal installed client settings.
 
 See the official [AGY MCP documentation](https://antigravity.google/docs/mcp).
 
