@@ -344,6 +344,23 @@ def test_secret_file_accepts_only_supported_credentials(tmp_path: Path) -> None:
         load_runtime_secrets(secret_file, expected_owner_uid=_current_uid())
 
 
+def test_runtime_mcp_bearer_is_forwarded_from_private_file(tmp_path: Path) -> None:
+    """The installed runtime must explicitly admit the separate MCP credential."""
+    secret_file = tmp_path / "runtime.env"
+    secret_file.write_text(
+        "OPEN_ROUTER_API_KEY=provider-canary-304\n"
+        "AGILEFORGE_MCP_BEARER_TOKEN=mcp-runtime-canary-304\n",
+        encoding="utf-8",
+    )
+    secret_file.chmod(0o600)
+    loaded = load_runtime_secrets(secret_file, expected_owner_uid=_current_uid())
+    environment = production_environment(
+        _state(tmp_path / "default"), _build(), secrets=loaded
+    )
+    assert environment["AGILEFORGE_MCP_BEARER_TOKEN"] == "mcp-runtime-canary-304"  # noqa: S105
+    assert environment["OPEN_ROUTER_API_KEY"] == "provider-canary-304"
+
+
 class _FinishedProcess:
     pid: int = 4242
     returncode: int | None = 0
@@ -363,8 +380,19 @@ class _FinishedProcess:
         self.returncode = -9
 
 
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"OPEN_ROUTER_API_KEY": "serve-secret-canary"},
+        {
+            "OPEN_ROUTER_API_KEY": "serve-secret-canary",
+            "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-serve-secret-canary",
+        },
+    ],
+)
 def test_serve_uses_container_listener_owned_group_and_full_identity(
     tmp_path: Path,
+    credentials: dict[str, str],
 ) -> None:
     """Production readiness must bind externally but probe exact local identity."""
     root = tmp_path / "default"
@@ -383,7 +411,7 @@ def test_serve_uses_container_listener_owned_group_and_full_identity(
     exit_code = serve_production(
         state,
         _build(),
-        secrets={"OPEN_ROUTER_API_KEY": "serve-secret-canary"},
+        secrets=credentials,
         port=8765,
         ready_timeout=3.0,
         start=start,
@@ -395,7 +423,7 @@ def test_serve_uses_container_listener_owned_group_and_full_identity(
     assert captured["start"]["host"] == CONTAINER_HOST
     assert captured["start"]["owned_process_group"] is True
     assert captured["start"]["reload"] is False
-    assert captured["start"]["redact_values"] == ("serve-secret-canary",)
+    assert captured["start"]["redact_values"] == tuple(credentials.values())
     expected = captured["expected"]
     assert expected.commit == "1" * 40
     assert expected.state_id == str(state.state_id)

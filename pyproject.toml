@@ -29,6 +29,7 @@ dependencies = [
     "uvicorn>=0.37.0",
     "yfinance>=0.2.66",
     "ruff>=0.15.8,<1",
+    "mcp==1.30.0",
 ]
 
 [project.scripts]

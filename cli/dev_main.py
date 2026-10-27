@@ -85,6 +85,10 @@ _MAX_PORT = 65_535
 _MIN_UV_VERSION_PARTS = 2
 _GIT_COMMIT_LENGTH = 40
 _PROVIDER_CREDENTIAL = "OPEN_ROUTER_API_KEY"
+_RUNTIME_CREDENTIALS: tuple[str, ...] = (
+    _PROVIDER_CREDENTIAL,
+    "AGILEFORGE_MCP_BEARER_TOKEN",
+)
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _INVALID_PRODUCTION_OUTPUT = "invalid_production_cli_output"
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
@@ -719,7 +723,7 @@ def _forwarded_arguments(raw_arguments: Sequence[str]) -> tuple[str, ...]:
 
 
 def _provider_environment(secrets_file: Path | None) -> dict[str, str]:
-    file_value: str | None = None
+    file_values: dict[str, str | None] = {}
     if secrets_file is not None:
         try:
             with open_secrets_file(secrets_file) as stream:
@@ -733,13 +737,15 @@ def _provider_environment(secrets_file: Path | None) -> dict[str, str]:
         except (OSError, UnicodeError):
             message = "secrets file could not be read as UTF-8 dotenv"
             raise DeveloperCommandError(message) from None
-        file_value = values.get(_PROVIDER_CREDENTIAL)
+        file_values = {key: values.get(key) for key in _RUNTIME_CREDENTIALS}
 
-    if _PROVIDER_CREDENTIAL in os.environ:
-        return {_PROVIDER_CREDENTIAL: os.environ[_PROVIDER_CREDENTIAL]}
-    if file_value is not None:
-        return {_PROVIDER_CREDENTIAL: file_value}
-    return {}
+    environment: dict[str, str] = {}
+    for key in _RUNTIME_CREDENTIALS:
+        if key in os.environ:
+            environment[key] = os.environ[key]
+        elif (file_value := file_values.get(key)) is not None:
+            environment[key] = file_value
+    return environment
 
 
 def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
@@ -858,7 +864,7 @@ def _run_cli(
     secret_values = tuple(
         value
         for key, value in environment.items()
-        if key == _PROVIDER_CREDENTIAL and value
+        if key in _RUNTIME_CREDENTIALS and value
     )
     _reject_credential_arguments(forwarded, secret_values=secret_values)
     child_arguments = (sys.executable, "-m", "cli.main", *forwarded)
@@ -1027,6 +1033,11 @@ def _managed_ui_child(
             reload=reload,
             host=host,
             owned_process_group=True,
+            redact_values=tuple(
+                value
+                for key, value in environment.items()
+                if key in _RUNTIME_CREDENTIALS and value
+            ),
         )
         _ui_child_handoff(child)
         yield child
