@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from http import HTTPStatus
 
 import pytest
@@ -81,6 +82,82 @@ def test_authenticated_client_initializes_supported_mcp(
     assert result["serverInfo"]["name"] == "AgileForge"
     assert "tools" in result["capabilities"]
     assert TOKEN not in response.text
+
+
+@pytest.mark.parametrize("method", ["POST", "GET", "DELETE", "OPTIONS", "HEAD"])
+def test_unsupported_protocol_version_does_not_echo_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    method: str,
+) -> None:
+    """Rejected protocol metadata must not enter SDK responses or raw logs."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    caplog.set_level(logging.DEBUG, logger="mcp")
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.request(
+            method,
+            "/mcp",
+            json=_message("tools/list"),
+            headers={
+                "Accept": ACCEPT,
+                "Authorization": f"Bearer {TOKEN}",
+                "MCP-Protocol-Version": TOKEN,
+            },
+        )
+    assert TOKEN not in response.text + caplog.text
+    assert all(TOKEN not in record.getMessage() for record in caplog.records)
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.parametrize("second_version", ["2025-11-25", TOKEN])
+def test_duplicate_protocol_versions_are_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    second_version: str,
+) -> None:
+    """A proxy and the SDK must not choose different protocol versions."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    caplog.set_level(logging.DEBUG, logger="mcp")
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=_message("tools/list"),
+            headers=[
+                ("Accept", ACCEPT),
+                ("Authorization", f"Bearer {TOKEN}"),
+                ("MCP-Protocol-Version", "2025-11-25"),
+                ("MCP-Protocol-Version", second_version),
+            ],
+        )
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert TOKEN not in response.text + caplog.text
+    assert all(TOKEN not in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"],
+)
+def test_supported_protocol_versions_preserve_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+) -> None:
+    """The metadata guard must preserve the SDK's supported client versions."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=_message("tools/list"),
+            headers={
+                "Accept": ACCEPT,
+                "Authorization": f"Bearer {TOKEN}",
+                "MCP-Protocol-Version": version,
+            },
+        )
+    assert response.status_code == HTTPStatus.OK
+    assert "service_identity" in {
+        tool["name"] for tool in response.json()["result"]["tools"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -221,6 +298,25 @@ def test_authenticated_loopback_origin_and_port_are_supported(
     assert response.status_code == HTTPStatus.OK
 
 
+def test_transport_identity_normalization_preserves_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK must receive the normalized identity accepted by our guard."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=_message("initialize"),
+            headers={
+                "Accept": ACCEPT,
+                "Authorization": f"Bearer {TOKEN}",
+                "Host": "LOCALHOST:8765",
+                "Origin": "HTTP://LOCALHOST:8765",
+            },
+        )
+    assert response.status_code == HTTPStatus.OK
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -288,3 +384,129 @@ def test_protocol_errors_do_not_echo_credentials(
         )
     assert response.status_code in {200, 400}
     assert TOKEN not in response.text + caplog.text
+
+
+@pytest.mark.parametrize(
+    "response_body",
+    [
+        {"jsonrpc": "2.0", "id": 3, "result": {"marker": TOKEN}},
+        {"jsonrpc": "2.0", "id": 4, "error": {"code": -1, "message": TOKEN}},
+    ],
+    ids=["unsolicited-result", "unsolicited-error"],
+)
+def test_unsolicited_responses_do_not_reach_sdk_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    response_body: dict[str, object],
+) -> None:
+    """A stateless tools-only server has no client request awaiting a response."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    caplog.set_level(logging.DEBUG, logger="mcp")
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=response_body,
+            headers={"Accept": ACCEPT, "Authorization": f"Bearer {TOKEN}"},
+        )
+    assert TOKEN not in response.text + caplog.text
+    assert all(TOKEN not in record.getMessage() for record in caplog.records)
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.parametrize(
+    "notification",
+    [
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 1, "reason": "Client cancelled"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/roots/list_changed",
+            "params": {"_meta": {"marker": "Client state changed"}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {
+                "progressToken": "progress-1",
+                "progress": 0,
+                "message": "Working",
+            },
+        },
+    ],
+    ids=["initialized", "cancelled", "roots-changed", "progress"],
+)
+def test_response_guard_preserves_client_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+    notification: dict[str, object],
+) -> None:
+    """Rejecting the opposite message direction must preserve client notices."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=notification,
+            headers={"Accept": ACCEPT, "Authorization": f"Bearer {TOKEN}"},
+        )
+    assert response.status_code == HTTPStatus.ACCEPTED
+
+
+@pytest.mark.parametrize(
+    "notification",
+    [
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/roots/list_changed",
+            "params": {"_meta": {"marker": TOKEN}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {"progressToken": "progress-1", "progress": 0, "message": TOKEN},
+        },
+    ],
+    ids=["roots-metadata", "progress-message"],
+)
+def test_credential_bearing_notifications_do_not_enter_sdk_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    notification: dict[str, object],
+) -> None:
+    """Control metadata must not copy runtime credentials into SDK diagnostics."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    caplog.set_level(logging.DEBUG, logger="mcp")
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=notification,
+            headers={"Accept": ACCEPT, "Authorization": f"Bearer {TOKEN}"},
+        )
+    assert TOKEN not in response.text + caplog.text
+    assert all(TOKEN not in record.getMessage() for record in caplog.records)
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_content_type_whitespace_does_not_enter_raw_sdk_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The SDK must receive the same normalized media type the guard accepts."""
+    monkeypatch.setenv(AUTH_ENV, TOKEN)
+    caplog.set_level(logging.DEBUG, logger="mcp")
+    with TestClient(api.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            json=_message("tools/list"),
+            headers={
+                "Accept": ACCEPT,
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": f" application/json; marker={TOKEN}",
+            },
+        )
+    assert TOKEN not in response.text + caplog.text
+    assert all(TOKEN not in record.getMessage() for record in caplog.records)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["result"]["tools"]

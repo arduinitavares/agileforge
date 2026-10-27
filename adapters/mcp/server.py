@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from mcp.types import (
     CallToolResult,
     ClientNotification,
@@ -114,6 +115,15 @@ def _valid_origin(value: str) -> bool:
         and value == f"{parsed.scheme}://{parsed.netloc}"
         and _valid_authority(parsed.netloc)
     )
+
+
+def _normalized_header(name: bytes, value: bytes) -> tuple[bytes, bytes]:
+    """Forward the same transport metadata accepted by the outer guard."""
+    if name.lower() in {b"host", b"origin"}:
+        value = value.lower()
+    elif name.lower() == b"content-type":
+        value = value.strip()
+    return name, value
 
 
 @dataclass(frozen=True)
@@ -269,9 +279,13 @@ class McpEndpoint:
             isinstance(identifier, str) and secret in identifier
             for identifier in identifiers
             for secret in self._secret_values
+        ) or (
+            isinstance(message, JSONRPCNotification)
+            and _redact_secrets(wire, self._secret_values) != wire
         ):
+            # SDK diagnostics include notification metadata and request IDs.
             return JSONResponse(
-                {"error": "Invalid request identifier"}, status_code=400
+                {"error": "Invalid MCP metadata"}, status_code=400
             )
         try:
             if isinstance(message, JSONRPCRequest):
@@ -279,7 +293,10 @@ class McpEndpoint:
             elif isinstance(message, JSONRPCNotification):
                 ClientNotification.model_validate(wire)
             else:
-                return None
+                # This tools-only endpoint never issues requests to clients.
+                return JSONResponse(
+                    {"error": "Unsolicited MCP response"}, status_code=400
+                )
         except ValidationError:
             return JSONResponse(
                 {
@@ -375,6 +392,18 @@ class McpEndpoint:
             or not _matches_transport_identity(origin, self._settings.allowed_origins)
         ):
             return JSONResponse({"error": "Invalid Origin header"}, status_code=403)
+        versions = [
+            value
+            for name, value in scope["headers"]
+            if name.lower() == b"mcp-protocol-version"
+        ]
+        if versions and (
+            len(versions) != 1
+            or versions[0].decode("latin-1") not in SUPPORTED_PROTOCOL_VERSIONS
+        ):
+            return JSONResponse(
+                {"error": "Invalid MCP-Protocol-Version header"}, status_code=400
+            )
         if scope["method"] == "POST":
             content_types = [
                 value
@@ -403,13 +432,12 @@ class McpEndpoint:
         if error is not None:
             await error(scope, receive, send)
             return
-        # The SDK retains its own DNS-rebinding checks. Give it only validated,
-        # normalized identities so its rejection logs cannot echo raw headers.
+        # The SDK retains its transport checks. Give it the same normalized
+        # metadata validated above so its rejection logs cannot echo raw input.
         scope = {
             **scope,
             "headers": [
-                (name, value.lower() if name.lower() in {b"host", b"origin"} else value)
-                for name, value in scope["headers"]
+                _normalized_header(name, value) for name, value in scope["headers"]
             ],
         }
         if self._manager is None:
