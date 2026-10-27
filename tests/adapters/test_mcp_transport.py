@@ -10,7 +10,8 @@ from fastapi.testclient import TestClient
 
 import api
 
-TOKEN = "mcp-test-bearer-secret-canary-304"  # noqa: S105 - synthetic canary
+# Deliberate synthetic credential for authenticated transport checks.
+TOKEN = "mcp-test-bearer-secret-canary-304"  # noqa: S105  # nosec B105
 AUTH_ENV = "AGILEFORGE_MCP_BEARER_TOKEN"
 ACCEPT = "application/json, text/event-stream"
 

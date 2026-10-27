@@ -2051,7 +2051,8 @@ _mcp_endpoint = create_mcp_endpoint(
 )
 app.add_route(
     "/mcp",
-    _mcp_endpoint,
+    # Starlette dispatches callable instances as ASGI apps, not Request handlers.
+    _mcp_endpoint,  # ty: ignore[invalid-argument-type]
     methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
     name="mcp",
 )

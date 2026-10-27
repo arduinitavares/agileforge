@@ -386,7 +386,7 @@ class _FinishedProcess:
         {"OPEN_ROUTER_API_KEY": "serve-secret-canary"},
         {
             "OPEN_ROUTER_API_KEY": "serve-secret-canary",
-            "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-serve-secret-canary",
+            "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-serve-secret-canary",  # nosec B105
         },
     ],
 )

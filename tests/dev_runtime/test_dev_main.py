@@ -932,7 +932,7 @@ def test_runtime_mcp_bearer_is_forwarded_with_explicit_precedence(
     loaded = module._provider_environment(secret_file)
     assert loaded == {
         "OPEN_ROUTER_API_KEY": "provider-file-canary-304",
-        "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-file-canary-304",
+        "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-file-canary-304",  # nosec B105
     }
     monkeypatch.setenv("AGILEFORGE_MCP_BEARER_TOKEN", "mcp-environment-canary-304")
     assert (

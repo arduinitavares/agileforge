@@ -44,7 +44,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
-TOKEN = "mcp-application-secret-canary-304"  # noqa: S105 - synthetic canary
+# Deliberate synthetic credential for authentication and disclosure checks.
+TOKEN = "mcp-application-secret-canary-304"  # noqa: S105  # nosec B105
 READ_TOOLS = {
     "service_identity",
     "project_list",
@@ -118,19 +119,20 @@ def workflow_system(
     )
     SQLModel.metadata.create_all(engine)
     project_id, _sprint_id, _story_id, task_id = seed_started_execution(engine)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=ProviderGraphClock(),
+    )
     application = AgileForgeApplication(
-        workflow_domain=WorkflowDomain(
-            engine=engine,
-            graph=project_graph(),
-            clock=ProviderGraphClock(),
-        ),
+        workflow_domain=domain,
         read_projection=DurableReadProjectionService(engine=engine),
         execution_action_selection=ExecutionActionSelectionService(engine=engine),
     )
     application.set_project_lifecycle(
         ProjectLifecycleService(
             engine=engine,
-            workflow_domain=application._workflow_domain,
+            workflow_domain=domain,
             repository_probe=GitPythonRepositoryProbe(),
         )
     )
@@ -149,7 +151,8 @@ def test_catalogue_is_explicit_and_preserves_required_fields(
     monkeypatch.setenv("AGILEFORGE_MCP_BEARER_TOKEN", TOKEN)
 
     def forbidden_application() -> AgileForgeApplication:
-        pytest.fail("Discovery must not compose or run the application")
+        message = "Discovery must not compose or run the application"
+        raise AssertionError(message)
 
     monkeypatch.setattr(api, "_application", forbidden_application)
     with TestClient(api.app, base_url="http://localhost") as client:
@@ -290,9 +293,9 @@ def test_work_submission_replay_and_conflicting_reuse_preserve_domain_results(
             "outcome_summary": "Changed input under the same key",
         }
         rejected = _call(client, "complete_task", **conflicting)
-    expected = application.complete_task(CompleteTaskRequest(**arguments)).model_dump(
-        mode="json"
-    )
+    expected = application.complete_task(
+        CompleteTaskRequest.model_validate(arguments)
+    ).model_dump(mode="json")
     assert expected == {**first["structuredContent"], "replayed": True}
     assert replay["structuredContent"] == expected
     assert http_replay.status_code == HTTPStatus.OK
@@ -327,7 +330,7 @@ def test_work_submission_replay_and_conflicting_reuse_preserve_domain_results(
     assert json.loads(capsys.readouterr().out) == expected
     assert rejected["isError"] is True
     assert rejected["structuredContent"] == application.complete_task(
-        CompleteTaskRequest(**conflicting),
+        CompleteTaskRequest.model_validate(conflicting),
     ).model_dump(mode="json")
     assert durable_rows(engine) == after
 
@@ -436,7 +439,10 @@ def test_known_runtime_secrets_are_redacted_without_changing_business_facts(
 ) -> None:
     """Stored text must not turn a read into a runtime credential disclosure."""
     engine, application, _project_id, _task_id = workflow_system
-    provider_secret = "provider-response-secret-canary-304"  # noqa: S105 - synthetic canary
+    # Deliberate synthetic provider credential for disclosure checks.
+    provider_secret = (
+        "provider-response-secret-canary-304"  # noqa: S105  # nosec B105
+    )
     monkeypatch.setenv("OPEN_ROUTER_API_KEY", provider_secret)
     created = application.create_project(
         CreateProjectCommand(
@@ -614,7 +620,11 @@ def test_long_generation_can_be_observed_without_competing_attempts(
         history_after = application.reads.artifact_history(
             project_id=lineage.project_id, node_id="backlog.generate"
         )
-        assert len(history_after["data"]["items"]) == 1
+        history_data = history_after["data"]
+        assert isinstance(history_data, dict)
+        history_items = history_data["items"]
+        assert isinstance(history_items, list)
+        assert len(history_items) == 1
     finally:
         release.set()
         engine.dispose()
