@@ -100,7 +100,9 @@ DEFAULT_SECRET_PATH = Path("/run/secrets/agileforge")
 INSTALLED_ROOT = Path("/opt/agileforge")
 PRODUCTION_DEPLOYMENT_ROOT = Path("/var/lib/agileforge")
 PRODUCTION_WORKSPACE_ROOT = Path("/workspace")
-_SUPPORTED_CREDENTIALS = frozenset({"OPEN_ROUTER_API_KEY"})
+_SUPPORTED_CREDENTIALS: frozenset[str] = frozenset(
+    {"OPEN_ROUTER_API_KEY", "AGILEFORGE_MCP_BEARER_TOKEN"}
+)
 _MAX_PORT = 65_535
 _MAX_CHILD_OUTPUT_BYTES = 8 * 1024 * 1024
 _COMMIT_LENGTH = 40

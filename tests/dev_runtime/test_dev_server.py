@@ -505,7 +505,7 @@ def test_stop_ui_terminates_then_kills_only_after_timeout() -> None:
 
 
 @pytest.mark.parametrize("with_secrets_file", [False, True])
-def test_ui_json_readiness_preserves_normal_profile_across_restarts(
+def test_ui_json_readiness_preserves_normal_profile_across_restarts(  # noqa: PLR0915 - one profile across restart
     monkeypatch: pytest.MonkeyPatch,
     checkout: Path,
     capsys: pytest.CaptureFixture[str],
@@ -516,10 +516,12 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     """Reuse a validated development database and emit one readiness object."""
     _create_profile(checkout)
     monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGILEFORGE_MCP_BEARER_TOKEN", raising=False)
     credential = "dummy-ui-credential-sentinel"
+    mcp_credential = "dummy-ui-mcp-credential-sentinel"
     secrets_file = tmp_path / "provider.env"
     secrets_file.write_text(
-        f"OPEN_ROUTER_API_KEY={credential}\nMODEL_CONFIG_PATH=forbidden-ui-config\n",
+        f"OPEN_ROUTER_API_KEY={credential}\nAGILEFORGE_MCP_BEARER_TOKEN={mcp_credential}\nMODEL_CONFIG_PATH=forbidden-ui-config\n",
         encoding="utf-8",
     )
     secrets_arguments = (
@@ -537,6 +539,8 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     def fake_start_ui(**options: object) -> object:
         environment = cast("Mapping[str, str]", options["environment"])
         started_environments.append(dict(environment))
+        expected_redactions = (credential, mcp_credential) if with_secrets_file else ()
+        assert options["redact_values"] == expected_redactions
         return FakeUIChild(process=FakeProcess(), port=_UI_PORT)
 
     monkeypatch.setattr(_main_module(), "start_ui", fake_start_ui)
@@ -567,6 +571,7 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
         )
         captured = capsys.readouterr()
         assert credential not in captured.out + captured.err
+        assert mcp_credential not in captured.out + captured.err
         payload = json.loads(captured.out)
         assert payload["status"] == "ready"
         assert payload["profile"] == "local"
@@ -580,6 +585,9 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     assert started_environments[0]["AGILEFORGE_LAUNCHER_CHILD"] == "1"
     assert started_environments[0].get("OPEN_ROUTER_API_KEY") == (
         credential if with_secrets_file else None
+    )
+    assert started_environments[0].get("AGILEFORGE_MCP_BEARER_TOKEN") == (
+        mcp_credential if with_secrets_file else None
     )
     assert "forbidden-ui-config" not in started_environments[0].values()
     for artifact in (checkout / ".agileforge").rglob("*"):

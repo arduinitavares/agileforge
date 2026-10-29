@@ -914,6 +914,37 @@ def test_info_secrets_file_reports_presence_without_credential_value(
     )
 
 
+def test_runtime_mcp_bearer_is_forwarded_with_explicit_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward both runtime credentials with explicit environment precedence."""
+    module = _module()
+    secret_file = tmp_path / "runtime.env"
+    secret_file.write_text(
+        "OPEN_ROUTER_API_KEY=provider-file-canary-304\n"
+        "AGILEFORGE_MCP_BEARER_TOKEN=mcp-file-canary-304\n",
+        encoding="utf-8",
+    )
+    secret_file.chmod(0o600)
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGILEFORGE_MCP_BEARER_TOKEN", raising=False)
+    loaded = module._provider_environment(secret_file)
+    assert loaded == {
+        "OPEN_ROUTER_API_KEY": "provider-file-canary-304",
+        "AGILEFORGE_MCP_BEARER_TOKEN": "mcp-file-canary-304",  # nosec B105
+    }
+    monkeypatch.setenv("AGILEFORGE_MCP_BEARER_TOKEN", "mcp-environment-canary-304")
+    assert (
+        module._provider_environment(secret_file)["AGILEFORGE_MCP_BEARER_TOKEN"]
+        == "mcp-environment-canary-304"  # noqa: S105 - synthetic canary
+    )
+    monkeypatch.setenv("AGILEFORGE_MCP_BEARER_TOKEN", "")
+    assert (
+        module._provider_environment(secret_file)["AGILEFORGE_MCP_BEARER_TOKEN"] == ""
+    )
+
+
 def test_real_launcher_child_ignores_checkout_dotenv_controls_and_credentials(
     checkout: Path,
 ) -> None:

@@ -101,6 +101,11 @@ configuration repair below. Use a fresh project name for a trial run.
 Provider-backed actions require an explicit runtime secret mount as described
 below. Startup itself does not load the host's credentials.
 
+The same API serves the [authenticated MCP endpoint](mcp.md) at `/mcp`.
+It requires `AGILEFORGE_MCP_BEARER_TOKEN` in the private runtime secret input for
+initialization, discovery, reads and commands. Without that value MCP fails
+closed; the existing dashboard startup remains available.
+
 All eight model roles use the shared [generation policy](generation-policy.md),
 including Vision primary and semantic-repair calls. New host-owned generation
 has no application token budget or total generation deadline. Each call requests
@@ -358,7 +363,7 @@ command when running a different profile for a maintenance rehearsal.
 
 Credentials are runtime-only. Never put them in a Dockerfile, build argument,
 image layer, Git bundle, backup, checkout `.env`, or ambient host environment.
-For authorized provider work, mount one regular non-symlink file
+For MCP access or authorized provider work, mount one regular non-symlink file
 at `/run/secrets/agileforge`, owned by UID 10001 and mode `0600`, and pass
 `--secrets-file /run/secrets/agileforge` to `serve` or `cli`. On a Linux Docker
 host, supply the operator-owned `secret_file` with those container-visible

@@ -165,6 +165,9 @@ Only Docker with Compose is needed to run the packaged app. See the
 [container runbook](docs/linux-containers.md#run-the-packaged-app) for image
 selection, separate installations, credentials, and building from source.
 
+The same runtime provides an authenticated [MCP endpoint](docs/mcp.md) with typed
+Project, artifact and workflow tools and separate Codex and AGY connection examples.
+
 ## Development
 
 For the Linux/amd64 container workflow, use the

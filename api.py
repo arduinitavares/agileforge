@@ -26,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from adapters.mcp.server import create_mcp_endpoint
 from repositories.project import ProjectRepository
 from services.agent_workbench.version import agileforge_version
 from services.application import (
@@ -107,7 +108,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     require_linux()
     with runtime_access():
         ensure_business_db_ready()
-        yield
+        async with _mcp_endpoint.lifespan():
+            yield
 
 
 app = FastAPI(title="AgileForge API", lifespan=lifespan)
@@ -2036,6 +2038,24 @@ def record_project_post_sprint_triage(
             )
         )
     )
+
+
+def _mcp_application() -> AgileForgeApplication:
+    """Resolve the same application supplier used by the HTTP routes."""
+    return _application()
+
+
+_mcp_endpoint = create_mcp_endpoint(
+    application_factory=_mcp_application,
+    identity_factory=lambda: get_dashboard_config().model_dump(mode="json"),
+)
+app.add_route(
+    "/mcp",
+    # Starlette dispatches callable instances as ASGI apps, not Request handlers.
+    _mcp_endpoint,  # ty: ignore[invalid-argument-type]
+    methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
+    name="mcp",
+)
 
 
 if __name__ == "__main__":
