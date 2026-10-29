@@ -4,27 +4,24 @@ Use this procedure when the target repository has an approved external specifica
 
 ## Keep AgileForge in control of sequence
 
-Do not translate the specification into an independent issue list or implementation plan before AgileForge requests it. First read:
+Do not translate the specification into an independent issue list or implementation plan before AgileForge requests it.
 
-```sh
-agileforge workflow position --project-id <id>
-agileforge workflow next --project-id <id>
-```
+Call `workflow_position` and `workflow_next` with the selected `project_id`.
 
-Use the active runtime prefix. Vision and Product Goal work may precede source registration. Follow the exact current command template.
+Use the selected MCP connection. Vision and Product Goal work may precede source registration. Match the current action to its discovered MCP schema.
 
 The [lifecycle map](lifecycle.md) groups source registration, structuring, and
 review into one Specification stage. Each remains a separate transition.
 Feedback loops require the appropriate revision and review; accepting an earlier
 candidate does not accept a changed candidate.
 
-Do not construct a registration or planning command from `--help`, guessed flags, or the source filename. `workflow next` supplies the command template and required operator inputs.
+Do not construct a registration or planning command from `--help`, guessed flags, or the source filename. `workflow_next` supplies the command template and required operator inputs.
 
 ## Register the exact source
 
-When `workflow next` advertises `specification source register`:
+When `workflow_next` advertises Specification source registration, use `register_specification_source`:
 
-1. Confirm the approved source exists inside the target repository.
+1. Confirm the approved source exists inside the repository visible to the selected service.
 2. Use its repository-relative path.
 3. Identify only ADRs that actually govern the source.
 4. Do not rewrite, normalize, or regenerate the approved source during registration.
@@ -32,7 +29,9 @@ When `workflow next` advertises `specification source register`:
 
 The current contract accepts `grill-with-docs` as the preparation capability, but the advertised template remains authoritative.
 
-After registration, parse the response and reread `workflow position` and `workflow next`. Structure the source only when the new route advertises that action.
+Supply current `expected_decision_fingerprint` and `expected_source_fingerprint` from observed state, the discovered `preparation_capability`, an explicit actor, and an idempotency key. Do not guess fingerprints or mechanically translate CLI flags.
+
+After registration, parse the response and reread `workflow_position` and `workflow_next`. Structure the source only when the new route advertises that action.
 
 When the user named this approved source as part of the bootstrap request, deterministic source registration is within that authority once advertised. Specification structuring remains provider-backed and needs provider authorization.
 
@@ -58,6 +57,6 @@ Obtain the user's decision for:
 
 Use the exact review packet selected by AgileForge. After the decision command completes, reread both workflow routes.
 
-## CLI and UI review
+## MCP and human review
 
-Use CLI JSON as authority. When the dashboard is running, guide the user to the matching candidate or decision control and check that the visible projection agrees with the CLI packet. Record any mismatch as an AgileForge defect. Do not treat button color, ordering, or disappearance as proof that a transition completed.
+Use fresh MCP workflow and review reads as authority. When the dashboard is running, guide the user to the matching candidate or decision control and check that the visible projection agrees with the MCP packet. Record any mismatch as an AgileForge defect. Do not treat button color, ordering, or disappearance as proof that a transition completed.

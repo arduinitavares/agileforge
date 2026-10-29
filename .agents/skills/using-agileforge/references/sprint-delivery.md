@@ -4,7 +4,7 @@ Use this procedure only after AgileForge reports an active Sprint execution acti
 
 ## Bind work to the exact Task
 
-Reread `workflow position` and `workflow next`. Inspect the advertised Task and its parent Story through current read commands such as `sprint task show`, `sprint tasks`, and `story show`. Do not select a Task from rank, UI order, or a previous session.
+Reread `workflow_position` and `workflow_next`. Inspect the advertised Task and its parent Story through discovered MCP tools such as `sprint_task_show`, `sprint_tasks`, and `story_show`. Do not select a Task from rank, UI order, or a previous session.
 
 Record:
 
@@ -35,7 +35,7 @@ Commit only when the user request or target workflow authorizes a local commit. 
 
 ## Record completion
 
-Before any completion mutation, reread both workflow routes. Use the exact advertised completion command and report only evidence that exists:
+Before any completion mutation, reread both workflow routes. Use the discovered `complete_task` schema for the current advertised Task and report only evidence that exists:
 
 - verified commit or working-tree state
 - files or artifacts actually changed
