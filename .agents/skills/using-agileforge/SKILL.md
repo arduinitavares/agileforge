@@ -1,89 +1,50 @@
 ---
 name: using-agileforge
-description: Use when the user asks Codex to start, continue, or deliver a target repository through AgileForge, including bootstrapping from an approved specification or implementing AgileForge-planned Sprint work.
+description: Use when the user asks an agent to start, continue, or deliver a target repository through AgileForge, including approved specification handoff and AgileForge-planned Sprint work.
 ---
 
 # Using AgileForge
 
-## Purpose
+Guide the target repository through the selected AgileForge service. Use **MCP first** for Project and workflow operations. Keep CLI support for administration, diagnostics, and recovery. AgileForge owns workflow sequencing; repository instructions govern implementation; the human owns product decisions.
 
-Guide one target repository through AgileForge while keeping product decisions with the user. AgileForge chooses the workflow route. The target repository's instructions choose how code is built and tested.
+Use this skill only when the user asks AgileForge to manage the work.
 
-Do not use this skill for ordinary repository work that the user did not ask AgileForge to manage.
+## Connection and identity
 
-## Core contract
+1. Read the target repository's instructions and Git state. Preserve unrelated changes.
+2. Use the user's selected AgileForge MCP connection. Discover its tools and schemas; tool prefixes depend on the client.
+3. Call `service_identity` before Project operations. Verify the selected runtime/profile and state against the configured deployment. A reachable endpoint or familiar Project name is insufficient.
+4. Call `project_list` and, when needed, `project_show`. Select the exact repository binding. For a remote or container service, verify the mapping between client and server paths. Never default to Project 1 or send a Mac/Windows path as an assumed Linux server path.
+5. If the connection is absent, ambiguous, or rejects authentication, report the specific gap. Do not change client settings or switch to an unverified CLI profile.
 
-1. Treat the current repository as the product being developed. Do not assume it contains AgileForge's source checkout or `./agileforge-dev`.
-2. Read the target repository's instructions and Git state before acting. Preserve unrelated user changes.
-3. From a target repository, run `command -v agileforge` and use the stable `agileforge` command. The stable CLI has no `info` subcommand. Do not search for or invoke a nearby `./agileforge-dev`. Use `info --json` only with a selected development launcher and profile.
-4. Reject legacy v1 bootstrap instructions involving `specs/spec.json`, `spec profile validate`, `project create --dry-run`, or authority compilation. The current v2 lifecycle creates the Project first and routes through Vision, Product Goal, and exact Specification source registration.
-5. Use JSON CLI reads as workflow authority. Bound potentially large output and parse selected fields. The browser is a human review surface and a cross-check, not routing authority.
-6. For an existing project, always run both `workflow position --project-id <id>` and `workflow next --project-id <id>`. Do not substitute `status`, help output, a UI control, or a previous route. Execute only the current `workflow next` command template.
-7. Parse every mutation result before continuing. After a successful mutation, read both routing commands again.
-8. Use a new idempotency key for each distinct request. Reuse the same key only when retrying the exact request after an uncertain transport result.
-9. Treat a user's instruction as authority only for the actions it names. "Create the AgileForge project if it does not exist" authorizes one matching local project creation. Do not ask for that approval again. Do not stretch it to provider calls, product decisions, external records, merges, pushes, or cleanup.
+Read [project-bootstrap.md](references/project-bootstrap.md) for Project selection or creation. Read [mcp-workflow.md](references/mcp-workflow.md) for supported tools, errors, and command mapping. Configuration belongs to the selected installation; this skill contains no bearer credentials or machine-specific service address.
 
-## Operating loop
+## Workflow loop
 
-### Understand the lifecycle
+- Read both `workflow_position` and `workflow_next` for the selected `project_id` before a mutation and after a successful mutation.
+- Follow the current action, selectors, reason codes, and fingerprints. Do not substitute dashboard ordering, status summaries, or a remembered route.
+- Match the advertised business action to its discovered MCP tool and input schema. `workflow_next` may return a CLI command template; it is routing evidence, not an instruction to launch CLI. Do not mechanically translate flags or invent a generic dispatch tool.
+- Read the needed candidate or Task through MCP. Keep its exact identity and human-review binding.
+- Mutate only within existing user authorization. Every command needs an explicit `actor` and `idempotency_key`. Use a new key for distinct work. Preserve the same key and identical input across an uncertain response or reconnect.
+- Parse MCP `isError` and the structured application's `ok`, `error`, `replayed`, and `output` before continuing. A transport success is not business success.
+- If the selected action has no MCP command, use the existing human dashboard or report the missing capability. MCP has no human-acceptance or generic transition tool. CLI access does not grant authority to decide a review.
 
-Read [lifecycle.md](references/lifecycle.md) when explaining the overall sequence,
-moving between planning and delivery, or continuing after Sprint triage. It maps
-the grouped stages and conditional loops; use the current CLI routes to choose
-the actual transition.
+Read [lifecycle.md](references/lifecycle.md) for orientation, not for a fixed sequence. Reject obsolete v1 bootstrap recipes involving `specs/spec.json`, `spec profile validate`, `project create --dry-run`, or authority compilation. The v2 lifecycle creates the Project before Vision, Product Goal, and exact Specification source registration.
 
-### Start or resume
+## Planning and delivery
 
-Read [project-bootstrap.md](references/project-bootstrap.md). Resolve the target repository, AgileForge runtime, profile when applicable, and exact project identity.
+Read [specification-handoff.md](references/specification-handoff.md) for an approved external specification or planning work. Present the exact candidate and requested decision. Obtain human acceptance, rejection, clarification, Story selection, sizing, dependencies, and Sprint decisions through the existing review interface.
 
-If no matching project exists, create one when the user asked to start or create it. Resolve required inputs, run the creation, and report the result without asking for duplicate approval. If identity is ambiguous, stop and ask instead of selecting by name or numeric order.
+Read [sprint-delivery.md](references/sprint-delivery.md) for active Sprint Tasks. Implement only the current Task and its parent Story contract. Follow the target repository's build, test, review, and commit rules.
 
-For a stable runtime, the mandatory command shapes are:
+An instruction to start or create a missing Project authorizes that matching creation. It does not authorize provider generation, product acceptance, external issue filing, Git publication, cleanup, or deployment. Reuse existing applicable approvals; ask only for missing authority.
 
-```sh
-command -v agileforge
-agileforge --version
-agileforge project list
+## Administration and recovery
 
-agileforge project create \
-  --name "<approved-product-name>" \
-  --repository-path "<absolute-target-repository>" \
-  --idempotency-key "<new-key>" \
-  --actor "codex"
+Read [cli-administration.md](references/cli-administration.md) for explicit CLI administration, diagnostics, or recovery. Verify that it addresses the same runtime/profile and business state before use. A host CLI may target different data from the MCP service.
 
-agileforge workflow position --project-id <returned-or-matched-id>
-agileforge workflow next --project-id <returned-or-matched-id>
-```
-
-Run `project create` only when no exact repository binding exists and creation is authorized. The development runtime uses the same semantic commands after `./agileforge-dev cli --profile <profile> --` and requires `./agileforge-dev info --profile <profile> --json` first.
-
-There is no `agileforge info`, `project bootstrap`, `--repository`, or `--spec` command in this workflow. Do not invent substitutes. Never omit `--idempotency-key` or `--actor` from a mutation.
-
-### Follow product planning
-
-Read [specification-handoff.md](references/specification-handoff.md) when an approved external specification exists or the workflow is in Vision, Product Goal, Specification, Backlog, Roadmap, Story, or Sprint planning.
-
-Present the exact candidate and decision requested by AgileForge. The user decides acceptance, rejection, feedback, Story selection, dependencies, sizing corrections, and Sprint commitment.
-
-An approved source is not registered until `workflow next` advertises `specification source register`. Register with `--source-path`, the advertised preparation capability, a new idempotency key, and actor. Then reread both routes. Do not run provider-backed `specification structure` until the user authorizes that provider action.
-
-### Deliver Sprint work
-
-Read [sprint-delivery.md](references/sprint-delivery.md) when AgileForge reports an active Sprint Task or execution transition. Implement only the current Task and its parent Story contract. Use the target repository's own workflow, test commands, and commit rules.
-
-### Handle defects and recovery
-
-Read [approvals-and-recovery.md](references/approvals-and-recovery.md) for stale state, retries, provider failures, CLI and UI disagreement, AgileForge defects, issue filing, or any unclear authority boundary.
+Read [approvals-and-recovery.md](references/approvals-and-recovery.md) for stale state, uncertain results, provider errors, and defects. An access denial stops the affected operation. CLI must not bypass MCP authentication, a denied action, or a required human decision.
 
 ## Step report
 
-After each meaningful step, report only:
-
-- target repository, branch, and HEAD
-- AgileForge runtime, profile when applicable, and project ID
-- current workflow position and reason code
-- the exact next action or decision
-- CLI evidence and, when available, the UI cross-check
-- what needs the user's decision
-
-Do not bury the next action in a lifecycle recap.
+Report the target repository, branch and HEAD; selected service/profile and Project; workflow position and reason; next action or human decision; and bounded MCP evidence. Include CLI diagnostics only when used. Keep credentials and large private packets out of the report.

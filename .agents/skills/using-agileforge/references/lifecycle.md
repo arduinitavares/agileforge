@@ -39,8 +39,8 @@ Create Project -> Vision -> Product Goal
   distinct attempt with fresh evidence and preserved history, not a next Sprint.
   Use only an exposed, eligible route under the user's authority.
 
-Read both `workflow position` and `workflow next` before a mutation and after its
-successful result. Use the returned command template. If the needed route is not
+Read both `workflow_position` and `workflow_next` before a mutation and after its
+successful result. Map the selected action to the discovered MCP tool and schema. If the needed route is not
 exposed, report the blocker instead of constructing a command from this map.
 
 Use [specification-handoff.md](specification-handoff.md) for planning decisions,

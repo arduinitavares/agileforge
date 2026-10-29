@@ -7,6 +7,9 @@
 AgileForge is a developer tool for agent-assisted product planning and
 execution governed by one human-accepted Specification.
 
+For coding-agent use, [install the `using-agileforge` skill](docs/agent-skill.md).
+It uses MCP first and retains CLI support for administration and recovery.
+
 ## Lifecycle
 
 One durable Project owns planning, delivery, and learning across Sprints:

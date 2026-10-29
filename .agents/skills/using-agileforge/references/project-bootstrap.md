@@ -1,81 +1,29 @@
 # Project bootstrap
 
-Use this procedure when entering a target repository or when AgileForge project identity is unknown.
+Read the target repository's instructions. Record its absolute root, branch, HEAD, and dirty state. Do not assume it contains AgileForge source or a development launcher.
 
-## Inspect the target repository
+## Select the service and Project
 
-Read the nearest applicable `AGENTS.md` and other repository instructions. Then record:
+Use the explicitly selected MCP connection. Discover tools and call `service_identity`, then `project_list`. Confirm the runtime/profile and business-state identity before commands. Use `project_show` when list output does not establish the repository binding.
 
-```sh
-repo_root="$(git rev-parse --show-toplevel)"
-git status --short --branch
-git rev-parse HEAD
-```
+Match the actual target repository to its service-side binding. A container or remote service can use a different path. Resolve that mapping from the selected deployment or explicit user input; do not guess, create a duplicate Project, or reattach a repository to make paths appear equal.
 
-Do not discard, stash, or rewrite unrelated changes.
+- One verified binding: use that Project ID.
+- No verified match: establish identity before creation.
+- Multiple matches or stale bindings: present the ambiguity.
 
-## Select the AgileForge runtime
-
-Follow explicit user or repository configuration first.
-
-For a stable installation, verify `agileforge` is available and use its JSON-first CLI:
-
-```sh
-command -v agileforge
-agileforge --version
-agileforge project list
-```
-
-Do not run `agileforge info`; stable releases have no such command. Provenance through `info --json` belongs to `agileforge-dev` only.
-
-Do not scan parent directories for `agileforge-dev`, copy it into the target repository, or assume every repository has a development launcher.
-
-For an explicitly selected AgileForge source checkout, change to that exact checkout and run its launcher there:
-
-```sh
-./agileforge-dev info --profile <profile> --json
-./agileforge-dev cli --profile <profile> -- project list
-```
-
-Add `--secrets-file` only for an authorized provider-backed action. Never inspect or print credential values.
-
-If neither runtime is available, stop and ask the user which AgileForge installation and profile to use. Do not invent a path.
-
-## Resolve project identity
-
-Parse `project list` as structured JSON. Compare repository bindings against the resolved target `repo_root`. Use `project show --project-id <id>` when list output is insufficient.
-
-- One exact binding match: use that project ID.
-- No match: create only when the user asked to start or create the AgileForge project.
-- More than one match, a stale binding, or a name-only guess: stop and present the ambiguity.
-
-Never default to project ID `1`.
+Do not select by name or numeric order alone.
 
 ## Create when authorized
 
-An instruction to create or start the project when absent is approval for this local creation. Do not ask again after resolving the inputs.
+If the user asked to start or create the Project and no matching binding exists, call discovered `create_project`. Supply the approved `name`, explicit `actor`, and a new `idempotency_key`. Use `repository_path` only when the path is verified in the service's filesystem. A client path is not automatically a server path.
 
-Use the approved product name from the specification or ask only when the name is unresolved. Use the resolved repository root, a fresh idempotency key, and an explicit actor:
+Do not initialize or reset a runtime/profile to connect MCP. Project creation does not authorize provider generation or product acceptance.
 
-```sh
-agileforge project create \
-  --name "<approved-product-name>" \
-  --repository-path "$repo_root" \
-  --idempotency-key "<new-key>" \
-  --actor "codex"
-```
+Parse the result. Read `workflow_position` and `workflow_next` using the returned Project ID. Follow the newly advertised action. See [mcp-workflow.md](mcp-workflow.md) for schema and route handling.
 
-For a source checkout, apply the same semantic arguments after its `./agileforge-dev cli --profile <profile> --` prefix.
+## Connection setup gaps
 
-Parse the result. If the transport result is uncertain, preserve the exact request and key before retrying. Do not change either.
+When the client has no AgileForge MCP connection, report the required endpoint and credential provisioning as a setup task. Do not install a new server or edit personal settings without authorization. See the selected release's [MCP runbook](https://github.com/arduinitavares/agileforge/blob/master/docs/mcp.md).
 
-## Establish the next step
-
-For the resolved project ID, run:
-
-```sh
-agileforge workflow position --project-id <id>
-agileforge workflow next --project-id <id>
-```
-
-Use the selected source-checkout prefix when applicable. Report the current reason code and exact advertised command. Do not mutate until the action is within the user's authority.
+For explicit CLI diagnostics or recovery, use [cli-administration.md](cli-administration.md). Select the exact installation/profile before running commands; do not search nearby folders for an arbitrary `agileforge-dev`.
