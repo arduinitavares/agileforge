@@ -15,12 +15,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 OWNER_TABLE = "workflow_node_attempt_ownership"
+_LATER_TABLES: frozenset[str] = frozenset({"sprint_plan_retirements"})
 
 
-def test_previous_current_schema_adds_only_owner_table_atomically(
+def test_pre_ownership_schema_upgrades_atomically(
     tmp_path: Path,
 ) -> None:
-    """Previous current schema adds only owner table atomically."""
+    """Upgrade the exact pre-ownership baseline without changing existing rows."""
     engine = _file_engine(tmp_path / "previous-current.sqlite")
     try:
         SQLModel.metadata.create_all(
@@ -28,7 +29,7 @@ def test_previous_current_schema_adds_only_owner_table_atomically(
             tables=[
                 table
                 for name, table in SQLModel.metadata.tables.items()
-                if name != OWNER_TABLE
+                if name != OWNER_TABLE and name not in _LATER_TABLES
             ],
         )
         with engine.connect() as connection:
@@ -66,7 +67,7 @@ def test_owner_table_ddl_failure_rolls_back_the_whole_upgrade(tmp_path: Path) ->
             tables=[
                 table
                 for name, table in SQLModel.metadata.tables.items()
-                if name != OWNER_TABLE
+                if name != OWNER_TABLE and name not in _LATER_TABLES
             ],
         )
         before = db._inspect_business_schema_manifest(engine)

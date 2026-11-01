@@ -64,7 +64,7 @@ class FrozenHistoricalChange(TypedDict):
 _HISTORICAL_CHANGES: list[FrozenHistoricalChange] = cast(
     "list[FrozenHistoricalChange]",
     json.loads(
-        (_FIXTURES / "issue_302" / "historical_table_changes.json").read_text(
+        (_FIXTURES / "issue_292" / "historical_table_changes.json").read_text(
             encoding="utf-8"
         )
     ),
@@ -84,6 +84,15 @@ _CATALOG = [item for item in _CATALOG if item["identity"] != _LATER] + cast(
     "list[FrozenReleaseFixture]",
     json.loads(
         (_FIXTURES / "issue_302" / "schema_releases.json").read_text(encoding="utf-8")
+    ),
+)
+
+
+# Preserve earlier oracles; simulated successors now follow the retirement release.
+_CATALOG = [item for item in _CATALOG if item["identity"] != _LATER] + cast(
+    "list[FrozenReleaseFixture]",
+    json.loads(
+        (_FIXTURES / "issue_292" / "schema_releases.json").read_text(encoding="utf-8")
     ),
 )
 

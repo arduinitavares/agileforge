@@ -11,6 +11,11 @@ dependency reviews, Sprint membership, Tasks, and audit receipts. The old Sprint
 remains historical and can never start. A started or completed Sprint cannot use
 this recovery.
 
+For an installed production profile, complete the supported
+[schema upgrade](linux-containers.md) before using this release. The new
+`issue292-sprint-plan-retirement` schema appends evidence storage and preserves
+all existing accepted Sprint history.
+
 To use the CLI from a development checkout, inspect the selected profile first:
 
 ```sh

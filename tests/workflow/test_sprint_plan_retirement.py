@@ -303,6 +303,34 @@ def test_schema_upgrade_preserves_accepted_plan_rows(engine: Engine) -> None:
     assert _stored_sprint_evidence(engine, fixture) == before
 
 
+def test_production_upgrade_preserves_accepted_sprint_history(tmp_path: Path) -> None:
+    """The registered production migration preserves history and enables recovery."""
+    from cli.production_schema_upgrade import (  # noqa: PLC0415
+        CURRENT_SCHEMA_ID,
+        upgrade_registered_database,
+    )
+
+    database = tmp_path / "production.sqlite3"
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        ensure_business_db_ready(engine)
+        fixture = _accepted_dependency_sprint(engine, started=False)
+        before = _stored_sprint_evidence(engine, fixture)
+        SQLModel.metadata.tables["sprint_plan_retirements"].drop(engine)
+        engine.dispose()
+
+        installed = upgrade_registered_database(database)
+
+        assert installed.release_id == CURRENT_SCHEMA_ID
+        assert _stored_sprint_evidence(engine, fixture) == before
+        _replace(engine, fixture.scenario.artifact_ids[0])
+        assert _domain(engine).transition(_retire_request(engine, fixture)).ok
+        with Session(engine) as session:
+            assert len(session.exec(select(SprintPlanRetirement)).all()) == 1
+    finally:
+        engine.dispose()
+
+
 def test_retirement_releases_story_scope_selection(engine: Engine) -> None:
     """A person can remove an old selected Story after explicit retirement."""
     fixture = _accepted_dependency_sprint(engine, started=False)

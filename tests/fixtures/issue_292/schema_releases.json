@@ -1,0 +1,91 @@
+[
+  {
+    "identity": "issue292-sprint-plan-retirement",
+    "encoding": "frozen",
+    "complete_sha256": "f1c6011cd3acc310fc9a35cdf2a77e74b319ff4443418cd07421c6a733066232",
+    "structural_sha256": "cfd43b2f0116439fdaa6a99a87f0a1a10b38543bb1a9bf1e3538aab1ba0c7596",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "frozen",
+    "complete_sha256": "ce2190bae07e34cb114bd911374861fa9b94d151fb29a3c75b94e17d0d5d78d3",
+    "structural_sha256": "98248a756105fed2ade465b43d4f5296030befac959c684b19ae9102416a7cee",
+    "sql_files": [
+      "issue_260/pre_retry_business_schema_da3dbf63.sql",
+      "issue_230/prior_current_retry_additions_8b4ee1f.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
+  },
+  {
+    "identity": "issue292-sprint-plan-retirement",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "d25a3400e46aafac1932db489df58c5e1b776924234ae57bcec8218868a0bbe2",
+    "structural_sha256": "cfd43b2f0116439fdaa6a99a87f0a1a10b38543bb1a9bf1e3538aab1ba0c7596",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy",
+    "complete_sha256": "b9549dfa0700440653e16fcc499dffc1d716dffa047b2118ab431275f465d7d3",
+    "structural_sha256": "98248a756105fed2ade465b43d4f5296030befac959c684b19ae9102416a7cee",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/repository_evidence_columns.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
+  },
+  {
+    "identity": "issue292-sprint-plan-retirement",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "9d7083d14435c3417393373bb965f8525ac0ea31bda244e2f8d6a9bbf82ab0d8",
+    "structural_sha256": "cfd43b2f0116439fdaa6a99a87f0a1a10b38543bb1a9bf1e3538aab1ba0c7596",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql"
+    ]
+  },
+  {
+    "identity": "simulated-later-release",
+    "encoding": "sqlalchemy-fresh",
+    "complete_sha256": "d312b5d770757094fe0ca518e6e9f9db618d2c3b7d88f54af36e22aa8631a1b8",
+    "structural_sha256": "98248a756105fed2ade465b43d4f5296030befac959c684b19ae9102416a7cee",
+    "sql_files": [
+      "issue_230/master_b3a4fb4_raw_schema.sql",
+      "issue_230/issue230_provider_indexes.sql",
+      "issue_289/fresh_repository_evidence_tables.sql",
+      "issue_302/attempt_ownership.sql.json",
+      "issue_292/sprint_plan_retirement.sql.json",
+      "issue_292/sprint_plan_retirement_indexes.sql",
+      "issue_230/simulated_later_release.sql"
+    ]
+  }
+]

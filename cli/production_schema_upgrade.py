@@ -153,6 +153,55 @@ def _migrate_issue302_attempt_ownership(connection: Connection) -> None:
     connection.exec_driver_sql(_ISSUE302_OWNERSHIP_DDL)
 
 
+_ISSUE292_RETIREMENT_DDL: tuple[str, ...] = (
+    (
+        "CREATE TABLE sprint_plan_retirements (\n\tretirement_id INTEGE"
+        "R NOT NULL, \n\tproject_id INTEGER NOT NULL, \n\tsprint_plan_art"
+        "ifact_id INTEGER NOT NULL, \n\tsprint_plan_artifact_decision_i"
+        "d INTEGER NOT NULL, \n\tsprint_id INTEGER NOT NULL, \n\tplan_fin"
+        "gerprint VARCHAR NOT NULL, \n\tcandidate_set_fingerprint VARCH"
+        "AR NOT NULL, \n\trationale TEXT NOT NULL, \n\tretired_by VARCHAR"
+        " NOT NULL, \n\tretired_at DATETIME NOT NULL, \n\treceipt_id INTE"
+        "GER NOT NULL, \n\tretirement_fingerprint VARCHAR NOT NULL, \n\tP"
+        "RIMARY KEY (retirement_id), \n\tCONSTRAINT uq_retired_sprint_p"
+        "lan UNIQUE (sprint_plan_artifact_id), \n\tCONSTRAINT uq_retire"
+        "d_sprint UNIQUE (sprint_id), \n\tCONSTRAINT uq_retirement_rece"
+        "ipt UNIQUE (receipt_id), \n\tCONSTRAINT fk_retirement_accepted"
+        "_plan FOREIGN KEY(project_id, sprint_plan_artifact_id, sprin"
+        "t_plan_artifact_decision_id) REFERENCES sprint_plan_artifact"
+        "_decisions (project_id, sprint_plan_artifact_id, sprint_plan"
+        "_artifact_decision_id), \n\tFOREIGN KEY(project_id) REFERENCES"
+        " projects (project_id), \n\tFOREIGN KEY(sprint_id) REFERENCES "
+        "sprints (sprint_id), \n\tFOREIGN KEY(receipt_id) REFERENCES wo"
+        "rkflow_transition_receipts (workflow_transition_receipt_id)\n"
+        ")"
+    ),
+    (
+        "CREATE INDEX ix_sprint_plan_retirements_project_id ON sprint"
+        "_plan_retirements (project_id)"
+    ),
+    (
+        "CREATE INDEX ix_sprint_plan_retirements_sprint_id ON sprint_"
+        "plan_retirements (sprint_id)"
+    ),
+    (
+        "CREATE INDEX ix_sprint_plan_retirements_sprint_plan_artifact"
+        "_decision_id ON sprint_plan_retirements (sprint_plan_artifac"
+        "t_decision_id)"
+    ),
+    (
+        "CREATE INDEX ix_sprint_plan_retirements_sprint_plan_artifact"
+        "_id ON sprint_plan_retirements (sprint_plan_artifact_id)"
+    ),
+)
+
+
+def _migrate_issue292_sprint_plan_retirement(connection: Connection) -> None:
+    """Append retirement evidence without changing accepted Sprint history."""
+    for statement in _ISSUE292_RETIREMENT_DDL:
+        connection.exec_driver_sql(statement)
+
+
 SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
     SchemaRelease(
         "master-b3a4fb4",
@@ -218,6 +267,24 @@ SCHEMA_RELEASES: tuple[SchemaRelease, ...] = (
             ),
         ),
     ),
+    SchemaRelease(
+        "issue292-sprint-plan-retirement",
+        "cfd43b2f0116439fdaa6a99a87f0a1a10b38543bb1a9bf1e3538aab1ba0c7596",
+        (
+            SchemaVariant(
+                "frozen",
+                "f1c6011cd3acc310fc9a35cdf2a77e74b319ff4443418cd07421c6a733066232",
+            ),
+            SchemaVariant(
+                "sqlalchemy",
+                "d25a3400e46aafac1932db489df58c5e1b776924234ae57bcec8218868a0bbe2",
+            ),
+            SchemaVariant(
+                "sqlalchemy-fresh",
+                "9d7083d14435c3417393373bb965f8525ac0ea31bda244e2f8d6a9bbf82ab0d8",
+            ),
+        ),
+    ),
 )
 SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
     SchemaTransition(
@@ -269,8 +336,27 @@ SCHEMA_TRANSITIONS: tuple[SchemaTransition, ...] = (
         ),
         migration=_migrate_issue302_attempt_ownership,
     ),
+    SchemaTransition(
+        "issue302-attempt-ownership",
+        "issue292-sprint-plan-retirement",
+        (
+            (
+                "0ef823b56a9171ee91e2c91cf2c2fc6aa449d2ec498d37ab14fcb3b959ffa8f8",
+                "f1c6011cd3acc310fc9a35cdf2a77e74b319ff4443418cd07421c6a733066232",
+            ),
+            (
+                "d28265c28deb4346745e6c0fb3d1357b8261beb7a31e4011544529acb728c9d3",
+                "d25a3400e46aafac1932db489df58c5e1b776924234ae57bcec8218868a0bbe2",
+            ),
+            (
+                "4f611f7e81fb97069a61af5b8f29a47443d7cdd7c74137adda462698bd4205ec",
+                "9d7083d14435c3417393373bb965f8525ac0ea31bda244e2f8d6a9bbf82ab0d8",
+            ),
+        ),
+        migration=_migrate_issue292_sprint_plan_retirement,
+    ),
 )
-CURRENT_SCHEMA_ID: str = "issue302-attempt-ownership"
+CURRENT_SCHEMA_ID: str = "issue292-sprint-plan-retirement"
 _JOURNAL_NAME: str = "schema-upgrade.json"
 _HASH: str = r"^[0-9a-f]{64}$"
 
