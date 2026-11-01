@@ -609,6 +609,13 @@ def _require_mutable_lifecycle(session: Session, *, story: UserStory) -> None:
     story_id = _story_id(story)
     try:
         retired = load_sprint_plan_retirements(session, story.project_id)
+        retired_stream_sprints = {
+            (
+                session.get_one(SprintPlanArtifact, plan_id).sprint_plan_stream_id,
+                retirement.sprint_id,
+            )
+            for plan_id, retirement in retired.items()
+        }
     except ValueError as error:
         raise StorySprintSelectionIntegrityError(str(error)) from error
     decisions = session.exec(
@@ -618,8 +625,6 @@ def _require_mutable_lifecycle(session: Session, *, story: UserStory) -> None:
         )
     ).all()
     for decision in decisions:
-        if decision.sprint_plan_artifact_id in retired:
-            continue
         plan = session.get(SprintPlanArtifact, decision.sprint_plan_artifact_id)
         if plan is None or plan.project_id != story.project_id:
             message = "Accepted Sprint-plan lifecycle lineage is invalid."
@@ -634,6 +639,11 @@ def _require_mutable_lifecycle(session: Session, *, story: UserStory) -> None:
         ) != plan.selected_story_ids_json or selected_ids != sorted(set(selected_ids)):
             message = "Accepted Sprint-plan Story IDs are not canonical."
             raise StorySprintSelectionIntegrityError(message)
+        if (
+            plan.sprint_plan_stream_id,
+            decision.activated_sprint_id,
+        ) in retired_stream_sprints:
+            continue
         if story_id in selected_ids:
             message = "Story selection is locked by an accepted Sprint plan."
             raise StorySprintSelectionMutationError(_LIFECYCLE_LOCKED, message)

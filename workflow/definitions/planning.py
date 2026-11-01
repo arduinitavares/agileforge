@@ -1630,11 +1630,6 @@ def _sprint_retirement_rule(
             "SPRINT_PLAN_RETIREMENT_STARTED",
             "Retirement requires an unstarted planned Sprint.",
         )
-    if state.latest is None or state.latest.artifact_id != plan.artifact_id:
-        return _blocked(
-            "SPRINT_PLAN_RETIREMENT_REVIEW_PENDING",
-            "Resolve the pending Sprint Plan review first.",
-        )
     stories = selected_scope_stories(snapshot)
     specification = _accepted_backlog(snapshot).specification
     stale = _sprint_plan_freshness_reason(snapshot, plan, stories, review=False)
