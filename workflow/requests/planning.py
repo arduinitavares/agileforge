@@ -182,6 +182,20 @@ class RetireSprintPlan(PositionedRequest):
     idempotency_key: ReviewRationale
 
 
+class RetireHistoricalStoryDependency(PositionedRequest):
+    """Retire an exact historical edge without changing its original evidence."""
+
+    kind: Literal["retire_historical_story_dependency"] = (
+        "retire_historical_story_dependency"
+    )
+    node_id: ClassVar[str] = "planning.story_dependencies.retire_historical"
+    dependency_id: int = Field(strict=True, gt=0)
+    dependency_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rationale: ReviewRationale
+    actor: ReviewRationale
+    idempotency_key: ReviewRationale
+
+
 class StartSprint(PositionedRequest):
     """Start the exact accepted Sprint plan while its candidates remain current."""
 
@@ -198,6 +212,7 @@ __all__ = [
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RepairStoryReadiness",
+    "RetireHistoricalStoryDependency",
     "RetireSprintPlan",
     "ReviewedDependencyEdge",
     "StartSprint",

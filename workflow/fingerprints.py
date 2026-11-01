@@ -149,6 +149,8 @@ def _snapshot_fingerprint(
         facts = snapshot.model_dump(mode="json")
     if not snapshot.sprint_retries:
         facts.pop("sprint_retries")
+    if not snapshot.story_dependency_retirements:
+        facts.pop("story_dependency_retirements")
     if not include_node_attempts:
         facts.pop("node_attempts")
     # These are retry-specific derived guard projections, never legacy facts.

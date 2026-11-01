@@ -363,10 +363,23 @@ class StoryDependencyFact(FrozenModel):
     dependency_id: int
     dependent_story_id: int
     prerequisite_story_id: int
-    status: Literal["proposed", "active", "rejected"]
+    status: Literal["proposed", "active", "rejected", "retired"]
     source: Literal["story_writer", "dependency_repair", "manual_review"]
     confidence: Literal["explicit", "inferred", "reviewed"]
     reason: str | None = None
+
+
+class StoryDependencyRetirementFact(FrozenModel):
+    """Append-only authority for one historical edge's effective retirement."""
+
+    retirement_event_id: int
+    dependency_id: int
+    dependency_fingerprint: str
+    receipt_id: int
+    actor: str
+    rationale: str
+    retired_at: _DATETIME
+    retirement_fingerprint: str
 
 
 class StoryDependencyReviewEdgeFact(FrozenModel):
@@ -726,6 +739,7 @@ class WorkflowFactSnapshot(FrozenModel):
     sprint_starts: tuple[SprintStartFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()
     story_dependencies: tuple[StoryDependencyFact, ...] = ()
+    story_dependency_retirements: tuple[StoryDependencyRetirementFact, ...] = ()
     story_dependency_reviews: tuple[StoryDependencyReviewFact, ...] = ()
     tasks: tuple[TaskFact, ...] = ()
     task_completions: tuple[TaskCompletionFact, ...] = ()

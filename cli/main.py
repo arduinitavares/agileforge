@@ -29,6 +29,7 @@ from services.application import (
     CreateProjectCommand,
     DeliveryActionRequest,
     ExpectedPlanningReviewBinding,
+    HistoricalStoryDependencyRetirementRequest,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -295,6 +296,10 @@ class _Application(Protocol):
 
     def retire_sprint_plan(
         self, request: SprintPlanRetirementRequest
+    ) -> TransitionResult: ...
+
+    def retire_historical_story_dependency(
+        self, request: HistoricalStoryDependencyRetirementRequest
     ) -> TransitionResult: ...
 
     def sprint_retry_preview(
@@ -783,6 +788,18 @@ def _install_planning_action_mutations(
         "--selected-scope-fingerprint",
         required=True,
     )
+    dependency_retire = _semantic_leaf(
+        branches[("story", "dependencies")],
+        "retire-historical",
+        _historical_dependency_retire,
+    )
+    dependency_retire.add_argument("--dependency-id", type=int, required=True)
+    for name in (
+        "dependency-fingerprint",
+        "expected-decision-fingerprint",
+        "rationale",
+    ):
+        dependency_retire.add_argument("--" + name, required=True)
     readiness_repair = _semantic_leaf(
         branches[("story", "readiness")],
         "repair",
@@ -2395,6 +2412,25 @@ def _story_sprint_selection(
                 rationale=args.rationale,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _historical_dependency_retire(
+    args: argparse.Namespace, application: _Application
+) -> int:
+    return _emit_result(
+        application.retire_historical_story_dependency(
+            HistoricalStoryDependencyRetirementRequest(
+                project_id=args.project_id,
+                dependency_id=args.dependency_id,
+                dependency_fingerprint=args.dependency_fingerprint,
+                expected_decision_fingerprint=args.expected_decision_fingerprint,
+                rationale=args.rationale,
+                actor=args.actor,
+                idempotency_key=args.idempotency_key,
                 correlation_id=args.correlation_id,
             )
         )

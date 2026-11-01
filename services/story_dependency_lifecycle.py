@@ -20,6 +20,7 @@ from services.planning_lineage import (
     validate_artifact_lineage,
 )
 from services.story_artifact_lineage import build_story_artifact_lineage_nodes
+from services.story_dependency_retirement import load_story_dependency_retirements
 from workflow.contracts import FrozenModel
 from workflow.facts import StoryDependencyFact, StoryFact
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -158,10 +159,14 @@ class _LineageProof:
 class StoryDependencyValidationContext:
     """Retain one graph and lineage proof inside a synchronous operation."""
 
-    def __init__(self, session: Session, *, project_id: int) -> None:
+    def __init__(
+        self, session: Session, *, project_id: int, isolate_reads: bool = True
+    ) -> None:
         """Bind lazy proof to the operation's exact Session and Project."""
         self._session = session
         self._project_id = project_id
+        self._isolate_reads = isolate_reads
+        self._identity_token = object() if isolate_reads else None
         self._graph: _CurrentGraph | None = None
         self._proof: _LineageProof | None = None
         self._closed = False
@@ -190,7 +195,11 @@ class StoryDependencyValidationContext:
         """Load the current graph once before the operation changes its inputs."""
         self.require(self._session, project_id=self._project_id)
         if self._graph is None:
-            self._graph = _current_graph(self._session, project_id=self._project_id)
+            self._graph = _current_graph(
+                self._session,
+                project_id=self._project_id,
+                identity_token=self._identity_token,
+            )
         return self._graph
 
     def lineage(self) -> _LineageProof:
@@ -198,7 +207,9 @@ class StoryDependencyValidationContext:
         self.require(self._session, project_id=self._project_id)
         if self._proof is None:
             self._proof = _load_lineage_proof(
-                self._session, project_id=self._project_id
+                self._session,
+                project_id=self._project_id,
+                identity_token=self._identity_token,
             )
         return self._proof
 
@@ -206,6 +217,7 @@ class StoryDependencyValidationContext:
         """Discard proof after this operation writes dependency evidence."""
         self._graph = None
         self._proof = None
+        self._identity_token = object() if self._isolate_reads else None
 
 
 def _validation_for(
@@ -214,21 +226,30 @@ def _validation_for(
     project_id: int,
     validation: StoryDependencyValidationContext | None,
 ) -> StoryDependencyValidationContext:
+    # Standalone helpers validate caller-owned transaction state. Fact loads and
+    # application operations supply an isolated context at their own boundary.
     context = validation or StoryDependencyValidationContext(
-        session, project_id=project_id
+        session, project_id=project_id, isolate_reads=False
     )
     context.require(session, project_id=project_id)
     return context
 
 
-def _current_graph(session: Session, *, project_id: int) -> _CurrentGraph:
+def _current_graph(
+    session: Session, *, project_id: int, identity_token: object | None = None
+) -> _CurrentGraph:
+    query_options = (
+        {"identity_token": identity_token} if identity_token is not None else {}
+    )
     rows = session.exec(
-        select(UserStory).where(col(UserStory.project_id) == project_id)
+        select(UserStory).where(col(UserStory.project_id) == project_id),
+        execution_options=query_options,
     ).all()
     dependencies = session.exec(
         select(UserStoryDependency).where(
             col(UserStoryDependency.project_id) == project_id
-        )
+        ),
+        execution_options=query_options,
     ).all()
     by_id: dict[int, UserStory] = {}
     facts: list[StoryFact] = []
@@ -263,6 +284,9 @@ def _current_graph(session: Session, *, project_id: int) -> _CurrentGraph:
     try:
         # Project only semantic fields; database timestamps are not freshness inputs.
         for row in dependencies:
+            if row.status not in {"proposed", "active", "rejected"}:
+                message = "Dependency lifecycle contains an invalid stored edge status."
+                raise StoryDependencyLifecycleIntegrityError(message)
             dependency_id = row.dependency_id
             if dependency_id is None:
                 message = "Dependency lifecycle rows contain malformed identities."
@@ -283,7 +307,19 @@ def _current_graph(session: Session, *, project_id: int) -> _CurrentGraph:
     except ValidationError as error:
         message = "Dependency lifecycle rows contain malformed identities."
         raise StoryDependencyLifecycleIntegrityError(message) from error
-    edge_facts = tuple(edge_facts_list)
+    try:
+        retired_ids = {
+            item.dependency_id
+            for item in load_story_dependency_retirements(session, project_id)
+        }
+    except ValueError as error:
+        raise StoryDependencyLifecycleIntegrityError(str(error)) from error
+    edge_facts = tuple(
+        edge.model_copy(update={"status": "retired"})
+        if edge.dependency_id in retired_ids
+        else edge
+        for edge in edge_facts_list
+    )
     if any(
         edge.dependency_id <= 0
         or edge.dependent_story_id not in by_id
@@ -364,17 +400,24 @@ def _causal_paths(
     return tuple(paths[key] for key in sorted(paths))
 
 
-def _load_lineage_proof(session: Session, *, project_id: int) -> _LineageProof:
+def _load_lineage_proof(
+    session: Session, *, project_id: int, identity_token: object | None = None
+) -> _LineageProof:
+    query_options = (
+        {"identity_token": identity_token} if identity_token is not None else {}
+    )
     artifacts = tuple(
         session.exec(
-            select(StoryArtifact).where(col(StoryArtifact.project_id) == project_id)
+            select(StoryArtifact).where(col(StoryArtifact.project_id) == project_id),
+            execution_options=query_options,
         ).all()
     )
     decisions = tuple(
         session.exec(
             select(StoryArtifactDecision).where(
                 col(StoryArtifactDecision.project_id) == project_id
-            )
+            ),
+            execution_options=query_options,
         ).all()
     )
     try:

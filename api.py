@@ -38,6 +38,7 @@ from services.application import (
     CreateProjectCommand,
     DeliveryActionRequest,
     ExpectedPlanningReviewBinding,
+    HistoricalStoryDependencyRetirementRequest,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -381,6 +382,17 @@ class StoryReadinessRepairApiRequest(MutationApiRequest):
         return value
 
 
+class HistoricalStoryDependencyRetirementApiRequest(MutationApiRequest):
+    """Exact edge identity and accountable intent for historical retirement."""
+
+    dependency_id: PositiveStoryId
+    dependency_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_decision_fingerprint: SemanticText
+    rationale: SemanticText
+    actor: SemanticText
+    idempotency_key: SemanticText
+
+
 class SprintPlanRetirementApiRequest(MutationApiRequest):
     """Explicit retirement of one exact displayed stale accepted Sprint Plan."""
 
@@ -516,6 +528,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "review_sprint": "sprint/review",
     "start_sprint": "sprint/start",
     "retire_sprint_plan": "sprint/retire",
+    "retire_historical_story_dependency": "story/dependencies/retire-historical",
     "start_sprint_retry": "sprint/start",
 }
 
@@ -532,6 +545,7 @@ _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
     }
 )
 _SELECTOR_API_REQUEST_KINDS = frozenset(DELIVERY_API_PATHS) | {
+    "retire_historical_story_dependency",
     "close_sprint",
     "complete_task",
     "close_story",
@@ -1894,6 +1908,20 @@ def apply_project_story_dependencies(
                 selected_scope_fingerprint=req.selected_scope_fingerprint,
                 reviewed_edges=tuple(req.reviewed_edges),
                 **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/dependencies/retire-historical")
+def retire_project_historical_dependency(
+    project_id: int, req: HistoricalStoryDependencyRetirementApiRequest
+) -> dict[str, object]:
+    """Append guarded retirement of one historical dependency edge."""
+    return _result_payload(
+        _application().retire_historical_story_dependency(
+            HistoricalStoryDependencyRetirementRequest(
+                project_id=project_id, **req.model_dump()
             )
         )
     )

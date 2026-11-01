@@ -23,7 +23,7 @@ from services.story_dependency_lifecycle import (
     validate_reviewed_dependency_lifecycle_in_session,
 )
 from workflow.execution_scope import retry_blocks_planning
-from workflow.facts import StoryDependencyReviewEdgeFact
+from workflow.facts import StoryDependencyFact, StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
     canonical_dependency_edges,
@@ -342,7 +342,7 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         )
         prospective_cycles = _prospective_dependency_cycles(
             stories=project_stories,
-            dependencies=existing_rows,
+            dependencies=validation.graph().dependencies,
             selected_story_ids=selected,
             reviewed_pairs=pairs,
             completed_story_ids=completed_story_ids,
@@ -468,7 +468,7 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
 def _prospective_dependency_cycles(
     *,
     stories: Sequence[UserStory],
-    dependencies: Sequence[UserStoryDependency],
+    dependencies: Sequence[UserStoryDependency | StoryDependencyFact],
     selected_story_ids: set[int],
     reviewed_pairs: tuple[tuple[int, int], ...],
     completed_story_ids: frozenset[int],

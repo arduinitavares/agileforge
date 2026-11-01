@@ -34,17 +34,56 @@ def _count_validation(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     graph = lifecycle._current_graph
     lineage = lifecycle._load_lineage_proof
 
-    def graph_load(session: Session, *, project_id: int) -> lifecycle._CurrentGraph:
+    def graph_load(
+        session: Session, *, project_id: int, identity_token: object | None = None
+    ) -> lifecycle._CurrentGraph:
         counts["graph"] += 1
-        return graph(session, project_id=project_id)
+        return graph(session, project_id=project_id, identity_token=identity_token)
 
-    def lineage_load(session: Session, *, project_id: int) -> lifecycle._LineageProof:
+    def lineage_load(
+        session: Session, *, project_id: int, identity_token: object | None = None
+    ) -> lifecycle._LineageProof:
         counts["lineage"] += 1
-        return lineage(session, project_id=project_id)
+        return lineage(session, project_id=project_id, identity_token=identity_token)
 
     monkeypatch.setattr(lifecycle, "_current_graph", graph_load)
     monkeypatch.setattr(lifecycle, "_load_lineage_proof", lineage_load)
     return counts
+
+
+def test_fact_load_rechecks_supersession_with_retained_orm_row(engine: Engine) -> None:
+    """Retained caller identity cannot hide a committed accepted replacement."""
+    scenario = fixture._seed(engine)
+    a, b = scenario.story_ids[:2]
+    fixture._edge(engine, scenario, b, a)
+    fixture._review(engine, scenario, b)
+    with Session(engine) as reader:
+        held = reader.get_one(UserStory, a)
+        repository = WorkflowFactRepository(reader)
+        repository.load(scenario.project_id)
+        fixture._replace(engine, scenario.artifact_ids[0])
+        assert not held.is_superseded
+        snapshot = repository.load(scenario.project_id)
+        assert fixture._story(snapshot, a).is_superseded
+        assert not fixture._story(snapshot, b).dependency_safe
+
+
+def test_fact_load_preserves_unflushed_lineage_edit(engine: Engine) -> None:
+    """A read ignores pending caller lineage edits and leaves them untouched."""
+    scenario = fixture._seed(engine)
+    a, b = scenario.story_ids[:2]
+    fixture._edge(engine, scenario, b, a)
+    fixture._review(engine, scenario, b)
+    fixture._replace(engine, scenario.artifact_ids[0])
+    expected = fixture._snapshot(engine, scenario)
+    with Session(engine) as reader:
+        held = reader.get_one(UserStory, a)
+        held.is_superseded = False
+        reader.add(held)
+        assert WorkflowFactRepository(reader).load(scenario.project_id) == expected
+        assert not held.is_superseded
+        assert held in reader.dirty
+        reader.rollback()
 
 
 @pytest.mark.parametrize("boundary", ["load", "inspect", "apply"])

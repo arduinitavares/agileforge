@@ -19,7 +19,12 @@ if TYPE_CHECKING:
         SprintPlannerOutput,
     )
     from workflow.contracts import JsonObject
-    from workflow.facts import StoryDependencyFact, StoryFact, TaskFact
+    from workflow.facts import (
+        StoryDependencyFact,
+        StoryFact,
+        TaskFact,
+        WorkflowFactSnapshot,
+    )
 
 
 def dependency_edge_payload(edge: StoryDependencyReviewEdgeFact) -> JsonObject:
@@ -167,6 +172,37 @@ def selected_dependency_active_closure(
                 edge.dependency_id,
             ),
         )
+    )
+
+
+def historical_dependency_edges(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[StoryDependencyFact, ...]:
+    """Select original active edges whose accepted endpoints have no live Sprint."""
+    completed = {
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
+    }
+    live = {
+        sprint.sprint_id
+        for sprint in snapshot.sprints
+        if sprint.status in {"planned", "active"}
+    }
+    historical = {
+        story.story_id
+        for story in snapshot.stories
+        if story.content_accepted
+        and not live.intersection(story.sprint_ids)
+        and (
+            story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}
+            or completed.intersection(story.sprint_ids)
+        )
+    }
+    return tuple(
+        edge
+        for edge in snapshot.story_dependencies
+        if edge.status == "active"
+        and edge.dependent_story_id in historical
+        and edge.prerequisite_story_id in historical
     )
 
 

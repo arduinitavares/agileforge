@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from workflow.domain import WorkflowDomain
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 36
+EXPECTED_REQUEST_VARIANT_COUNT = 37
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,

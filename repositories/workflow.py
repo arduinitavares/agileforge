@@ -105,6 +105,7 @@ from services.story_dependency_lifecycle import (
     load_story_dependency_invalidations_in_session,
     selected_scope_dependency_lifecycle_fingerprint,
 )
+from services.story_dependency_retirement import load_story_dependency_retirements
 from services.story_sprint_selection import (
     StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
@@ -426,13 +427,25 @@ class WorkflowFactRepository:
         phase_load = self._phase_artifacts(project_id)
         planning_load = self._planning_artifacts(project_id)
         sprints = self._sprints(project_id)
+        try:
+            story_dependency_retirements = load_story_dependency_retirements(
+                self._session, project_id
+            )
+        except ValueError as error:
+            raise self._error(str(error)) from error
+        retired_dependency_ids = frozenset(
+            item.dependency_id for item in story_dependency_retirements
+        )
         stories = self._stories(
             project_id,
             spec_versions,
             planning_load.facts,
             sprints,
+            retired_dependency_ids=retired_dependency_ids,
         )
-        story_dependencies = self._story_dependencies(project_id)
+        story_dependencies = self._story_dependencies(
+            project_id, retired_dependency_ids=retired_dependency_ids
+        )
         story_dependency_reviews = self._story_dependency_reviews(
             project_id,
             stories,
@@ -467,6 +480,7 @@ class WorkflowFactRepository:
             sprint_starts=sprint_starts,
             stories=stories,
             story_dependencies=story_dependencies,
+            story_dependency_retirements=story_dependency_retirements,
             story_dependency_reviews=story_dependency_reviews,
             tasks=tasks,
         )
@@ -535,6 +549,7 @@ class WorkflowFactRepository:
             sprint_starts=sprint_starts,
             stories=stories,
             story_dependencies=story_dependencies,
+            story_dependency_retirements=story_dependency_retirements,
             story_dependency_reviews=story_dependency_reviews,
             tasks=tasks,
             task_completions=task_completions,
@@ -3232,6 +3247,8 @@ class WorkflowFactRepository:
         spec_versions: dict[int, str],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
         sprints: tuple[SprintFact, ...],
+        *,
+        retired_dependency_ids: frozenset[int] = frozenset(),
     ) -> tuple[StoryFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
         completed_sprint_ids = frozenset(
@@ -3292,7 +3309,14 @@ class WorkflowFactRepository:
             if membership.sprint_id in completed_sprint_ids
         )
         blockers = self._story_readiness_blockers(
-            rows, dependencies, stories_by_id, completed_story_ids=completed_story_ids
+            rows,
+            tuple(
+                row
+                for row in dependencies
+                if row.dependency_id not in retired_dependency_ids
+            ),
+            stories_by_id,
+            completed_story_ids=completed_story_ids,
         )
         try:
             selection_by_story_id = story_sprint_selection_facts_in_session(
@@ -3414,6 +3438,7 @@ class WorkflowFactRepository:
                                 )
                             )
                             for row in dependencies
+                            if row.dependency_id not in retired_dependency_ids
                         ),
                         root_story_ids=selected_ids,
                         completed_story_ids=completed_story_ids,
@@ -3435,6 +3460,8 @@ class WorkflowFactRepository:
     def _story_dependencies(
         self,
         project_id: int,
+        *,
+        retired_dependency_ids: frozenset[int] = frozenset(),
     ) -> tuple[StoryDependencyFact, ...]:
         rows = self._session.exec(
             select(UserStoryDependency)
@@ -3468,7 +3495,9 @@ class WorkflowFactRepository:
                         ),
                         "dependent_story_id": row.dependent_story_id,
                         "prerequisite_story_id": row.prerequisite_story_id,
-                        "status": row.status,
+                        "status": "retired"
+                        if row.dependency_id in retired_dependency_ids
+                        else row.status,
                         "source": row.source,
                         "confidence": row.confidence,
                         "reason": row.reason,
