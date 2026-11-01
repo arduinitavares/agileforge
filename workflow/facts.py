@@ -344,6 +344,9 @@ class PlanningArtifactFact(FrozenModel):
     story_item_ids: tuple[str, ...] = ()
     selected_story_ids: tuple[int, ...] = ()
     activated_sprint_id: int | None = None
+    accepted_decision_id: int | None = None
+    retirement_id: int | None = None
+    retirement_fingerprint: str | None = None
     candidate_set_fingerprint: str | None = None
     task_content_fingerprint: str | None = None
     supersedes_artifact_id: int | None = None
@@ -353,6 +356,7 @@ class PlanningArtifactFact(FrozenModel):
         "rejected",
         "feedback",
         "superseded",
+        "retired",
     ]
 
 

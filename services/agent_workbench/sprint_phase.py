@@ -155,6 +155,11 @@ def _sprint_plan_rows(
     spec_version_id: int | None = None,
     spec_hash: str | None = None,
 ) -> tuple[SprintPlanArtifact, ...]:
+    from services.sprint_plan_retirement import (  # noqa: PLC0415
+        retired_sprint_stream_ids,
+    )
+
+    retired_streams = retired_sprint_stream_ids(session, project_id)
     statement = select(SprintPlanArtifact).where(
         SprintPlanArtifact.project_id == project_id
     )
@@ -164,9 +169,10 @@ def _sprint_plan_rows(
             SprintPlanArtifact.spec_hash == spec_hash,
         )
     return tuple(
-        session.exec(
+        row for row in session.exec(
             statement.order_by(col(SprintPlanArtifact.sprint_plan_artifact_id))
         ).all()
+        if row.sprint_plan_stream_id not in retired_streams
     )
 
 

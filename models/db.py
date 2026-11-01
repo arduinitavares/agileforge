@@ -2004,6 +2004,60 @@ CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
     },
 )
 
+PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST: BusinessSchemaManifest = (
+    CURRENT_BUSINESS_SCHEMA_MANIFEST
+)
+CURRENT_BUSINESS_SCHEMA_MANIFEST = BusinessSchemaManifest(
+    table_names=PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST.table_names
+    | {"sprint_plan_retirements"},
+    structures={
+        **PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST.structures,
+        "sprint_plan_retirements": _structure(
+            columns=(
+                ("retirement_id", False),
+                ("project_id", False),
+                ("sprint_plan_artifact_id", False),
+                ("sprint_plan_artifact_decision_id", False),
+                ("sprint_id", False),
+                ("plan_fingerprint", False),
+                ("candidate_set_fingerprint", False),
+                ("rationale", False),
+                ("retired_by", False),
+                ("retired_at", False),
+                ("receipt_id", False),
+                ("retirement_fingerprint", False),
+            ),
+            uniques=(
+                (("sprint_plan_artifact_id",), None),
+                (("sprint_id",), None),
+                (("receipt_id",), None),
+            ),
+            foreign_keys=(
+                (("project_id",), "projects", ("project_id",)),
+                (("sprint_id",), "sprints", ("sprint_id",)),
+                (
+                    ("receipt_id",),
+                    "workflow_transition_receipts",
+                    ("workflow_transition_receipt_id",),
+                ),
+                (
+                    (
+                        "project_id",
+                        "sprint_plan_artifact_id",
+                        "sprint_plan_artifact_decision_id",
+                    ),
+                    "sprint_plan_artifact_decisions",
+                    (
+                        "project_id",
+                        "sprint_plan_artifact_id",
+                        "sprint_plan_artifact_decision_id",
+                    ),
+                ),
+            ),
+        ),
+    },
+)
+
 _RETIRED_TABLES = frozenset(
     {
         "discovery_artifacts",
@@ -2326,6 +2380,7 @@ def _upgrade_reviewed_business_schema(
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST,
         PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,
         PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
@@ -2355,6 +2410,9 @@ def _upgrade_reviewed_business_schema(
     if observed != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         SQLModel.metadata.create_all(
             connection, tables=[SQLModel.metadata.tables[_OWNER_TABLE_NAME]]
+        )
+        SQLModel.metadata.create_all(
+            connection, tables=[SQLModel.metadata.tables["sprint_plan_retirements"]]
         )
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():

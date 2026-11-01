@@ -481,7 +481,9 @@ def _canonical_acceptance_criteria(raw: str) -> list[str]:
 
 
 def _story_lineage_decision(
-    status: Literal["pending_review", "accepted", "rejected", "feedback", "superseded"],
+    status: Literal[
+        "pending_review", "accepted", "rejected", "feedback", "superseded", "retired"
+    ],
 ) -> PlanningLineageDecision:
     """Recover the terminal review outcome represented by a Story fact."""
     if status in {"superseded", "accepted"}:

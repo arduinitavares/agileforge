@@ -271,10 +271,19 @@ def _artifact_state(  # noqa: PLR0911
     lineage = _accepted_backlog(snapshot)
     backlog = lineage.backlog
     specification = lineage.specification
+    retired_streams = {
+        item.sprint_plan_stream_id
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan" and item.status == "retired"
+    }
     artifacts = tuple(
         item
         for item in snapshot.planning_artifacts
         if item.artifact_type == artifact_type
+        and (
+            artifact_type != "sprint_plan"
+            or item.sprint_plan_stream_id not in retired_streams
+        )
         and (backlog_item_id is None or item.backlog_item_id == backlog_item_id)
         and (
             (
@@ -1592,6 +1601,69 @@ def _sprint_start_rule(  # noqa: PLR0911
     return _sprint_start_evaluation(snapshot, plan, joined)
 
 
+def _sprint_retirement_rule(
+    snapshot: WorkflowFactSnapshot, _evaluated_at: datetime
+) -> tuple[RuleEvaluation, ...]:
+    state = _sprint_start_artifact_state(snapshot)
+    plan = state.accepted
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if plan is None or plan.accepted_decision_id is None:
+        return (
+            RuleEvaluation(
+                RuleCategory.SATISFIED, "SPRINT_PLAN_RETIREMENT_NOT_REQUIRED"
+            ),
+        )
+    if _sprint_start_lifecycle_state(snapshot, plan) != "unstarted" or any(
+        sprint.status == "active" for sprint in snapshot.sprints
+    ):
+        return _blocked(
+            "SPRINT_PLAN_RETIREMENT_STARTED",
+            "Retirement requires an unstarted planned Sprint.",
+        )
+    if state.latest is None or state.latest.artifact_id != plan.artifact_id:
+        return _blocked(
+            "SPRINT_PLAN_RETIREMENT_REVIEW_PENDING",
+            "Resolve the pending Sprint Plan review first.",
+        )
+    stories = selected_scope_stories(snapshot)
+    specification = _accepted_backlog(snapshot).specification
+    stale = _sprint_plan_freshness_reason(snapshot, plan, stories, review=False)
+    if (
+        stale is None
+        and specification is not None
+        and (plan.spec_version_id, plan.spec_hash)
+        == (specification.spec_version_id, specification.spec_hash)
+    ):
+        return (
+            RuleEvaluation(
+                RuleCategory.SATISFIED, "SPRINT_PLAN_RETIREMENT_NOT_REQUIRED"
+            ),
+        )
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "STALE_SPRINT_PLAN_RETIREMENT_AVAILABLE",
+            fact_references=(
+                *_sprint_plan_references(snapshot, stories, plan=plan),
+                FactReference(
+                    fact_type="sprint_plan_decision",
+                    fact_id=str(plan.accepted_decision_id),
+                    fingerprint=plan.artifact_fingerprint,
+                ),
+                FactReference(
+                    fact_type="sprint",
+                    fact_id=str(plan.activated_sprint_id),
+                    fingerprint=canonical_hash(
+                        {"sprint_id": plan.activated_sprint_id, "state": "unstarted"}
+                    ),
+                ),
+            ),
+            recommendation_kind=RecommendationKind.RECOVERY,
+        ),
+    )
+
+
 def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
     def _guarded_rule(
         snapshot: WorkflowFactSnapshot,
@@ -1619,6 +1691,20 @@ def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
 
 
 PLANNING_NODES: tuple[NodeSpec, ...] = (
+    NodeSpec(
+        node_id="planning.sprint.retire",
+        child_graph_id="planning",
+        request_kind="retire_sprint_plan",
+        recommendation_kind=RecommendationKind.RECOVERY,
+        required_inputs=(
+            InputField(name="sprint_plan_artifact_id", value_type="integer"),
+            InputField(name="sprint_plan_artifact_decision_id", value_type="integer"),
+            InputField(name="sprint_id", value_type="integer"),
+            InputField(name="plan_fingerprint", value_type="string"),
+            InputField(name="rationale", value_type="string"),
+        ),
+        evaluate_rule=_sprint_retirement_rule,
+    ),
     NodeSpec(
         node_id="planning.roadmap.generate",
         child_graph_id="planning",

@@ -45,6 +45,7 @@ from models.workflow import (
     SprintClosure,
     SprintPlanArtifact,
     SprintPlanArtifactDecision,
+    SprintPlanRetirement,
     SprintReview,
     SprintStart,
     StoryArtifact,
@@ -489,6 +490,11 @@ class ProjectRepository:
                 story_ids=story_ids,
             )
 
+            session.exec(
+                delete(SprintPlanRetirement).where(
+                    col(SprintPlanRetirement.project_id) == project_id
+                )
+            )
             session.exec(
                 delete(SprintStart).where(col(SprintStart.project_id) == project_id)
             )

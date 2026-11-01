@@ -25,6 +25,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    RetireSprintPlan,
     StartSprint,
     TransitionRequest,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RepairStoryReadiness",
+    "RetireSprintPlan",
     "StartSprint",
     "TransitionRequest",
     "TransitionResult",

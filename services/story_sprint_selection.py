@@ -602,7 +602,15 @@ def _current_evidence_fingerprint(
 
 
 def _require_mutable_lifecycle(session: Session, *, story: UserStory) -> None:
+    from services.sprint_plan_retirement import (  # noqa: PLC0415
+        load_sprint_plan_retirements,
+    )
+
     story_id = _story_id(story)
+    try:
+        retired = load_sprint_plan_retirements(session, story.project_id)
+    except ValueError as error:
+        raise StorySprintSelectionIntegrityError(str(error)) from error
     decisions = session.exec(
         select(SprintPlanArtifactDecision).where(
             col(SprintPlanArtifactDecision.project_id) == story.project_id,
@@ -610,6 +618,8 @@ def _require_mutable_lifecycle(session: Session, *, story: UserStory) -> None:
         )
     ).all()
     for decision in decisions:
+        if decision.sprint_plan_artifact_id in retired:
+            continue
         plan = session.get(SprintPlanArtifact, decision.sprint_plan_artifact_id)
         if plan is None or plan.project_id != story.project_id:
             message = "Accepted Sprint-plan lifecycle lineage is invalid."

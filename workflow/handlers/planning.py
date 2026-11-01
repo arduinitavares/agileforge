@@ -49,6 +49,7 @@ from workflow.requests.planning import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    RetireSprintPlan,
     StartSprint,
 )
 
@@ -72,6 +73,7 @@ type PlanningRequest = (
     | RecordSprintPlan
     | DecideSprintPlan
     | StartSprint
+    | RetireSprintPlan
 )
 
 
@@ -84,7 +86,9 @@ type RoadmapPlanningRequest = RecordRoadmapDraft | DecideRoadmap
 type StoryPlanningRequest = (
     RecordStoryDraft | DecideStory | ApplyStoryDependencies | RepairStoryReadiness
 )
-type SprintPlanningRequest = RecordSprintPlan | DecideSprintPlan | StartSprint
+type SprintPlanningRequest = (
+    RecordSprintPlan | DecideSprintPlan | StartSprint | RetireSprintPlan
+)
 
 
 def _success(decision: NodeDecision, output: dict[str, object]) -> TransitionResult:
@@ -401,9 +405,7 @@ def execute_record_story_draft(
                 canonical_content=request.canonical_content,
                 content_fingerprint=request.content_fingerprint,
                 supersedes_story_artifact_id=request.supersedes_story_artifact_id,
-                identical_successor_authorized=(
-                    request.identical_successor_authorized
-                ),
+                identical_successor_authorized=(request.identical_successor_authorized),
                 actor=request.actor,
                 recorded_at=evaluated_at,
             ),
@@ -832,6 +834,25 @@ def _execute_sprint_request(
         return execute_record_sprint_plan(session, request, decision, evaluated_at)
     if isinstance(request, DecideSprintPlan):
         return execute_decide_sprint_plan(session, request, decision, evaluated_at)
+    if isinstance(request, RetireSprintPlan):
+        from services.sprint_plan_retirement import (  # noqa: PLC0415
+            retire_sprint_plan_in_session,
+        )
+
+        try:
+            with session.begin_nested():
+                row = retire_sprint_plan_in_session(session, request, evaluated_at)
+        except ValueError as error:
+            return _conflict(str(error))
+        return _success(
+            decision,
+            {
+                "retirement_id": row.retirement_id,
+                "sprint_plan_artifact_id": row.sprint_plan_artifact_id,
+                "sprint_id": row.sprint_id,
+                "retirement_fingerprint": row.retirement_fingerprint,
+            },
+        )
     return execute_start_sprint(session, request, decision, evaluated_at)
 
 
