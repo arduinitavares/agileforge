@@ -530,6 +530,7 @@ def _upgrade_reviewed_business_schema(
     """Install additive DDL only after the table and owned-index baseline gates."""
     if observed.table_names and observed not in (
         CURRENT_BUSINESS_SCHEMA_MANIFEST,
+        PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST,
         PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,
         PRE_REVISION_BUSINESS_SCHEMA_MANIFEST,
         PRE_RETRY_BUSINESS_SCHEMA_MANIFEST,
@@ -559,6 +560,9 @@ def _upgrade_reviewed_business_schema(
     if observed != CURRENT_BUSINESS_SCHEMA_MANIFEST:
         SQLModel.metadata.create_all(
             connection, tables=[SQLModel.metadata.tables[_OWNER_TABLE_NAME]]
+        )
+        SQLModel.metadata.create_all(
+            connection, tables=[SQLModel.metadata.tables["sprint_plan_retirements"]]
         )
     if not indexes_present:
         for ddl in PROVIDER_AUDIT_INDEX_DDL.values():
@@ -626,7 +630,7 @@ def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
     ]
     expected_schema_guard_call_count = 3
     expected_schema_guard_load_count = 3
-    expected_schema_ddl_call_count = 3
+    expected_schema_ddl_call_count = 4
     if (
         len(assertion_calls) != expected_schema_guard_call_count
         or len(assertion_loads) != expected_schema_guard_load_count
@@ -2299,9 +2303,22 @@ def test_models_db_schema_initializer_rejects_unsafe_source_mutations() -> None:
             "PRE_REVISION_BUSINESS_SCHEMA_MANIFEST.table_names:",
         ),
         (
+            "broadened-pre-retirement-manifest",
+            "        PRE_RETIREMENT_BUSINESS_SCHEMA_MANIFEST,",
+            "        observed,",
+        ),
+        (
             "broadened-pre-ownership-manifest",
             "        PRE_OWNERSHIP_BUSINESS_SCHEMA_MANIFEST,",
             "        observed,",
+        ),
+        (
+            "unrestricted-retirement-ddl",
+            "        SQLModel.metadata.create_all(\n"
+            "            connection, "
+            'tables=[SQLModel.metadata.tables["sprint_plan_retirements"]]\n'
+            "        )",
+            "        SQLModel.metadata.create_all(connection)",
         ),
         (
             "unrestricted-ownership-ddl",
