@@ -149,6 +149,9 @@ runtime environment. The redacted preflight reports `configured_models`,
 `provider_credentials`, and `child_runtime_environment`; it never reports
 credential values.
 
+If an accepted unstarted Sprint Plan becomes stale, use the explicit
+[Sprint Plan recovery](docs/sprint-plan-recovery.md) before replacement planning.
+
 ## Run with Docker
 
 With a reviewed production image available locally as `agileforge-production:local`,

@@ -143,6 +143,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("agileforge", "story", "readiness", "repair"),
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_sprint": ("agileforge", "sprint", "start"),
+    "retire_sprint_plan": ("agileforge", "sprint", "plan", "retire"),
     "start_sprint_retry": ("agileforge", "sprint", "start"),
     "structure_specification": ("agileforge", "specification", "structure"),
 }
@@ -257,6 +258,20 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("--repair", "<repair>"),
     "review_sprint": (),
     "start_sprint": (),
+    "retire_sprint_plan": (
+        "--sprint-plan-artifact-id",
+        "<sprint-plan-artifact-id>",
+        "--sprint-plan-artifact-decision-id",
+        "<sprint-plan-artifact-decision-id>",
+        "--sprint-id",
+        "<sprint-id>",
+        "--plan-fingerprint",
+        "<plan-fingerprint>",
+        "--expected-decision-fingerprint",
+        "<expected-decision-fingerprint>",
+        "--rationale",
+        "<rationale>",
+    ),
     "start_sprint_retry": (),
     "structure_specification": (),
 }
@@ -357,9 +372,22 @@ def _render_semantic_command(
             and decision.instance_key is not None
         ):
             command.extend(("--instance-key", decision.instance_key))
+        arguments = _SEMANTIC_ARGUMENTS[request_kind]
+        if request_kind == "retire_sprint_plan":
+            references = {item.fact_type: item for item in decision.fact_references}
+            values = {
+                "<sprint-plan-artifact-id>": references["sprint_plan"].fact_id,
+                "<sprint-plan-artifact-decision-id>": references[
+                    "sprint_plan_decision"
+                ].fact_id,
+                "<sprint-id>": references["sprint"].fact_id,
+                "<plan-fingerprint>": references["sprint_plan"].fingerprint,
+                "<expected-decision-fingerprint>": decision.decision_fingerprint,
+            }
+            arguments = tuple(values.get(value, value) for value in arguments)
         command.extend(
             (
-                *_SEMANTIC_ARGUMENTS[request_kind],
+                *arguments,
                 "--idempotency-key",
                 "<idempotency-key>",
                 "--actor",

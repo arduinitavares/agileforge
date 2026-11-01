@@ -206,6 +206,7 @@ from workflow.requests import (
     RecordPostSprintTriage,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetireSprintPlan,
     RetrySprint,
     ReviewSprint,
     StartNodeAttempt,
@@ -2160,6 +2161,19 @@ def _story_eligibility_item(
     }
 
 
+class SprintPlanRetirementRequest(_PlanningMutationRequest):
+    """Explicit recovery bound to one displayed accepted-plan identity."""
+
+    sprint_plan_artifact_id: PositiveStoryId
+    sprint_plan_artifact_decision_id: PositiveStoryId
+    sprint_id: PositiveStoryId
+    plan_fingerprint: SemanticText
+    expected_decision_fingerprint: SemanticText
+    rationale: SemanticText
+    actor: SemanticText
+    idempotency_key: SemanticText
+
+
 class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
@@ -3981,6 +3995,64 @@ class AgileForgeApplication:
                 return response
         except StorySprintSelectionIntegrityError as error:
             return _selection_integrity_error_response(str(error))
+
+    def retire_sprint_plan(
+        self, request: SprintPlanRetirementRequest
+    ) -> TransitionResult:
+        """Retire the exact displayed stale plan without reinterpreting acceptance."""
+        fields = request.model_dump(
+            mode="json",
+            exclude={
+                "project_id",
+                "idempotency_key",
+                "actor",
+                "correlation_id",
+                "expected_decision_fingerprint",
+            },
+        )
+        replay = self._replay_planning_action(
+            request_kind="retire_sprint_plan",
+            request=request,
+            operator_input={
+                **fields,
+                "decision_fingerprint": request.expected_decision_fingerprint,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.sprint.retire")
+        if (
+            decision is None
+            or decision.decision_fingerprint != request.expected_decision_fingerprint
+        ):
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_POSITION,
+                    message=(
+                        "The Sprint Plan retirement action changed. "
+                        "Reload before recovery."
+                    ),
+                ),
+            )
+        return self.transition(
+            RetireSprintPlan(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=request.expected_decision_fingerprint,
+                sprint_plan_artifact_id=request.sprint_plan_artifact_id,
+                sprint_plan_artifact_decision_id=request.sprint_plan_artifact_decision_id,
+                sprint_id=request.sprint_id,
+                plan_fingerprint=request.plan_fingerprint,
+                rationale=request.rationale,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""
@@ -6384,7 +6456,7 @@ def _backlog_correction_decision_is_valid(decision: NodeDecision) -> bool:
     return False
 
 
-def planning_action_decision_is_transportable(
+def planning_action_decision_is_transportable(  # noqa: PLR0911
     project_id: int,
     decision: NodeDecision,
 ) -> bool:
@@ -6416,6 +6488,11 @@ def planning_action_decision_is_transportable(
             and candidate_reference is not None
             and candidate_reference.fact_id == str(project_id)
             and _integer_fact_reference(decision, "sprint_plan_tasks") is not None
+        )
+    if decision.request_kind == "retire_sprint_plan":
+        return all(
+            _positive_integer_reference(decision, kind) is not None
+            for kind in ("sprint_plan", "sprint_plan_decision", "sprint")
         )
     return True
 

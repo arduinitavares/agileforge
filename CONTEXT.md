@@ -108,6 +108,17 @@ capacity, and Accepted Specification facts.
 
 Avoid: active Sprint, ad hoc Task list.
 
+## Sprint Plan Retirement
+
+An explicit, append-only operator decision that retires one stale accepted
+Sprint Plan and its unstarted planned Sprint. Retirement preserves the accepted
+artifact, decision, dependency reviews, membership, Tasks, and audit history.
+It releases that plan's current planning locks and permanently prevents its
+Sprint from starting. Replacement planning requires explicit dependency review
+and human acceptance of a new plan. A started Sprint cannot be retired.
+
+Avoid: accepted-plan rewrite, started-Sprint cancellation, automatic replanning.
+
 ## Sprint Owner
 
 The durable accountable role for a Sprint Plan. New plans default to the

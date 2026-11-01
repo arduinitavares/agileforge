@@ -10,6 +10,92 @@ const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
 const fingerprint = (character) => `sha256:${character.repeat(64)}`;
 
+function retirementState() {
+    const decision = {
+        node_id: 'planning.sprint.retire', instance_key: null,
+        request_kind: 'retire_sprint_plan', category: 'available',
+        reason_code: 'STALE_SPRINT_PLAN_RETIREMENT_AVAILABLE',
+        decision_fingerprint: fingerprint('a'),
+        fact_references: [
+            { fact_type: 'sprint_plan', fact_id: '41', fingerprint: fingerprint('b') },
+            { fact_type: 'sprint_plan_decision', fact_id: '42', fingerprint: fingerprint('b') },
+            { fact_type: 'sprint', fact_id: '31', fingerprint: fingerprint('c') },
+        ],
+    };
+    return { position: { project_id: 7, decisions: [decision] }, actions: [{
+        node_id: decision.node_id, instance_key: null, request_kind: decision.request_kind,
+        endpoint: 'sprint/retire', transport: 'semantic',
+    }] };
+}
+
+test('stale plan recovery binds the displayed plan, acceptance and Sprint exactly', () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const binding = vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions)', context);
+    assert.deepEqual(JSON.parse(JSON.stringify(binding.fields)), {
+        sprint_plan_artifact_id: 41, sprint_plan_artifact_decision_id: 42,
+        sprint_id: 31, plan_fingerprint: fingerprint('b'),
+        expected_decision_fingerprint: fingerprint('a'),
+    });
+    context.retirementState.actions.push(context.retirementState.actions[0]);
+    assert.equal(vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions)', context), null);
+});
+
+test('retirement form requests a rationale and explains explicit replacement review', () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const markup = vm.runInContext('sprintPlanRetirementMarkup(retirementState.position, retirementState.actions)', context);
+    assert.match(markup, /Retire stale Sprint Plan/);
+    assert.match(markup, /name="rationale"/);
+    assert.match(markup, /required/);
+    assert.match(markup, /new plan.*human acceptance/i);
+});
+
+test('retirement submission rejects a stale display and sends the exact guarded identity once', async () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const fields = vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions).fields', context);
+    const button = { disabled: false };
+    const form = { dataset: { retirementBinding: JSON.stringify({ ...fields, sprint_id: 999 }) },
+        querySelector: (selector) => selector === '[name="rationale"]'
+            ? { value: 'Retire this obsolete scope.' } : button };
+    const calls = [];
+    context.form = form;
+    context.fetch = async (url, options) => {
+        calls.push({ url, payload: JSON.parse(options.body) });
+        return { ok: true, text: async () => JSON.stringify({ status: 'success', data: { ok: true } }) };
+    };
+    vm.runInContext(`selectedProjectId = 7; lifecycleState = retirementState;
+        loadDashboard = async () => true; isDashboardReconciled = () => true;
+        setCockpitActionBusy = (busy, _kind, options) => { activeCockpitAction = busy ? { token: options.token } : null; };`, context);
+    assert.equal(await vm.runInContext('submitSprintPlanRetirement(form)', context), false);
+    assert.equal(calls.length, 0);
+    form.dataset.retirementBinding = JSON.stringify(fields);
+    const results = await vm.runInContext('Promise.all([submitSprintPlanRetirement(form), submitSprintPlanRetirement(form)])', context);
+    assert.deepEqual(Array.from(results), [true, false]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/api/projects/7/sprint/retire');
+    assert.equal(calls[0].payload.sprint_id, 31);
+    assert.equal(calls[0].payload.sprint_plan_artifact_id, 41);
+    assert.equal(calls[0].payload.expected_decision_fingerprint, fingerprint('a'));
+    assert.equal(calls[0].payload.rationale, 'Retire this obsolete scope.');
+    assert.equal(calls[0].payload.actor, 'dashboard-ui');
+});
+
+test('retired Sprint presentation preserves the reason and offers no start', () => {
+    const context = loadFrontend();
+    const { status } = completedSprintRetryState();
+    status.sprint.status = 'planned';
+    status.accepted_plan.status = 'planned';
+    status.effective_status = 'retired';
+    status.retirement = { rationale: 'The prerequisite changed.', retired_by: 'operator' };
+    context.retiredStatus = status;
+    const markup = vm.runInContext('sprintStatusMarkup({kind: "ready", data: retiredStatus}, {}, [], {})', context);
+    assert.match(markup, /Sprint #31 is retired/);
+    assert.match(markup, /The prerequisite changed\./);
+    assert.ok(!markup.includes('data-direct-action="start_sprint"'));
+});
+
 function loadFrontend() {
     const createElement = () => ({
         _textContent: '',

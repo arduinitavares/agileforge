@@ -4278,6 +4278,11 @@ _REQUEST_KIND_FACT_REFERENCE_ROWS = {
         ("candidate_set", "41", "candidates-41"),
         ("sprint_plan_tasks", "31", "tasks-31"),
     ),
+    "retire_sprint_plan": (
+        ("sprint_plan", "29", "plan-29"),
+        ("sprint_plan_decision", "30", "plan-29"),
+        ("sprint", "31", "sprint-31"),
+    ),
 }
 
 
