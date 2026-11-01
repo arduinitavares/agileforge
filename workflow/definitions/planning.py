@@ -1608,7 +1608,16 @@ def _sprint_retirement_rule(
     plan = state.accepted
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if plan is None or plan.accepted_decision_id is None:
+    accepted_decisions = tuple(
+        decision
+        for decision in snapshot.review_decisions
+        if plan is not None
+        and decision.artifact_type == "sprint"
+        and decision.artifact_id == plan.artifact_id
+        and decision.artifact_fingerprint == plan.artifact_fingerprint
+        and decision.decision == "accepted"
+    )
+    if plan is None or len(accepted_decisions) != 1:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED, "SPRINT_PLAN_RETIREMENT_NOT_REQUIRED"
@@ -1648,7 +1657,7 @@ def _sprint_retirement_rule(
                 *_sprint_plan_references(snapshot, stories, plan=plan),
                 FactReference(
                     fact_type="sprint_plan_decision",
-                    fact_id=str(plan.accepted_decision_id),
+                    fact_id=str(accepted_decisions[0].decision_id),
                     fingerprint=plan.artifact_fingerprint,
                 ),
                 FactReference(

@@ -145,12 +145,21 @@ def retire_sprint_plan_in_session(
         None,
     )
     sprint = session.get(Sprint, request.sprint_id)
+    accepted_decision = session.get(
+        SprintPlanArtifactDecision, request.sprint_plan_artifact_decision_id
+    )
     if (
         plan is None
         or sprint is None
+        or accepted_decision is None
+        or accepted_decision.project_id != request.project_id
+        or accepted_decision.sprint_plan_artifact_id
+        != request.sprint_plan_artifact_id
+        or accepted_decision.decision != "accepted"
+        or accepted_decision.activated_sprint_id != request.sprint_id
+        or accepted_decision.plan_fingerprint != request.plan_fingerprint
         or plan.status != "accepted"
         or plan.activated_sprint_id != request.sprint_id
-        or plan.accepted_decision_id != request.sprint_plan_artifact_decision_id
         or plan.artifact_fingerprint != request.plan_fingerprint
         or sprint.project_id != request.project_id
         or sprint.completed_at is not None

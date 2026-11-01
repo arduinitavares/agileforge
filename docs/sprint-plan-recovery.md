@@ -23,7 +23,8 @@ To use the CLI from a development checkout, inspect the selected profile first:
 ./agileforge-dev cli --profile local -- workflow next --project-id 1
 ```
 
-Use the returned `sprint plan retire` command. It contains the exact plan,
+Pass the returned `sprint plan retire` arguments to
+`./agileforge-dev cli --profile local --`. They contain the exact plan,
 acceptance decision, Sprint, plan fingerprint, and current decision fingerprint.
 Supply your actor, rationale, and a new idempotency key. Repeating the exact
 request with the same key replays its original outcome. Reload after a stale

@@ -2866,17 +2866,6 @@ class WorkflowFactRepository:
                     activated_sprint_id=(
                         None if decision is None else decision.activated_sprint_id
                     ),
-                    accepted_decision_id=(
-                        None
-                        if decision is None or decision.decision != "accepted"
-                        else decision.sprint_plan_artifact_decision_id
-                    ),
-                    retirement_id=None
-                    if retirement is None
-                    else retirement.retirement_id,
-                    retirement_fingerprint=None
-                    if retirement is None
-                    else retirement.retirement_fingerprint,
                     candidate_set_fingerprint=row.candidate_set_fingerprint,
                     task_content_fingerprint=planned_task_content_fingerprint(
                         envelope.planner_output,
