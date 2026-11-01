@@ -3108,7 +3108,12 @@ class WorkflowFactRepository:
     ) -> dict[int, PlanningArtifactFact]:
         accepted_by_id: dict[int, PlanningArtifactFact] = {}
         for artifact in planning_artifacts:
-            if artifact.artifact_type != "story" or artifact.status != "accepted":
+            # Superseded is assigned only to displaced accepted ancestors.
+            # Their acceptance still proves the original execution content.
+            if artifact.artifact_type != "story" or artifact.status not in {
+                "accepted",
+                "superseded",
+            }:
                 continue
             if artifact.backlog_item_id is None or not artifact.story_item_ids:
                 message = "Accepted Story artifact has no immutable item identity."

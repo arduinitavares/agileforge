@@ -135,7 +135,9 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     DecideSprintPlan,
+    DecideStory,
     RecordSprintPlan,
+    RecordStoryDraft,
     RetrySprint,
     ReviewSprint,
     StartSprint,
@@ -774,6 +776,135 @@ def _completed_history(snapshot: WorkflowFactSnapshot) -> tuple:
             for artifact in snapshot.planning_artifacts
             if artifact.artifact_type == "sprint_plan"
         ),
+    )
+
+
+def _record_replacement_through_workflow(
+    engine: Engine, project_id: int, source_id: int, key: str
+) -> tuple[int, str, str]:
+    """Record one exact correction through the guarded public workflow."""
+    domain = _domain(engine)
+    with Session(engine) as session:
+        source = session.get_one(StoryArtifact, source_id)
+        content = json.loads(source.canonical_content_json)
+        for envelope in content["story_items"]:
+            envelope["item"]["story_title"] += f" ({key})"
+            envelope["item_fingerprint"] = canonical_hash(envelope["item"])
+        instance_key = f"backlog_item:{source.backlog_item_id}"
+        request = RecordStoryDraft(
+            **planning_guards(
+                domain.position(project_id), "planning.story.generate", instance_key
+            ),
+            idempotency_key=f"{key}-draft",
+            backlog_item_id=source.backlog_item_id,
+            source_backlog_artifact_id=source.source_backlog_artifact_id,
+            source_backlog_artifact_fingerprint=source.source_backlog_artifact_fingerprint,
+            roadmap_artifact_id=source.roadmap_artifact_id,
+            roadmap_artifact_fingerprint=source.roadmap_artifact_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_story_artifact_id=source_id,
+        )
+    result = domain.transition(request)
+    assert result.ok, result
+    artifact_id = result.output["story_artifact_id"]
+    assert isinstance(artifact_id, int)
+    return artifact_id, request.content_fingerprint, request.backlog_item_id
+
+
+@pytest.mark.parametrize("intermediate_decision", [None, "feedback", "rejected"])
+def test_own_completed_sprint_story_replacement_preserves_pinned_contract(
+    engine: Engine, intermediate_decision: str | None
+) -> None:
+    """Current supersession must not revoke the completed Story's acceptance."""
+    scenario = _seed(engine)
+    a, b, _ = scenario.story_ids
+    sprint_id = _complete_fixture_story_sprint(engine, scenario, a)
+    select_for_sprint(engine, b)
+    domain = _domain(engine)
+    assert domain.transition(
+        _request(engine, scenario, b, (a,), "completed-own-prerequisite")
+    ).ok
+    before = _snapshot(engine, scenario)
+    history = _completed_history(before)
+    original_tasks = before.tasks
+    source_id = scenario.artifact_ids[0]
+    intermediate_id = None
+    if intermediate_decision is not None:
+        with Session(engine) as session:
+            draft = _draft(session, source_id, "intermediate")
+            _decide(session, draft, intermediate_decision)
+            session.commit()
+            assert draft.story_artifact_id is not None
+            source_id = draft.story_artifact_id
+            intermediate_id = source_id
+    artifact_id, fingerprint, backlog_item_id = _record_replacement_through_workflow(
+        engine, scenario.project_id, source_id, "completed-own-replacement"
+    )
+    accepted = domain.transition(
+        DecideStory(
+            **planning_guards(
+                domain.position(scenario.project_id),
+                "planning.story.review",
+                f"backlog_item:{backlog_item_id}",
+            ),
+            idempotency_key="completed-own-replacement-accept",
+            backlog_item_id=backlog_item_id,
+            story_artifact_id=artifact_id,
+            artifact_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Accept this exact correction without rewriting execution.",
+        )
+    )
+    assert accepted.ok, accepted
+    after = _snapshot(engine, scenario)
+    assert _completed_history(after) == history
+    assert after.tasks == original_tasks
+    old = _story(after, a)
+    assert old.is_superseded
+    assert old.content_accepted
+    assert old.sprint_ids == (sprint_id,)
+    assert not old.sprint_candidate
+    current = next(
+        story for story in after.stories if story.story_artifact_id == artifact_id
+    )
+    assert not current.is_superseded
+    assert current.content_accepted
+    assert current.sprint_ids == ()
+    if intermediate_id is not None:
+        intermediate = next(
+            item
+            for item in after.planning_artifacts
+            if item.artifact_type == "story" and item.artifact_id == intermediate_id
+        )
+        assert intermediate.status == intermediate_decision
+    select_for_sprint(engine, current.story_id)
+    selected = _snapshot(engine, scenario)
+    assert domain.transition(
+        ApplyStoryDependencies(
+            **planning_guards(
+                domain.position(scenario.project_id), "planning.story_dependencies"
+            ),
+            idempotency_key="completed-own-current-review",
+            selected_story_ids=tuple(sorted((b, current.story_id))),
+            reviewed_edges=(
+                ReviewedDependencyEdge(
+                    dependent_story_id=b,
+                    prerequisite_story_id=current.story_id,
+                    reason="Confirm this current successor explicitly.",
+                ),
+            ),
+            source_fingerprint=story_dependency_source_fingerprint(selected.stories),
+        )
+    ).ok
+    reloaded = _snapshot(engine, scenario)
+    assert _completed_history(reloaded) == history
+    assert reloaded.tasks == original_tasks
+    assert (
+        planning_decision(
+            domain.position(scenario.project_id), "planning.sprint.plan"
+        ).category
+        is NodeCategory.AVAILABLE
     )
 
 
