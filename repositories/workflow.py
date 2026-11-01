@@ -100,6 +100,7 @@ from services.story_dependencies import (
 )
 from services.story_dependency_lifecycle import (
     StoryDependencyLifecycleIntegrityError,
+    StoryDependencyValidationContext,
     infer_unrecorded_story_dependency_invalidations_in_session,
     load_story_dependency_invalidations_in_session,
     selected_scope_dependency_lifecycle_fingerprint,
@@ -3380,45 +3381,50 @@ class WorkflowFactRepository:
                 )
             )
         try:
-            persisted_anchors = load_story_dependency_invalidations_in_session(
-                self._session,
-                project_id=project_id,
-            )
-            selected_ids = tuple(entry.story_id for entry in selected_scope_entries)
-            implicit_anchors = (
-                infer_unrecorded_story_dependency_invalidations_in_session(
+            with StoryDependencyValidationContext(
+                self._session, project_id=project_id
+            ) as validation:
+                persisted_anchors = load_story_dependency_invalidations_in_session(
                     self._session,
                     project_id=project_id,
-                    root_story_ids=selected_ids,
+                    validation=validation,
                 )
-                if superseded_dependency_edges(
-                    stories=tuple(facts),
-                    dependencies=tuple(
-                        StoryDependencyFact.model_validate(
-                            row.model_dump(
-                                include={
-                                    "dependency_id",
-                                    "dependent_story_id",
-                                    "prerequisite_story_id",
-                                    "status",
-                                    "source",
-                                    "confidence",
-                                    "reason",
-                                }
+                selected_ids = tuple(entry.story_id for entry in selected_scope_entries)
+                implicit_anchors = (
+                    infer_unrecorded_story_dependency_invalidations_in_session(
+                        self._session,
+                        project_id=project_id,
+                        root_story_ids=selected_ids,
+                        validation=validation,
+                    )
+                    if superseded_dependency_edges(
+                        stories=tuple(facts),
+                        dependencies=tuple(
+                            StoryDependencyFact.model_validate(
+                                row.model_dump(
+                                    include={
+                                        "dependency_id",
+                                        "dependent_story_id",
+                                        "prerequisite_story_id",
+                                        "status",
+                                        "source",
+                                        "confidence",
+                                        "reason",
+                                    }
+                                )
                             )
-                        )
-                        for row in dependencies
-                    ),
-                    root_story_ids=selected_ids,
-                    completed_story_ids=completed_story_ids,
+                            for row in dependencies
+                        ),
+                        root_story_ids=selected_ids,
+                        completed_story_ids=completed_story_ids,
+                    )
+                    else ()
                 )
-                else ()
-            )
-            final_fingerprint = selected_scope_dependency_lifecycle_fingerprint(
-                selected_scope_fingerprint=scope_fingerprint,
-                selected_story_ids=selected_ids,
-                invalidation_anchors=(*persisted_anchors, *implicit_anchors),
-            )
+                final_fingerprint = selected_scope_dependency_lifecycle_fingerprint(
+                    selected_scope_fingerprint=scope_fingerprint,
+                    selected_story_ids=selected_ids,
+                    invalidation_anchors=(*persisted_anchors, *implicit_anchors),
+                )
         except (StoryDependencyLifecycleIntegrityError, ValueError) as error:
             raise self._error(str(error)) from error
         return tuple(

@@ -16,6 +16,7 @@ from services.agent_workbench.story_phase import (
 )
 from services.story_dependency_lifecycle import (
     StoryDependencyLifecycleIntegrityError,
+    StoryDependencyValidationContext,
     adopt_story_dependency_invalidations_in_session,
     infer_unrecorded_story_dependency_invalidations_in_session,
     load_story_dependency_invalidations_in_session,
@@ -187,12 +188,26 @@ def _retry_blocks_dependency_mutation(session: Session, *, project_id: int) -> b
         return True
 
 
-def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
+def apply_story_dependencies_in_session(
     session: Session,
     *,
     inputs: ApplyStoryDependenciesInput,
 ) -> StoryDependencyReview:
     """Apply an exact acyclic reviewed edge set in the caller transaction."""
+    with StoryDependencyValidationContext(
+        session, project_id=inputs.project_id
+    ) as validation:
+        return _apply_story_dependencies_in_session(
+            session, inputs=inputs, validation=validation
+        )
+
+
+def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
+    session: Session,
+    *,
+    inputs: ApplyStoryDependenciesInput,
+    validation: StoryDependencyValidationContext,
+) -> StoryDependencyReview:
     project_id = inputs.project_id
     if _retry_blocks_dependency_mutation(session, project_id=project_id):
         message = (
@@ -309,7 +324,9 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         select(UserStoryDependency).where(UserStoryDependency.project_id == project_id)
     ).all()
     try:
-        load_story_dependency_invalidations_in_session(session, project_id=project_id)
+        load_story_dependency_invalidations_in_session(
+            session, project_id=project_id, validation=validation
+        )
         project_stories = session.exec(
             select(UserStory).where(UserStory.project_id == project_id)
         ).all()
@@ -348,6 +365,7 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
                 project_id=project_id,
                 selected_story_ids=selected_story_ids,
                 reviewed_edges=reviewed_edges,
+                validation=validation,
             )
         except ValueError as error:
             raise StoryDependencyGraphError(
@@ -360,10 +378,17 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
                 ]
             ) from error
         implicit = infer_unrecorded_story_dependency_invalidations_in_session(
-            session, project_id=project_id, root_story_ids=selected_story_ids
+            session,
+            project_id=project_id,
+            root_story_ids=selected_story_ids,
+            validation=validation,
         )
         adopt_story_dependency_invalidations_in_session(
-            session, project_id=project_id, anchors=implicit, reviewed_at=reviewed_at
+            session,
+            project_id=project_id,
+            anchors=implicit,
+            reviewed_at=reviewed_at,
+            validation=validation,
         )
     except StoryDependencyLifecycleIntegrityError as error:
         raise StoryDependencyGraphError(

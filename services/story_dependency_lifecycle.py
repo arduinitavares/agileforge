@@ -155,6 +155,72 @@ class _LineageProof:
     nodes: dict[int, ArtifactLineageNode]
 
 
+class StoryDependencyValidationContext:
+    """Retain one graph and lineage proof inside a synchronous operation."""
+
+    def __init__(self, session: Session, *, project_id: int) -> None:
+        """Bind lazy proof to the operation's exact Session and Project."""
+        self._session = session
+        self._project_id = project_id
+        self._graph: _CurrentGraph | None = None
+        self._proof: _LineageProof | None = None
+        self._closed = False
+
+    def __enter__(self) -> Self:
+        """Enter a live caller-owned validation scope."""
+        self.require(self._session, project_id=self._project_id)
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        """Discard all proof when the owning operation ends."""
+        self.invalidate()
+        self._closed = True
+
+    def require(self, session: Session, *, project_id: int) -> None:
+        """Reject evidence outside its exact caller-owned operation."""
+        if (
+            self._closed
+            or session is not self._session
+            or project_id != self._project_id
+        ):
+            message = "Dependency validation belongs to another or finished operation."
+            raise ValueError(message)
+
+    def graph(self) -> _CurrentGraph:
+        """Load the current graph once before the operation changes its inputs."""
+        self.require(self._session, project_id=self._project_id)
+        if self._graph is None:
+            self._graph = _current_graph(self._session, project_id=self._project_id)
+        return self._graph
+
+    def lineage(self) -> _LineageProof:
+        """Load exact artifact ancestry only when a consumer requires it."""
+        self.require(self._session, project_id=self._project_id)
+        if self._proof is None:
+            self._proof = _load_lineage_proof(
+                self._session, project_id=self._project_id
+            )
+        return self._proof
+
+    def invalidate(self) -> None:
+        """Discard proof after this operation writes dependency evidence."""
+        self._graph = None
+        self._proof = None
+
+
+def _validation_for(
+    session: Session,
+    *,
+    project_id: int,
+    validation: StoryDependencyValidationContext | None,
+) -> StoryDependencyValidationContext:
+    context = validation or StoryDependencyValidationContext(
+        session, project_id=project_id
+    )
+    context.require(session, project_id=project_id)
+    return context
+
+
 def _current_graph(session: Session, *, project_id: int) -> _CurrentGraph:
     rows = session.exec(
         select(UserStory).where(col(UserStory.project_id) == project_id)
@@ -473,43 +539,52 @@ def invalidate_story_dependents_for_replacement_in_session(
     """Append targeted acceptance evidence in the caller-owned transaction."""
     if not superseded_stories:
         return
-    graph = _current_graph(session, project_id=artifact.project_id)
-    superseded_ids = {story.story_id for story in superseded_stories}
-    if any(story.project_id != artifact.project_id for story in superseded_stories):
-        message = "Accepted replacement contains a foreign superseded Story."
-        raise StoryDependencyLifecycleIntegrityError(message)
-    paths = tuple(
-        path
-        for path in _causal_paths(graph, root_story_ids=tuple(graph.rows))
-        if path.superseded_story_id in superseded_ids
-    )
-    if not paths:
-        return
-    proof = _load_lineage_proof(session, project_id=artifact.project_id)
-    anchors = tuple(_anchor_for_path(path, graph=graph, proof=proof) for path in paths)
-    if any(
-        anchor.replacement_story_artifact_id != artifact.story_artifact_id
-        or anchor.replacement_story_artifact_fingerprint != artifact.content_fingerprint
-        for anchor in anchors
-    ):
-        message = "Accepted replacement is not the exact first accepted successor."
-        raise StoryDependencyLifecycleIntegrityError(message)
-    _append_missing_event(
-        session,
-        project_id=artifact.project_id,
-        anchors=anchors,
-        paths=paths,
-        mode="accepted_replacement",
-        recorded_at=accepted_at,
-    )
+    with StoryDependencyValidationContext(
+        session, project_id=artifact.project_id
+    ) as validation:
+        graph = validation.graph()
+        superseded_ids = {story.story_id for story in superseded_stories}
+        if any(story.project_id != artifact.project_id for story in superseded_stories):
+            message = "Accepted replacement contains a foreign superseded Story."
+            raise StoryDependencyLifecycleIntegrityError(message)
+        paths = tuple(
+            path
+            for path in _causal_paths(graph, root_story_ids=tuple(graph.rows))
+            if path.superseded_story_id in superseded_ids
+        )
+        if not paths:
+            return
+        proof = validation.lineage()
+        anchors = tuple(
+            _anchor_for_path(path, graph=graph, proof=proof) for path in paths
+        )
+        if any(
+            anchor.replacement_story_artifact_id != artifact.story_artifact_id
+            or anchor.replacement_story_artifact_fingerprint
+            != artifact.content_fingerprint
+            for anchor in anchors
+        ):
+            message = "Accepted replacement is not the exact first accepted successor."
+            raise StoryDependencyLifecycleIntegrityError(message)
+        _append_missing_event(
+            session,
+            project_id=artifact.project_id,
+            anchors=anchors,
+            paths=paths,
+            mode="accepted_replacement",
+            recorded_at=accepted_at,
+            validation=validation,
+        )
 
 
 def load_story_dependency_invalidations_in_session(
     session: Session,
     *,
     project_id: int,
+    validation: StoryDependencyValidationContext | None = None,
 ) -> tuple[StoryDependencyInvalidationAnchor, ...]:
     """Verify persisted evidence, then normalize its stable identities."""
+    context = _validation_for(session, project_id=project_id, validation=validation)
     events = tuple(
         session.exec(
             select(WorkflowEvent)
@@ -523,8 +598,8 @@ def load_story_dependency_invalidations_in_session(
     )
     if not events:
         return ()
-    graph = _current_graph(session, project_id=project_id)
-    proof = _load_lineage_proof(session, project_id=project_id)
+    graph = context.graph()
+    proof = context.lineage()
     anchors: list[StoryDependencyInvalidationAnchor] = []
     for event in events:
         if (
@@ -556,9 +631,16 @@ def load_story_dependency_invalidations_in_session(
     return _canonical_anchors(tuple(anchors))
 
 
-def _build_inference_lineage(session: Session, *, project_id: int) -> _LineageProof:
+def _build_inference_lineage(
+    session: Session,
+    *,
+    project_id: int,
+    validation: StoryDependencyValidationContext | None = None,
+) -> _LineageProof:
     """Build complete artifact proof only after reaching an obsolete endpoint."""
-    return _load_lineage_proof(session, project_id=project_id)
+    return _validation_for(
+        session, project_id=project_id, validation=validation
+    ).lineage()
 
 
 def infer_unrecorded_story_dependency_invalidations_in_session(
@@ -566,13 +648,15 @@ def infer_unrecorded_story_dependency_invalidations_in_session(
     *,
     project_id: int,
     root_story_ids: tuple[int, ...],
+    validation: StoryDependencyValidationContext | None = None,
 ) -> tuple[StoryDependencyInvalidationAnchor, ...]:
     """Recover verified legacy identities without mutating stored evidence."""
-    graph = _current_graph(session, project_id=project_id)
+    context = _validation_for(session, project_id=project_id, validation=validation)
+    graph = context.graph()
     paths = _causal_paths(graph, root_story_ids=root_story_ids)
     if not paths:
         return ()
-    proof = _build_inference_lineage(session, project_id=project_id)
+    proof = _build_inference_lineage(session, project_id=project_id, validation=context)
     return _canonical_anchors(
         tuple(_anchor_for_path(path, graph=graph, proof=proof) for path in paths)
     )
@@ -586,9 +670,11 @@ def _append_missing_event(  # noqa: PLR0913
     paths: tuple[StoryDependencyInvalidationPath, ...],
     mode: Literal["accepted_replacement", "review_adoption"],
     recorded_at: datetime,
+    validation: StoryDependencyValidationContext | None = None,
 ) -> None:
+    context = _validation_for(session, project_id=project_id, validation=validation)
     existing = load_story_dependency_invalidations_in_session(
-        session, project_id=project_id
+        session, project_id=project_id, validation=context
     )
     identities = {_identity(anchor) for anchor in existing}
     missing = tuple(
@@ -618,6 +704,7 @@ def _append_missing_event(  # noqa: PLR0913
         )
     )
     session.flush()
+    context.invalidate()
 
 
 def adopt_story_dependency_invalidations_in_session(
@@ -626,12 +713,14 @@ def adopt_story_dependency_invalidations_in_session(
     project_id: int,
     anchors: tuple[StoryDependencyInvalidationAnchor, ...],
     reviewed_at: datetime,
+    validation: StoryDependencyValidationContext | None = None,
 ) -> None:
     """Persist missing implicit identities before caller reconciliation writes."""
     if not anchors:
         return
-    graph = _current_graph(session, project_id=project_id)
-    proof = _load_lineage_proof(session, project_id=project_id)
+    context = _validation_for(session, project_id=project_id, validation=validation)
+    graph = context.graph()
+    proof = context.lineage()
     for anchor in anchors:
         _require_anchor(anchor, graph=graph, proof=proof)
     obsolete_ids = {anchor.superseded_story_id for anchor in anchors}
@@ -645,7 +734,7 @@ def adopt_story_dependency_invalidations_in_session(
     recorded_identities = {
         _identity(anchor)
         for anchor in load_story_dependency_invalidations_in_session(
-            session, project_id=project_id
+            session, project_id=project_id, validation=context
         )
     }
     if any(
@@ -663,6 +752,7 @@ def adopt_story_dependency_invalidations_in_session(
         paths=paths,
         mode="review_adoption",
         recorded_at=reviewed_at,
+        validation=context,
     )
 
 
@@ -672,12 +762,15 @@ def validate_reviewed_dependency_lifecycle_in_session(
     project_id: int,
     selected_story_ids: tuple[int, ...],
     reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...],
+    validation: StoryDependencyValidationContext | None = None,
 ) -> None:
     """Reject unresolved prospective authority with ValueError.
 
     Malformed stored evidence raises StoryDependencyLifecycleIntegrityError.
     """
-    graph = _current_graph(session, project_id=project_id)
+    graph = _validation_for(
+        session, project_id=project_id, validation=validation
+    ).graph()
     if any(story_id not in graph.rows for story_id in selected_story_ids):
         message = "Reviewed dependency scope references a missing Story."
         raise ValueError(message)
