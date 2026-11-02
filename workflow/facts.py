@@ -382,6 +382,11 @@ class StoryDependencyRetirementFact(FrozenModel):
     retirement_fingerprint: str
 
 
+def _retirements_absent(value: tuple[StoryDependencyRetirementFact, ...]) -> bool:
+    """Preserve legacy snapshot projections when no retirement is recorded."""
+    return not value
+
+
 class StoryDependencyReviewEdgeFact(FrozenModel):
     """One strictly typed canonical edge captured by dependency review."""
 
@@ -739,7 +744,9 @@ class WorkflowFactSnapshot(FrozenModel):
     sprint_starts: tuple[SprintStartFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()
     story_dependencies: tuple[StoryDependencyFact, ...] = ()
-    story_dependency_retirements: tuple[StoryDependencyRetirementFact, ...] = ()
+    story_dependency_retirements: tuple[StoryDependencyRetirementFact, ...] = Field(
+        default=(), exclude_if=_retirements_absent
+    )
     story_dependency_reviews: tuple[StoryDependencyReviewFact, ...] = ()
     tasks: tuple[TaskFact, ...] = ()
     task_completions: tuple[TaskCompletionFact, ...] = ()

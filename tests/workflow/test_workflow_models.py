@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
+from pydantic import TypeAdapter
 from sqlalchemy import Text
 from sqlmodel import SQLModel
 
@@ -19,6 +21,7 @@ from workflow.contracts import GRAPH_VERSION
 from workflow.facts import (
     ProjectFact,
     ProviderGenerationGuardFact,
+    StoryDependencyRetirementFact,
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import (
@@ -221,3 +224,67 @@ def test_retry_guard_defaults_and_projection_preserve_legacy_snapshot_hashes() -
     assert business_fact_fingerprint(guarded_snapshot) == business_fact_fingerprint(
         restored_legacy_snapshot
     )
+
+
+def test_absent_retirements_preserve_legacy_snapshot_projection() -> None:
+    """Empty retirement evidence must not change direct or nested legacy bytes."""
+    project = ProjectFact(
+        project_id=7,
+        name="Historical retirement serialization",
+        created_at=datetime(2026, 9, 9, tzinfo=UTC),
+    )
+    adapter = TypeAdapter(tuple[WorkflowFactSnapshot, ...])
+    for snapshot in (
+        WorkflowFactSnapshot(project=project),
+        WorkflowFactSnapshot(project=project, story_dependency_retirements=()),
+    ):
+        for mode in ("python", "json"):
+            assert "story_dependency_retirements" not in snapshot.model_dump(mode=mode)
+            nested = adapter.dump_python((snapshot,), mode=mode)
+            assert "story_dependency_retirements" not in nested[0]
+        assert "story_dependency_retirements" not in json.loads(
+            snapshot.model_dump_json()
+        )
+        assert (
+            "story_dependency_retirements"
+            not in json.loads(adapter.dump_json((snapshot,)))[0]
+        )
+        assert (
+            WorkflowFactSnapshot.model_validate_json(snapshot.model_dump_json())
+            == snapshot
+        )
+        assert adapter.validate_json(adapter.dump_json((snapshot,))) == (snapshot,)
+
+
+def test_nonempty_retirements_remain_serialized_and_round_trip() -> None:
+    """A historical retirement remains visible in direct and nested snapshots."""
+    retirement = StoryDependencyRetirementFact(
+        retirement_event_id=11,
+        dependency_id=13,
+        dependency_fingerprint="sha256:" + "a" * 64,
+        receipt_id=17,
+        actor="operator",
+        rationale="Retire the named historical cycle edge.",
+        retired_at=datetime(2026, 9, 9, tzinfo=UTC),
+        retirement_fingerprint="sha256:" + "b" * 64,
+    )
+    snapshot = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=7,
+            name="Historical retirement serialization",
+            created_at=datetime(2026, 9, 9, tzinfo=UTC),
+        ),
+        story_dependency_retirements=(retirement,),
+    )
+    adapter = TypeAdapter(tuple[WorkflowFactSnapshot, ...])
+    for mode in ("python", "json"):
+        assert snapshot.model_dump(mode=mode)["story_dependency_retirements"]
+        assert adapter.dump_python((snapshot,), mode=mode)[0][
+            "story_dependency_retirements"
+        ]
+    assert json.loads(snapshot.model_dump_json())["story_dependency_retirements"]
+    assert json.loads(adapter.dump_json((snapshot,)))[0]["story_dependency_retirements"]
+    restored = WorkflowFactSnapshot.model_validate_json(snapshot.model_dump_json())
+    assert restored.story_dependency_retirements == (retirement,)
+    assert fact_fingerprint(restored) == fact_fingerprint(snapshot)
+    assert adapter.validate_json(adapter.dump_json((snapshot,))) == (snapshot,)
