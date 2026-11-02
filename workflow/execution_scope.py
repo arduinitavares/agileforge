@@ -202,8 +202,16 @@ def retry_blocks_planning(snapshot: WorkflowFactSnapshot) -> bool:
 def current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None:
     """Select the sole live attempt or proven terminal attempt for the project."""
     retries = _validated_retries(snapshot)
+    retired_sprint_ids = {
+        item.activated_sprint_id
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan" and item.status == "retired"
+    }
     live_originals = tuple(
-        item for item in snapshot.sprints if item.status in {"planned", "active"}
+        item
+        for item in snapshot.sprints
+        if item.status in {"planned", "active"}
+        and item.sprint_id not in retired_sprint_ids
     )
     live_retries = tuple(
         item for item in retries if item.status in {"planned", "active"}

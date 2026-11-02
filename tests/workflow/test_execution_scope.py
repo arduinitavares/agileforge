@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
@@ -21,6 +21,9 @@ from tests.workflow.retry_execution_fixtures import (
     CompletedRetrySource,
     record_pending_successor_plan,
     seed_completed_retry_source,
+)
+from tests.workflow.test_sprint_plan_retirement_history import (
+    _live_retry_before_retired_history,
 )
 from workflow.execution_identity import (
     ExecutionIdentity,
@@ -50,6 +53,9 @@ from workflow.sprint_lineage import (
     current_sprint_stream_artifacts,
     plan_has_matching_sprint_start,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 
 def _retry_fact(  # noqa: PLR0913
@@ -446,6 +452,26 @@ def test_current_scope_selects_the_valid_planned_retry_after_triaged_source() ->
     assert scope is not None
     assert scope.retry_attempt_id == retry.retry_attempt_id
     assert scope.status == "planned"
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["planned", "active"])
+def test_current_scope_keeps_earlier_live_retry_before_later_retired_history(
+    engine: Engine, *, active: bool
+) -> None:
+    """A later retired original cannot compete with or hide an earlier live retry."""
+    source, retired_id, retry_id = _live_retry_before_retired_history(
+        engine, active=active
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(source.project_id)
+
+    scope = current_execution_scope(snapshot)
+
+    assert source.source_sprint_id < retired_id
+    assert scope is not None
+    assert scope.sprint_id == source.source_sprint_id
+    assert scope.retry_attempt_id == retry_id
+    assert scope.status == ("active" if active else "planned")
 
 
 def test_current_scope_allows_one_valid_review_on_an_active_retry() -> None:

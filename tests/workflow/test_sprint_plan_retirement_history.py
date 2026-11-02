@@ -25,13 +25,30 @@ from services.story_sprint_selection import (
     apply_story_sprint_selection_with_receipt_in_session,
     story_sprint_selection_fact_in_session,
 )
+from tests.workflow.execution_fixtures import unbind_synthetic_execution_repository
+from tests.workflow.execution_retry_support import (
+    _close_execution_sprint,
+    _triage_execution_sprint,
+)
+from tests.workflow.execution_retry_support import (
+    _domain as execution_domain,
+)
 from tests.workflow.planning_fixtures import (
     EVALUATED_AT,
     planning_decision,
     planning_guards,
 )
+from tests.workflow.retry_execution_fixtures import (
+    CompletedRetrySource,
+    record_pending_successor_plan,
+    seed_completed_retry_source,
+)
 from tests.workflow.test_planning_transitions import _sprint_plan
 from tests.workflow.test_sprint_plan_retirement import _retire_request
+from tests.workflow.test_sprint_retry_execution import (
+    _plan_retry_with_requests,
+    _start_planned_retry,
+)
 from tests.workflow.test_superseded_story_dependencies import (
     _accepted_dependency_sprint,
     _domain,
@@ -43,7 +60,14 @@ from tests.workflow.test_superseded_story_dependencies import (
 )
 from workflow.contracts import NodeCategory
 from workflow.definitions.product_discovery import accepted_current_spec
-from workflow.requests import DecideSprintPlan, RecordSprintPlan, StartSprint
+from workflow.execution_integrity import execution_contract
+from workflow.execution_scope import current_execution_scope
+from workflow.requests import (
+    DecideSprintPlan,
+    RecordSprintPlan,
+    RetireSprintPlan,
+    StartSprint,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -187,6 +211,194 @@ def _replacement_start(engine: Engine, fixture: _DependencySprint) -> int:
         assert session.get_one(Sprint, fixture.sprint_id).status is SprintStatus.PLANNED
         assert session.get_one(Sprint, new_sprint_id).status is SprintStatus.ACTIVE
     return new_sprint_id
+
+
+def _retired_replacement(
+    engine: Engine,
+    *,
+    replacement_state: Literal["planned", "active", "completed"],
+    successor_outcome: Literal["none", "pending", "feedback", "rejected"] = "none",
+) -> tuple[int, int, int]:
+    """Retain a retired stream while a distinct replacement advances normally."""
+    fixture = _accepted_dependency_sprint(engine, started=False)
+    project_id = fixture.scenario.project_id
+    artifact_ids = [fixture.plan_id]
+    if successor_outcome != "none":
+        artifact_ids.append(
+            _revision(engine, fixture, outcome=successor_outcome, key="scope-successor")
+        )
+    history = _history(engine, tuple(artifact_ids))
+    _replace(engine, fixture.scenario.artifact_ids[0])
+    domain = _domain(engine)
+    retired = domain.transition(_retire_request(engine, fixture))
+    assert retired.ok, retired
+    reconciled = domain.transition(
+        _request(engine, fixture.scenario, fixture.story_id, (), "scope-reconcile")
+    )
+    assert reconciled.ok, reconciled
+    plan_id = _revision(engine, fixture, outcome="accepted", key="scope-replacement")
+    with Session(engine) as session:
+        accepted = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                SprintPlanArtifactDecision.sprint_plan_artifact_id == plan_id
+            )
+        ).one()
+        replacement_id = accepted.activated_sprint_id
+    assert isinstance(replacement_id, int)
+    assert replacement_id != fixture.sprint_id
+    if replacement_state != "planned":
+        started = domain.transition(
+            StartSprint(
+                **planning_guards(domain.position(project_id), "planning.sprint.start"),
+                idempotency_key="scope-start-replacement",
+            )
+        )
+        assert started.ok, started
+        unbind_synthetic_execution_repository(engine, project_id)
+    if replacement_state == "completed":
+        with Session(engine) as session:
+            snapshot = WorkflowFactRepository(session).load(project_id)
+        contract = execution_contract(snapshot, replacement_id)
+        assert len(contract.tasks) == 1
+        execution = execution_domain(engine)
+        _close_execution_sprint(
+            execution,
+            project_id=project_id,
+            sprint_id=replacement_id,
+            story_id=fixture.story_id,
+            task_id=contract.tasks[0].task_id,
+            idempotency_suffix="-scope-replacement",
+        )
+        _triage_execution_sprint(
+            execution, project_id=project_id, sprint_id=replacement_id
+        )
+    assert _history(engine, tuple(artifact_ids)) == history
+    with Session(engine) as session:
+        assert session.get_one(Sprint, fixture.sprint_id).status is SprintStatus.PLANNED
+    return project_id, fixture.sprint_id, replacement_id
+
+
+def _retired_after_completed_sprints(
+    engine: Engine,
+) -> tuple[CompletedRetrySource, int]:
+    """Accept, stale and retire a third plan after two genuinely closed Sprints."""
+    source = seed_completed_retry_source(engine)
+    domain, plan_id = record_pending_successor_plan(engine, source)
+    with Session(engine) as session:
+        fingerprint = session.get_one(SprintPlanArtifact, plan_id).plan_fingerprint
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **planning_guards(
+                domain.position(source.project_id), "planning.sprint.review"
+            ),
+            idempotency_key="scope-third-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Accept the exact later Sprint before its scope changes.",
+        )
+    )
+    assert accepted.ok, accepted
+    retired_id = accepted.output["activated_sprint_id"]
+    assert isinstance(retired_id, int)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, source.candidate_story_id)
+        story.story_points += 1
+        session.add(story)
+        session.commit()
+        decision = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                SprintPlanArtifactDecision.sprint_plan_artifact_id == plan_id
+            )
+        ).one()
+        decision_id = decision.sprint_plan_artifact_decision_id
+    assert decision_id is not None
+    retired = domain.transition(
+        RetireSprintPlan(
+            **planning_guards(
+                domain.position(source.project_id), "planning.sprint.retire"
+            ),
+            idempotency_key="scope-third-retire",
+            sprint_plan_artifact_id=plan_id,
+            sprint_plan_artifact_decision_id=decision_id,
+            sprint_id=retired_id,
+            plan_fingerprint=fingerprint,
+            rationale="Retire the stale unstarted scope and preserve earlier history.",
+        )
+    )
+    assert retired.ok, retired
+    return source, retired_id
+
+
+def _live_retry_before_retired_history(
+    engine: Engine, *, active: bool
+) -> tuple[CompletedRetrySource, int, int]:
+    """Persist a valid earlier retry without removing the later retired Sprint."""
+    source, retired_id = _retired_after_completed_sprints(engine)
+    planned = _plan_retry_with_requests(
+        engine,
+        source.domain,
+        project_id=source.project_id,
+        sprint_id=source.source_sprint_id,
+        suffix="scope-mixed-history",
+    )
+    if active:
+        _start_planned_retry(
+            source.domain,
+            project_id=source.project_id,
+            sprint_id=source.source_sprint_id,
+            planned=planned,
+            suffix="scope-mixed-history",
+        )
+    return source, retired_id, planned.retry_id
+
+
+@pytest.mark.parametrize("replacement_state", ["planned", "active", "completed"])
+def test_retired_history_does_not_block_current_execution_scope(
+    engine: Engine, replacement_state: Literal["planned", "active", "completed"]
+) -> None:
+    """Retired originals cannot compete with a replacement's execution authority."""
+    project_id, retired_id, replacement_id = _retired_replacement(
+        engine, replacement_state=replacement_state
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    scope = current_execution_scope(snapshot)
+
+    if replacement_state == "planned":
+        assert scope is None
+    else:
+        assert scope is not None
+        assert scope.sprint_id == replacement_id
+        assert scope.status == replacement_state
+    assert (
+        next(item for item in snapshot.sprints if item.sprint_id == retired_id).status
+        == "planned"
+    )
+    assert any(
+        item.status == "retired" and item.activated_sprint_id == retired_id
+        for item in snapshot.planning_artifacts
+    )
+
+
+@pytest.mark.parametrize("outcome", ["pending", "feedback", "rejected"])
+def test_retired_stream_successor_does_not_select_terminal_scope(
+    engine: Engine, outcome: Literal["pending", "feedback", "rejected"]
+) -> None:
+    """Unaccepted historical revisions cannot hide a completed replacement stream."""
+    project_id, _retired_id, replacement_id = _retired_replacement(
+        engine, replacement_state="completed", successor_outcome=outcome
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    scope = current_execution_scope(snapshot)
+
+    assert scope is not None
+    assert scope.sprint_id == replacement_id
+    expected_status = "pending_review" if outcome == "pending" else outcome
+    assert any(item.status == expected_status for item in snapshot.planning_artifacts)
 
 
 @pytest.mark.parametrize("outcome", ["pending", "feedback", "rejected"])

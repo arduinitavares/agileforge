@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
+import pytest
 from sqlmodel import Session, select
 
 from models.core import Sprint, Task
@@ -37,16 +38,85 @@ from tests.workflow.test_planning_transitions import (
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
 )
+from tests.workflow.test_sprint_plan_retirement_history import (
+    _live_retry_before_retired_history,
+    _retired_after_completed_sprints,
+    _retired_replacement,
+)
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.requests import DecideSprintPlan, RecordSprintPlan, RetrySprint
 
 if TYPE_CHECKING:
-    import pytest
     from sqlalchemy.engine import Engine
 
     from workflow.contracts import JsonObject
 
 _EXPECTED_STORY_POINTS = 3
+
+
+@pytest.mark.parametrize("replacement_state", ["planned", "active", "completed"])
+def test_default_status_follows_replacement_after_retirement(
+    engine: Engine, replacement_state: Literal["planned", "active", "completed"]
+) -> None:
+    """Default and explicit history reads must bind their own retirement identity."""
+    project_id, retired_id, replacement_id = _retired_replacement(
+        engine, replacement_state=replacement_state
+    )
+    reads = DurableReadProjectionService(engine=engine)
+
+    current = reads.sprint_status(project_id=project_id)
+    historical = reads.sprint_status(project_id=project_id, sprint_id=retired_id)
+
+    assert current["ok"] is True, current
+    data = cast("JsonObject", current["data"])
+    assert cast("JsonObject", data["sprint"])["sprint_id"] == replacement_id
+    assert data["effective_status"] == replacement_state
+    assert "retirement" not in data
+    assert historical["ok"] is True, historical
+    old = cast("JsonObject", historical["data"])
+    assert cast("JsonObject", old["sprint"])["sprint_id"] == retired_id
+    assert old["effective_status"] == "retired"
+    assert cast("JsonObject", old["retirement"])["sprint_id"] == retired_id
+
+
+def test_default_status_keeps_latest_retirement_after_prior_completed_sprints(
+    engine: Engine,
+) -> None:
+    """Older completed evidence cannot suppress current replacement planning."""
+    source, retired_id = _retired_after_completed_sprints(engine)
+
+    result = DurableReadProjectionService(engine=engine).sprint_status(
+        project_id=source.project_id
+    )
+
+    assert result["ok"] is True, result
+    data = cast("JsonObject", result["data"])
+    assert source.source_sprint_id < retired_id
+    assert cast("JsonObject", data["sprint"])["sprint_id"] == retired_id
+    assert data["effective_status"] == "retired"
+    assert cast("JsonObject", data["retirement"])["sprint_id"] == retired_id
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["planned", "active"])
+def test_default_status_keeps_earlier_live_retry_before_later_retired_history(
+    engine: Engine, *, active: bool
+) -> None:
+    """A live retry wins by authority and never borrows later retirement evidence."""
+    source, retired_id, retry_id = _live_retry_before_retired_history(
+        engine, active=active
+    )
+
+    result = DurableReadProjectionService(engine=engine).sprint_status(
+        project_id=source.project_id
+    )
+
+    assert result["ok"] is True, result
+    data = cast("JsonObject", result["data"])
+    assert source.source_sprint_id < retired_id
+    assert cast("JsonObject", data["sprint"])["sprint_id"] == source.source_sprint_id
+    assert cast("JsonObject", data["current_retry"])["retry_attempt_id"] == retry_id
+    assert data["effective_status"] == ("active" if active else "planned")
+    assert "retirement" not in data
 
 
 def _seed_planned_sprint(engine: Engine) -> tuple[int, int, int, JsonObject]:
