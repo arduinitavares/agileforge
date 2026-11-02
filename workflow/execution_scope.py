@@ -451,12 +451,20 @@ def _current_terminal_sprint_id(snapshot: WorkflowFactSnapshot) -> int | None:
     if len(approved_specs) != 1:
         raise ExecutionScopeError("Current Specification lineage is ambiguous.")
     spec = approved_specs[0]
+    retired_streams = {
+        item.sprint_plan_stream_id
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
+        and item.status == "retired"
+        and item.sprint_plan_stream_id is not None
+    }
     artifacts = tuple(
         item
         for item in snapshot.planning_artifacts
         if item.artifact_type == "sprint_plan"
         and item.spec_version_id == spec.spec_version_id
         and item.spec_hash == spec.spec_hash
+        and item.sprint_plan_stream_id not in retired_streams
     )
     if not artifacts:
         return None

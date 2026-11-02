@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 import pytest
@@ -45,10 +46,6 @@ from tests.workflow.retry_execution_fixtures import (
 )
 from tests.workflow.test_planning_transitions import _sprint_plan
 from tests.workflow.test_sprint_plan_retirement import _retire_request
-from tests.workflow.test_sprint_retry_execution import (
-    _plan_retry_with_requests,
-    _start_planned_retry,
-)
 from tests.workflow.test_superseded_story_dependencies import (
     _accepted_dependency_sprint,
     _domain,
@@ -62,6 +59,7 @@ from workflow.contracts import NodeCategory
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.execution_integrity import execution_contract
 from workflow.execution_scope import current_execution_scope
+from workflow.facts import SprintRetryFact, SprintRetryStartFact, WorkflowFactSnapshot
 from workflow.requests import (
     DecideSprintPlan,
     RecordSprintPlan,
@@ -232,6 +230,7 @@ def _retired_replacement(
     domain = _domain(engine)
     retired = domain.transition(_retire_request(engine, fixture))
     assert retired.ok, retired
+    retired_evidence = _stored_sprint_evidence(engine, fixture)
     reconciled = domain.transition(
         _request(engine, fixture.scenario, fixture.story_id, (), "scope-reconcile")
     )
@@ -273,6 +272,7 @@ def _retired_replacement(
             execution, project_id=project_id, sprint_id=replacement_id
         )
     assert _history(engine, tuple(artifact_ids)) == history
+    assert _stored_sprint_evidence(engine, fixture) == retired_evidence
     with Session(engine) as session:
         assert session.get_one(Sprint, fixture.sprint_id).status is SprintStatus.PLANNED
     return project_id, fixture.sprint_id, replacement_id
@@ -330,27 +330,77 @@ def _retired_after_completed_sprints(
     return source, retired_id
 
 
-def _live_retry_before_retired_history(
+def _live_retry_snapshot_before_retired_history(
     engine: Engine, *, active: bool
-) -> tuple[CompletedRetrySource, int, int]:
-    """Persist a valid earlier retry without removing the later retired Sprint."""
+) -> tuple[WorkflowFactSnapshot, int, int]:
+    """Exercise selection with valid retry facts, without public retry admission."""
     source, retired_id = _retired_after_completed_sprints(engine)
-    planned = _plan_retry_with_requests(
-        engine,
-        source.domain,
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(source.project_id)
+    contract = execution_contract(snapshot, source.source_sprint_id)
+    created_at = datetime(2026, 9, 9, 9, 30, tzinfo=UTC)
+    retry = SprintRetryFact(
+        retry_attempt_id=17,
         project_id=source.project_id,
         sprint_id=source.source_sprint_id,
-        suffix="scope-mixed-history",
+        ordinal=2,
+        predecessor_retry_attempt_id=None,
+        contract_fingerprint=contract.fingerprint,
+        created_by="owner@example.com",
+        rationale="Verify earlier retry priority over retired history.",
+        creation_fingerprint="sha256:mixed-history-retry",
+        creation_receipt_key="scope-mixed-history",
+        created_at=created_at,
+        status="planned",
+        story_statuses=tuple((item.story_id, "To Do") for item in contract.stories),
+        task_statuses=tuple((item.task_id, "To Do") for item in contract.tasks),
     )
     if active:
-        _start_planned_retry(
-            source.domain,
-            project_id=source.project_id,
-            sprint_id=source.source_sprint_id,
-            planned=planned,
-            suffix="scope-mixed-history",
+        started_at = created_at + timedelta(minutes=1)
+        retry = retry.model_copy(
+            update={
+                "status": "active",
+                "started_at": started_at,
+                "start": SprintRetryStartFact(
+                    start_id=717,
+                    retry_attempt_id=retry.retry_attempt_id,
+                    contract_fingerprint=contract.fingerprint,
+                    decision_fingerprint="sha256:mixed-history-start",
+                    started_by="owner@example.com",
+                    started_at=started_at,
+                ),
+            }
         )
-    return source, retired_id, planned.retry_id
+    return (
+        snapshot.model_copy(update={"sprint_retries": (retry,)}),
+        retired_id,
+        retry.retry_attempt_id,
+    )
+
+
+def test_completed_replacement_preserves_retired_task_and_evidence(
+    engine: Engine,
+) -> None:
+    """Real closure must leave the retired Task unfinished and its evidence intact."""
+    project_id, retired_id, replacement_id = _retired_replacement(
+        engine, replacement_state="completed"
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    retired_tasks = tuple(
+        item for item in snapshot.tasks if item.sprint_id == retired_id
+    )
+    assert len(retired_tasks) == 1
+    assert retired_tasks[0].status == "To Do"
+    assert not any(item.sprint_id == retired_id for item in snapshot.task_completions)
+    assert not any(item.sprint_id == retired_id for item in snapshot.story_completions)
+    assert not any(item.sprint_id == retired_id for item in snapshot.sprint_starts)
+    assert any(item.sprint_id == replacement_id for item in snapshot.task_completions)
+    assert any(item.sprint_id == replacement_id for item in snapshot.story_completions)
+    assert any(item.sprint_id == replacement_id for item in snapshot.sprint_reviews)
+    assert any(item.sprint_id == replacement_id for item in snapshot.sprint_closures)
+    assert any(item.sprint_id == replacement_id for item in snapshot.post_sprint_triage)
 
 
 @pytest.mark.parametrize("replacement_state", ["planned", "active", "completed"])

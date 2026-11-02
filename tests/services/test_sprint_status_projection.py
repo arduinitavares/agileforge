@@ -39,7 +39,7 @@ from tests.workflow.test_planning_transitions import (
     _seed_accepted_backlog,
 )
 from tests.workflow.test_sprint_plan_retirement_history import (
-    _live_retry_before_retired_history,
+    _live_retry_snapshot_before_retired_history,
     _retired_after_completed_sprints,
     _retired_replacement,
 )
@@ -102,18 +102,19 @@ def test_default_status_keeps_earlier_live_retry_before_later_retired_history(
     engine: Engine, *, active: bool
 ) -> None:
     """A live retry wins by authority and never borrows later retirement evidence."""
-    source, retired_id, retry_id = _live_retry_before_retired_history(
+    snapshot, retired_id, retry_id = _live_retry_snapshot_before_retired_history(
         engine, active=active
     )
+    source_sprint_id = snapshot.sprint_retries[0].sprint_id
 
-    result = DurableReadProjectionService(engine=engine).sprint_status(
-        project_id=source.project_id
+    result = DurableReadProjectionService(engine=engine)._sprint_status_from_snapshot(
+        project_id=snapshot.project.project_id, sprint_id=None, snapshot=snapshot
     )
 
     assert result["ok"] is True, result
     data = cast("JsonObject", result["data"])
-    assert source.source_sprint_id < retired_id
-    assert cast("JsonObject", data["sprint"])["sprint_id"] == source.source_sprint_id
+    assert source_sprint_id < retired_id
+    assert cast("JsonObject", data["sprint"])["sprint_id"] == source_sprint_id
     assert cast("JsonObject", data["current_retry"])["retry_attempt_id"] == retry_id
     assert data["effective_status"] == ("active" if active else "planned")
     assert "retirement" not in data
