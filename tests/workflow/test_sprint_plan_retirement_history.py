@@ -303,6 +303,7 @@ def _retired_after_completed_sprints(
     assert isinstance(retired_id, int)
     with Session(engine) as session:
         story = session.get_one(UserStory, source.candidate_story_id)
+        assert story.story_points is not None
         story.story_points += 1
         session.add(story)
         session.commit()
