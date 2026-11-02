@@ -20,6 +20,7 @@ from models.workflow import SprintPlanRetirement
 from services.application import AgileForgeApplication, PlanningActionSelectionService
 from services.read_projections import DurableReadProjectionService
 from tests.workflow.test_sprint_plan_retirement import _retire_request
+from tests.workflow.test_sprint_plan_retirement_history import _retired_replacement
 from tests.workflow.test_superseded_story_dependencies import (
     _accepted_dependency_sprint,
     _domain,
@@ -147,6 +148,35 @@ def test_retired_sprint_reads_preserve_explicit_historical_identity(
     first = retirements[0]
     assert isinstance(first, dict)
     assert first["sprint_id"] == fixture.sprint_id
+
+
+def test_replacement_start_api_reads_bind_each_sprints_own_retirement(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default and explicit HTTP reads bind live and retired Sprint identities."""
+    project_id, retired_id, replacement_id = _retired_replacement(
+        engine, replacement_state="active"
+    )
+    application = _application(engine)
+    monkeypatch.setattr(api, "_application", lambda: application)
+    client = TestClient(api.app)
+
+    current = client.get(f"/api/projects/{project_id}/sprint/status")
+    replacement = client.get(f"/api/projects/{project_id}/sprints/{replacement_id}")
+    historical = client.get(f"/api/projects/{project_id}/sprints/{retired_id}")
+
+    for response in (current, replacement, historical):
+        assert response.status_code == HTTPStatus.OK, response.text
+        assert response.json()["status"] == "success"
+    for response in (current, replacement):
+        data = response.json()["data"]
+        assert data["sprint"]["sprint_id"] == replacement_id
+        assert data["effective_status"] == "active"
+        assert "retirement" not in data
+    old = historical.json()["data"]
+    assert old["sprint"]["sprint_id"] == retired_id
+    assert old["effective_status"] == "retired"
+    assert old["retirement"]["sprint_id"] == retired_id
 
 
 @pytest.mark.parametrize(

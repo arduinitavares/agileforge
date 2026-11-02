@@ -96,6 +96,83 @@ test('retired Sprint presentation preserves the reason and offers no start', () 
     assert.ok(!markup.includes('data-direct-action="start_sprint"'));
 });
 
+function retiredSprintStatus() {
+    const { status } = completedSprintRetryState();
+    status.sprint = { sprint_id: 31, status: 'planned', completed_at: null };
+    status.accepted_plan.status = 'planned';
+    status.effective_status = 'retired';
+    status.original_start = null;
+    status.start = null;
+    status.review = null;
+    status.closure = null;
+    status.tasks[0].status = 'To Do';
+    status.stories[0].status = 'To Do';
+    status.retirement = {
+        retirement_id: 91, project_id: 7,
+        sprint_id: 31, sprint_plan_artifact_id: 41,
+        sprint_plan_artifact_decision_id: 51,
+        plan_fingerprint: fingerprint('c'),
+        candidate_set_fingerprint: fingerprint('d'),
+        retirement_fingerprint: fingerprint('9'),
+        rationale: 'The prerequisite changed.', retired_by: 'operator',
+        retired_at: '2026-09-09T09:30:00Z', receipt_id: 92,
+    };
+    return status;
+}
+
+test('complete retired status validates and retains replacement planning', async () => {
+    const context = loadFrontend();
+    const status = await context.validateSprintStatusProjection(retiredSprintStatus(), 7);
+    assert.ok(status);
+    assert.equal(status.sprint.sprint_id, 31);
+    assert.equal(status.retirement.sprint_id, 31);
+    const owner = await context.validateSprintOwnerProjection({
+        ...status.accepted_plan.owner, named_team_override_allowed: true,
+    }, 7);
+    const candidate = {
+        story_id: 101, source_story_item_id: 'US-0101',
+        title: 'Keep replacement scope explicit.', story_points: 3,
+        is_superseded: false, structurally_eligible: true,
+        structural_eligibility_status: 'eligible', sprint_selection_state: 'selected',
+        sprint_selection_state_fingerprint: fingerprint('f'),
+        selected_scope_fingerprint: fingerprint('a'),
+        dependency_safe: true, sprint_candidate: true,
+        validation_status: 'validated', validation_failures: [],
+    };
+    const action = {
+        node_id: 'planning.sprint.plan', instance_key: null,
+        request_kind: 'record_sprint_plan', endpoint: 'sprint/generate', transport: 'semantic',
+    };
+    const markup = context.deliveryPanelMarkup(
+        { project_id: 7, decisions: [{ ...action, category: 'available' }] },
+        { backlog: {} }, [action], {
+            sprintStatus: { kind: 'ready', data: status },
+            sprintCandidates: {
+                project_id: 7, items: [candidate], sprint_owner: owner,
+                capacity: {
+                    status: 'recommended', recommended_max_story_points: 8,
+                    source: 'project_metrics', rationale: 'Review fixture capacity.',
+                },
+            },
+            storyDependencies: {
+                project_id: 7, stories: [candidate], edges: [], selected_story_ids: [101],
+                selected_scope_fingerprint: fingerprint('a'),
+            },
+        },
+    );
+    assert.match(markup, /Sprint #31 is retired/);
+    assert.match(markup, /data-delivery-generation-form="record_sprint_plan"/);
+    assert.doesNotMatch(markup, /data-direct-action="start_sprint"/);
+});
+
+test('retired status validation rejects retirement for a different Sprint', async () => {
+    const context = loadFrontend();
+    const status = retiredSprintStatus();
+    status.retirement.sprint_id = 32;
+
+    assert.equal(await context.validateSprintStatusProjection(status, 7), null);
+});
+
 function loadFrontend() {
     const createElement = () => ({
         _textContent: '',
