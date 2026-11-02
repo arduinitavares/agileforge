@@ -4011,7 +4011,7 @@ class AgileForgeApplication:
     def retire_historical_story_dependency(
         self, request: HistoricalStoryDependencyRetirementRequest
     ) -> TransitionResult:
-        """Retire only the exact displayed historical dependency authority."""
+        """Retire one explicitly named historical Story dependency edge."""
         fields = {
             "dependency_id": request.dependency_id,
             "dependency_fingerprint": request.dependency_fingerprint,

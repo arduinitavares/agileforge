@@ -44,6 +44,7 @@ from workflow.facts import (
     SprintStartFact,
     StoryCompletionFact,
     StoryDependencyFact,
+    StoryDependencyRetirementFact,
     StoryDependencyReviewFact,
     StoryFact,
     TaskCompletionFact,
@@ -454,6 +455,21 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 status="active",
                 source="manual_review",
                 confidence="reviewed",
+            ),
+        ),
+    ),
+    (
+        "story_dependency_retirements",
+        (
+            StoryDependencyRetirementFact(
+                retirement_event_id=16,
+                dependency_id=14,
+                dependency_fingerprint="sha256:" + "a" * 64,
+                receipt_id=17,
+                actor="operator",
+                rationale="Retire the named historical cycle edge.",
+                retired_at=EVALUATED_AT,
+                retirement_fingerprint="sha256:" + "c" * 64,
             ),
         ),
     ),
@@ -1082,7 +1098,7 @@ def test_authoritative_snapshot_fields_change_fact_and_decision_fingerprints(
     variant_position = graph.evaluate(variant, EVALUATED_AT)
 
     assert fact_fingerprint(variant) != fact_fingerprint(baseline), field_name
-    if field_name == "sprint_retries":
+    if field_name in {"sprint_retries", "story_dependency_retirements"}:
         assert business_fact_fingerprint(variant) != business_fact_fingerprint(baseline)
     assert variant_position.fact_fingerprint != baseline_position.fact_fingerprint
     assert variant_position.decisions[0].decision_fingerprint != (
