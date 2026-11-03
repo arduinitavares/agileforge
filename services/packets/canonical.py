@@ -634,9 +634,7 @@ def validate_canonical_packet(packet: JsonObject) -> JsonObject:
             for item in cast("list[JsonObject]", specification["items"])
         )
         _require_canonical_context_temporals(cast("JsonObject", packet["context"]))
-        _require_canonical_sprint_owner_context(
-            cast("JsonObject", packet["context"])
-        )
+        _require_canonical_sprint_owner_context(cast("JsonObject", packet["context"]))
         backlog_item = BacklogItem.model_validate(evidence["backlog_item"])
         roadmap_release = RoadmapRelease.model_validate(evidence["roadmap_release"])
         story_item = CanonicalStoryItem.model_validate(evidence["story_item"])
@@ -1151,17 +1149,83 @@ def _load_context(  # noqa: PLR0915
     materialized = tuple(
         session.exec(select(Task).where(col(Task.story_id) == story_id)).all()
     )
-    if len(materialized) != len(selected_story.tasks):
-        raise _error(
-            "PACKET_LINEAGE_INVALID", "Materialized Tasks differ from the Sprint plan."
-        )
-    tasks = tuple(sorted(materialized, key=lambda item: item.task_id or 0))
-    metadata: list[TaskMetadata] = []
-    for task, proposed in zip(tasks, selected_story.tasks, strict=True):
+    owned: list[tuple[Task, TaskMetadata]] = []
+    for task in sorted(materialized, key=lambda item: item.task_id or 0):
         try:
             observed = parse_task_metadata(task.metadata_json)
         except ValueError as exc:
             raise _error("TASK_METADATA_INVALID", "Task metadata is invalid.") from exc
+        owner_plan = session.get(SprintPlanArtifact, observed.sprint_plan_artifact_id)
+        if (
+            owner_plan is None
+            or owner_plan.project_id != project_id
+            or observed.spec_version_id != owner_plan.spec_version_id
+            or observed.spec_hash != owner_plan.spec_hash
+            or observed.sprint_plan_stream_id != owner_plan.sprint_plan_stream_id
+            or observed.sprint_plan_fingerprint != owner_plan.plan_fingerprint
+        ):
+            raise _error("TASK_METADATA_INVALID", "Task plan ownership is invalid.")
+        if owner_plan.sprint_plan_artifact_id == plan.sprint_plan_artifact_id:
+            owned.append((task, observed))
+            continue
+        decisions = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                SprintPlanArtifactDecision.project_id == project_id,
+                SprintPlanArtifactDecision.sprint_plan_artifact_id
+                == owner_plan.sprint_plan_artifact_id,
+            )
+        ).all()
+        decision = decisions[0] if len(decisions) == 1 else None
+        owner_sprint = (
+            None
+            if decision is None or decision.activated_sprint_id is None
+            else session.get(Sprint, decision.activated_sprint_id)
+        )
+        if (
+            decision is None
+            or decision.decision != "accepted"
+            or decision.plan_fingerprint != owner_plan.plan_fingerprint
+            or owner_sprint is None
+            or owner_sprint.project_id != project_id
+            or session.get(SprintStory, (owner_sprint.sprint_id, story_id)) is None
+        ):
+            raise _error("TASK_METADATA_INVALID", "Task plan activation is invalid.")
+        try:
+            owner_envelope = load_bound_sprint_plan_envelope(
+                owner_plan.canonical_task_plan_json,
+                expected_fingerprint=owner_plan.plan_fingerprint,
+                spec_version_id=owner_plan.spec_version_id,
+                spec_hash=owner_plan.spec_hash,
+                candidate_set_fingerprint=owner_plan.candidate_set_fingerprint,
+                selected_story_ids_json=owner_plan.selected_story_ids_json,
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise _error(
+                "TASK_METADATA_INVALID", "Task plan content is invalid."
+            ) from exc
+        if not any(
+            selected.story_id == story_id
+            and proposed.description == task.description
+            and observed
+            == metadata_from_structured_task(
+                proposed,
+                spec_version_id=owner_plan.spec_version_id,
+                spec_hash=owner_plan.spec_hash,
+                sprint_plan_stream_id=owner_plan.sprint_plan_stream_id,
+                sprint_plan_artifact_id=observed.sprint_plan_artifact_id,
+                sprint_plan_fingerprint=owner_plan.plan_fingerprint,
+            )
+            for selected in owner_envelope.planner_output.selected_stories
+            for proposed in selected.tasks
+        ):
+            raise _error("TASK_METADATA_INVALID", "Task differs from its owning plan.")
+    if len(owned) != len(selected_story.tasks):
+        raise _error(
+            "PACKET_LINEAGE_INVALID", "Materialized Tasks differ from the Sprint plan."
+        )
+    tasks = tuple(task for task, _metadata in owned)
+    metadata: list[TaskMetadata] = []
+    for (task, observed), proposed in zip(owned, selected_story.tasks, strict=True):
         expected = metadata_from_structured_task(
             proposed,
             spec_version_id=plan.spec_version_id,

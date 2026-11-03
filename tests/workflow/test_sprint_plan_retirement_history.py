@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -10,16 +11,23 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from sqlmodel import Session, col, select
 
-from models.core import Sprint, UserStory
+from models.core import Sprint, Task, UserStory
 from models.enums import SprintStatus
-from models.workflow import SprintPlanArtifact, SprintPlanArtifactDecision
-from repositories.workflow import WorkflowFactRepository
+from models.events import TaskExecutionLog
+from models.workflow import (
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    WorkflowTransitionReceipt,
+)
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.sprint_phase import (
     RecordSprintPlanDecisionInput,
     record_sprint_plan_decision_in_session,
 )
 from services.contracts.sprint import SprintPlannerOutput
+from services.packets.canonical import build_story_packet, build_task_packet
 from services.planning_lineage import PlanningLineageError
+from services.read_projections import DurableReadProjectionService
 from services.story_sprint_selection import (
     StorySprintSelectionMutationError,
     StorySprintSelectionRequest,
@@ -55,11 +63,13 @@ from tests.workflow.test_superseded_story_dependencies import (
     _request,
     _stored_sprint_evidence,
 )
+from utils.task_metadata import parse_task_metadata
 from workflow.contracts import NodeCategory
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.execution_integrity import execution_contract
 from workflow.execution_scope import current_execution_scope
 from workflow.facts import SprintRetryFact, SprintRetryStartFact, WorkflowFactSnapshot
+from workflow.fingerprints import canonical_json
 from workflow.requests import (
     DecideSprintPlan,
     RecordSprintPlan,
@@ -276,6 +286,232 @@ def _retired_replacement(
     with Session(engine) as session:
         assert session.get_one(Sprint, fixture.sprint_id).status is SprintStatus.PLANNED
     return project_id, fixture.sprint_id, replacement_id
+
+
+def _correction_replacement(engine: Engine) -> tuple[_DependencySprint, int, int]:
+    """Keep the real original fixture available for repeated replacement review."""
+    fixture = _accepted_dependency_sprint(engine, started=False)
+    _replace(engine, fixture.scenario.artifact_ids[0])
+    domain = _domain(engine)
+    retired = domain.transition(_retire_request(engine, fixture))
+    assert retired.ok, retired
+    reconciled = domain.transition(
+        _request(engine, fixture.scenario, fixture.story_id, (), "correction-reconcile")
+    )
+    assert reconciled.ok, reconciled
+    plan_id = _revision(engine, fixture, outcome="accepted", key="correction-initial")
+    with Session(engine) as session:
+        decision = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                SprintPlanArtifactDecision.sprint_plan_artifact_id == plan_id
+            )
+        ).one()
+        sprint_id = decision.activated_sprint_id
+    assert isinstance(sprint_id, int)
+    assert sprint_id != fixture.sprint_id
+    return fixture, plan_id, sprint_id
+
+
+def _retained_project_receipts(
+    engine: Engine, project_id: int
+) -> dict[tuple[str, str], str]:
+    with Session(engine) as session:
+        return {
+            (row.request_kind, row.idempotency_key): row.model_dump_json()
+            for row in session.exec(select(WorkflowTransitionReceipt)).all()
+            if json.loads(row.request_json).get("project_id") == project_id
+        }
+
+
+def test_replacement_correction_preserves_retired_projection(engine: Engine) -> None:
+    """Two accepted corrections preserve full retired rows even if IDs are reused."""
+    fixture, initial_plan_id, sprint_id = _correction_replacement(engine)
+    project_id = fixture.scenario.project_id
+    protected = _stored_sprint_evidence(engine, fixture)
+    protected_plans = _history(engine, (fixture.plan_id, initial_plan_id))
+    receipts = _retained_project_receipts(engine, project_id)
+    reads = DurableReadProjectionService(engine=engine)
+    for outcome, key in (
+        ("feedback", "correction-feedback"),
+        ("accepted", "correction-first"),
+        ("accepted", "correction-second"),
+    ):
+        plan_id = _revision(engine, fixture, outcome=outcome, key=key)
+        assert _stored_sprint_evidence(engine, fixture) == protected
+        assert _history(engine, (fixture.plan_id, initial_plan_id)) == protected_plans
+        current_receipts = _retained_project_receipts(engine, project_id)
+        assert {
+            identity: current_receipts[identity] for identity in receipts
+        } == receipts
+        if outcome == "feedback":
+            continue
+        historical = reads.sprint_status(
+            project_id=project_id, sprint_id=fixture.sprint_id
+        )
+        current = reads.sprint_status(project_id=project_id, sprint_id=sprint_id)
+        assert historical["ok"] is True, historical
+        assert current["ok"] is True, current
+        historical_data, current_data = historical["data"], current["data"]
+        assert isinstance(historical_data, dict)
+        assert isinstance(current_data, dict)
+        assert historical_data["effective_status"] == "retired"
+        assert current_data["effective_status"] == "planned"
+        with Session(engine) as session:
+            tasks = session.exec(
+                select(Task).where(col(Task.story_id) == fixture.story_id)
+            ).all()
+            current_tasks = [
+                task
+                for task in tasks
+                if parse_task_metadata(task.metadata_json).sprint_plan_artifact_id
+                == plan_id
+            ]
+            assert len(current_tasks) == 1
+            task_id = current_tasks[0].task_id
+            assert task_id is not None
+            assert task_id != fixture.task_id
+            for packet in (
+                build_story_packet(
+                    session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    story_id=fixture.story_id,
+                ),
+                build_task_packet(
+                    session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    task_id=task_id,
+                ),
+            ):
+                lineage = packet["lineage"]
+                assert isinstance(lineage, dict)
+                plan = lineage["sprint_plan"]
+                assert isinstance(plan, dict)
+                assert plan["sprint_plan_artifact_id"] == plan_id
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "invalid-prior-ownership",
+        "malformed",
+        "missing",
+        "duplicate",
+        "execution",
+        "started",
+    ],
+)
+def test_replacement_correction_ownership_failure_rolls_back(  # noqa: PLR0915
+    engine: Engine, mutation: str
+) -> None:
+    """Invalid current ownership or execution cannot cause a partial replacement."""
+    fixture, initial_plan_id, sprint_id = _correction_replacement(engine)
+    project_id = fixture.scenario.project_id
+    domain = _domain(engine)
+    if mutation == "started":
+        with Session(engine) as session:
+            snapshot = WorkflowFactRepository(session).load(project_id)
+        spec = accepted_current_spec(snapshot)
+        assert spec is not None
+        story = next(
+            item for item in snapshot.stories if item.story_id == fixture.story_id
+        )
+        request = RecordSprintPlan(
+            **planning_guards(domain.position(project_id), "planning.sprint.plan"),
+            idempotency_key="correction-after-start",
+            team_name="Prerequisite replacement preservation team",
+            spec_version_id=spec.spec_version_id,
+            spec_hash=spec.spec_hash,
+            planner_output=SprintPlannerOutput.model_validate(
+                _sprint_plan(
+                    fixture.story_id,
+                    story_item_id=story.source_story_item_id,
+                    spec_item_ids=story.spec_item_ids,
+                )
+            ),
+        )
+        started = domain.transition(
+            StartSprint(
+                **planning_guards(domain.position(project_id), "planning.sprint.start"),
+                idempotency_key="correction-guard-real-start",
+            )
+        )
+        assert started.ok, started
+    else:
+        pending_id = _revision(
+            engine, fixture, outcome="pending", key="correction-invalid"
+        )
+        with Session(engine) as session:
+            pending = session.get_one(SprintPlanArtifact, pending_id)
+            fingerprint = pending.plan_fingerprint
+        request = DecideSprintPlan(
+            **planning_guards(domain.position(project_id), "planning.sprint.review"),
+            idempotency_key="correction-invalid-review",
+            sprint_plan_artifact_id=pending_id,
+            plan_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Review this exact proposed correction.",
+        )
+        with Session(engine) as session:
+            task = next(
+                row
+                for row in session.exec(
+                    select(Task).where(col(Task.story_id) == fixture.story_id)
+                ).all()
+                if parse_task_metadata(row.metadata_json).sprint_plan_artifact_id
+                == initial_plan_id
+            )
+            if mutation == "missing":
+                session.delete(task)
+            elif mutation == "duplicate":
+                session.add(
+                    Task(
+                        story_id=task.story_id,
+                        description=task.description,
+                        metadata_json=task.metadata_json,
+                    )
+                )
+            elif mutation == "execution":
+                assert task.task_id is not None
+                session.add(
+                    TaskExecutionLog(
+                        task_id=task.task_id,
+                        sprint_id=sprint_id,
+                        new_status=task.status,
+                        notes="Execution evidence protects this projection.",
+                    )
+                )
+            else:
+                metadata = json.loads(task.metadata_json)
+                if mutation == "invalid-prior-ownership":
+                    metadata["sprint_plan_artifact_id"] = fixture.plan_id
+                    task.metadata_json = canonical_json(metadata)
+                else:
+                    task.metadata_json = "{}"
+                session.add(task)
+            session.commit()
+    before = _project_business_rows(engine, project_id)
+    protected = _stored_sprint_evidence(engine, fixture)
+    if mutation in {"invalid-prior-ownership", "malformed"}:
+        receipts = _retained_project_receipts(engine, project_id)
+        for _ in range(2):
+            with pytest.raises(WorkflowFactLoadError, match="metadata"):
+                domain.transition(request)
+            assert _project_business_rows(engine, project_id) == before
+            assert _stored_sprint_evidence(engine, fixture) == protected
+            assert _retained_project_receipts(engine, project_id) == receipts
+        return
+    result = domain.transition(request)
+    assert not result.ok, result
+    assert _project_business_rows(engine, project_id) == before
+    assert _stored_sprint_evidence(engine, fixture) == protected
+    receipt = _rejection_receipt(engine, request)
+    replay = domain.transition(request)
+    assert not replay.ok, replay
+    assert replay.replayed, replay
+    assert _rejection_receipt(engine, request) == receipt
+    assert _project_business_rows(engine, project_id) == before
 
 
 def _retired_after_completed_sprints(
