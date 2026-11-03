@@ -17,6 +17,7 @@ from models.events import TaskExecutionLog
 from models.workflow import (
     SprintPlanArtifact,
     SprintPlanArtifactDecision,
+    StoryArtifact,
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
@@ -44,8 +45,10 @@ from tests.workflow.execution_retry_support import (
 )
 from tests.workflow.planning_fixtures import (
     EVALUATED_AT,
+    apply_current_dependencies,
     planning_decision,
     planning_guards,
+    select_for_sprint,
 )
 from tests.workflow.retry_execution_fixtures import (
     CompletedRetrySource,
@@ -65,6 +68,7 @@ from tests.workflow.test_superseded_story_dependencies import (
 )
 from utils.task_metadata import parse_task_metadata
 from workflow.contracts import NodeCategory
+from workflow.definitions.planning import _sprint_plan_rule
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.execution_integrity import execution_contract
 from workflow.execution_scope import current_execution_scope
@@ -226,9 +230,12 @@ def _retired_replacement(
     *,
     replacement_state: Literal["planned", "active", "completed"],
     successor_outcome: Literal["none", "pending", "feedback", "rejected"] = "none",
+    story_count: int = 2,
 ) -> tuple[int, int, int]:
     """Retain a retired stream while a distinct replacement advances normally."""
-    fixture = _accepted_dependency_sprint(engine, started=False)
+    fixture = _accepted_dependency_sprint(
+        engine, started=False, story_count=story_count
+    )
     project_id = fixture.scenario.project_id
     artifact_ids = [fixture.plan_id]
     if successor_outcome != "none":
@@ -286,6 +293,103 @@ def _retired_replacement(
     with Session(engine) as session:
         assert session.get_one(Sprint, fixture.sprint_id).status is SprintStatus.PLANNED
     return project_id, fixture.sprint_id, replacement_id
+
+
+@pytest.mark.parametrize("successor_outcome", ["pending", "feedback", "rejected"])
+def test_retired_pending_successor_allows_real_next_sprint_plan(
+    engine: Engine,
+    successor_outcome: Literal["pending", "feedback", "rejected"],
+) -> None:
+    """A retired review cannot block a new stream after replacement triage."""
+    project_id, retired_id, replacement_id = _retired_replacement(
+        engine,
+        replacement_state="completed",
+        successor_outcome=successor_outcome,
+        story_count=3,
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        retired_plan = next(
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+            and item.status == "retired"
+            and item.activated_sprint_id == retired_id
+        )
+        successor = next(
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+            and item.sprint_plan_stream_id == retired_plan.sprint_plan_stream_id
+            and item.supersedes_artifact_id == retired_plan.artifact_id
+        )
+        next_story = next(
+            item
+            for item in snapshot.stories
+            if not item.is_superseded and item.spec_item_ids == ("REQ.planning-3",)
+        )
+        story_artifact = session.get_one(
+            StoryArtifact, next_story.source_story_artifact_id
+        )
+        assert story_artifact.backlog_item_id == "PBI-000003"
+    expected_status = (
+        "pending_review" if successor_outcome == "pending" else successor_outcome
+    )
+    assert successor.status == expected_status
+    assert replacement_id in {item.sprint_id for item in snapshot.post_sprint_triage}
+    before = _project_business_rows(engine, project_id)
+    receipts = _retained_project_receipts(engine, project_id)
+    domain = _domain(engine)
+    select_for_sprint(engine, next_story.story_id)
+    apply_current_dependencies(
+        engine, domain, project_id, idempotency_key="next-cycle-explicit-dependencies"
+    )
+    position = domain.position(project_id)
+    with Session(engine) as session:
+        observed = WorkflowFactRepository(session).load(project_id)
+    assert _sprint_plan_rule(observed, EVALUATED_AT)[0].reason_code == (
+        "NEXT_SPRINT_PLANNING_REQUIRED"
+    )
+    decision = planning_decision(position, "planning.sprint.plan")
+    assert decision.category is NodeCategory.AVAILABLE, decision
+    assert decision.reason_code == "NEXT_SPRINT_PLANNING_REQUIRED"
+    spec = accepted_current_spec(observed)
+    assert spec is not None
+    recorded = domain.transition(
+        RecordSprintPlan(
+            **planning_guards(position, "planning.sprint.plan"),
+            team_name="Next reviewed Sprint team",
+            idempotency_key="next-cycle-plan-after-retired-review",
+            spec_version_id=spec.spec_version_id,
+            spec_hash=spec.spec_hash,
+            planner_output=SprintPlannerOutput.model_validate(
+                _sprint_plan(
+                    next_story.story_id,
+                    story_item_id=next_story.source_story_item_id,
+                    spec_item_ids=next_story.spec_item_ids,
+                )
+            ),
+        )
+    )
+    assert recorded.ok, recorded
+    plan_id = recorded.output["sprint_plan_artifact_id"]
+    assert isinstance(plan_id, int)
+    with Session(engine) as session:
+        plan = session.get_one(SprintPlanArtifact, plan_id)
+        assert plan.sprint_plan_stream_id not in {
+            item.sprint_plan_stream_id
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+        }
+        assert plan.selected_story_ids_json == canonical_json([next_story.story_id])
+        after_snapshot = WorkflowFactRepository(session).load(project_id)
+    after = _project_business_rows(engine, project_id)
+    for table, rows in before.items():
+        assert all(row in after[table] for row in rows), table
+    after_receipts = _retained_project_receipts(engine, project_id)
+    assert {key: after_receipts[key] for key in receipts} == receipts
+    assert successor in after_snapshot.planning_artifacts
+    assert retired_plan in after_snapshot.planning_artifacts
 
 
 def _correction_replacement(engine: Engine) -> tuple[_DependencySprint, int, int]:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
+import pytest
+
 from workflow.contracts import NodeCategory
 from workflow.definitions.product_goal import (
     _goal_interview_rule,
@@ -15,6 +17,7 @@ from workflow.definitions.product_goal import (
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.facts import (
     PhaseArtifactFact,
+    PlanningArtifactFact,
     PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
@@ -338,3 +341,92 @@ def test_goal_outcome_requires_every_artifact_review_to_be_quiescent() -> None:
     assert _outcome_rule("abandoned")(snapshot, NOW)[0].reason_code == (
         "PRODUCT_GOAL_OUTCOME_NOT_READY"
     )
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "retired",
+        "not-retired",
+        "different-stream",
+        "other-pending",
+        "pending-phase",
+        "missing-retirement",
+        "missing-stream",
+    ],
+)
+def test_goal_outcome_ignores_only_verified_retired_pending_streams(guard: str) -> None:
+    """Pure Goal rules exempt the exact verified retired Sprint-plan stream only."""
+    retired = PlanningArtifactFact(
+        artifact_type="sprint_plan",
+        artifact_id=30,
+        artifact_fingerprint="sha256:" + "a" * 64,
+        source_fingerprint="sha256:" + "c" * 64,
+        spec_version_id=40,
+        spec_hash="sha256:" + "d" * 64,
+        sprint_plan_stream_id="SPS-" + "a" * 32,
+        selected_story_ids=(50,),
+        activated_sprint_id=60,
+        status="retired",
+    )
+    pending = retired.model_copy(
+        update={
+            "artifact_id": 31,
+            "artifact_fingerprint": "sha256:" + "b" * 64,
+            "version_number": 2,
+            "supersedes_artifact_id": 30,
+            "activated_sprint_id": None,
+            "status": "pending_review",
+        }
+    )
+    if guard == "not-retired":
+        retired = retired.model_copy(update={"status": "accepted"})
+    elif guard == "different-stream":
+        pending = pending.model_copy(
+            update={"sprint_plan_stream_id": "SPS-" + "b" * 32}
+        )
+    elif guard == "missing-stream":
+        retired = retired.model_copy(update={"sprint_plan_stream_id": None})
+        pending = pending.model_copy(update={"sprint_plan_stream_id": None})
+    artifacts = (pending,) if guard == "missing-retirement" else (retired, pending)
+    if guard == "other-pending":
+        artifacts = (
+            *artifacts,
+            pending.model_copy(
+                update={
+                    "artifact_id": 32,
+                    "sprint_plan_stream_id": "SPS-" + "b" * 32,
+                    "version_number": 1,
+                    "supersedes_artifact_id": None,
+                }
+            ),
+        )
+    snapshot = _snapshot(goal_decision="accepted").model_copy(
+        update={"planning_artifacts": artifacts}
+    )
+    if guard == "pending-phase":
+        snapshot = snapshot.model_copy(
+            update={
+                "phase_artifacts": (
+                    PhaseArtifactFact(
+                        artifact_type="backlog",
+                        artifact_id=70,
+                        artifact_fingerprint="backlog-pending",
+                        spec_version_id=40,
+                        spec_hash="sha256:" + "d" * 64,
+                        status="pending_review",
+                    ),
+                )
+            }
+        )
+    for kind in ("fulfilled", "abandoned"):
+        result = _outcome_rule(kind)(snapshot, NOW)[0]
+        assert result.category is (
+            RuleCategory.AVAILABLE if guard == "retired" else RuleCategory.SATISFIED
+        )
+        assert result.reason_code == (
+            f"PRODUCT_GOAL_{kind.upper()}_AVAILABLE"
+            if guard == "retired"
+            else "PRODUCT_GOAL_OUTCOME_NOT_READY"
+        )
+    assert snapshot.planning_artifacts == artifacts
