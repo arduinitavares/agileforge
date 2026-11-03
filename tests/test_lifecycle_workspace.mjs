@@ -35,6 +35,37 @@ function deliveryContext(status = 'active') {
     } } };
 }
 
+test('retired delivery follows advertised required and review stages', () => {
+    const workspace = api();
+    const context = deliveryContext('planned');
+    context.sprintStatus.data.effective_status = 'retired';
+    const recovery = { request_kind: 'apply_story_dependencies', category: 'available', recommendation_kind: 'recovery' };
+    const generation = { request_kind: 'record_sprint_plan', category: 'available', recommendation_kind: 'required' };
+    const review = { request_kind: 'decide_sprint_plan', category: 'waiting', recommendation_kind: 'required' };
+    const optional = { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'optional_reentry' };
+    for (const [decisions, stages, primary] of [
+        [[recovery], [7], 7], [[generation], [8], 8], [[review], [8], 8],
+        [[recovery, generation], [7, 8], null], [[generation, recovery], [7, 8], null],
+        [[optional], [], null], [[], [], null],
+    ]) {
+        const position = { project_id: 7, decisions };
+        assert.deepEqual(Array.from(workspace.currentStageIds(position, context)), stages);
+        assert.equal(workspace.initialStageId(position, context), primary);
+    }
+    const position = { project_id: 7, decisions: [recovery, generation] };
+    const data = context.sprintStatus.data;
+    for (const invalid of [
+        { kind: 'error', data }, { kind: 'unavailable' }, { kind: 'ready' },
+        { kind: 'ready', data: { ...data, project_id: 8 } },
+        { kind: 'ready', data: { ...data, sprint: { sprint_id: 0, status: 'planned' } } },
+        { kind: 'ready', data: { ...data, effective_status: 'unknown' } },
+    ]) {
+        assert.deepEqual(Array.from(workspace.currentStageIds(position, { sprintStatus: invalid })), []);
+        assert.equal(workspace.initialStageId(position, { sprintStatus: invalid }), null);
+    }
+    assert.deepEqual(Array.from(workspace.currentStageIds(position, { sprintStatus: { kind: 'absent' } })), [7, 8]);
+});
+
 test('accepted Specification source preparation does not displace confirmed Sprint work', () => {
     const position = { project_id: 7, decisions: [
         { request_kind: 'register_specification_source', category: 'available', recommendation_kind: 'optional_reentry' },

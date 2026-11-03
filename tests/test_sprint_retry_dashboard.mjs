@@ -120,6 +120,60 @@ function retiredSprintStatus() {
     return status;
 }
 
+test('validated retired status restores current display and initial selection', async () => {
+    const context = loadFrontend();
+    const workspacePath = path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js');
+    vm.runInContext(fs.readFileSync(workspacePath, 'utf8'), context, { filename: workspacePath });
+    const workspace = vm.runInContext('AgileForgeWorkspace', context);
+    const status = await context.validateSprintStatusProjection(retiredSprintStatus(), 7);
+    assert.ok(status, 'The complete retired status must pass the asynchronous validator.');
+    const recovery = { request_kind: 'apply_story_dependencies', category: 'available', recommendation_kind: 'recovery' };
+    const generation = { request_kind: 'record_sprint_plan', category: 'available', recommendation_kind: 'required' };
+    const review = { request_kind: 'decide_sprint_plan', category: 'waiting', recommendation_kind: 'required' };
+    const optional = { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'optional_reentry' };
+    for (const [decisions, stages, primary, label] of [
+        [[recovery], [7], 7, 'Stories'],
+        [[generation], [8], 8, 'Sprint plan & start'],
+        [[review], [8], 8, 'Sprint plan & start'],
+        [[recovery, generation], [7, 8], null, 'Multiple current stages'],
+        [[optional], [], null, 'No current stage'], [[], [], null, 'No current stage'],
+    ]) {
+        const state = { position: { project_id: 7, decisions }, sprintStatus: { kind: 'ready', data: status } };
+        const display = context.projectLifecycleDisplayProjection(state, { kind: 'ready' });
+        assert.deepEqual(Array.from(display.currentStageIds), stages);
+        assert.equal(display.primaryStageId, primary);
+        assert.equal(display.phaseLabel, label);
+        assert.equal(display.badges.Sprint.label, 'Retired');
+        const markup = workspace.mapMarkup({
+            position: state.position, context: state, view: workspace.createView(),
+            lastConfirmedAt: '2026-11-03T09:30:00Z', displayProgress: display,
+            displayReadKind: 'ready',
+        });
+        for (const stage of [7, 8]) {
+            const current = new RegExp(`data-workspace-stage="${stage}"[^>]*aria-current="step"`);
+            if (stages.includes(stage)) assert.match(markup, current);
+            else assert.doesNotMatch(markup, current);
+        }
+        if (stages.length) assert.doesNotMatch(markup, /No required stage is currently advertised/);
+        else assert.match(markup, /No required stage is currently advertised/);
+        context.displayState = state;
+        vm.runInContext('selectedProjectId = 7; lifecycleState = displayState; workspaceView = null; ensureWorkspaceView();', context);
+        assert.equal(vm.runInContext('workspaceView.stageId', context), primary);
+    }
+    const crossProject = retiredSprintStatus();
+    crossProject.project_id = 8;
+    const invalidRetirement = retiredSprintStatus();
+    invalidRetirement.retirement.sprint_id = 32;
+    for (const invalid of [crossProject, invalidRetirement, undefined]) {
+        assert.equal(await context.validateSprintStatusProjection(invalid, 7), null);
+        const state = { position: { project_id: 7, decisions: [recovery, generation] }, sprintStatus: { kind: 'unavailable' } };
+        const display = context.projectLifecycleDisplayProjection(state, { kind: 'ready' });
+        assert.deepEqual(Array.from(display.currentStageIds), []);
+        assert.equal(display.primaryStageId, null);
+        assert.equal(display.badges.Sprint.label, 'Unavailable');
+    }
+});
+
 test('complete retired status validates and retains replacement planning', async () => {
     const context = loadFrontend();
     const status = await context.validateSprintStatusProjection(retiredSprintStatus(), 7);
