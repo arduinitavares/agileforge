@@ -10,13 +10,20 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import inspect as inspect_orm
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
-from models.core import UserStory, UserStoryDependency
-from models.enums import StoryStatus, WorkflowEventType
+from models.core import Project, Sprint, SprintStory, UserStory, UserStoryDependency
+from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from models.workflow import WorkflowTransitionReceipt
+from models.workflow import (
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    SprintPlanRetirement,
+    WorkflowTransitionReceipt,
+)
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services import sprint_plan_retirement as plan_retirement
 from services import story_dependency_retirement as retirement
 from services.story_dependency_lifecycle import (
     load_story_dependency_invalidations_in_session,
@@ -33,7 +40,12 @@ from tests.workflow.planning_fixtures import (
     record_and_accept_story,
     seed_accepted_backlog,
 )
+from tests.workflow.test_sprint_plan_retirement import (
+    _retire_request as _retire_plan_request,
+)
+from tests.workflow.test_sprint_plan_retirement_history import _retired_replacement
 from tests.workflow.test_superseded_story_dependencies import (
+    _Scenario,
     _accepted_dependency_sprint,
     _complete_fixture_story_sprint,
     _completed_history,
@@ -43,6 +55,7 @@ from tests.workflow.test_superseded_story_dependencies import (
     _plan_or_start_preservation_retry,
     _project_business_rows,
     _replace,
+    _request as _apply_request,
     _review,
     _seed,
     _snapshot,
@@ -50,14 +63,12 @@ from tests.workflow.test_superseded_story_dependencies import (
 from workflow import requests
 from workflow.contracts import NodeCategory, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.planning_integrity import historical_dependency_edges
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
-
-    from tests.workflow.test_superseded_story_dependencies import _Scenario
-
 
 def _historical_cycle(engine: Engine) -> tuple[_Scenario, int]:
     scenario = _seed(engine)
@@ -573,3 +584,325 @@ def test_concurrent_historical_retirement_has_one_winner(tmp_path: Path) -> None
     assert sum(results) == 1
     assert len(_snapshot(engine, scenario).story_dependency_retirements) == 1
     engine.dispose()
+
+
+def _selected_terminal_retirement(
+    engine: Engine, status: StoryStatus
+) -> tuple[_Scenario, int]:
+    scenario = _seed(engine)
+    with Session(engine) as session:
+        for story_id in scenario.story_ids[:2]:
+            row = session.get_one(UserStory, story_id)
+            row.status = status
+            session.add(row)
+        session.commit()
+    dependency_id = _edge(engine, scenario, *scenario.story_ids[:2])
+    _review(engine, scenario, scenario.story_ids[0])
+    retired = _domain(engine).transition(_retire_request(engine, scenario, dependency_id))
+    assert retired.ok, retired
+    return scenario, dependency_id
+
+
+def _retirement_audits(engine: Engine, project_id: int) -> tuple[str, ...]:
+    with Session(engine) as session:
+        return tuple(
+            row.model_dump_json()
+            for row in session.exec(
+                select(WorkflowEvent)
+                .where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type == WorkflowEventType.STORY_DEPENDENCY_RETIRED,
+                )
+                .order_by(col(WorkflowEvent.event_id))
+            )
+        )
+
+
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+def test_retired_dependency_survives_selected_terminal_apply(
+    engine: Engine, status: StoryStatus
+) -> None:
+    """Ordinary Apply cannot rewrite the original row of an audited retirement."""
+    scenario, _ = _selected_terminal_retirement(engine, status)
+    edges = _stored_edges(engine, scenario.project_id)
+    audits = _retirement_audits(engine, scenario.project_id)
+    reviews = _snapshot(engine, scenario).story_dependency_reviews
+    applied = _domain(engine).transition(
+        _apply_request(engine, scenario, scenario.story_ids[0], (), "apply-after-retirement")
+    )
+    assert applied.ok, applied
+    assert _stored_edges(engine, scenario.project_id) == edges
+    assert _retirement_audits(engine, scenario.project_id) == audits
+    after = _snapshot(engine, scenario)
+    assert all(review in after.story_dependency_reviews for review in reviews)
+    assert len(after.story_dependency_retirements) == 1
+    assert _domain(engine).position(scenario.project_id).project_id == scenario.project_id
+
+
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+def test_retired_dependency_reactivation_is_atomic_conflict(
+    engine: Engine, status: StoryStatus
+) -> None:
+    """A retired pair is refused explicitly before review or history mutation."""
+    scenario, _ = _selected_terminal_retirement(engine, status)
+    request = _apply_request(
+        engine, scenario, scenario.story_ids[0], (scenario.story_ids[1],), "reactivate-retired-pair"
+    )
+    before = _project_business_rows(engine, scenario.project_id)
+    audits = _retirement_audits(engine, scenario.project_id)
+    refused = _domain(engine).transition(request)
+    assert not refused.ok
+    assert refused.error is not None
+    assert refused.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert "retired" in refused.error.message.lower()
+    assert "reactivat" in refused.error.message.lower()
+    assert _project_business_rows(engine, scenario.project_id) == before
+    assert _retirement_audits(engine, scenario.project_id) == audits
+    replay = _domain(engine).transition(request)
+    assert replay.replayed
+    assert replay.error == refused.error
+    assert _project_business_rows(engine, scenario.project_id) == before
+
+
+def _replacement_history_edge(
+    engine: Engine, replacement_state: str = "completed"
+) -> tuple[_Scenario, int, int]:
+    project_id, retired_sprint_id, _ = _retired_replacement(
+        engine, replacement_state=replacement_state
+    )
+    with Session(engine) as session:
+        dependent_id = session.exec(
+            select(SprintStory.story_id).where(SprintStory.sprint_id == retired_sprint_id)
+        ).one()
+        other_id = session.exec(
+            select(UserStory.story_id).where(
+                UserStory.project_id == project_id,
+                UserStory.story_id != dependent_id,
+                UserStory.status == StoryStatus.DONE,
+            )
+        ).one()
+    scenario = _Scenario(project_id, (), (other_id, dependent_id))
+    dependency_id = _edge(engine, scenario, other_id, dependent_id)
+    return scenario, dependency_id, retired_sprint_id
+
+
+def _proof_row(
+    session: Session, retirement_id: int, kind: str
+) -> tuple[SQLModel, str, object]:
+    row = session.get_one(SprintPlanRetirement, retirement_id)
+    if kind == "retirement":
+        return row, "retirement_fingerprint", "corrupt-persisted-retirement"
+    if kind == "receipt":
+        return session.get_one(WorkflowTransitionReceipt, row.receipt_id), "request_kind", "wrong-kind"
+    if kind == "plan":
+        return session.get_one(SprintPlanArtifact, row.sprint_plan_artifact_id), "plan_fingerprint", "corrupt-plan"
+    if kind == "decision":
+        return session.get_one(SprintPlanArtifactDecision, row.sprint_plan_artifact_decision_id), "decision", "rejected"
+    assert kind == "sprint"
+    return session.get_one(Sprint, row.sprint_id), "status", SprintStatus.ACTIVE
+
+
+def _proof_identity(engine: Engine, project_id: int) -> int:
+    with Session(engine) as session:
+        retirement_id = session.exec(
+            select(SprintPlanRetirement.retirement_id).where(
+                SprintPlanRetirement.project_id == project_id
+            )
+        ).one()
+    assert isinstance(retirement_id, int)
+    return retirement_id
+
+
+def _assert_later_corruption_visible(
+    engine: Engine, project_id: int, retirement_id: int, kind: str
+) -> None:
+    with Session(engine) as reader:
+        held, field, invalid = _proof_row(reader, retirement_id, kind)
+        retained = getattr(held, field)
+        assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
+        with Session(engine) as writer:
+            changed, _, _ = _proof_row(writer, retirement_id, kind)
+            setattr(changed, field, invalid)
+            writer.add(changed)
+            writer.commit()
+        identity = inspect_orm(held).identity
+        assert identity is not None
+        primary_key = next(iter(type(held).__table__.primary_key.columns))
+        assert reader.exec(
+            select(getattr(type(held), field)).where(primary_key == identity[0])
+        ).one() == invalid
+        if kind in {"retirement", "receipt"}:
+            with pytest.raises(WorkflowFactLoadError):
+                WorkflowFactRepository(reader).load(project_id)
+        else:
+            with pytest.raises(ValueError):
+                plan_retirement.load_sprint_plan_retirements(reader, project_id)
+        assert getattr(held, field) == retained
+        assert not inspect_orm(held).modified
+        assert held not in reader.dirty
+
+
+def test_retired_plan_completed_replacement_allows_dependency_retirement(engine: Engine) -> None:
+    """Retired planned membership supplies no current lock after replacement completion."""
+    scenario, dependency_id, retired_sprint_id = _replacement_history_edge(engine)
+    before = _project_business_rows(engine, scenario.project_id)
+    snapshot = _snapshot(engine, scenario)
+    assert dependency_id in {edge.dependency_id for edge in historical_dependency_edges(snapshot)}
+    request = _retire_request(engine, scenario, dependency_id)
+    result = _domain(engine).transition(request)
+    assert result.ok, result
+    assert _domain(engine).transition(request).replayed
+    after = _project_business_rows(engine, scenario.project_id)
+    assert {k: v for k, v in after.items() if k != WorkflowEvent.__tablename__} == {
+        k: v for k, v in before.items() if k != WorkflowEvent.__tablename__
+    }
+    assert len(_snapshot(engine, scenario).story_dependency_retirements) == 1
+    with Session(engine) as session:
+        assert session.get_one(Sprint, retired_sprint_id).status is SprintStatus.PLANNED
+    _assert_later_corruption_visible(
+        engine, scenario.project_id, _proof_identity(engine, scenario.project_id), "retirement"
+    )
+
+
+@pytest.mark.parametrize("replacement_state", ["planned", "active"])
+def test_retired_plan_does_not_bypass_live_replacement_guard(
+    engine: Engine, replacement_state: str
+) -> None:
+    """Only retired membership loses authority; genuine live ownership still refuses."""
+    scenario, dependency_id, _ = _replacement_history_edge(engine, replacement_state)
+    with Session(engine) as session:
+        endpoint = session.get_one(UserStory, scenario.story_ids[1])
+        endpoint.status = StoryStatus.DONE
+        session.add(endpoint)
+        session.commit()
+    before = _project_business_rows(engine, scenario.project_id)
+    result = _domain(engine).transition(_retire_request(engine, scenario, dependency_id))
+    assert not result.ok
+    assert _project_business_rows(engine, scenario.project_id) == before
+
+
+@pytest.mark.parametrize("kind", ["retirement", "receipt"])
+def test_dependency_retirement_rejects_invalid_retired_plan_proof(engine: Engine, kind: str) -> None:
+    """Invalid stored retirement authority fails before first historical repair."""
+    project_id, _, _ = _retired_replacement(engine, replacement_state="planned")
+    retirement_id = _proof_identity(engine, project_id)
+    with Session(engine) as session:
+        held, field, invalid = _proof_row(session, retirement_id, kind)
+        setattr(held, field, invalid)
+        session.add(held)
+        session.commit()
+    before = _project_business_rows(engine, project_id)
+    with Session(engine) as session, pytest.raises(WorkflowFactLoadError):
+        WorkflowFactRepository(session).load(project_id)
+    assert _project_business_rows(engine, project_id) == before
+
+
+@pytest.mark.parametrize("kind", ["retirement", "receipt", "plan", "decision", "sprint"])
+def test_retired_plan_retained_proof_sees_later_committed_corruption(engine: Engine, kind: str) -> None:
+    """A retained ORM identity cannot conceal transaction-visible invalid proof."""
+    project_id, _, _ = _retired_replacement(engine, replacement_state="planned")
+    assert _retirement_audits(engine, project_id) == ()
+    _assert_later_corruption_visible(engine, project_id, _proof_identity(engine, project_id), kind)
+
+
+@pytest.mark.parametrize("kind", ["retirement", "receipt"])
+@pytest.mark.parametrize("persisted_valid", [False, True])
+def test_retired_plan_unflushed_caller_proof_does_not_supply_authority(
+    engine: Engine, kind: str, persisted_valid: bool
+) -> None:
+    """Proof reads neither trust nor flush pending caller edits and business rows."""
+    project_id, _, _ = _retired_replacement(engine, replacement_state="planned")
+    retirement_id = _proof_identity(engine, project_id)
+    with Session(engine) as writer:
+        row, field, invalid = _proof_row(writer, retirement_id, kind)
+        valid = getattr(row, field)
+        if not persisted_valid:
+            setattr(row, field, invalid)
+            writer.add(row)
+            writer.commit()
+    with Session(engine) as reader:
+        held, field, invalid = _proof_row(reader, retirement_id, kind)
+        setattr(held, field, invalid if persisted_valid else valid)
+        reader.add(held)
+        pending = Project(name="Pending caller business row")
+        reader.add(pending)
+        transaction = reader.get_transaction()
+        if persisted_valid:
+            try:
+                assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
+            except ValueError as error:
+                pytest.fail(f"Valid persisted proof was replaced by unflushed caller state: {error}")
+        else:
+            with pytest.raises(ValueError):
+                plan_retirement.load_sprint_plan_retirements(reader, project_id)
+        assert getattr(held, field) == (invalid if persisted_valid else valid)
+        assert held in reader.dirty
+        assert inspect_orm(held).modified
+        assert reader.get_transaction() is transaction
+        assert reader.get(type(held), inspect_orm(held).identity) is held
+        assert pending in reader.new
+        assert pending.project_id is None
+        with reader.no_autoflush:
+            assert reader.exec(select(Project).where(Project.name == pending.name)).first() is None
+        reader.rollback()
+
+
+def test_retired_plan_proof_rebuilds_after_flush_rollback_and_new_session(engine: Engine) -> None:
+    """Proof follows the owning transaction without ending or repairing it."""
+    project_id, _, _ = _retired_replacement(engine, replacement_state="planned")
+    retirement_id = _proof_identity(engine, project_id)
+    with Session(engine) as reader:
+        held = reader.get_one(SprintPlanRetirement, retirement_id)
+        valid = held.retirement_fingerprint
+        held.retirement_fingerprint = "flushed-invalid-proof"
+        reader.add(held)
+        reader.flush()
+        transaction = reader.get_transaction()
+        with pytest.raises(ValueError):
+            plan_retirement.load_sprint_plan_retirements(reader, project_id)
+        assert reader.get_transaction() is transaction
+        assert held.retirement_fingerprint == "flushed-invalid-proof"
+        assert not inspect_orm(held).modified
+        reader.rollback()
+        assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
+        assert held.retirement_fingerprint == valid
+        assert reader.get_one(SprintPlanRetirement, retirement_id) is held
+    with Session(engine) as fresh:
+        rows = plan_retirement.load_sprint_plan_retirements(fresh, project_id)
+        assert next(iter(rows.values())).retirement_fingerprint == valid
+
+
+def test_retired_plan_fresh_reader_preserves_active_writer_receipt(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the actual active retirement writer may validate an incomplete receipt."""
+    fixture = _accepted_dependency_sprint(engine, started=False)
+    _replace(engine, fixture.scenario.artifact_ids[0])
+    request = _retire_plan_request(engine, fixture)
+    load = plan_retirement.load_sprint_plan_retirements
+    observed: list[int] = []
+
+    def inspect_writer(session: Session, project_id: int) -> dict[int, SprintPlanRetirement]:
+        rows = load(session, project_id)
+        for row in rows.values():
+            receipt = session.get_one(WorkflowTransitionReceipt, row.receipt_id)
+            marker = session.info.get("agileforge.active_transition_receipt")
+            if receipt.result_json is None:
+                assert isinstance(marker, dict)
+                assert marker["receipt_id"] == row.receipt_id
+                observed.append(row.receipt_id)
+        return rows
+
+    monkeypatch.setattr(plan_retirement, "load_sprint_plan_retirements", inspect_writer)
+    result = _domain(engine).transition(request)
+    assert result.ok, result
+    assert observed
+    replay = _domain(engine).transition(request)
+    assert replay.ok and replay.replayed
+    with Session(engine) as writer:
+        receipt = writer.get_one(WorkflowTransitionReceipt, observed[0])
+        receipt.result_json = None
+        writer.add(receipt)
+        writer.commit()
+    with Session(engine) as fresh, pytest.raises(ValueError):
+        load(fresh, fixture.scenario.project_id)
