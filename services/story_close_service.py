@@ -345,11 +345,21 @@ def _story_close_subject(
 def _terminal_story_tasks(
     session: Session,
     command: StoryCloseInput,
+    *,
+    scope: ExecutionScope,
 ) -> tuple[tuple[Task, ...], tuple[int, ...]]:
+    task_ids = tuple(
+        item.task_id
+        for item in scope.contract.tasks
+        if item.story_id == command.story_id
+    )
     tasks = tuple(
         session.exec(
             select(Task)
-            .where(col(Task.story_id) == command.story_id)
+            .where(
+                col(Task.story_id) == command.story_id,
+                col(Task.task_id).in_(task_ids),
+            )
             .order_by(col(Task.task_id))
         ).all()
     )
@@ -399,7 +409,7 @@ def _story_open_message(command: StoryCloseInput) -> str:
     return "Story close requires an active Sprint retry."
 
 
-def _validate_story_closure(
+def _validate_story_closure(  # noqa: C901
     session: Session,
     command: StoryCloseInput,
 ) -> _ValidatedStoryClosure:
@@ -418,6 +428,8 @@ def _validate_story_closure(
         raise StoryCloseServiceError(str(error), status_code=409) from error
     if scope.status.lower() != "active":
         raise StoryCloseServiceError(_story_open_message(command), status_code=409)
+    if command.retry_attempt_id is None:
+        _terminal_story_tasks(session, command, scope=scope)
     scoped_story = next(
         (item for item in scope.stories if item.story_id == command.story_id),
         None,
@@ -482,7 +494,6 @@ def _validate_story_attempt_open(
         raise StoryCloseServiceError(_story_open_message(command), status_code=409)
     if story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}:
         raise StoryCloseServiceError.already_closed(story.status)
-    _terminal_story_tasks(session, command)
     return None
 
 

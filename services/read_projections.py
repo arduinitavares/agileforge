@@ -4144,12 +4144,9 @@ class DurableReadProjectionService:
                 sprint_id=sprint_id,
             )
         selected_id = sprint.sprint_id
+        retirements = self._sprint_plan_retirements(project_id)
         retirement = next(
-            (
-                item
-                for item in self._sprint_plan_retirements(project_id)
-                if item["sprint_id"] == selected_id
-            ),
+            (item for item in retirements if item["sprint_id"] == selected_id),
             None,
         )
         accepted_plan = self._accepted_sprint_plan_status(
@@ -4166,6 +4163,11 @@ class DurableReadProjectionService:
             sprint_id is None
             and current_scope is not None
             and current_scope.sprint_id != selected_id
+            and (
+                retirement is None
+                or current_scope.status != "completed"
+                or current_scope.sprint_id > selected_id
+            )
         ):
             sprint = self._select_sprint(snapshot.sprints, current_scope.sprint_id)
             if sprint is None:
@@ -4183,6 +4185,10 @@ class DurableReadProjectionService:
             )
             if accepted_plan.get("ok") is not True:
                 return accepted_plan
+        retirement = next(
+            (item for item in retirements if item["sprint_id"] == selected_id),
+            None,
+        )
         scope = (
             current_scope
             if current_scope is not None and current_scope.sprint_id == selected_id

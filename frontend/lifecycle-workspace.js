@@ -58,6 +58,7 @@ const AgileForgeWorkspace = (() => {
         if (status.kind !== 'ready' || !positive(data?.sprint?.sprint_id)
             || data?.project_id !== position?.project_id) return { stages: [], primary: null };
         const effective = data.effective_status ?? data.sprint.status;
+        if (effective === 'retired') return null;
         if (effective === 'planned') return { stages: [8], primary: 8 };
         if (effective === 'active') {
             const tasks = Array.isArray(data.tasks) ? data.tasks : [];

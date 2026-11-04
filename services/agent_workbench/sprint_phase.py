@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from sqlmodel import Session, col, select
 
-from models.core import ProjectTeam, Sprint, SprintStory, Task, Team
+from models.core import ProjectTeam, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import TaskExecutionLog, WorkflowEvent
 from models.sprint_retry import (
@@ -53,7 +53,11 @@ from services.sprint_ownership import (
     ensure_solo_project_owner_team,
     load_sprint_owner_evidence,
 )
-from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
+from utils.task_metadata import (
+    metadata_from_structured_task,
+    parse_task_metadata,
+    serialize_task_metadata,
+)
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.execution_integrity import (
@@ -169,7 +173,8 @@ def _sprint_plan_rows(
             SprintPlanArtifact.spec_hash == spec_hash,
         )
     return tuple(
-        row for row in session.exec(
+        row
+        for row in session.exec(
             statement.order_by(col(SprintPlanArtifact.sprint_plan_artifact_id))
         ).all()
         if row.sprint_plan_stream_id not in retired_streams
@@ -578,6 +583,102 @@ def _ensure_team(
     return team_id
 
 
+def _owned_projection_tasks(
+    session: Session,
+    *,
+    prior_artifact: SprintPlanArtifact,
+    prior_sprint: Sprint,
+) -> tuple[Task, ...]:
+    """Validate the exact accepted projection before replacing any of its rows."""
+    artifact_id = prior_artifact.sprint_plan_artifact_id
+    sprint_id = prior_sprint.sprint_id
+    if (
+        artifact_id is None
+        or sprint_id is None
+        or prior_artifact.project_id != prior_sprint.project_id
+    ):
+        message = "Prior Sprint plan projection identity is invalid."
+        raise ValueError(message)
+    decisions = session.exec(
+        select(SprintPlanArtifactDecision).where(
+            SprintPlanArtifactDecision.project_id == prior_artifact.project_id,
+            SprintPlanArtifactDecision.sprint_plan_artifact_id == artifact_id,
+        )
+    ).all()
+    if (
+        len(decisions) != 1
+        or decisions[0].decision != "accepted"
+        or decisions[0].plan_fingerprint != prior_artifact.plan_fingerprint
+        or decisions[0].activated_sprint_id != sprint_id
+    ):
+        message = "Prior Sprint plan activation is invalid."
+        raise ValueError(message)
+    envelope = load_bound_sprint_plan_envelope(
+        prior_artifact.canonical_task_plan_json,
+        expected_fingerprint=prior_artifact.plan_fingerprint,
+        spec_version_id=prior_artifact.spec_version_id,
+        spec_hash=prior_artifact.spec_hash,
+        candidate_set_fingerprint=prior_artifact.candidate_set_fingerprint,
+        selected_story_ids_json=prior_artifact.selected_story_ids_json,
+    )
+    memberships = session.exec(
+        select(SprintStory).where(SprintStory.sprint_id == sprint_id)
+    ).all()
+    selected = envelope.planner_output.selected_stories
+    if {row.story_id for row in memberships} != {row.story_id for row in selected}:
+        message = "Prior Sprint membership differs from its accepted plan."
+        raise ValueError(message)
+    owned: list[Task] = []
+    for planned_story in selected:
+        story = session.get(UserStory, planned_story.story_id)
+        if (
+            story is None
+            or story.project_id != prior_artifact.project_id
+            or story.source_story_item_id != planned_story.story_item_id
+            or story.accepted_spec_version_id != prior_artifact.spec_version_id
+            or story.accepted_spec_hash != prior_artifact.spec_hash
+        ):
+            message = "Prior Sprint Story lineage is invalid."
+            raise ValueError(message)
+        rows = session.exec(
+            select(Task)
+            .where(Task.story_id == planned_story.story_id)
+            .order_by(col(Task.task_id))
+        ).all()
+        parsed = tuple((task, parse_task_metadata(task.metadata_json)) for task in rows)
+        current = tuple(
+            (task, metadata)
+            for task, metadata in parsed
+            if (
+                metadata.spec_version_id == prior_artifact.spec_version_id
+                and metadata.spec_hash == prior_artifact.spec_hash
+                and metadata.sprint_plan_stream_id
+                == prior_artifact.sprint_plan_stream_id
+                and metadata.sprint_plan_artifact_id == artifact_id
+                and metadata.sprint_plan_fingerprint == prior_artifact.plan_fingerprint
+            )
+        )
+        if len(current) != len(planned_story.tasks):
+            message = "Prior Sprint Task count differs from its accepted plan."
+            raise ValueError(message)
+        for (task, metadata), proposed in zip(
+            current, planned_story.tasks, strict=True
+        ):
+            expected = metadata_from_structured_task(
+                proposed,
+                spec_version_id=prior_artifact.spec_version_id,
+                spec_hash=prior_artifact.spec_hash,
+                sprint_plan_stream_id=prior_artifact.sprint_plan_stream_id,
+                sprint_plan_artifact_id=artifact_id,
+                sprint_plan_fingerprint=prior_artifact.plan_fingerprint,
+            )
+            if task.description != proposed.description or metadata != expected:
+                message = "Prior Sprint Task differs from its accepted plan."
+                raise ValueError(message)
+            owned.append(task)
+    return tuple(owned)
+
+
 def _replace_operational_projection(  # noqa: PLR0913
     session: Session,
     *,
@@ -587,6 +688,20 @@ def _replace_operational_projection(  # noqa: PLR0913
     team_id: int,
     activated_at: datetime,
 ) -> Sprint:
+    prior = _current_accepted_for_stream(
+        _sprint_plan_rows(
+            session,
+            project_id=artifact.project_id,
+            spec_version_id=artifact.spec_version_id,
+            spec_hash=artifact.spec_hash,
+        ),
+        _decision_rows(session, project_id=artifact.project_id),
+        stream_id=artifact.sprint_plan_stream_id,
+    )
+    prior_artifact = None if prior is None else prior[0]
+    if (prior_artifact is None) != (prior_sprint is None):
+        message = "Prior Sprint plan activation is incomplete."
+        raise ValueError(message)
     if prior_sprint is None:
         sprint = Sprint(
             goal=envelope.planner_output.sprint_goal,
@@ -600,6 +715,18 @@ def _replace_operational_projection(  # noqa: PLR0913
         session.flush()
     else:
         _assert_replaceable_sprint(session, prior_sprint)
+        if (
+            prior_artifact is None
+            or prior_artifact.project_id != artifact.project_id
+            or prior_artifact.spec_version_id != artifact.spec_version_id
+            or prior_artifact.spec_hash != artifact.spec_hash
+            or prior_artifact.sprint_plan_stream_id != artifact.sprint_plan_stream_id
+        ):
+            message = "Prior Sprint plan belongs to a different stream."
+            raise ValueError(message)
+        prior_tasks = _owned_projection_tasks(
+            session, prior_artifact=prior_artifact, prior_sprint=prior_sprint
+        )
         sprint = prior_sprint
         sprint.goal = envelope.planner_output.sprint_goal
         sprint.team_id = team_id
@@ -607,12 +734,8 @@ def _replace_operational_projection(  # noqa: PLR0913
         memberships = session.exec(
             select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
         ).all()
-        old_story_ids = tuple(item.story_id for item in memberships)
-        if old_story_ids:
-            for task in session.exec(
-                select(Task).where(col(Task.story_id).in_(old_story_ids))
-            ).all():
-                session.delete(task)
+        for task in prior_tasks:
+            session.delete(task)
         for membership in memberships:
             session.delete(membership)
         session.add(sprint)
