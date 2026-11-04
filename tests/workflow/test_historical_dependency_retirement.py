@@ -776,11 +776,23 @@ def _assert_later_corruption_visible(
             if kind == "plan":
                 # Preserve the real parent/decision FK at commit while changing
                 # their joint proof relative to the immutable retirement.
-                writer.connection().exec_driver_sql("PRAGMA defer_foreign_keys = ON")
                 retirement_row = writer.get_one(SprintPlanRetirement, retirement_id)
                 decision = writer.get_one(
                     SprintPlanArtifactDecision,
                     retirement_row.sprint_plan_artifact_decision_id,
+                )
+                connection = writer.connection()
+                driver = connection.connection.driver_connection
+                assert driver is not None
+                if not driver.in_transaction:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                connection.exec_driver_sql("PRAGMA defer_foreign_keys = ON")
+                assert (
+                    connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+                )
+                assert (
+                    connection.exec_driver_sql("PRAGMA defer_foreign_keys").scalar_one()
+                    == 1
                 )
                 decision.plan_fingerprint = str(invalid)
                 writer.add(decision)
