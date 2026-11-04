@@ -36,6 +36,7 @@ const REQUEST_STAGE = {
     repair_story_readiness: 'Stories',
     review_sprint: 'Review',
     start_sprint: 'Sprint',
+    retire_sprint_plan: 'Sprint',
     structure_specification: 'Specification',
 };
 
@@ -54,6 +55,7 @@ const CHILD_STAGE = {
 };
 
 const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
+    'retire_sprint_plan',
     'abandon_product_goal',
     'apply_story_dependencies',
     'begin_vision_revision',
@@ -1624,6 +1626,21 @@ async function validateSprintStatusProjection(value, projectId) {
         || originalStart.task_content_fingerprint !== plan.task_content_fingerprint
     ) return null;
     if (!currentRetry) {
+        if (data.effective_status === 'retired') {
+            const retirement = reviewObject(data.retirement);
+            return sprint.status === 'planned' && !originalStart
+                && positiveInteger(retirement?.retirement_id)
+                && retirement.project_id === projectId
+                && retirement.sprint_id === sprint.sprint_id
+                && retirement.sprint_plan_artifact_id === plan.sprint_plan_artifact_id
+                && retirement.sprint_plan_artifact_decision_id === plan.sprint_plan_artifact_decision_id
+                && retirement.plan_fingerprint === plan.plan_fingerprint
+                && isSha256Fingerprint(retirement.retirement_fingerprint)
+                && typeof retirement.rationale === 'string' && retirement.rationale.trim()
+                && typeof retirement.retired_by === 'string' && retirement.retired_by.trim()
+                ? data : null;
+        }
+        if (data.retirement !== undefined) return null;
         return data.effective_status === undefined || data.effective_status === sprint.status
             ? data
             : null;
@@ -3660,7 +3677,9 @@ function sprintStatusMarkup(
     const plan = status.accepted_plan;
     const retryScope = retrySprintScope(status);
     const effectiveStatus = status.effective_status ?? sprint.status;
-    const heading = retryScope
+    const heading = effectiveStatus === 'retired'
+        ? `Sprint #${sprint.sprint_id} is retired`
+        : retryScope
         ? `Attempt ${retryScope.retry.ordinal} is ${effectiveStatus}`
         : (sprint.status === 'planned'
         ? `Sprint #${sprint.sprint_id} is planned`
@@ -3734,6 +3753,7 @@ function sprintStatusMarkup(
     return `<section class="rounded-lg border border-emerald-300 bg-emerald-50 p-5" data-sprint-status="${escapeWorkflowText(effectiveStatus)}">
         <p class="text-xs font-semibold uppercase tracking-wide text-emerald-800">${retryScope ? 'Current Sprint retry' : 'Current Sprint'}</p>
         <h3 class="mt-1 text-lg font-bold text-emerald-950">${escapeWorkflowText(heading)}</h3>
+        ${effectiveStatus === 'retired' ? `<p class="mt-3 text-sm"><strong>Retired by ${escapeWorkflowText(status.retirement?.retired_by)}:</strong> ${escapeWorkflowText(status.retirement?.rationale)} The accepted evidence remains historical. This Sprint cannot start.</p>` : ''}
         <p class="mt-3 text-sm leading-6 text-slate-800"><strong>Goal:</strong> ${escapeWorkflowText(plan.goal)}</p>
         <dl class="mt-3 grid gap-2 text-sm sm:grid-cols-3">
             <div><dt class="font-semibold text-slate-600">Owner</dt><dd>${escapeWorkflowText(plan.owner.display_label)}</dd></div>
@@ -3767,6 +3787,92 @@ function workspaceSprintBoardNavigationMarkup(sprintState) {
         <span class="material-symbols-outlined" aria-hidden="true">view_kanban</span>
         <span>Inspect Sprint board</span>
     </button>`;
+}
+
+function sprintPlanRetirementBinding(position, actions) {
+    const decisions = (Array.isArray(position?.decisions) ? position.decisions : []).filter((item) => (
+        item.node_id === 'planning.sprint.retire'
+        && item.request_kind === 'retire_sprint_plan' && item.category === 'available'
+        && item.reason_code === 'STALE_SPRINT_PLAN_RETIREMENT_AVAILABLE'
+        && item.instance_key == null && isSha256Fingerprint(item.decision_fingerprint)
+    ));
+    const routes = (Array.isArray(actions) ? actions : []).filter((item) => (
+        item.node_id === 'planning.sprint.retire' && item.request_kind === 'retire_sprint_plan'
+        && item.endpoint === 'sprint/retire' && item.transport === 'semantic'
+        && item.instance_key == null && item.availability !== 'locked'
+    ));
+    if (decisions.length !== 1 || routes.length !== 1) return null;
+    const decision = decisions[0];
+    const reference = (kind) => {
+        const refs = (Array.isArray(decision.fact_references) ? decision.fact_references : []).filter((item) => item.fact_type === kind);
+        const ref = refs[0];
+        return refs.length === 1 && /^[1-9][0-9]*$/.test(ref.fact_id)
+            && Number.isSafeInteger(Number(ref.fact_id)) && isSha256Fingerprint(ref.fingerprint)
+            ? ref : null;
+    };
+    const plan = reference('sprint_plan');
+    const accepted = reference('sprint_plan_decision');
+    const sprint = reference('sprint');
+    if (!plan || !accepted || !sprint || accepted.fingerprint !== plan.fingerprint) return null;
+    return { action: routes[0], fields: {
+        sprint_plan_artifact_id: Number(plan.fact_id),
+        sprint_plan_artifact_decision_id: Number(accepted.fact_id),
+        sprint_id: Number(sprint.fact_id), plan_fingerprint: plan.fingerprint,
+        expected_decision_fingerprint: decision.decision_fingerprint,
+    } };
+}
+
+function sprintPlanRetirementMarkup(position, actions) {
+    const binding = sprintPlanRetirementBinding(position, actions);
+    if (!binding) return '';
+    return `<section class="rounded-lg border border-amber-300 bg-amber-50 p-4" data-sprint-plan-retirement="true">
+        <h3 class="font-semibold text-amber-950">Retire stale Sprint Plan</h3>
+        <p class="mt-2 text-sm">Sprint #${binding.fields.sprint_id} has an accepted plan that is no longer current. Retirement preserves its accepted evidence and releases its planning locks.</p>
+        <p class="mt-2 text-sm">Review dependencies explicitly, choose scope, and generate a new plan for human acceptance before starting a replacement Sprint.</p>
+        <form class="mt-3 space-y-3" data-sprint-plan-retirement-form="true" data-retirement-binding="${escapeWorkflowText(JSON.stringify(binding.fields))}">
+            <label class="block text-sm">Rationale<textarea name="rationale" required class="mt-1 w-full rounded border-slate-300"></textarea></label>
+            <button type="submit" class="${BUTTON_SECONDARY}">Retire unstarted plan</button>
+        </form>
+    </section>`;
+}
+
+async function submitSprintPlanRetirement(form) {
+    if (activeCockpitAction || activeDeliveryUnreconciled || form.dataset.submitting === 'true') return false;
+    const binding = sprintPlanRetirementBinding(lifecycleState.position, lifecycleState.actions);
+    let rendered;
+    try { rendered = JSON.parse(form.dataset.retirementBinding); } catch (_error) { return false; }
+    const rationale = form.querySelector('[name="rationale"]')?.value.trim() ?? '';
+    if (!binding || lifecycleState.position?.project_id !== selectedProjectId
+        || !Object.entries(binding.fields).every(([key, value]) => rendered[key] === value)) {
+        setProjectError('The displayed retirement action changed. Reload before recovery.');
+        return false;
+    }
+    if (!rationale) { setProjectError('Enter a rationale before retirement.'); return false; }
+    if (!form.dataset.retirementToken || form.dataset.retirementRationale !== rationale) {
+        form.dataset.retirementToken = crypto.randomUUID();
+        form.dataset.retirementRationale = rationale;
+    }
+    const token = form.dataset.retirementToken;
+    const button = form.querySelector('button[type="submit"]');
+    const sequence = dashboardLoadSequence + 1;
+    let completed = false;
+    form.dataset.submitting = 'true';
+    if (button) button.disabled = true;
+    setCockpitActionBusy(true, 'retire_sprint_plan', { token, busyLabel: 'Retiring unstarted plan...' });
+    try {
+        await postAction(binding.action, { ...binding.fields, rationale, idempotency_key: token });
+        completed = true;
+        if (!await loadDashboard() && !isDashboardReconciled(sequence)) activeDeliveryUnreconciled = true;
+        return true;
+    } catch (error) {
+        if (completed) activeDeliveryUnreconciled = true;
+        setProjectError(error.message);
+        return false;
+    } finally {
+        delete form.dataset.submitting;
+        if (button) button.disabled = activeDeliveryUnreconciled;
+        setCockpitActionBusy(false, 'retire_sprint_plan', { token });
+    }
 }
 
 function workspaceScopedActionMarkup(action, label) {
@@ -3927,6 +4033,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         && !(
             typeof context?.sprintStatus?.kind === 'string'
             && context.sprintStatus.kind !== 'absent'
+            && context.sprintStatus?.data?.effective_status !== 'retired'
             && action?.request_kind === 'record_sprint_plan'
         )
     ));
@@ -3941,7 +4048,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         5: [backlogCard, ...actionFor('record_backlog_draft')],
         6: [acceptedRoadmapCard, roadmapCard, ...actionFor('record_roadmap_draft')],
         7: [...storyReviewCards, readinessSection, dependencySection, candidateSection, ...actionFor('record_story_draft')],
-        8: [sprintPlanCard, candidateSection, workspaceSprintSection, sprintBoardNavigation, ...actionFor('record_sprint_plan')],
+        8: [sprintPlanRetirementMarkup(position, actions), sprintPlanCard, candidateSection, workspaceSprintSection, sprintBoardNavigation, ...actionFor('record_sprint_plan')],
         9: [taskBoard, workspaceSprintContextMarkup(context?.sprintStatus)],
         10: [workspaceCloseStoriesMarkup(context?.sprintStatus, actions)],
         11: [workspaceReviewClosureMarkup(context?.sprintStatus, actions)],
@@ -3951,6 +4058,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     const sections = (stageId && stageSections[stageId]
         ? stageSections[stageId]
         : [
+            sprintPlanRetirementMarkup(position, actions),
             sprintSection,
             `<div class="grid gap-4">${[acceptedRoadmapCard, ...allReviewCards].filter(Boolean).join('')}</div>`,
             readinessSection,
@@ -4819,7 +4927,7 @@ function projectLifecycleDisplayProjection(state, readState) {
         : sprint?.kind === 'ready' && positiveInteger(projectId)
             && sprint.data?.project_id === projectId
             && positiveInteger(sprint.data?.sprint?.sprint_id)
-            && ['planned', 'active', 'completed'].includes(sprintStatus)
+            && ['planned', 'active', 'completed', 'retired'].includes(sprintStatus)
             ? badge(humanizeKey(sprintStatus))
             : badge('Unavailable', text(sprint?.message) ?? 'Sprint status unavailable');
 
@@ -4841,6 +4949,7 @@ function resolveActiveWorkflowStage(position) {
 function findPrimaryWorkflowAction(actions = [], position = {}) {
     const actionList = Array.isArray(actions) ? actions : [];
     const priorities = [
+        'retire_sprint_plan',
         'start_sprint',
         'close_sprint',
         'review_sprint',
@@ -4934,6 +5043,15 @@ function handlePrimaryCockpitAction(primaryAction) {
     if (actionBtn?.disabled) return;
 
     const kind = primaryAction.request_kind;
+    if (kind === 'retire_sprint_plan') {
+        if (workspaceView) workspaceView = { ...workspaceView, stageId: 8 };
+        selectedStageTab = 'Sprint';
+        renderDashboard();
+        const form = document.querySelector('[data-sprint-plan-retirement-form]');
+        form?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        form?.querySelector('[name="rationale"]')?.focus();
+        return;
+    }
 
     const directBtn = document.querySelector(`button[data-direct-action="${kind}"]`);
     if (directBtn) {
@@ -7467,6 +7585,11 @@ function installInteractions() {
     });
     document.addEventListener('submit', async (event) => {
         const form = event.target;
+        if (form?.dataset?.sprintPlanRetirementForm === 'true') {
+            event.preventDefault();
+            await submitSprintPlanRetirement(form);
+            return;
+        }
         if (form?.dataset?.workspaceScopedActionForm) {
             event.preventDefault();
             await submitWorkspaceScopedAction(form);

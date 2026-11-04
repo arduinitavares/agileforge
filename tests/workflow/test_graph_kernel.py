@@ -456,6 +456,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "backlog.review",
     )
     assert tuple(node.node_id for node in planning.nodes) == (
+        "planning.sprint.retire",
         "planning.roadmap.generate",
         "planning.roadmap.review",
         "planning.story.generate",

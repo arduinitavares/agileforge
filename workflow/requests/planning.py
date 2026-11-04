@@ -168,6 +168,20 @@ class DecideSprintPlan(PositionedRequest):
     rationale: ReviewRationale
 
 
+class RetireSprintPlan(PositionedRequest):
+    """Explicitly retire one exact stale, accepted, unstarted Sprint Plan."""
+
+    kind: Literal["retire_sprint_plan"] = "retire_sprint_plan"
+    node_id: ClassVar[str] = "planning.sprint.retire"
+    sprint_plan_artifact_id: int = Field(strict=True, gt=0)
+    sprint_plan_artifact_decision_id: int = Field(strict=True, gt=0)
+    sprint_id: int = Field(strict=True, gt=0)
+    plan_fingerprint: str = Field(min_length=1)
+    rationale: ReviewRationale
+    actor: ReviewRationale
+    idempotency_key: ReviewRationale
+
+
 class StartSprint(PositionedRequest):
     """Start the exact accepted Sprint plan while its candidates remain current."""
 
@@ -184,6 +198,7 @@ __all__ = [
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RepairStoryReadiness",
+    "RetireSprintPlan",
     "ReviewedDependencyEdge",
     "StartSprint",
     "StoryReadinessUpdate",

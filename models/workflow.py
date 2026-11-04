@@ -476,6 +476,45 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class SprintPlanRetirement(SQLModel, table=True):
+    """Append-only retirement of one exact accepted, unstarted Sprint Plan."""
+
+    __tablename__ = "sprint_plan_retirements"
+    __table_args__ = (
+        UniqueConstraint("sprint_plan_artifact_id", name="uq_retired_sprint_plan"),
+        UniqueConstraint("sprint_id", name="uq_retired_sprint"),
+        UniqueConstraint("receipt_id", name="uq_retirement_receipt"),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "sprint_plan_artifact_id",
+                "sprint_plan_artifact_decision_id",
+            ],
+            [
+                "sprint_plan_artifact_decisions.project_id",
+                "sprint_plan_artifact_decisions.sprint_plan_artifact_id",
+                "sprint_plan_artifact_decisions.sprint_plan_artifact_decision_id",
+            ],
+            name="fk_retirement_accepted_plan",
+        ),
+    )
+
+    retirement_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
+    sprint_plan_artifact_id: int = Field(index=True)
+    sprint_plan_artifact_decision_id: int = Field(index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    plan_fingerprint: str
+    candidate_set_fingerprint: str
+    rationale: str = Field(sa_type=Text)
+    retired_by: str
+    retired_at: datetime = Field(default_factory=utc_now, nullable=False)
+    receipt_id: int = Field(
+        foreign_key="workflow_transition_receipts.workflow_transition_receipt_id"
+    )
+    retirement_fingerprint: str
+
+
 class SprintStart(SQLModel, table=True):
     """Immutable StartSprint lineage for one accepted Sprint plan."""
 

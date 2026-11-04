@@ -1,0 +1,4 @@
+CREATE INDEX ix_sprint_plan_retirements_project_id ON sprint_plan_retirements (project_id);
+CREATE INDEX ix_sprint_plan_retirements_sprint_id ON sprint_plan_retirements (sprint_id);
+CREATE INDEX ix_sprint_plan_retirements_sprint_plan_artifact_decision_id ON sprint_plan_retirements (sprint_plan_artifact_decision_id);
+CREATE INDEX ix_sprint_plan_retirements_sprint_plan_artifact_id ON sprint_plan_retirements (sprint_plan_artifact_id);

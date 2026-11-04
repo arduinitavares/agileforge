@@ -353,6 +353,7 @@ class PlanningArtifactFact(FrozenModel):
         "rejected",
         "feedback",
         "superseded",
+        "retired",
     ]
 
 

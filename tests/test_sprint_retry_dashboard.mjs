@@ -10,6 +10,223 @@ const sourcePath = path.resolve(import.meta.dirname, '../frontend/project.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
 const fingerprint = (character) => `sha256:${character.repeat(64)}`;
 
+function retirementState() {
+    const decision = {
+        node_id: 'planning.sprint.retire', instance_key: null,
+        request_kind: 'retire_sprint_plan', category: 'available',
+        reason_code: 'STALE_SPRINT_PLAN_RETIREMENT_AVAILABLE',
+        decision_fingerprint: fingerprint('a'),
+        fact_references: [
+            { fact_type: 'sprint_plan', fact_id: '41', fingerprint: fingerprint('b') },
+            { fact_type: 'sprint_plan_decision', fact_id: '42', fingerprint: fingerprint('b') },
+            { fact_type: 'sprint', fact_id: '31', fingerprint: fingerprint('c') },
+        ],
+    };
+    return { position: { project_id: 7, decisions: [decision] }, actions: [{
+        node_id: decision.node_id, instance_key: null, request_kind: decision.request_kind,
+        endpoint: 'sprint/retire', transport: 'semantic',
+    }] };
+}
+
+test('stale plan recovery binds the displayed plan, acceptance and Sprint exactly', () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const binding = vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions)', context);
+    assert.deepEqual(JSON.parse(JSON.stringify(binding.fields)), {
+        sprint_plan_artifact_id: 41, sprint_plan_artifact_decision_id: 42,
+        sprint_id: 31, plan_fingerprint: fingerprint('b'),
+        expected_decision_fingerprint: fingerprint('a'),
+    });
+    context.retirementState.actions.push(context.retirementState.actions[0]);
+    assert.equal(vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions)', context), null);
+});
+
+test('retirement form requests a rationale and explains explicit replacement review', () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const markup = vm.runInContext('sprintPlanRetirementMarkup(retirementState.position, retirementState.actions)', context);
+    assert.match(markup, /Retire stale Sprint Plan/);
+    assert.match(markup, /name="rationale"/);
+    assert.match(markup, /required/);
+    assert.match(markup, /new plan.*human acceptance/i);
+});
+
+test('retirement submission rejects a stale display and sends the exact guarded identity once', async () => {
+    const context = loadFrontend();
+    context.retirementState = retirementState();
+    const fields = vm.runInContext('sprintPlanRetirementBinding(retirementState.position, retirementState.actions).fields', context);
+    const button = { disabled: false };
+    const form = { dataset: { retirementBinding: JSON.stringify({ ...fields, sprint_id: 999 }) },
+        querySelector: (selector) => selector === '[name="rationale"]'
+            ? { value: 'Retire this obsolete scope.' } : button };
+    const calls = [];
+    context.form = form;
+    context.fetch = async (url, options) => {
+        calls.push({ url, payload: JSON.parse(options.body) });
+        return { ok: true, text: async () => JSON.stringify({ status: 'success', data: { ok: true } }) };
+    };
+    vm.runInContext(`selectedProjectId = 7; lifecycleState = retirementState;
+        loadDashboard = async () => true; isDashboardReconciled = () => true;
+        setCockpitActionBusy = (busy, _kind, options) => { activeCockpitAction = busy ? { token: options.token } : null; };`, context);
+    assert.equal(await vm.runInContext('submitSprintPlanRetirement(form)', context), false);
+    assert.equal(calls.length, 0);
+    form.dataset.retirementBinding = JSON.stringify(fields);
+    const results = await vm.runInContext('Promise.all([submitSprintPlanRetirement(form), submitSprintPlanRetirement(form)])', context);
+    assert.deepEqual(Array.from(results), [true, false]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/api/projects/7/sprint/retire');
+    assert.equal(calls[0].payload.sprint_id, 31);
+    assert.equal(calls[0].payload.sprint_plan_artifact_id, 41);
+    assert.equal(calls[0].payload.expected_decision_fingerprint, fingerprint('a'));
+    assert.equal(calls[0].payload.rationale, 'Retire this obsolete scope.');
+    assert.equal(calls[0].payload.actor, 'dashboard-ui');
+});
+
+test('retired Sprint presentation preserves the reason and offers no start', () => {
+    const context = loadFrontend();
+    const { status } = completedSprintRetryState();
+    status.sprint.status = 'planned';
+    status.accepted_plan.status = 'planned';
+    status.effective_status = 'retired';
+    status.retirement = { rationale: 'The prerequisite changed.', retired_by: 'operator' };
+    context.retiredStatus = status;
+    const markup = vm.runInContext('sprintStatusMarkup({kind: "ready", data: retiredStatus}, {}, [], {})', context);
+    assert.match(markup, /Sprint #31 is retired/);
+    assert.match(markup, /The prerequisite changed\./);
+    assert.ok(!markup.includes('data-direct-action="start_sprint"'));
+});
+
+function retiredSprintStatus() {
+    const { status } = completedSprintRetryState();
+    status.sprint = { sprint_id: 31, status: 'planned', completed_at: null };
+    status.accepted_plan.status = 'planned';
+    status.effective_status = 'retired';
+    status.original_start = null;
+    status.start = null;
+    status.review = null;
+    status.closure = null;
+    status.tasks[0].status = 'To Do';
+    status.stories[0].status = 'To Do';
+    status.retirement = {
+        retirement_id: 91, project_id: 7,
+        sprint_id: 31, sprint_plan_artifact_id: 41,
+        sprint_plan_artifact_decision_id: 51,
+        plan_fingerprint: fingerprint('c'),
+        candidate_set_fingerprint: fingerprint('d'),
+        retirement_fingerprint: fingerprint('9'),
+        rationale: 'The prerequisite changed.', retired_by: 'operator',
+        retired_at: '2026-09-09T09:30:00Z', receipt_id: 92,
+    };
+    return status;
+}
+
+test('validated retired status restores current display and initial selection', async () => {
+    const context = loadFrontend();
+    const workspacePath = path.resolve(import.meta.dirname, '../frontend/lifecycle-workspace.js');
+    vm.runInContext(fs.readFileSync(workspacePath, 'utf8'), context, { filename: workspacePath });
+    const workspace = vm.runInContext('AgileForgeWorkspace', context);
+    const status = await context.validateSprintStatusProjection(retiredSprintStatus(), 7);
+    assert.ok(status, 'The complete retired status must pass the asynchronous validator.');
+    const recovery = { request_kind: 'apply_story_dependencies', category: 'available', recommendation_kind: 'recovery' };
+    const generation = { request_kind: 'record_sprint_plan', category: 'available', recommendation_kind: 'required' };
+    const review = { request_kind: 'decide_sprint_plan', category: 'waiting', recommendation_kind: 'required' };
+    const optional = { request_kind: 'record_story_draft', category: 'available', recommendation_kind: 'optional_reentry' };
+    for (const [decisions, stages, primary, label] of [
+        [[recovery], [7], 7, 'Stories'],
+        [[generation], [8], 8, 'Sprint plan & start'],
+        [[review], [8], 8, 'Sprint plan & start'],
+        [[recovery, generation], [7, 8], null, 'Multiple current stages'],
+        [[optional], [], null, 'No current stage'], [[], [], null, 'No current stage'],
+    ]) {
+        const state = { position: { project_id: 7, decisions }, sprintStatus: { kind: 'ready', data: status } };
+        const display = context.projectLifecycleDisplayProjection(state, { kind: 'ready' });
+        assert.deepEqual(Array.from(display.currentStageIds), stages);
+        assert.equal(display.primaryStageId, primary);
+        assert.equal(display.phaseLabel, label);
+        assert.equal(display.badges.Sprint.label, 'Retired');
+        const markup = workspace.mapMarkup({
+            position: state.position, context: state, view: workspace.createView(),
+            lastConfirmedAt: '2026-11-03T09:30:00Z', displayProgress: display,
+            displayReadKind: 'ready',
+        });
+        for (const stage of [7, 8]) {
+            const current = new RegExp(`data-workspace-stage="${stage}"[^>]*aria-current="step"`);
+            if (stages.includes(stage)) assert.match(markup, current);
+            else assert.doesNotMatch(markup, current);
+        }
+        if (stages.length) assert.doesNotMatch(markup, /No required stage is currently advertised/);
+        else assert.match(markup, /No required stage is currently advertised/);
+        context.displayState = state;
+        vm.runInContext('selectedProjectId = 7; lifecycleState = displayState; workspaceView = null; ensureWorkspaceView();', context);
+        assert.equal(vm.runInContext('workspaceView.stageId', context), primary);
+    }
+    const crossProject = retiredSprintStatus();
+    crossProject.project_id = 8;
+    const invalidRetirement = retiredSprintStatus();
+    invalidRetirement.retirement.sprint_id = 32;
+    for (const invalid of [crossProject, invalidRetirement, undefined]) {
+        assert.equal(await context.validateSprintStatusProjection(invalid, 7), null);
+        const state = { position: { project_id: 7, decisions: [recovery, generation] }, sprintStatus: { kind: 'unavailable' } };
+        const display = context.projectLifecycleDisplayProjection(state, { kind: 'ready' });
+        assert.deepEqual(Array.from(display.currentStageIds), []);
+        assert.equal(display.primaryStageId, null);
+        assert.equal(display.badges.Sprint.label, 'Unavailable');
+    }
+});
+
+test('complete retired status validates and retains replacement planning', async () => {
+    const context = loadFrontend();
+    const status = await context.validateSprintStatusProjection(retiredSprintStatus(), 7);
+    assert.ok(status);
+    assert.equal(status.sprint.sprint_id, 31);
+    assert.equal(status.retirement.sprint_id, 31);
+    const owner = await context.validateSprintOwnerProjection({
+        ...status.accepted_plan.owner, named_team_override_allowed: true,
+    }, 7);
+    const candidate = {
+        story_id: 101, source_story_item_id: 'US-0101',
+        title: 'Keep replacement scope explicit.', story_points: 3,
+        is_superseded: false, structurally_eligible: true,
+        structural_eligibility_status: 'eligible', sprint_selection_state: 'selected',
+        sprint_selection_state_fingerprint: fingerprint('f'),
+        selected_scope_fingerprint: fingerprint('a'),
+        dependency_safe: true, sprint_candidate: true,
+        validation_status: 'validated', validation_failures: [],
+    };
+    const action = {
+        node_id: 'planning.sprint.plan', instance_key: null,
+        request_kind: 'record_sprint_plan', endpoint: 'sprint/generate', transport: 'semantic',
+    };
+    const markup = context.deliveryPanelMarkup(
+        { project_id: 7, decisions: [{ ...action, category: 'available' }] },
+        { backlog: {} }, [action], {
+            sprintStatus: { kind: 'ready', data: status },
+            sprintCandidates: {
+                project_id: 7, items: [candidate], sprint_owner: owner,
+                capacity: {
+                    status: 'recommended', recommended_max_story_points: 8,
+                    source: 'project_metrics', rationale: 'Review fixture capacity.',
+                },
+            },
+            storyDependencies: {
+                project_id: 7, stories: [candidate], edges: [], selected_story_ids: [101],
+                selected_scope_fingerprint: fingerprint('a'),
+            },
+        },
+    );
+    assert.match(markup, /Sprint #31 is retired/);
+    assert.match(markup, /data-delivery-generation-form="record_sprint_plan"/);
+    assert.doesNotMatch(markup, /data-direct-action="start_sprint"/);
+});
+
+test('retired status validation rejects retirement for a different Sprint', async () => {
+    const context = loadFrontend();
+    const status = retiredSprintStatus();
+    status.retirement.sprint_id = 32;
+
+    assert.equal(await context.validateSprintStatusProjection(status, 7), null);
+});
+
 function loadFrontend() {
     const createElement = () => ({
         _textContent: '',

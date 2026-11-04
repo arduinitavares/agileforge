@@ -123,6 +123,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    RetireSprintPlan,
     StartNodeAttempt,
     StartSprint,
     TransitionRequest,
@@ -140,8 +141,8 @@ if TYPE_CHECKING:
     from services.planning_lineage import Decision
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 35
-EXPECTED_PLANNING_REQUEST_COUNT = 9
+EXPECTED_REQUEST_VARIANT_COUNT = 36
+EXPECTED_PLANNING_REQUEST_COUNT = 10
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
 TEMPORARY_LOCK_CONFLICT_MESSAGE: str = (
@@ -157,6 +158,7 @@ PLANNING_REQUESTS = (
     RepairStoryReadiness,
     RecordSprintPlan,
     DecideSprintPlan,
+    RetireSprintPlan,
     StartSprint,
 )
 CALLER_SESSION_FUNCTIONS = {
@@ -755,8 +757,8 @@ def _seed_dependency_review_rows(
         return project_id, foreign_story_id, story_ids, edges
 
 
-def test_closed_union_adds_exactly_nine_typed_planning_requests() -> None:
-    """Add exactly the nine approved planning request variants."""
+def test_closed_union_adds_exactly_ten_typed_planning_requests() -> None:
+    """Add exactly the ten approved planning request variants."""
     variants = get_args(TransitionRequest.__value__)
     assert len(variants) == EXPECTED_REQUEST_VARIANT_COUNT
     assert set(PLANNING_REQUESTS).issubset(set(variants))

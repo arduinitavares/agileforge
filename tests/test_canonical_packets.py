@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models.core import Project, Sprint, Task, Team, UserStory
+from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus
 from models.specs import SpecRegistry
-from models.workflow import SprintStart
+from models.workflow import SprintPlanArtifactDecision, SprintStart
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.sprint import SprintPlannerOutput
 from services.packets.canonical import (
@@ -40,6 +40,9 @@ from tests.workflow.test_planning_transitions import (
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
 )
+from tests.workflow.test_sprint_plan_retirement_history import _retired_replacement
+from tests.workflow.test_superseded_story_dependencies import _project_business_rows
+from utils.task_metadata import parse_task_metadata
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import DecideSprintPlan, RecordSprintPlan
@@ -52,6 +55,163 @@ if TYPE_CHECKING:
 
 def _seed(engine: Engine) -> tuple[int, int, int, int]:
     return seed_started_execution(engine)
+
+
+def _replacement_packet_subject(engine: Engine) -> tuple[int, int, int, int, int, int]:
+    project_id, _retired_id, sprint_id = _retired_replacement(
+        engine, replacement_state="planned"
+    )
+    with Session(engine) as session:
+        decision = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                SprintPlanArtifactDecision.activated_sprint_id == sprint_id
+            )
+        ).one()
+        story_id = session.exec(
+            select(SprintStory.story_id).where(SprintStory.sprint_id == sprint_id)
+        ).one()
+        tasks = session.exec(select(Task).where(col(Task.story_id) == story_id)).all()
+        current = [
+            task
+            for task in tasks
+            if parse_task_metadata(task.metadata_json).sprint_plan_artifact_id
+            == decision.sprint_plan_artifact_id
+        ]
+        retained = [task for task in tasks if task not in current]
+        assert len(current) == len(retained) == 1
+        current_id, retained_id = current[0].task_id, retained[0].task_id
+        assert current_id is not None
+        assert retained_id is not None
+        return (
+            project_id,
+            sprint_id,
+            story_id,
+            current_id,
+            retained_id,
+            decision.sprint_plan_artifact_id,
+        )
+
+
+def test_replacement_packets_exclude_retired_tasks(engine: Engine) -> None:
+    """Retained Tasks cannot contaminate either current replacement packet."""
+    project_id, sprint_id, story_id, task_id, retired_task_id, plan_id = (
+        _replacement_packet_subject(engine)
+    )
+    before = _project_business_rows(engine, project_id)
+    with Session(engine) as session:
+        retired = session.get_one(Task, retired_task_id).model_dump_json()
+        story_packet = build_story_packet(
+            session, project_id=project_id, sprint_id=sprint_id, story_id=story_id
+        )
+        task_packet = build_task_packet(
+            session, project_id=project_id, sprint_id=sprint_id, task_id=task_id
+        )
+        work = _items(_object(story_packet["work"])["tasks"])
+        assert len(work) == 1
+        assert (
+            _object(_object(work[0])["metadata"])["sprint_plan_artifact_id"] == plan_id
+        )
+        for packet in (story_packet, task_packet):
+            lineage = _object(packet["lineage"])
+            assert _object(lineage["sprint"])["sprint_id"] == sprint_id
+            assert _object(lineage["sprint_plan"])["sprint_plan_artifact_id"] == plan_id
+        assert (
+            _object(_object(task_packet["work"])["task"])["metadata"]
+            == (_object(work[0])["metadata"])
+        )
+        assert (
+            build_story_packet(
+                session, project_id=project_id, sprint_id=sprint_id, story_id=story_id
+            )
+            == story_packet
+        )
+        assert (
+            build_task_packet(
+                session, project_id=project_id, sprint_id=sprint_id, task_id=task_id
+            )
+            == task_packet
+        )
+        assert session.get_one(Task, retired_task_id).model_dump_json() == retired
+    assert _project_business_rows(engine, project_id) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong-plan",
+        "wrong-sprint",
+        "missing",
+        "duplicate",
+        "malformed-target",
+        "malformed-other",
+        "wrong-spec",
+        "foreign-binding",
+    ],
+)
+def test_replacement_packet_task_ownership_guards(
+    engine: Engine, mutation: str
+) -> None:
+    """Filtering history must not hide corrupt metadata or wrong Task identity."""
+    project_id, sprint_id, story_id, task_id, retired_task_id, _plan_id = (
+        _replacement_packet_subject(engine)
+    )
+    with Session(engine) as session:
+        task = session.get_one(
+            Task,
+            retired_task_id
+            if mutation in {"malformed-other", "foreign-binding"}
+            else task_id,
+        )
+        if mutation == "missing":
+            session.delete(task)
+        elif mutation == "duplicate":
+            session.add(
+                Task(
+                    story_id=story_id,
+                    description=task.description,
+                    metadata_json=task.metadata_json,
+                )
+            )
+        elif mutation.startswith("malformed"):
+            task.metadata_json = "{}"
+            session.add(task)
+        elif mutation in {"wrong-spec", "foreign-binding"}:
+            metadata = json.loads(task.metadata_json)
+            metadata["spec_hash"] = "sha256:" + "f" * 64
+            task.metadata_json = canonical_json(metadata)
+            session.add(task)
+        session.commit()
+    before = _project_business_rows(engine, project_id)
+    with Session(engine) as session:
+        expected = (
+            "TASK_PACKET_CONTEXT_NOT_FOUND"
+            if mutation in {"wrong-plan", "wrong-sprint", "missing"}
+            else "PACKET_LINEAGE_INVALID"
+            if mutation == "duplicate"
+            else "TASK_METADATA_INVALID"
+        )
+        with pytest.raises(CanonicalPacketError) as error:
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id + 10000
+                if mutation == "wrong-sprint"
+                else sprint_id,
+                task_id=retired_task_id if mutation == "wrong-plan" else task_id,
+            )
+        assert error.value.code == expected
+        if mutation not in {"wrong-plan", "wrong-sprint"}:
+            with pytest.raises(CanonicalPacketError) as story_error:
+                build_story_packet(
+                    session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    story_id=story_id,
+                )
+            assert story_error.value.code == (
+                "PACKET_LINEAGE_INVALID" if mutation == "missing" else expected
+            )
+    assert _project_business_rows(engine, project_id) == before
 
 
 def _object(value: JsonValue) -> JsonObject:

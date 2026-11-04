@@ -2793,7 +2793,16 @@ class WorkflowFactRepository:
         self,
         indexes: _PlanningIndexes,
         decisions: _PlanningDecisionLoad,
+        project_id: int,
     ) -> tuple[PlanningArtifactFact, ...]:
+        from services.sprint_plan_retirement import (  # noqa: PLC0415
+            load_sprint_plan_retirements,
+        )
+
+        try:
+            retirements = load_sprint_plan_retirements(self._session, project_id)
+        except ValueError as error:
+            raise self._error(str(error)) from error
         superseded = self._superseded_accepted_ids(
             tuple(
                 ArtifactLineageNode(
@@ -2842,6 +2851,7 @@ class WorkflowFactRepository:
                 message = "Sprint plan envelope does not match durable columns."
                 raise self._error(message)
             decision = decisions.sprint_plans.get(artifact_id)
+            retirement = retirements.get(artifact_id)
             facts.append(
                 PlanningArtifactFact(
                     artifact_type="sprint_plan",
@@ -2866,7 +2876,9 @@ class WorkflowFactRepository:
                         sprint_plan_fingerprint=row.plan_fingerprint,
                     ),
                     supersedes_artifact_id=row.supersedes_sprint_plan_artifact_id,
-                    status=self._phase_status(
+                    status="retired"
+                    if retirement is not None
+                    else self._phase_status(
                         None if decision is None else decision.decision,
                         superseded=artifact_id in superseded,
                     ),
@@ -2882,7 +2894,7 @@ class WorkflowFactRepository:
         facts = (
             *self._roadmap_planning_facts(indexes, decisions),
             *self._story_planning_facts(indexes, decisions),
-            *self._sprint_planning_facts(indexes, decisions),
+            *self._sprint_planning_facts(indexes, decisions, project_id),
         )
         return _PlanningArtifactLoad(
             facts=tuple(

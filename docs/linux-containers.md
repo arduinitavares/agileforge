@@ -535,11 +535,18 @@ Callables own no transaction boundaries and must use only their supplied
 connection and frozen historical definitions. Fresh/development bootstrap is a
 separate readiness path.
 
-The current `issue289-task-repository-evidence` release appends nullable TEXT
+The `issue289-task-repository-evidence` release appends nullable TEXT
 columns to original and retry Task completion records. Its transition follows
 `issue230-provider-indexes`, preserves historical rows without backfill, and
 retains the provider indexes. Fresh creation and the two reviewed upgrade DDL
 encodings have separately registered complete hashes.
+
+The current `issue292-sprint-plan-retirement` release follows
+`issue302-attempt-ownership`. It adds retirement evidence and its indexes without
+changing accepted plans, decisions, memberships, Tasks or audit receipts. Existing
+installed profiles require the explicit production upgrade before using this
+release. Frozen, SQLAlchemy upgrade and SQLAlchemy fresh encodings each have an
+exact registered hash. Their fixtures are in `tests/fixtures/issue_292/`.
 
 Future schema changes append one `SchemaRelease` and one `SchemaTransition`
 from the previous current release in `cli/production_schema_upgrade.py`. Declare

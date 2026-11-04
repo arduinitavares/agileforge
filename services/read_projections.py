@@ -481,7 +481,9 @@ def _canonical_acceptance_criteria(raw: str) -> list[str]:
 
 
 def _story_lineage_decision(
-    status: Literal["pending_review", "accepted", "rejected", "feedback", "superseded"],
+    status: Literal[
+        "pending_review", "accepted", "rejected", "feedback", "superseded", "retired"
+    ],
 ) -> PlanningLineageDecision:
     """Recover the terminal review outcome represented by a Story fact."""
     if status in {"superseded", "accepted"}:
@@ -4057,6 +4059,7 @@ class DurableReadProjectionService:
                     for item in snapshot_or_error.sprints
                 ],
                 "execution_attempts": _execution_attempt_history(snapshot_or_error),
+                "retirements": list(self._sprint_plan_retirements(project_id)),
             }
         )
 
@@ -4096,6 +4099,18 @@ class DurableReadProjectionService:
             snapshot=snapshot_or_error,
         )
 
+    def _sprint_plan_retirements(self, project_id: int) -> tuple[JsonObject, ...]:
+        """Read validated retirement facts without changing historical rows."""
+        from services.sprint_plan_retirement import (  # noqa: PLC0415
+            load_sprint_plan_retirements,
+        )
+
+        with self._session() as session:
+            return tuple(
+                _validated(row.model_dump(mode="json"))
+                for row in load_sprint_plan_retirements(session, project_id).values()
+            )
+
     def _sprint_status_from_snapshot(  # noqa: PLR0911
         self,
         *,
@@ -4113,6 +4128,11 @@ class DurableReadProjectionService:
                 sprint_id=sprint_id,
             )
         selected_id = sprint.sprint_id
+        retirements = self._sprint_plan_retirements(project_id)
+        retirement = next(
+            (item for item in retirements if item["sprint_id"] == selected_id),
+            None,
+        )
         accepted_plan = self._accepted_sprint_plan_status(
             project_id=project_id,
             sprint=sprint,
@@ -4127,6 +4147,11 @@ class DurableReadProjectionService:
             sprint_id is None
             and current_scope is not None
             and current_scope.sprint_id != selected_id
+            and (
+                retirement is None
+                or current_scope.status != "completed"
+                or current_scope.sprint_id > selected_id
+            )
         ):
             sprint = self._select_sprint(snapshot.sprints, current_scope.sprint_id)
             if sprint is None:
@@ -4144,6 +4169,10 @@ class DurableReadProjectionService:
             )
             if accepted_plan.get("ok") is not True:
                 return accepted_plan
+        retirement = next(
+            (item for item in retirements if item["sprint_id"] == selected_id),
+            None,
+        )
         scope = (
             current_scope
             if current_scope is not None and current_scope.sprint_id == selected_id
@@ -4210,9 +4239,10 @@ class DurableReadProjectionService:
                     "sprint": _validated(sprint.model_dump(mode="json")),
                     "accepted_plan": _result_data(accepted_plan),
                     "current_retry": retry,
-                    "effective_status": sprint.status
-                    if scope is None
-                    else scope.status,
+                    "effective_status": "retired"
+                    if retirement is not None
+                    else (sprint.status if scope is None else scope.status),
+                    **({"retirement": retirement} if retirement is not None else {}),
                     "start": effective_start,
                     "original_start": original_start,
                     "tasks": [
@@ -4300,7 +4330,7 @@ class DurableReadProjectionService:
                 for item in snapshot.planning_artifacts
                 if item.artifact_type == "sprint_plan"
                 and item.activated_sprint_id == sprint_id
-                and item.status == "accepted"
+                and item.status in {"accepted", "retired"}
             )
             if len(plans) != 1 or starts:
                 return self._sprint_status_inconsistent(project_id, sprint_id)

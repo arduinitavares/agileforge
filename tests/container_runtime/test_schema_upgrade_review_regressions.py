@@ -294,6 +294,20 @@ def test_registered_schema_inspection_reads_committed_wal_schema(
                 / "attempt_ownership.sql.json"
             )
             writer.execute(json.loads(ownership_ddl.read_text(encoding="utf-8")))
+            retirement_fixtures = Path(__file__).parents[1] / "fixtures" / "issue_292"
+            writer.execute(
+                json.loads(
+                    (retirement_fixtures / "sprint_plan_retirement.sql.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            )
+            for statement in (
+                (retirement_fixtures / "sprint_plan_retirement_indexes.sql")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ):
+                writer.execute(statement)
         writer.commit()
         database.chmod(0o600)
         before = database.read_bytes()

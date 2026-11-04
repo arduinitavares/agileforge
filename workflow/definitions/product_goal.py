@@ -146,9 +146,24 @@ def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
     triaged_sprint_ids = {triage.sprint_id for triage in snapshot.post_sprint_triage}
     if not completed_sprint_ids <= triaged_sprint_ids:
         return False
+    retired_streams = {
+        artifact.sprint_plan_stream_id
+        for artifact in snapshot.planning_artifacts
+        if artifact.artifact_type == "sprint_plan"
+        and artifact.status == "retired"
+        and artifact.sprint_plan_stream_id is not None
+    }
+    if any(
+        artifact.status == "pending_review" for artifact in snapshot.phase_artifacts
+    ):
+        return False
     if any(
         artifact.status == "pending_review"
-        for artifact in (*snapshot.phase_artifacts, *snapshot.planning_artifacts)
+        and not (
+            artifact.artifact_type == "sprint_plan"
+            and artifact.sprint_plan_stream_id in retired_streams
+        )
+        for artifact in snapshot.planning_artifacts
     ):
         return False
     reviewed_candidate_ids = {

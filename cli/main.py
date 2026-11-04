@@ -41,6 +41,7 @@ from services.application import (
     SpecificationStructuringRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
+    SprintPlanRetirementRequest,
     SprintPlanReviewRequest,
     SprintRetryRequest,
     SprintReviewRequest,
@@ -291,6 +292,10 @@ class _Application(Protocol):
     ) -> JsonObject: ...
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
+
+    def retire_sprint_plan(
+        self, request: SprintPlanRetirementRequest
+    ) -> TransitionResult: ...
 
     def sprint_retry_preview(
         self, *, project_id: int, sprint_id: int
@@ -823,6 +828,17 @@ def _install_planning_action_mutations(
     retry.add_argument("--rationale", required=True)
     start = _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
     start.add_argument("--instance-key")
+    plan = branches[("sprint",)].add_parser("plan")
+    plan_sub = plan.add_subparsers(dest="sprint_plan_action", required=True)
+    retire = _semantic_leaf(plan_sub, "retire", _sprint_plan_retire)
+    for name in (
+        "sprint-plan-artifact-id",
+        "sprint-plan-artifact-decision-id",
+        "sprint-id",
+    ):
+        retire.add_argument("--" + name, type=int, required=True)
+    for name in ("plan-fingerprint", "expected-decision-fingerprint", "rationale"):
+        retire.add_argument("--" + name, required=True)
 
 
 def _install_execution_action_mutations(
@@ -2379,6 +2395,25 @@ def _story_sprint_selection(
                 rationale=args.rationale,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_plan_retire(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.retire_sprint_plan(
+            SprintPlanRetirementRequest(
+                project_id=args.project_id,
+                sprint_plan_artifact_id=args.sprint_plan_artifact_id,
+                sprint_plan_artifact_decision_id=args.sprint_plan_artifact_decision_id,
+                sprint_id=args.sprint_id,
+                plan_fingerprint=args.plan_fingerprint,
+                expected_decision_fingerprint=args.expected_decision_fingerprint,
+                rationale=args.rationale,
+                actor=args.actor,
+                idempotency_key=args.idempotency_key,
                 correlation_id=args.correlation_id,
             )
         )

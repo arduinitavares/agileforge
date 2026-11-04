@@ -202,8 +202,16 @@ def retry_blocks_planning(snapshot: WorkflowFactSnapshot) -> bool:
 def current_execution_scope(snapshot: WorkflowFactSnapshot) -> ExecutionScope | None:
     """Select the sole live attempt or proven terminal attempt for the project."""
     retries = _validated_retries(snapshot)
+    retired_sprint_ids = {
+        item.activated_sprint_id
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan" and item.status == "retired"
+    }
     live_originals = tuple(
-        item for item in snapshot.sprints if item.status in {"planned", "active"}
+        item
+        for item in snapshot.sprints
+        if item.status in {"planned", "active"}
+        and item.sprint_id not in retired_sprint_ids
     )
     live_retries = tuple(
         item for item in retries if item.status in {"planned", "active"}
@@ -443,12 +451,20 @@ def _current_terminal_sprint_id(snapshot: WorkflowFactSnapshot) -> int | None:
     if len(approved_specs) != 1:
         raise ExecutionScopeError("Current Specification lineage is ambiguous.")
     spec = approved_specs[0]
+    retired_streams = {
+        item.sprint_plan_stream_id
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
+        and item.status == "retired"
+        and item.sprint_plan_stream_id is not None
+    }
     artifacts = tuple(
         item
         for item in snapshot.planning_artifacts
         if item.artifact_type == "sprint_plan"
         and item.spec_version_id == spec.spec_version_id
         and item.spec_hash == spec.spec_hash
+        and item.sprint_plan_stream_id not in retired_streams
     )
     if not artifacts:
         return None

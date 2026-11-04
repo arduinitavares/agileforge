@@ -19,7 +19,7 @@ const AgileForgeWorkspace = (() => {
         record_backlog_draft: 5, decide_backlog: 5, record_roadmap_draft: 6,
         decide_roadmap: 6, record_story_draft: 7, decide_story: 7,
         apply_story_dependencies: 7, repair_story_readiness: 7, record_sprint_plan: 8,
-        decide_sprint_plan: 8, start_sprint: 8, start_sprint_retry: 8,
+        decide_sprint_plan: 8, start_sprint: 8, start_sprint_retry: 8, retire_sprint_plan: 8,
         complete_task: 9, close_story: 10, review_sprint: 11, close_sprint: 11,
         record_post_sprint_triage: 12, retry_sprint: 13,
     });
@@ -58,6 +58,7 @@ const AgileForgeWorkspace = (() => {
         if (status.kind !== 'ready' || !positive(data?.sprint?.sprint_id)
             || data?.project_id !== position?.project_id) return { stages: [], primary: null };
         const effective = data.effective_status ?? data.sprint.status;
+        if (effective === 'retired') return null;
         if (effective === 'planned') return { stages: [8], primary: 8 };
         if (effective === 'active') {
             const tasks = Array.isArray(data.tasks) ? data.tasks : [];

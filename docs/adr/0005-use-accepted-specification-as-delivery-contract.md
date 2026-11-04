@@ -59,6 +59,14 @@ immutable plan artifact; accepting it atomically creates or replaces the
 unstarted Sprint membership and Tasks. Feedback or rejection cannot change a
 previously accepted, startable plan.
 
+An explicit Sprint Plan Retirement can retire an accepted plan that became
+stale while its Sprint is still unstarted. The append-only retirement fact
+releases that plan's current planning locks without rewriting its acceptance,
+membership, Tasks, or audit evidence. The retired stream cannot start or become
+current again. Replacement planning creates a new stream and Sprint, with
+explicit dependency review and human plan acceptance. Started-Sprint authority
+is unchanged. See [the recovery procedure](../sprint-plan-recovery.md).
+
 Artifact history is lineage-scoped: Backlog by exact Goal and Specification,
 Roadmap by exact Backlog, Story by exact Backlog item, and Sprint plan by exact
 Specification plus a host-minted planning-stream identity. Versioning,

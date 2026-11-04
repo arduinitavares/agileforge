@@ -50,6 +50,7 @@ from services.application import (
     SpecificationStructuringRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
+    SprintPlanRetirementRequest,
     SprintPlanReviewRequest,
     SprintRetryRequest,
     SprintReviewRequest,
@@ -380,6 +381,19 @@ class StoryReadinessRepairApiRequest(MutationApiRequest):
         return value
 
 
+class SprintPlanRetirementApiRequest(MutationApiRequest):
+    """Explicit retirement of one exact displayed stale accepted Sprint Plan."""
+
+    sprint_plan_artifact_id: PositiveStoryId
+    sprint_plan_artifact_decision_id: PositiveStoryId
+    sprint_id: PositiveStoryId
+    plan_fingerprint: SemanticText
+    expected_decision_fingerprint: SemanticText
+    rationale: SemanticText
+    actor: SemanticText
+    idempotency_key: SemanticText
+
+
 class SprintStartApiRequest(MutationApiRequest):
     """Transport metadata only for the accepted current Sprint plan."""
 
@@ -501,6 +515,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
     "start_sprint": "sprint/start",
+    "retire_sprint_plan": "sprint/retire",
     "start_sprint_retry": "sprint/start",
 }
 
@@ -1897,6 +1912,18 @@ def repair_project_story_readiness(
                 repairs=tuple(req.repairs),
                 **_metadata(req),
             )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/retire")
+def retire_project_sprint_plan(
+    project_id: int, req: SprintPlanRetirementApiRequest
+) -> dict[str, object]:
+    """Retire an explicitly identified stale unstarted Sprint Plan."""
+    return _result_payload(
+        _application().retire_sprint_plan(
+            SprintPlanRetirementRequest(project_id=project_id, **req.model_dump())
         )
     )
 
