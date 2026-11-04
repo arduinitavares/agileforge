@@ -13,6 +13,7 @@ from models.core import Sprint, SprintStory, UserStory, UserStoryDependency
 from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import WorkflowTransitionReceipt
+from services.sprint_plan_retirement import load_sprint_plan_retirements
 from workflow.contracts import FrozenModel, TransitionResult, WorkflowErrorCode
 from workflow.facts import StoryDependencyFact, StoryDependencyRetirementFact
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -80,11 +81,16 @@ def _story_identity(row: UserStory) -> str:
     )
 
 
-def _historical_endpoint(session: Session, row: UserStory) -> bool:
+def _historical_endpoint(
+    session: Session, row: UserStory, *, retired_sprint_ids: frozenset[int]
+) -> bool:
     statuses = session.exec(
         select(Sprint.status)
         .join(SprintStory, col(SprintStory.sprint_id) == col(Sprint.sprint_id))
-        .where(SprintStory.story_id == row.story_id)
+        .where(
+            SprintStory.story_id == row.story_id,
+            ~col(Sprint.sprint_id).in_(retired_sprint_ids),
+        )
     ).all()
     return not {SprintStatus.PLANNED, SprintStatus.ACTIVE}.intersection(statuses) and (
         row.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}
@@ -119,6 +125,10 @@ def load_story_dependency_retirements(
     session: Session, project_id: int
 ) -> tuple[StoryDependencyRetirementFact, ...]:
     """Validate canonical audit, original edge, endpoint lineage and writer receipt."""
+    retired_sprint_ids = frozenset(
+        row.sprint_id
+        for row in load_sprint_plan_retirements(session, project_id).values()
+    )
     identity_token = object()
     events = session.exec(
         select(WorkflowEvent)
@@ -187,8 +197,12 @@ def load_story_dependency_retirements(
             and _story_identity(dependent) == evidence.dependent_identity_fingerprint
             and _story_identity(prerequisite)
             == evidence.prerequisite_identity_fingerprint
-            and _historical_endpoint(session, dependent)
-            and _historical_endpoint(session, prerequisite)
+            and _historical_endpoint(
+                session, dependent, retired_sprint_ids=retired_sprint_ids
+            )
+            and _historical_endpoint(
+                session, prerequisite, retired_sprint_ids=retired_sprint_ids
+            )
             and request.project_id == project_id
             and receipt.idempotency_key == request.idempotency_key
             and receipt.request_fingerprint

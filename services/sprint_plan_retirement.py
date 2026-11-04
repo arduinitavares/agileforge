@@ -35,65 +35,79 @@ def load_sprint_plan_retirements(
     session: Session, project_id: int
 ) -> dict[int, SprintPlanRetirement]:
     """Fail closed when retirement identity, evidence, or lifecycle is corrupt."""
-    rows = session.exec(
-        select(SprintPlanRetirement).where(
-            SprintPlanRetirement.project_id == project_id
-        )
-    ).all()
-    result: dict[int, SprintPlanRetirement] = {}
-    for row in rows:
-        plan = session.get(SprintPlanArtifact, row.sprint_plan_artifact_id)
-        decision = session.get(
-            SprintPlanArtifactDecision, row.sprint_plan_artifact_decision_id
-        )
-        sprint = session.get(Sprint, row.sprint_id)
-        receipt = session.get(WorkflowTransitionReceipt, row.receipt_id)
-        if receipt is None or receipt.request_kind != "retire_sprint_plan":
-            message = "Sprint Plan retirement receipt is missing or invalid."
-            raise ValueError(message)
-        request = RetireSprintPlan.model_validate_json(receipt.request_json)
-        valid = (
-            plan is not None
-            and decision is not None
-            and sprint is not None
-            and plan.project_id
-            == decision.project_id
-            == sprint.project_id
-            == project_id
-            and decision.sprint_plan_artifact_id == row.sprint_plan_artifact_id
-            and decision.decision == "accepted"
-            and decision.activated_sprint_id == row.sprint_id
-            and plan.plan_fingerprint
-            == decision.plan_fingerprint
-            == row.plan_fingerprint
-            and sprint.status is SprintStatus.PLANNED
-            and sprint.started_at is None
-            and sprint.completed_at is None
-            and session.exec(
-                select(SprintStart).where(SprintStart.sprint_id == row.sprint_id)
-            ).first()
-            is None
-            and row.retirement_fingerprint == retirement_fingerprint(row)
-            and receipt.request_fingerprint
-            == canonical_hash(request.model_dump(mode="json"))
-            and _receipt_matches_retirement(session, row, receipt)
-            and request.project_id == project_id
-            and request.sprint_plan_artifact_id == row.sprint_plan_artifact_id
-            and request.sprint_plan_artifact_decision_id
-            == row.sprint_plan_artifact_decision_id
-            and request.sprint_id == row.sprint_id
-            and request.plan_fingerprint == row.plan_fingerprint
-            and request.actor == row.retired_by
-            and request.rationale == row.rationale
-            and row.sprint_plan_artifact_id not in result
-        )
-        if not valid:
-            message = (
-                "Sprint Plan retirement evidence conflicts with its accepted "
-                "unstarted Sprint."
+    identity_token = object()
+    with session.no_autoflush:
+        rows = session.exec(
+            select(SprintPlanRetirement).where(
+                SprintPlanRetirement.project_id == project_id
+            ),
+            execution_options={"identity_token": identity_token},
+        ).all()
+        result: dict[int, SprintPlanRetirement] = {}
+        for row in rows:
+            plan = session.get(
+                SprintPlanArtifact,
+                row.sprint_plan_artifact_id,
+                identity_token=identity_token,
             )
-            raise ValueError(message)
-        result[row.sprint_plan_artifact_id] = row
+            decision = session.get(
+                SprintPlanArtifactDecision,
+                row.sprint_plan_artifact_decision_id,
+                identity_token=identity_token,
+            )
+            sprint = session.get(Sprint, row.sprint_id, identity_token=identity_token)
+            receipt = session.get(
+                WorkflowTransitionReceipt,
+                row.receipt_id,
+                identity_token=identity_token,
+            )
+            if receipt is None or receipt.request_kind != "retire_sprint_plan":
+                message = "Sprint Plan retirement receipt is missing or invalid."
+                raise ValueError(message)
+            request = RetireSprintPlan.model_validate_json(receipt.request_json)
+            valid = (
+                plan is not None
+                and decision is not None
+                and sprint is not None
+                and plan.project_id
+                == decision.project_id
+                == sprint.project_id
+                == project_id
+                and decision.sprint_plan_artifact_id == row.sprint_plan_artifact_id
+                and decision.decision == "accepted"
+                and decision.activated_sprint_id == row.sprint_id
+                and plan.plan_fingerprint
+                == decision.plan_fingerprint
+                == row.plan_fingerprint
+                and sprint.status is SprintStatus.PLANNED
+                and sprint.started_at is None
+                and sprint.completed_at is None
+                and session.exec(
+                    select(SprintStart).where(SprintStart.sprint_id == row.sprint_id),
+                    execution_options={"identity_token": identity_token},
+                ).first()
+                is None
+                and row.retirement_fingerprint == retirement_fingerprint(row)
+                and receipt.request_fingerprint
+                == canonical_hash(request.model_dump(mode="json"))
+                and _receipt_matches_retirement(session, row, receipt)
+                and request.project_id == project_id
+                and request.sprint_plan_artifact_id == row.sprint_plan_artifact_id
+                and request.sprint_plan_artifact_decision_id
+                == row.sprint_plan_artifact_decision_id
+                and request.sprint_id == row.sprint_id
+                and request.plan_fingerprint == row.plan_fingerprint
+                and request.actor == row.retired_by
+                and request.rationale == row.rationale
+                and row.sprint_plan_artifact_id not in result
+            )
+            if not valid:
+                message = (
+                    "Sprint Plan retirement evidence conflicts with its accepted "
+                    "unstarted Sprint."
+                )
+                raise ValueError(message)
+            result[row.sprint_plan_artifact_id] = row
     return result
 
 
@@ -153,8 +167,7 @@ def retire_sprint_plan_in_session(
         or sprint is None
         or accepted_decision is None
         or accepted_decision.project_id != request.project_id
-        or accepted_decision.sprint_plan_artifact_id
-        != request.sprint_plan_artifact_id
+        or accepted_decision.sprint_plan_artifact_id != request.sprint_plan_artifact_id
         or accepted_decision.decision != "accepted"
         or accepted_decision.activated_sprint_id != request.sprint_id
         or accepted_decision.plan_fingerprint != request.plan_fingerprint

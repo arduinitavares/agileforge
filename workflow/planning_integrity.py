@@ -182,10 +182,17 @@ def historical_dependency_edges(
     completed = {
         sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
     }
+    retired = {
+        artifact.activated_sprint_id
+        for artifact in snapshot.planning_artifacts
+        if artifact.artifact_type == "sprint_plan"
+        and artifact.status == "retired"
+        and artifact.activated_sprint_id is not None
+    }
     live = {
         sprint.sprint_id
         for sprint in snapshot.sprints
-        if sprint.status in {"planned", "active"}
+        if sprint.status in {"planned", "active"} and sprint.sprint_id not in retired
     }
     historical = {
         story.story_id

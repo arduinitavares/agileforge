@@ -327,6 +327,28 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         load_story_dependency_invalidations_in_session(
             session, project_id=project_id, validation=validation
         )
+        current_graph = validation.graph()
+        retired_dependencies = tuple(
+            edge for edge in current_graph.dependencies if edge.status == "retired"
+        )
+        retired_dependency_ids = frozenset(
+            edge.dependency_id for edge in retired_dependencies
+        )
+        retired_pairs = {
+            (edge.dependent_story_id, edge.prerequisite_story_id)
+            for edge in retired_dependencies
+        }
+        if any(pair in retired_pairs for pair in pairs):
+            message = "A retired Story dependency pair cannot be reactivated."
+            raise StoryDependencyGraphError(
+                [
+                    DependencyGraphIssue(
+                        code="STORY_DEPENDENCY_INVALID",
+                        message=message,
+                        story_ids=sorted(endpoint_ids),
+                    )
+                ]
+            )
         project_stories = session.exec(
             select(UserStory).where(UserStory.project_id == project_id)
         ).all()
@@ -342,7 +364,7 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         )
         prospective_cycles = _prospective_dependency_cycles(
             stories=project_stories,
-            dependencies=validation.graph().dependencies,
+            dependencies=current_graph.dependencies,
             selected_story_ids=selected,
             reviewed_pairs=pairs,
             completed_story_ids=completed_story_ids,
@@ -409,7 +431,10 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         for edge in reviewed_edges
     }
     for pair, row in existing_by_pair.items():
-        if row.dependent_story_id not in selected:
+        if (
+            row.dependency_id in retired_dependency_ids
+            or row.dependent_story_id not in selected
+        ):
             continue
         row.status = "active" if pair in reviewed_by_pair else "rejected"
         row.source = "manual_review"
