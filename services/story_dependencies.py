@@ -108,11 +108,14 @@ def selected_scope_fingerprint(
 class StoryDependencyGraphError(RuntimeError):
     """Raised when active dependencies are not safe for sprint planning."""
 
-    def __init__(self, issues: list[DependencyGraphIssue]) -> None:
+    def __init__(
+        self, issues: list[DependencyGraphIssue], *, detail: str | None = None
+    ) -> None:
         """Initialize with graph issues to expose through CLI diagnostics."""
         self.issues = issues
         codes = ", ".join(sorted({issue.code for issue in issues}))
-        super().__init__(f"Story dependency graph invalid for sprint planning: {codes}")
+        message = f"Story dependency graph invalid for sprint planning: {codes}"
+        super().__init__(f"{message}. {detail}" if detail else message)
 
 
 def detect_dependency_cycles(edges: dict[int, set[int]]) -> list[list[int]]:
@@ -347,7 +350,8 @@ def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
                         message=message,
                         story_ids=sorted(endpoint_ids),
                     )
-                ]
+                ],
+                detail=message,
             )
         project_stories = session.exec(
             select(UserStory).where(UserStory.project_id == project_id)
