@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -686,7 +686,8 @@ def test_retired_dependency_reactivation_is_atomic_conflict(
 
 
 def _replacement_history_edge(
-    engine: Engine, replacement_state: str = "completed"
+    engine: Engine,
+    replacement_state: Literal["planned", "active", "completed"] = "completed",
 ) -> tuple[_Scenario, int, int]:
     project_id, retired_sprint_id, _ = _retired_replacement(
         engine, replacement_state=replacement_state
@@ -804,9 +805,11 @@ def _assert_later_corruption_visible(
                 == []
             )
             writer.commit()
-        identity = inspect_orm(held).identity
+        held_state = inspect_orm(held)
+        assert held_state is not None
+        identity = held_state.identity
         assert identity is not None
-        primary_key = next(iter(type(held).__table__.primary_key.columns))
+        primary_key = held_state.mapper.primary_key[0]
         assert (
             reader.exec(
                 select(getattr(type(held), field)).where(primary_key == identity[0])
@@ -820,11 +823,13 @@ def _assert_later_corruption_visible(
             with pytest.raises(ValueError, match="Sprint Plan retirement"):
                 plan_retirement.load_sprint_plan_retirements(reader, project_id)
         assert getattr(held, field) == retained
-        assert not inspect_orm(held).modified
+        assert not held_state.modified
         assert held not in reader.dirty
         if companion is not None:
             assert companion.model_dump() == companion_before
-            assert not inspect_orm(companion).modified
+            companion_state = inspect_orm(companion)
+            assert companion_state is not None
+            assert not companion_state.modified
 
 
 def test_retired_plan_completed_replacement_allows_dependency_retirement(
@@ -858,7 +863,7 @@ def test_retired_plan_completed_replacement_allows_dependency_retirement(
 
 @pytest.mark.parametrize("replacement_state", ["planned", "active"])
 def test_retired_plan_does_not_bypass_live_replacement_guard(
-    engine: Engine, replacement_state: str
+    engine: Engine, replacement_state: Literal["planned", "active"]
 ) -> None:
     """Only retired membership loses authority; genuine live ownership still refuses."""
     scenario, dependency_id, _ = _replacement_history_edge(engine, replacement_state)
@@ -955,21 +960,19 @@ def test_retired_plan_unflushed_caller_proof_does_not_supply_authority(
         reader.add(pending)
         transaction = reader.get_transaction()
         if persisted_valid:
-            try:
-                assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
-            except ValueError as error:
-                pytest.fail(
-                    "Valid persisted proof was replaced by unflushed caller state: "
-                    f"{error}"
-                )
+            assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
         else:
             with pytest.raises(ValueError, match="Sprint Plan retirement"):
                 plan_retirement.load_sprint_plan_retirements(reader, project_id)
         assert getattr(held, field) == (invalid if persisted_valid else valid)
         assert held in reader.dirty
-        assert inspect_orm(held).modified
+        held_state = inspect_orm(held)
+        assert held_state is not None
+        assert held_state.modified
+        identity = held_state.identity
+        assert identity is not None
         assert reader.get_transaction() is transaction
-        assert reader.get(type(held), inspect_orm(held).identity) is held
+        assert reader.get(type(held), identity) is held
         assert pending in reader.new
         assert pending.project_id is None
         with reader.no_autoflush:
@@ -997,7 +1000,9 @@ def test_retired_plan_proof_rebuilds_after_flush_rollback_and_new_session(
             plan_retirement.load_sprint_plan_retirements(reader, project_id)
         assert reader.get_transaction() is transaction
         assert held.retirement_fingerprint == "flushed-invalid-proof"
-        assert not inspect_orm(held).modified
+        held_state = inspect_orm(held)
+        assert held_state is not None
+        assert not held_state.modified
         reader.rollback()
         assert plan_retirement.load_sprint_plan_retirements(reader, project_id)
         assert held.retirement_fingerprint == valid
