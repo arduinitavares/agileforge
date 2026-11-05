@@ -1099,6 +1099,23 @@ def _sprint_candidate_problem(
     lineage_problem = _story_lineage_problem(snapshot, stories)
     if lineage_problem is not None:
         return lineage_problem
+    retired_endpoint_ids = {
+        endpoint
+        for edge in snapshot.story_dependencies
+        if edge.status == "retired"
+        for endpoint in (edge.dependent_story_id, edge.prerequisite_story_id)
+    }
+    if any(story.story_id in retired_endpoint_ids for story in stories):
+        return RuleEvaluation(
+            RuleCategory.BLOCKED,
+            "STORY_DEPENDENCY_RETIRED_ENDPOINT",
+            blockers=(
+                Blocker(
+                    code="STORY_DEPENDENCY_RETIRED_ENDPOINT",
+                    message="Retired dependency endpoints cannot enter a new Sprint.",
+                ),
+            ),
+        )
     blockers: list[Blocker] = []
     if any(item.story_points is None for item in stories):
         blockers.append(

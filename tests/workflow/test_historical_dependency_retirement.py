@@ -65,6 +65,7 @@ from tests.workflow.test_superseded_story_dependencies import (
 )
 from workflow import requests
 from workflow.contracts import NodeCategory, WorkflowErrorCode
+from workflow.definitions.planning import story_dependency_source_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import historical_dependency_edges
 
@@ -626,6 +627,92 @@ def _retirement_audits(engine: Engine, project_id: int) -> tuple[str, ...]:
                 .order_by(col(WorkflowEvent.event_id))
             )
         )
+
+
+def _terminal_dependency_edge(
+    engine: Engine, status: StoryStatus = StoryStatus.DONE
+) -> tuple[_Scenario, int]:
+    """Seed terminal endpoints with no Sprint membership or selection change."""
+    scenario = _seed(engine)
+    with Session(engine) as session:
+        for story_id in scenario.story_ids[:2]:
+            story = session.get_one(UserStory, story_id)
+            story.status = status
+            session.add(story)
+        session.commit()
+    return scenario, _edge(engine, scenario, *scenario.story_ids[:2])
+
+
+def _selection_audits(engine: Engine, project_id: int) -> tuple[str, ...]:
+    with Session(engine) as session:
+        return tuple(
+            event.model_dump_json()
+            for event in session.exec(
+                select(WorkflowEvent)
+                .where(
+                    WorkflowEvent.project_id == project_id,
+                    WorkflowEvent.event_type
+                    == WorkflowEventType.STORY_SELECTION_CHANGED,
+                )
+                .order_by(col(WorkflowEvent.event_id))
+            )
+        )
+
+
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+@pytest.mark.parametrize("selected_role", ["dependent", "prerequisite"])
+def test_retirement_refreshes_unchanged_selected_scope(
+    engine: Engine, status: StoryStatus, selected_role: str
+) -> None:
+    """A retirement permits a new review without changing selected intent."""
+    scenario, dependency_id = _terminal_dependency_edge(engine, status)
+    selected = scenario.story_ids[0 if selected_role == "dependent" else 1]
+    _review(engine, scenario, selected)
+    before = _snapshot(engine, scenario)
+    source = story_dependency_source_fingerprint(before.stories)
+    reviews = before.story_dependency_reviews
+    selections = _selection_audits(engine, scenario.project_id)
+    edges = _stored_edges(engine, scenario.project_id)
+    assert (
+        _domain(engine).transition(_retire_request(engine, scenario, dependency_id)).ok
+    )
+    retired = _snapshot(engine, scenario)
+    assert tuple(
+        story.story_id
+        for story in retired.stories
+        if story.sprint_selection_state == "selected"
+    ) == (selected,)
+    assert _selection_audits(engine, scenario.project_id) == selections
+    assert retired.story_dependency_reviews == reviews
+    assert story_dependency_source_fingerprint(retired.stories) != source
+    decision = planning_decision(
+        _domain(engine).position(scenario.project_id), "planning.story_dependencies"
+    )
+    assert decision.category is NodeCategory.AVAILABLE
+    audits = _retirement_audits(engine, scenario.project_id)
+    stale = _apply_request(
+        engine, scenario, selected, (), "old-scope-after-retirement", source=source
+    )
+    business = _project_business_rows(engine, scenario.project_id)
+    refused = _domain(engine).transition(stale)
+    assert not refused.ok
+    assert _project_business_rows(engine, scenario.project_id) == business
+    request = _apply_request(engine, scenario, selected, (), "fresh-retirement-scope")
+    applied = _domain(engine).transition(request)
+    assert applied.ok, applied
+    after = _snapshot(engine, scenario)
+    assert len(after.story_dependency_reviews) == len(reviews) + 1
+    assert all(review in after.story_dependency_reviews for review in reviews)
+    assert after.story_dependency_reviews[-1].reviewed_edges == ()
+    assert _stored_edges(engine, scenario.project_id) == edges
+    assert _selection_audits(engine, scenario.project_id) == selections
+    assert _retirement_audits(engine, scenario.project_id) == audits
+    business = _project_business_rows(engine, scenario.project_id)
+    replay = _domain(engine).transition(request)
+    assert replay.ok
+    assert replay.replayed
+    assert replay.output == applied.output
+    assert _project_business_rows(engine, scenario.project_id) == business
 
 
 @pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])

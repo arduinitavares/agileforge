@@ -35,7 +35,7 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, WorkflowEventType
+from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import (
     BacklogArtifact,
@@ -52,6 +52,7 @@ from models.workflow import (
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.agent_workbench import sprint_phase as sprint_phase_module
 from services.contracts.sprint import SprintPlannerOutput
 from services.contracts.story import (
     CanonicalStoryOutput,
@@ -1256,6 +1257,198 @@ def test_sprint_plan_review_and_start_bind_exact_plan_and_candidate_set(
         task = session.exec(select(Task).where(col(Task.story_id) == story_id)).one()
         assert task.metadata_json is not None
         assert "implementation" in task.metadata_json
+
+
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+@pytest.mark.parametrize("selected_role", ["dependent", "prerequisite"])
+def test_retired_endpoint_is_not_a_sprint_candidate(
+    engine: Engine, status: StoryStatus, selected_role: str
+) -> None:
+    """Either retired endpoint stays selected but cannot enter a new Sprint."""
+    from tests.workflow import (  # noqa: PLC0415 - avoid fixture import cycle.
+        test_historical_dependency_retirement as fixture,
+    )
+
+    scenario, dependency_id = fixture._terminal_dependency_edge(engine, status)
+    domain = _domain(engine)
+    assert domain.transition(
+        fixture._retire_request(engine, scenario, dependency_id)
+    ).ok
+    selected = scenario.story_ids[0 if selected_role == "dependent" else 1]
+    _select_for_sprint(engine, selected)
+    _select_for_sprint(engine, scenario.story_ids[2])
+    _apply_current_dependencies(
+        engine, domain, scenario.project_id, idempotency_key="fresh-retirement-review"
+    )
+    snapshot = fixture._snapshot(engine, scenario)
+    by_id = {story.story_id: story for story in snapshot.stories}
+    assert by_id[selected].sprint_selection_state == "selected"
+    for endpoint in scenario.story_ids[:2]:
+        assert not by_id[endpoint].sprint_candidate
+        assert not by_id[endpoint].dependency_safe
+    for endpoint in scenario.story_ids[:2]:
+        assert "STORY_DEPENDENCY_RETIRED_ENDPOINT" in by_id[endpoint].readiness_blockers
+    assert by_id[scenario.story_ids[2]].sprint_candidate
+
+
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+@pytest.mark.parametrize("selected_role", ["dependent", "prerequisite"])
+def test_retired_endpoint_plan_refuses_before_projection(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    status: StoryStatus,
+    selected_role: str,
+) -> None:
+    """Public and direct plan writes refuse before draft or membership mutation."""
+    from tests.workflow import (  # noqa: PLC0415 - avoid fixture import cycle.
+        test_historical_dependency_retirement as fixture,
+    )
+
+    scenario, dependency_id = fixture._terminal_dependency_edge(engine, status)
+    selected = scenario.story_ids[0 if selected_role == "dependent" else 1]
+    domain = _domain(engine)
+    # This is a valid draft before retirement. It creates no Sprint membership.
+    plan_id, _, plan, _ = _record_sprint_plan_draft(
+        engine,
+        domain,
+        scenario.project_id,
+        selected,
+        team_name="Retirement guard team",
+        idempotency_key="pre-retirement-draft",
+    )
+    assert domain.transition(
+        fixture._retire_request(engine, scenario, dependency_id)
+    ).ok
+    _apply_current_dependencies(
+        engine, domain, scenario.project_id, idempotency_key="post-retirement-review"
+    )
+    position = domain.position(scenario.project_id)
+    decision = _decision(position, "planning.sprint.plan")
+    assert (decision.category, decision.reason_code) == (
+        NodeCategory.BLOCKED,
+        "STORY_DEPENDENCY_RETIRED_ENDPOINT",
+    )
+    snapshot = fixture._snapshot(engine, scenario)
+    specification = accepted_current_spec(snapshot)
+    assert specification is not None
+    before = fixture._project_business_rows(engine, scenario.project_id)
+    audits = fixture._retirement_audits(engine, scenario.project_id)
+    request = RecordSprintPlan(
+        **_guards(position, "planning.sprint.plan"),
+        idempotency_key="refuse-retired-endpoint-plan",
+        team_name="Retirement guard team",
+        spec_version_id=specification.spec_version_id,
+        spec_hash=specification.spec_hash,
+        planner_output=SprintPlannerOutput.model_validate(plan),
+    )
+    refused = domain.transition(request)
+    assert not refused.ok
+    assert fixture._project_business_rows(engine, scenario.project_id) == before
+    replay = domain.transition(request)
+    assert replay.replayed
+    assert replay.error == refused.error
+    assert fixture._project_business_rows(engine, scenario.project_id) == before
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.request_kind == request.kind,
+                WorkflowTransitionReceipt.idempotency_key == request.idempotency_key,
+            )
+        ).one()
+        assert json.loads(receipt.request_json)["project_id"] == scenario.project_id
+        assert receipt.result_json is not None
+        assert not TransitionResult.model_validate_json(receipt.result_json).ok
+        with pytest.raises(ValueError, match="not a current candidate"):
+            sprint_phase_module.record_sprint_plan_in_session(
+                session,
+                inputs=sprint_phase_module.RecordSprintPlanInput(
+                    project_id=scenario.project_id,
+                    spec_version_id=specification.spec_version_id,
+                    spec_hash=specification.spec_hash,
+                    team_name="Retirement guard team",
+                    planner_output=request.planner_output,
+                    actor="operator@example.com",
+                    recorded_at=EVALUATED_AT,
+                ),
+            )
+        assert not session.new
+        assert not session.dirty
+
+    def forbid_projection(*_args: object, **_kwargs: object) -> NoReturn:
+        message = "Retired endpoint reached operational projection writes."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        sprint_phase_module, "_replace_operational_projection", forbid_projection
+    )
+    with Session(engine) as session:
+        artifact = session.get_one(SprintPlanArtifact, plan_id)
+        with pytest.raises(ValueError, match="not a current candidate"):
+            sprint_phase_module.record_sprint_plan_decision_in_session(
+                session,
+                inputs=sprint_phase_module.RecordSprintPlanDecisionInput(
+                    artifact=artifact,
+                    decision="accepted",
+                    rationale="Check current candidacy.",
+                    reviewer="operator@example.com",
+                    idempotency_key="direct-retired-acceptance",
+                    decided_at=EVALUATED_AT,
+                ),
+            )
+        assert not session.new
+        assert not session.dirty
+    assert fixture._project_business_rows(engine, scenario.project_id) == before
+    assert fixture._retirement_audits(engine, scenario.project_id) == audits
+
+
+def test_unrelated_candidate_can_plan_after_retirement(engine: Engine) -> None:
+    """An unrelated selected Story can record, accept and reload a new Sprint."""
+    from tests.workflow import (  # noqa: PLC0415 - avoid fixture import cycle.
+        test_historical_dependency_retirement as fixture,
+    )
+
+    scenario, dependency_id = fixture._terminal_dependency_edge(engine)
+    domain = _domain(engine)
+    assert domain.transition(
+        fixture._retire_request(engine, scenario, dependency_id)
+    ).ok
+    edges = fixture._stored_edges(engine, scenario.project_id)
+    audits = fixture._retirement_audits(engine, scenario.project_id)
+    story_id = scenario.story_ids[2]
+    plan_id, _, _, fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        scenario.project_id,
+        story_id,
+        team_name="Unrelated retirement team",
+        idempotency_key="unrelated-retirement-plan",
+    )
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(domain.position(scenario.project_id), "planning.sprint.review"),
+            idempotency_key="accept-unrelated-retirement-plan",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Unrelated eligible Story.",
+        )
+    )
+    assert accepted.ok, accepted
+    sprint_id = _output_int(accepted, "activated_sprint_id")
+    reloaded = fixture._snapshot(engine, scenario)
+    assert len(reloaded.story_dependency_retirements) == 1
+    assert fixture._stored_edges(engine, scenario.project_id) == edges
+    assert fixture._retirement_audits(engine, scenario.project_id) == audits
+    with Session(engine) as session:
+        assert session.get_one(Sprint, sprint_id).status is SprintStatus.PLANNED
+        assert tuple(
+            session.exec(
+                select(SprintStory.story_id).where(
+                    SprintStory.sprint_id == sprint_id,
+                )
+            )
+        ) == (story_id,)
+        assert {task.story_id for task in session.exec(select(Task))} == {story_id}
 
 
 def test_solo_owner_acceptance_rejects_raced_reserved_team_conflict(

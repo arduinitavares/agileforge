@@ -68,41 +68,41 @@ def selected_scope_fingerprint(
     *,
     project_id: int,
     stories: tuple[SelectedScopeStory, ...],
+    retirement_fingerprints: tuple[str, ...] = (),
 ) -> str:
     """Bind exact selected Story lineages to current evidence and intent facts."""
     ordered = tuple(sorted(stories, key=lambda item: item.story_id))
     if len({item.story_id for item in ordered}) != len(ordered):
         message = "Selected Story scope contains duplicate Story identities."
         raise ValueError(message)
-    return canonical_hash(
-        {
-            "schema_version": "agileforge.story-selected-scope.v1",
-            "project_id": project_id,
-            "stories": [
-                {
-                    "story_id": item.story_id,
-                    "source_story_artifact_id": item.source_story_artifact_id,
-                    "source_story_artifact_fingerprint": (
-                        item.source_story_artifact_fingerprint
-                    ),
-                    "source_story_item_id": item.source_story_item_id,
-                    "source_story_item_fingerprint": (
-                        item.source_story_item_fingerprint
-                    ),
-                    "accepted_spec_version_id": item.accepted_spec_version_id,
-                    "accepted_spec_hash": item.accepted_spec_hash,
-                    "validation_evidence_fingerprint": (
-                        item.validation_evidence_fingerprint
-                    ),
-                    "selection_state": "selected",
-                    "selection_state_fingerprint": (item.selection_state_fingerprint),
-                    "selection_event_id": item.selection_event_id,
-                    "selection_event_fingerprint": (item.selection_event_fingerprint),
-                }
-                for item in ordered
-            ],
-        }
-    )
+    payload: dict[str, object] = {
+        "schema_version": "agileforge.story-selected-scope.v1",
+        "project_id": project_id,
+        "stories": [
+            {
+                "story_id": item.story_id,
+                "source_story_artifact_id": item.source_story_artifact_id,
+                "source_story_artifact_fingerprint": (
+                    item.source_story_artifact_fingerprint
+                ),
+                "source_story_item_id": item.source_story_item_id,
+                "source_story_item_fingerprint": (item.source_story_item_fingerprint),
+                "accepted_spec_version_id": item.accepted_spec_version_id,
+                "accepted_spec_hash": item.accepted_spec_hash,
+                "validation_evidence_fingerprint": (
+                    item.validation_evidence_fingerprint
+                ),
+                "selection_state": "selected",
+                "selection_state_fingerprint": (item.selection_state_fingerprint),
+                "selection_event_id": item.selection_event_id,
+                "selection_event_fingerprint": (item.selection_event_fingerprint),
+            }
+            for item in ordered
+        ],
+    }
+    if retirement_fingerprints:
+        payload["dependency_retirements"] = sorted(set(retirement_fingerprints))
+    return canonical_hash(payload)
 
 
 class StoryDependencyGraphError(RuntimeError):

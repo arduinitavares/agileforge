@@ -15,6 +15,7 @@ from services import story_dependency_lifecycle as lifecycle
 from services.story_dependencies import (
     ApplyStoryDependenciesInput,
     apply_story_dependencies_in_session,
+    selected_scope_fingerprint,
 )
 from services.story_sprint_selection import (
     StorySprintSelectionRequest,
@@ -22,11 +23,81 @@ from services.story_sprint_selection import (
     story_sprint_selection_fact_in_session,
 )
 from tests.workflow import test_superseded_story_dependencies as fixture
+from tests.workflow.test_historical_dependency_retirement import (
+    _retire_request,
+    _terminal_dependency_edge,
+)
 from workflow.definitions.planning import story_dependency_source_fingerprint
 from workflow.facts import StoryDependencyReviewEdgeFact
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
+
+
+def test_retirement_fingerprint_is_fresh_across_session_boundaries(
+    engine: Engine,
+) -> None:
+    """Flushed, rolled-back and other-session retirements have fresh identities."""
+    scenario, dependency_id = _terminal_dependency_edge(engine)
+    selected = scenario.story_ids[0]
+    fixture._review(engine, scenario, selected)
+    domain = fixture._domain(engine)
+    request = _retire_request(engine, scenario, dependency_id)
+    with Session(engine) as session:
+        repository = WorkflowFactRepository(session)
+        before = repository.load(scenario.project_id)
+        source = story_dependency_source_fingerprint(before.stories)
+        result = domain.transition_in_session(session, request)
+        assert result.ok, result
+        session.flush()
+        after = repository.load(scenario.project_id)
+        assert story_dependency_source_fingerprint(after.stories) != source
+        held = session.get_one(UserStory, selected)
+        held.title = "Unflushed caller title"
+        session.add(held)
+        assert repository.load(scenario.project_id) == after
+        assert held.title == "Unflushed caller title"
+        assert held in session.dirty
+        session.rollback()
+        assert repository.load(scenario.project_id) == before
+    assert fixture._snapshot(engine, scenario) == before
+    with Session(engine) as reader:
+        repository = WorkflowFactRepository(reader)
+        assert repository.load(scenario.project_id) == before
+        assert domain.transition(request).ok
+        committed = repository.load(scenario.project_id)
+        assert story_dependency_source_fingerprint(committed.stories) != source
+    assert fixture._snapshot(engine, scenario) == committed
+
+
+def test_unrelated_retirement_preserves_selected_scope_identity(engine: Engine) -> None:
+    """Retirement outside selected intent does not invalidate its review."""
+    scenario, dependency_id = _terminal_dependency_edge(engine)
+    fixture._review(engine, scenario, scenario.story_ids[2])
+    before = fixture._snapshot(engine, scenario)
+    assert (
+        fixture._domain(engine)
+        .transition(_retire_request(engine, scenario, dependency_id))
+        .ok
+    )
+    after = fixture._snapshot(engine, scenario)
+    assert story_dependency_source_fingerprint(after.stories) == (
+        story_dependency_source_fingerprint(before.stories)
+    )
+    assert after.story_dependency_reviews == before.story_dependency_reviews
+    assert fixture._story(after, scenario.story_ids[2]).sprint_candidate
+
+
+def test_empty_retirement_scope_keeps_v1_identity() -> None:
+    """The existing empty-scope wire identity remains byte-compatible."""
+    assert selected_scope_fingerprint(project_id=7, stories=()) == canonical_hash(
+        {
+            "schema_version": "agileforge.story-selected-scope.v1",
+            "project_id": 7,
+            "stories": [],
+        }
+    )
 
 
 def _count_validation(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:

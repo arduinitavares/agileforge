@@ -442,6 +442,10 @@ class WorkflowFactRepository:
             planning_load.facts,
             sprints,
             retired_dependency_ids=retired_dependency_ids,
+            retirement_fingerprints=tuple(
+                (item.dependency_id, item.retirement_fingerprint)
+                for item in story_dependency_retirements
+            ),
         )
         story_dependencies = self._story_dependencies(
             project_id, retired_dependency_ids=retired_dependency_ids
@@ -3241,7 +3245,7 @@ class WorkflowFactRepository:
             validation_failures=validation_failures,
         )
 
-    def _stories(
+    def _stories(  # noqa: PLR0913 - retain existing inputs and add retirement proof.
         self,
         project_id: int,
         spec_versions: dict[int, str],
@@ -3249,6 +3253,7 @@ class WorkflowFactRepository:
         sprints: tuple[SprintFact, ...],
         *,
         retired_dependency_ids: frozenset[int] = frozenset(),
+        retirement_fingerprints: tuple[tuple[int, str], ...] = (),
     ) -> tuple[StoryFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
         completed_sprint_ids = frozenset(
@@ -3371,9 +3376,21 @@ class WorkflowFactRepository:
                 )
             )
         try:
+            selected_scope_ids = {entry.story_id for entry in selected_scope_entries}
+            relevant_retirements = {
+                row.dependency_id
+                for row in dependencies
+                if row.dependent_story_id in selected_scope_ids
+                or row.prerequisite_story_id in selected_scope_ids
+            }
             scope_fingerprint = selected_scope_fingerprint(
                 project_id=project_id,
                 stories=tuple(selected_scope_entries),
+                retirement_fingerprints=tuple(
+                    fingerprint
+                    for dependency_id, fingerprint in retirement_fingerprints
+                    if dependency_id in relevant_retirements
+                ),
             )
         except ValueError as error:
             raise self._error(str(error)) from error
@@ -3658,14 +3675,32 @@ class WorkflowFactRepository:
                     dependencies,
                     completed_story_ids=completed_story_ids,
                 )
+        retired_endpoint_ids = {
+            endpoint
+            for edge in dependencies
+            if edge.status == "retired"
+            for endpoint in (edge.dependent_story_id, edge.prerequisite_story_id)
+        }
         facts: list[StoryFact] = []
         for story in stories:
-            safe = dependency_safe and story.story_id in selected_id_set
+            safe = (
+                dependency_safe
+                and story.story_id in selected_id_set
+                and story.story_id not in retired_endpoint_ids
+            )
             readiness_blockers = story.readiness_blockers
             if story.story_id in selected_id_set:
                 readiness_blockers = tuple(
                     dict.fromkeys((*readiness_blockers, *dependency_blockers))
                 )
+            retirement_blockers = (
+                ("STORY_DEPENDENCY_RETIRED_ENDPOINT",)
+                if story.story_id in retired_endpoint_ids
+                else ()
+            )
+            readiness_blockers = tuple(
+                dict.fromkeys((*readiness_blockers, *retirement_blockers))
+            )
             try:
                 facts.append(
                     StoryFact.model_validate(
