@@ -3401,9 +3401,7 @@ function selectedScopeDependencies(stories, dependencies) {
             || edge.dependent_story_id <= 0
             || edge.prerequisite_story_id <= 0
             || edge.dependent_story_id === edge.prerequisite_story_id
-            || !dependencyStoryIds.has(edge.dependent_story_id)
-            || !dependencyStoryIds.has(edge.prerequisite_story_id)
-            || !['proposed', 'active', 'rejected'].includes(edge.status)
+            || !['proposed', 'active', 'rejected', 'retired'].includes(edge.status)
             || typeof edge.reason !== 'string'
             || !edge.reason.trim()) {
             return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
@@ -3411,6 +3409,12 @@ function selectedScopeDependencies(stories, dependencies) {
         const edgeKey = `${edge.dependent_story_id}:${edge.prerequisite_story_id}`;
         if (seenEdges.has(edgeKey)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
         seenEdges.add(edgeKey);
+        // Retired history can outlive the active projection of its endpoints.
+        if (edge.status === 'retired') continue;
+        if (!dependencyStoryIds.has(edge.dependent_story_id)
+            || !dependencyStoryIds.has(edge.prerequisite_story_id)) {
+            return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+        }
         if (scopeIdSet.has(edge.dependent_story_id) && ['proposed', 'active'].includes(edge.status)) {
             scopeEdges.push({
                 dependent_story_id: edge.dependent_story_id,

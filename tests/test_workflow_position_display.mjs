@@ -3516,6 +3516,198 @@ test('dependency and readiness contradictions fail closed while missing evidence
     ] }).isWellFormed, false);
 });
 
+test('retired history preserves unrelated dependency confirmation and Sprint generation', async () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const stories = [candidate, ...[102, 103].map((storyId, index) => selectedScopeStory({
+        story_id: storyId,
+        source_story_item_id: `US-${storyId}`,
+        status: index === 0 ? 'Done' : 'Accepted',
+        sprint_selection_state: 'unselected',
+    }))];
+    const dependencies = dependencyProjection(stories, [{
+        dependent_story_id: 102, prerequisite_story_id: 103,
+        status: 'retired', reason: 'Completed historical dependency was explicitly retired.',
+    }]);
+    const before = JSON.stringify(dependencies);
+    const result = context.selectedScopeDependencies(stories, dependencies);
+    assert.equal(result.isWellFormed, true);
+    assert.deepEqual(Array.from(result.scopeIds), [101]);
+    assert.deepEqual(Array.from(result.scopeEdges), []);
+    const confirmation = context.storyDependencyReviewMarkup(
+        { request_kind: 'apply_story_dependencies' }, stories, dependencies,
+    ).match(/<button\b[^>]*data-apply-dependencies="true"[^>]*>/)?.[0];
+    assert.ok(confirmation);
+    assert.doesNotMatch(confirmation, /\sdisabled(?:\s|=|>)/);
+
+    const appState = {
+        storyDependencies: dependencies,
+        sprintCandidates: {
+            project_id: 7, items: [candidate],
+            sprint_owner: await validatedSprintOwner(context), capacity: sprintCapacity(),
+        },
+    };
+    assert.equal(context.canGenerateSprintPlan(appState), true);
+    const markup = context.deliveryPanelMarkup({}, {}, [{
+        node_id: 'planning.sprint.plan', instance_key: null,
+        request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+    }], appState);
+    assert.ok(markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+    assert.ok(!markup.includes('data-sprint-candidate-projection-error="true"'));
+    assert.equal(JSON.stringify(dependencies), before, 'Rendering must preserve historical facts.');
+});
+
+test('retired dependency endpoints need not remain in the active Story projection', () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const retired = {
+        dependent_story_id: 102, prerequisite_story_id: 103,
+        status: 'retired', reason: 'Retain history after Story supersession.',
+    };
+    for (const historicalRows of [
+        [],
+        [selectedScopeStory({ story_id: 102, sprint_selection_state: 'unselected' })],
+        [selectedScopeStory({ story_id: 103, sprint_selection_state: 'unselected' })],
+        [102, 103].map((storyId) => ({ story_id: storyId, is_superseded: true })),
+    ]) {
+        const dependencies = dependencyProjection([candidate, ...historicalRows], [retired]);
+        const result = context.selectedScopeDependencies(dependencies.stories, dependencies);
+        assert.equal(result.isWellFormed, true, JSON.stringify(historicalRows));
+        assert.deepEqual(Array.from(result.scopeEdges), []);
+        assert.equal(context.canGenerateSprintPlan({
+            storyDependencies: dependencies, sprintCandidates: { items: [candidate] },
+        }), true);
+    }
+});
+
+test('dependency confirmation transports current edges and excludes retired history', async () => {
+    const requests = [];
+    const listeners = {};
+    const context = loadFrontend(async (url, options = {}) => {
+        requests.push({ url, options });
+        return { ok: true, text: async () => '{}' };
+    });
+    context.document.addEventListener = (type, listener) => {
+        (listeners[type] ??= []).push(listener);
+    };
+    const selected = selectedScopeStory();
+    const stories = [selected, ...[102, 103, 104].map((storyId) => selectedScopeStory({
+        story_id: storyId, sprint_selection_state: 'unselected',
+    }))];
+    const dependencies = dependencyProjection(stories, [
+        { dependent_story_id: 101, prerequisite_story_id: 102, status: 'proposed', reason: 'Current proposed prerequisite.' },
+        { dependent_story_id: 101, prerequisite_story_id: 103, status: 'active', reason: 'Current active prerequisite.' },
+        { dependent_story_id: 101, prerequisite_story_id: 104, status: 'rejected', reason: 'Rejected prerequisite.' },
+        { dependent_story_id: 101, prerequisite_story_id: 999, status: 'retired', reason: 'Historical endpoint is no longer projected.' },
+    ]);
+    const attributes = new Map();
+    const button = {
+        dataset: { applyDependencies: 'true' }, disabled: false,
+        closest(selector) { return selector === 'button' ? this : null; },
+        querySelector() { return null; },
+        getAttribute(name) { return attributes.get(name) ?? null; },
+        setAttribute(name, value) { attributes.set(name, value); },
+        removeAttribute(name) { attributes.delete(name); },
+    };
+    context.__dependencies = dependencies;
+    vm.runInContext(`
+        selectedProjectId = 7;
+        lifecycleState = { storyDependencies: __dependencies };
+        renderDashboard = () => {};
+        loadDashboard = async () => true;
+        installInteractions();
+    `, context);
+    for (const listener of listeners.click ?? []) await listener({ target: button });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, '/api/projects/7/story/dependencies/apply');
+    assert.equal(requests[0].options.method, 'POST');
+    assert.deepEqual(JSON.parse(requests[0].options.body), {
+        selected_story_ids: [101],
+        selected_scope_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        reviewed_edges: [
+            { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'Current proposed prerequisite.' },
+            { dependent_story_id: 101, prerequisite_story_id: 103, reason: 'Current active prerequisite.' },
+        ],
+        actor: 'dashboard-ui', idempotency_key: 'dashboard-uuid-1',
+    });
+});
+
+test('retired history keeps malformed edges and missing current endpoints blocked', () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const stories = [candidate, ...[102, 103].map((storyId) => selectedScopeStory({
+        story_id: storyId, sprint_selection_state: 'unselected',
+    }))];
+    const retired = {
+        dependent_story_id: 102, prerequisite_story_id: 103,
+        status: 'retired', reason: 'Valid retained history.',
+    };
+    const invalidEdges = [
+        ['unknown status', [{ ...retired, status: 'unknown' }]],
+        ['zero dependent', [{ ...retired, dependent_story_id: 0 }]],
+        ['negative prerequisite', [{ ...retired, prerequisite_story_id: -1 }]],
+        ['fractional dependent', [{ ...retired, dependent_story_id: 102.5 }]],
+        ['string prerequisite', [{ ...retired, prerequisite_story_id: '103' }]],
+        ['self edge', [{ ...retired, prerequisite_story_id: 102 }]],
+        ['blank reason', [{ ...retired, reason: '   ' }]],
+        ['missing reason', [{ ...retired, reason: undefined }]],
+        ['null edge', [null]],
+        ['duplicate retired pair', [retired, { ...retired }]],
+        ['retired then active duplicate', [retired, { ...retired, status: 'active' }]],
+        ['active then retired duplicate', [{ ...retired, status: 'active' }, retired]],
+        ...['proposed', 'active', 'rejected'].flatMap((status) => [
+            [`${status} missing prerequisite`, [retired, {
+                dependent_story_id: 101, prerequisite_story_id: 999, status, reason: 'Missing current prerequisite.',
+            }]],
+            [`${status} missing dependent`, [retired, {
+                dependent_story_id: 999, prerequisite_story_id: 101, status, reason: 'Missing current dependent.',
+            }]],
+        ]),
+    ];
+    assert.equal(context.selectedScopeDependencies(stories, dependencyProjection(stories)).isWellFormed, true);
+    for (const [label, edges] of invalidEdges) {
+        const dependencies = dependencyProjection(stories, edges);
+        assert.equal(context.selectedScopeDependencies(stories, dependencies).isWellFormed, false, label);
+        const confirmation = context.storyDependencyReviewMarkup(
+            { request_kind: 'apply_story_dependencies' }, stories, dependencies,
+        ).match(/<button\b[^>]*data-apply-dependencies="true"[^>]*>/)?.[0];
+        assert.ok(confirmation, label);
+        assert.match(confirmation, /\sdisabled(?:\s|=|>)/, label);
+        assert.equal(context.canGenerateSprintPlan({
+            storyDependencies: dependencies, sprintCandidates: { items: [candidate] },
+        }), false, label);
+    }
+});
+
+test('valid retired history cannot bypass stale Sprint scope or candidate vectors', () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const second = sprintCandidateStory({ story_id: 104 });
+    const retired = {
+        dependent_story_id: 102, prerequisite_story_id: 103,
+        status: 'retired', reason: 'Historical endpoints are absent.',
+    };
+    for (const [stories, candidates] of [
+        [[candidate], [{ ...candidate, selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]],
+        [[candidate, second], [candidate]],
+    ]) {
+        const dependencies = dependencyProjection(stories, [retired]);
+        assert.equal(context.selectedScopeDependencies(stories, dependencies).isWellFormed, true);
+        assert.equal(context.canGenerateSprintPlan({
+            storyDependencies: dependencies, sprintCandidates: { items: candidates },
+        }), false);
+    }
+    const dependencies = {
+        ...dependencyProjection([candidate], [retired]),
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    };
+    assert.equal(context.selectedScopeDependencies([candidate], dependencies).isWellFormed, false);
+    assert.equal(context.canGenerateSprintPlan({
+        storyDependencies: dependencies, sprintCandidates: { items: [candidate] },
+    }), false);
+});
+
 test('malformed Sprint candidate projection blocks the generated Sprint form and transport', () => {
     const context = loadFrontend();
     const sprintAction = {
