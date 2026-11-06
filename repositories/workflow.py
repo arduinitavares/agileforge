@@ -100,10 +100,12 @@ from services.story_dependencies import (
 )
 from services.story_dependency_lifecycle import (
     StoryDependencyLifecycleIntegrityError,
+    StoryDependencyValidationContext,
     infer_unrecorded_story_dependency_invalidations_in_session,
     load_story_dependency_invalidations_in_session,
     selected_scope_dependency_lifecycle_fingerprint,
 )
+from services.story_dependency_retirement import load_story_dependency_retirements
 from services.story_sprint_selection import (
     StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
@@ -425,13 +427,29 @@ class WorkflowFactRepository:
         phase_load = self._phase_artifacts(project_id)
         planning_load = self._planning_artifacts(project_id)
         sprints = self._sprints(project_id)
+        try:
+            story_dependency_retirements = load_story_dependency_retirements(
+                self._session, project_id
+            )
+        except ValueError as error:
+            raise self._error(str(error)) from error
+        retired_dependency_ids = frozenset(
+            item.dependency_id for item in story_dependency_retirements
+        )
         stories = self._stories(
             project_id,
             spec_versions,
             planning_load.facts,
             sprints,
+            retired_dependency_ids=retired_dependency_ids,
+            retirement_fingerprints=tuple(
+                (item.dependency_id, item.retirement_fingerprint)
+                for item in story_dependency_retirements
+            ),
         )
-        story_dependencies = self._story_dependencies(project_id)
+        story_dependencies = self._story_dependencies(
+            project_id, retired_dependency_ids=retired_dependency_ids
+        )
         story_dependency_reviews = self._story_dependency_reviews(
             project_id,
             stories,
@@ -466,6 +484,7 @@ class WorkflowFactRepository:
             sprint_starts=sprint_starts,
             stories=stories,
             story_dependencies=story_dependencies,
+            story_dependency_retirements=story_dependency_retirements,
             story_dependency_reviews=story_dependency_reviews,
             tasks=tasks,
         )
@@ -534,6 +553,7 @@ class WorkflowFactRepository:
             sprint_starts=sprint_starts,
             stories=stories,
             story_dependencies=story_dependencies,
+            story_dependency_retirements=story_dependency_retirements,
             story_dependency_reviews=story_dependency_reviews,
             tasks=tasks,
             task_completions=task_completions,
@@ -3108,7 +3128,12 @@ class WorkflowFactRepository:
     ) -> dict[int, PlanningArtifactFact]:
         accepted_by_id: dict[int, PlanningArtifactFact] = {}
         for artifact in planning_artifacts:
-            if artifact.artifact_type != "story" or artifact.status != "accepted":
+            # Superseded is assigned only to displaced accepted ancestors.
+            # Their acceptance still proves the original execution content.
+            if artifact.artifact_type != "story" or artifact.status not in {
+                "accepted",
+                "superseded",
+            }:
                 continue
             if artifact.backlog_item_id is None or not artifact.story_item_ids:
                 message = "Accepted Story artifact has no immutable item identity."
@@ -3220,12 +3245,15 @@ class WorkflowFactRepository:
             validation_failures=validation_failures,
         )
 
-    def _stories(
+    def _stories(  # noqa: PLR0913 - retain existing inputs and add retirement proof.
         self,
         project_id: int,
         spec_versions: dict[int, str],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
         sprints: tuple[SprintFact, ...],
+        *,
+        retired_dependency_ids: frozenset[int] = frozenset(),
+        retirement_fingerprints: tuple[tuple[int, str], ...] = (),
     ) -> tuple[StoryFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
         completed_sprint_ids = frozenset(
@@ -3286,7 +3314,14 @@ class WorkflowFactRepository:
             if membership.sprint_id in completed_sprint_ids
         )
         blockers = self._story_readiness_blockers(
-            rows, dependencies, stories_by_id, completed_story_ids=completed_story_ids
+            rows,
+            tuple(
+                row
+                for row in dependencies
+                if row.dependency_id not in retired_dependency_ids
+            ),
+            stories_by_id,
+            completed_story_ids=completed_story_ids,
         )
         try:
             selection_by_story_id = story_sprint_selection_facts_in_session(
@@ -3341,9 +3376,21 @@ class WorkflowFactRepository:
                 )
             )
         try:
+            selected_scope_ids = {entry.story_id for entry in selected_scope_entries}
+            relevant_retirements = {
+                row.dependency_id
+                for row in dependencies
+                if row.dependent_story_id in selected_scope_ids
+                or row.prerequisite_story_id in selected_scope_ids
+            }
             scope_fingerprint = selected_scope_fingerprint(
                 project_id=project_id,
                 stories=tuple(selected_scope_entries),
+                retirement_fingerprints=tuple(
+                    fingerprint
+                    for dependency_id, fingerprint in retirement_fingerprints
+                    if dependency_id in relevant_retirements
+                ),
             )
         except ValueError as error:
             raise self._error(str(error)) from error
@@ -3375,45 +3422,51 @@ class WorkflowFactRepository:
                 )
             )
         try:
-            persisted_anchors = load_story_dependency_invalidations_in_session(
-                self._session,
-                project_id=project_id,
-            )
-            selected_ids = tuple(entry.story_id for entry in selected_scope_entries)
-            implicit_anchors = (
-                infer_unrecorded_story_dependency_invalidations_in_session(
+            with StoryDependencyValidationContext(
+                self._session, project_id=project_id
+            ) as validation:
+                persisted_anchors = load_story_dependency_invalidations_in_session(
                     self._session,
                     project_id=project_id,
-                    root_story_ids=selected_ids,
+                    validation=validation,
                 )
-                if superseded_dependency_edges(
-                    stories=tuple(facts),
-                    dependencies=tuple(
-                        StoryDependencyFact.model_validate(
-                            row.model_dump(
-                                include={
-                                    "dependency_id",
-                                    "dependent_story_id",
-                                    "prerequisite_story_id",
-                                    "status",
-                                    "source",
-                                    "confidence",
-                                    "reason",
-                                }
+                selected_ids = tuple(entry.story_id for entry in selected_scope_entries)
+                implicit_anchors = (
+                    infer_unrecorded_story_dependency_invalidations_in_session(
+                        self._session,
+                        project_id=project_id,
+                        root_story_ids=selected_ids,
+                        validation=validation,
+                    )
+                    if superseded_dependency_edges(
+                        stories=tuple(facts),
+                        dependencies=tuple(
+                            StoryDependencyFact.model_validate(
+                                row.model_dump(
+                                    include={
+                                        "dependency_id",
+                                        "dependent_story_id",
+                                        "prerequisite_story_id",
+                                        "status",
+                                        "source",
+                                        "confidence",
+                                        "reason",
+                                    }
+                                )
                             )
-                        )
-                        for row in dependencies
-                    ),
-                    root_story_ids=selected_ids,
-                    completed_story_ids=completed_story_ids,
+                            for row in dependencies
+                            if row.dependency_id not in retired_dependency_ids
+                        ),
+                        root_story_ids=selected_ids,
+                        completed_story_ids=completed_story_ids,
+                    )
+                    else ()
                 )
-                else ()
-            )
-            final_fingerprint = selected_scope_dependency_lifecycle_fingerprint(
-                selected_scope_fingerprint=scope_fingerprint,
-                selected_story_ids=selected_ids,
-                invalidation_anchors=(*persisted_anchors, *implicit_anchors),
-            )
+                final_fingerprint = selected_scope_dependency_lifecycle_fingerprint(
+                    selected_scope_fingerprint=scope_fingerprint,
+                    selected_story_ids=selected_ids,
+                    invalidation_anchors=(*persisted_anchors, *implicit_anchors),
+                )
         except (StoryDependencyLifecycleIntegrityError, ValueError) as error:
             raise self._error(str(error)) from error
         return tuple(
@@ -3424,6 +3477,8 @@ class WorkflowFactRepository:
     def _story_dependencies(
         self,
         project_id: int,
+        *,
+        retired_dependency_ids: frozenset[int] = frozenset(),
     ) -> tuple[StoryDependencyFact, ...]:
         rows = self._session.exec(
             select(UserStoryDependency)
@@ -3457,7 +3512,9 @@ class WorkflowFactRepository:
                         ),
                         "dependent_story_id": row.dependent_story_id,
                         "prerequisite_story_id": row.prerequisite_story_id,
-                        "status": row.status,
+                        "status": "retired"
+                        if row.dependency_id in retired_dependency_ids
+                        else row.status,
                         "source": row.source,
                         "confidence": row.confidence,
                         "reason": row.reason,
@@ -3618,14 +3675,32 @@ class WorkflowFactRepository:
                     dependencies,
                     completed_story_ids=completed_story_ids,
                 )
+        retired_endpoint_ids = {
+            endpoint
+            for edge in dependencies
+            if edge.status == "retired"
+            for endpoint in (edge.dependent_story_id, edge.prerequisite_story_id)
+        }
         facts: list[StoryFact] = []
         for story in stories:
-            safe = dependency_safe and story.story_id in selected_id_set
+            safe = (
+                dependency_safe
+                and story.story_id in selected_id_set
+                and story.story_id not in retired_endpoint_ids
+            )
             readiness_blockers = story.readiness_blockers
             if story.story_id in selected_id_set:
                 readiness_blockers = tuple(
                     dict.fromkeys((*readiness_blockers, *dependency_blockers))
                 )
+            retirement_blockers = (
+                ("STORY_DEPENDENCY_RETIRED_ENDPOINT",)
+                if story.story_id in retired_endpoint_ids
+                else ()
+            )
+            readiness_blockers = tuple(
+                dict.fromkeys((*readiness_blockers, *retirement_blockers))
+            )
             try:
                 facts.append(
                     StoryFact.model_validate(

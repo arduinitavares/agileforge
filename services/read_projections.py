@@ -3640,8 +3640,20 @@ class DurableReadProjectionService:
             payload["content_error"] = resolved.content_error
             serialized_stories.append(payload)
 
+        retirement_fingerprints = {
+            item.dependency_id: item.dependency_fingerprint
+            for item in snapshot.story_dependency_retirements
+        }
         edges: list[JsonValue] = [
-            _validated(dep.model_dump(mode="json"))
+            _validated(
+                {
+                    **dep.model_dump(mode="json"),
+                    "dependency_fingerprint": retirement_fingerprints.get(
+                        dep.dependency_id,
+                        canonical_hash(dep.model_dump(mode="json")),
+                    ),
+                }
+            )
             for dep in snapshot.story_dependencies
         ]
         reviews: list[JsonValue] = [
@@ -3695,6 +3707,10 @@ class DurableReadProjectionService:
             {
                 "project_id": project_id,
                 "edges": edges,
+                "retirements": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in snapshot.story_dependency_retirements
+                ],
                 "reviews": reviews,
                 "issues": issues,
                 "stories": serialized_stories,

@@ -206,6 +206,7 @@ from workflow.requests import (
     RecordPostSprintTriage,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetireHistoricalStoryDependency,
     RetireSprintPlan,
     RetrySprint,
     ReviewSprint,
@@ -2161,6 +2162,17 @@ def _story_eligibility_item(
     }
 
 
+class HistoricalStoryDependencyRetirementRequest(_PlanningMutationRequest):
+    """Explicit historical edge identity and its displayed freshness guard."""
+
+    dependency_id: PositiveStoryId
+    dependency_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_decision_fingerprint: SemanticText
+    rationale: SemanticText
+    actor: SemanticText
+    idempotency_key: SemanticText
+
+
 class SprintPlanRetirementRequest(_PlanningMutationRequest):
     """Explicit recovery bound to one displayed accepted-plan identity."""
 
@@ -3995,6 +4007,64 @@ class AgileForgeApplication:
                 return response
         except StorySprintSelectionIntegrityError as error:
             return _selection_integrity_error_response(str(error))
+
+    def retire_historical_story_dependency(
+        self, request: HistoricalStoryDependencyRetirementRequest
+    ) -> TransitionResult:
+        """Retire one explicitly named historical Story dependency edge."""
+        fields = {
+            "dependency_id": request.dependency_id,
+            "dependency_fingerprint": request.dependency_fingerprint,
+            "rationale": request.rationale,
+        }
+        instance_key = f"story_dependency:{request.dependency_id}"
+        replay = self._replay_planning_action(
+            request_kind="retire_historical_story_dependency",
+            request=request,
+            operator_input={
+                **fields,
+                "instance_key": instance_key,
+                "decision_fingerprint": request.expected_decision_fingerprint,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "planning.story_dependencies.retire_historical",
+            instance_key=instance_key,
+        )
+        if (
+            decision is None
+            or decision.decision_fingerprint != request.expected_decision_fingerprint
+        ):
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_POSITION,
+                    message=(
+                        "The historical dependency retirement action changed. "
+                        "Reload before repair."
+                    ),
+                ),
+            )
+        return self.transition(
+            RetireHistoricalStoryDependency(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=request.expected_decision_fingerprint,
+                instance_key=instance_key,
+                dependency_id=request.dependency_id,
+                dependency_fingerprint=request.dependency_fingerprint,
+                rationale=request.rationale,
+                actor=request.actor,
+                idempotency_key=request.idempotency_key,
+                correlation_id=request.correlation_id,
+            )
+        )
 
     def retire_sprint_plan(
         self, request: SprintPlanRetirementRequest
@@ -6494,6 +6564,12 @@ def planning_action_decision_is_transportable(  # noqa: PLR0911
             _positive_integer_reference(decision, kind) is not None
             for kind in ("sprint_plan", "sprint_plan_decision", "sprint")
         )
+    if decision.request_kind == "retire_historical_story_dependency":
+        reference = _positive_integer_reference(decision, "story_dependency")
+        return (
+            reference is not None
+            and decision.instance_key == f"story_dependency:{reference[0]}"
+        )
     return True
 
 
@@ -7148,6 +7224,7 @@ __all__ = [
     "DeliveryReviewSelectionService",
     "ExecutionActionSelectionService",
     "ExpectedPlanningReviewBinding",
+    "HistoricalStoryDependencyRetirementRequest",
     "PlanningActionSelectionService",
     "PostSprintTriageRequest",
     "ProductGoalInterviewRequest",

@@ -4260,6 +4260,9 @@ _AGENTIC_NODE_IDS = {
 
 
 _REQUEST_KIND_FACT_REFERENCE_ROWS = {
+    "retire_historical_story_dependency": (
+        ("story_dependency", "17", "dependency-17"),
+    ),
     "complete_task": (("task", "7", "task-7"),),
     "close_story": (("story_completion", "9", "story-completion-9"),),
     "review_sprint": (("sprint_review", "31", "sprint-review-31"),),
@@ -4301,6 +4304,8 @@ def _request_kind_fact_references(kind: str) -> tuple[FactReference, ...]:
 
 
 def _request_kind_instance_key(kind: str, index: int) -> str:
+    if kind == "retire_historical_story_dependency":
+        return "story_dependency:17"
     if kind == "complete_task":
         return "task:7"
     if kind == "close_story":

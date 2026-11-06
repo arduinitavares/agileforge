@@ -22,6 +22,7 @@ from workflow.requests.planning import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    RetireHistoricalStoryDependency,
     RetireSprintPlan,
     StartSprint,
 )
@@ -72,6 +73,7 @@ type TransitionRequest = (
     | DecideStory
     | ApplyStoryDependencies
     | RepairStoryReadiness
+    | RetireHistoricalStoryDependency
     | RecordSprintPlan
     | DecideSprintPlan
     | StartSprint
@@ -120,6 +122,7 @@ __all__ = [
     "RegisterSpecificationSource",
     "RepairStoryReadiness",
     "RepositoryBindingInput",
+    "RetireHistoricalStoryDependency",
     "RetireSprintPlan",
     "RetrySprint",
     "RevalidateNodeAttempt",

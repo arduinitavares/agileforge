@@ -42,6 +42,7 @@ from workflow.planning_integrity import (
     current_task_content_fingerprint,
     dependency_edges_have_cycle,
     dependency_review_fingerprint,
+    historical_dependency_edges,
     is_terminal_external,
     selected_dependency_active_closure,
 )
@@ -1098,6 +1099,23 @@ def _sprint_candidate_problem(
     lineage_problem = _story_lineage_problem(snapshot, stories)
     if lineage_problem is not None:
         return lineage_problem
+    retired_endpoint_ids = {
+        endpoint
+        for edge in snapshot.story_dependencies
+        if edge.status == "retired"
+        for endpoint in (edge.dependent_story_id, edge.prerequisite_story_id)
+    }
+    if any(story.story_id in retired_endpoint_ids for story in stories):
+        return RuleEvaluation(
+            RuleCategory.BLOCKED,
+            "STORY_DEPENDENCY_RETIRED_ENDPOINT",
+            blockers=(
+                Blocker(
+                    code="STORY_DEPENDENCY_RETIRED_ENDPOINT",
+                    message="Retired dependency endpoints cannot enter a new Sprint.",
+                ),
+            ),
+        )
     blockers: list[Blocker] = []
     if any(item.story_points is None for item in stories):
         blockers.append(
@@ -1668,6 +1686,44 @@ def _sprint_retirement_rule(
     )
 
 
+def _historical_dependency_retirement_rule(
+    snapshot: WorkflowFactSnapshot, _evaluated_at: datetime
+) -> tuple[RuleEvaluation, ...]:
+    if retry_blocks_planning(snapshot):
+        return _blocked(
+            "SPRINT_RETRY_LIFECYCLE_ACTIVE",
+            "Historical retirement waits for terminal retry triage.",
+        )
+    edges = historical_dependency_edges(snapshot)
+    if not edges:
+        return (
+            RuleEvaluation(
+                RuleCategory.SATISFIED, "HISTORICAL_DEPENDENCY_RETIREMENT_NOT_REQUIRED"
+            ),
+        )
+    recommendation = (
+        RecommendationKind.RECOVERY
+        if dependency_edges_have_cycle(edges)
+        else RecommendationKind.OPTIONAL_REENTRY
+    )
+    return tuple(
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "HISTORICAL_DEPENDENCY_RETIREMENT_AVAILABLE",
+            instance_key=f"story_dependency:{edge.dependency_id}",
+            fact_references=(
+                FactReference(
+                    fact_type="story_dependency",
+                    fact_id=str(edge.dependency_id),
+                    fingerprint=canonical_hash(edge.model_dump(mode="json")),
+                ),
+            ),
+            recommendation_kind=recommendation,
+        )
+        for edge in edges
+    )
+
+
 def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
     def _guarded_rule(
         snapshot: WorkflowFactSnapshot,
@@ -1695,6 +1751,18 @@ def _pause_during_backlog_correction(rule: NodeRule) -> NodeRule:
 
 
 PLANNING_NODES: tuple[NodeSpec, ...] = (
+    NodeSpec(
+        node_id="planning.story_dependencies.retire_historical",
+        child_graph_id="planning",
+        request_kind="retire_historical_story_dependency",
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        required_inputs=(
+            InputField(name="dependency_id", value_type="integer"),
+            InputField(name="dependency_fingerprint", value_type="string"),
+            InputField(name="rationale", value_type="string"),
+        ),
+        evaluate_rule=_historical_dependency_retirement_rule,
+    ),
     NodeSpec(
         node_id="planning.sprint.retire",
         child_graph_id="planning",

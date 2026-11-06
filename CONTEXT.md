@@ -101,6 +101,22 @@ Readiness and dependency decisions are durable facts.
 
 Avoid: Backlog requirement, Task.
 
+## Historical Dependency Retirement
+
+An explicit, append-only operator decision that removes one exact historical
+Story dependency edge from current planning authority. Both accepted endpoints
+must be Done, Accepted, or members of a completed Sprint. Neither endpoint can
+belong to a current planned or active Sprint, and no unresolved Sprint retry can exist.
+Membership backed by validated Sprint Plan retirement remains historical and
+supplies no current planning lock. A live replacement or unresolved retry still
+blocks dependency retirement.
+The guarded decision requires the exact edge fingerprint, actor, rationale and
+idempotency key. Original dependency rows, accepted reviews, saved invalidation
+paths and pinned execution contracts remain unchanged. Reload validates the
+retirement audit against its original edge, endpoint lineage and transition receipt.
+
+Avoid: current dependency bypass, automatic cycle repair, historical evidence rewrite.
+
 ## Sprint Plan
 
 A reviewed candidate set and Task plan bound to exact Story, dependency,

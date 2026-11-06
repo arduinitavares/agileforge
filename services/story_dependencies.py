@@ -16,13 +16,14 @@ from services.agent_workbench.story_phase import (
 )
 from services.story_dependency_lifecycle import (
     StoryDependencyLifecycleIntegrityError,
+    StoryDependencyValidationContext,
     adopt_story_dependency_invalidations_in_session,
     infer_unrecorded_story_dependency_invalidations_in_session,
     load_story_dependency_invalidations_in_session,
     validate_reviewed_dependency_lifecycle_in_session,
 )
 from workflow.execution_scope import retry_blocks_planning
-from workflow.facts import StoryDependencyReviewEdgeFact
+from workflow.facts import StoryDependencyFact, StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
     canonical_dependency_edges,
@@ -67,51 +68,54 @@ def selected_scope_fingerprint(
     *,
     project_id: int,
     stories: tuple[SelectedScopeStory, ...],
+    retirement_fingerprints: tuple[str, ...] = (),
 ) -> str:
     """Bind exact selected Story lineages to current evidence and intent facts."""
     ordered = tuple(sorted(stories, key=lambda item: item.story_id))
     if len({item.story_id for item in ordered}) != len(ordered):
         message = "Selected Story scope contains duplicate Story identities."
         raise ValueError(message)
-    return canonical_hash(
-        {
-            "schema_version": "agileforge.story-selected-scope.v1",
-            "project_id": project_id,
-            "stories": [
-                {
-                    "story_id": item.story_id,
-                    "source_story_artifact_id": item.source_story_artifact_id,
-                    "source_story_artifact_fingerprint": (
-                        item.source_story_artifact_fingerprint
-                    ),
-                    "source_story_item_id": item.source_story_item_id,
-                    "source_story_item_fingerprint": (
-                        item.source_story_item_fingerprint
-                    ),
-                    "accepted_spec_version_id": item.accepted_spec_version_id,
-                    "accepted_spec_hash": item.accepted_spec_hash,
-                    "validation_evidence_fingerprint": (
-                        item.validation_evidence_fingerprint
-                    ),
-                    "selection_state": "selected",
-                    "selection_state_fingerprint": (item.selection_state_fingerprint),
-                    "selection_event_id": item.selection_event_id,
-                    "selection_event_fingerprint": (item.selection_event_fingerprint),
-                }
-                for item in ordered
-            ],
-        }
-    )
+    payload: dict[str, object] = {
+        "schema_version": "agileforge.story-selected-scope.v1",
+        "project_id": project_id,
+        "stories": [
+            {
+                "story_id": item.story_id,
+                "source_story_artifact_id": item.source_story_artifact_id,
+                "source_story_artifact_fingerprint": (
+                    item.source_story_artifact_fingerprint
+                ),
+                "source_story_item_id": item.source_story_item_id,
+                "source_story_item_fingerprint": (item.source_story_item_fingerprint),
+                "accepted_spec_version_id": item.accepted_spec_version_id,
+                "accepted_spec_hash": item.accepted_spec_hash,
+                "validation_evidence_fingerprint": (
+                    item.validation_evidence_fingerprint
+                ),
+                "selection_state": "selected",
+                "selection_state_fingerprint": (item.selection_state_fingerprint),
+                "selection_event_id": item.selection_event_id,
+                "selection_event_fingerprint": (item.selection_event_fingerprint),
+            }
+            for item in ordered
+        ],
+    }
+    if retirement_fingerprints:
+        payload["dependency_retirements"] = sorted(set(retirement_fingerprints))
+    return canonical_hash(payload)
 
 
 class StoryDependencyGraphError(RuntimeError):
     """Raised when active dependencies are not safe for sprint planning."""
 
-    def __init__(self, issues: list[DependencyGraphIssue]) -> None:
+    def __init__(
+        self, issues: list[DependencyGraphIssue], *, detail: str | None = None
+    ) -> None:
         """Initialize with graph issues to expose through CLI diagnostics."""
         self.issues = issues
         codes = ", ".join(sorted({issue.code for issue in issues}))
-        super().__init__(f"Story dependency graph invalid for sprint planning: {codes}")
+        message = f"Story dependency graph invalid for sprint planning: {codes}"
+        super().__init__(f"{message}. {detail}" if detail else message)
 
 
 def detect_dependency_cycles(edges: dict[int, set[int]]) -> list[list[int]]:
@@ -187,12 +191,26 @@ def _retry_blocks_dependency_mutation(session: Session, *, project_id: int) -> b
         return True
 
 
-def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
+def apply_story_dependencies_in_session(
     session: Session,
     *,
     inputs: ApplyStoryDependenciesInput,
 ) -> StoryDependencyReview:
     """Apply an exact acyclic reviewed edge set in the caller transaction."""
+    with StoryDependencyValidationContext(
+        session, project_id=inputs.project_id
+    ) as validation:
+        return _apply_story_dependencies_in_session(
+            session, inputs=inputs, validation=validation
+        )
+
+
+def _apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
+    session: Session,
+    *,
+    inputs: ApplyStoryDependenciesInput,
+    validation: StoryDependencyValidationContext,
+) -> StoryDependencyReview:
     project_id = inputs.project_id
     if _retry_blocks_dependency_mutation(session, project_id=project_id):
         message = (
@@ -309,7 +327,32 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         select(UserStoryDependency).where(UserStoryDependency.project_id == project_id)
     ).all()
     try:
-        load_story_dependency_invalidations_in_session(session, project_id=project_id)
+        load_story_dependency_invalidations_in_session(
+            session, project_id=project_id, validation=validation
+        )
+        current_graph = validation.graph()
+        retired_dependencies = tuple(
+            edge for edge in current_graph.dependencies if edge.status == "retired"
+        )
+        retired_dependency_ids = frozenset(
+            edge.dependency_id for edge in retired_dependencies
+        )
+        retired_pairs = {
+            (edge.dependent_story_id, edge.prerequisite_story_id)
+            for edge in retired_dependencies
+        }
+        if any(pair in retired_pairs for pair in pairs):
+            message = "A retired Story dependency pair cannot be reactivated."
+            raise StoryDependencyGraphError(
+                [
+                    DependencyGraphIssue(
+                        code="STORY_DEPENDENCY_INVALID",
+                        message=message,
+                        story_ids=sorted(endpoint_ids),
+                    )
+                ],
+                detail=message,
+            )
         project_stories = session.exec(
             select(UserStory).where(UserStory.project_id == project_id)
         ).all()
@@ -325,7 +368,7 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         )
         prospective_cycles = _prospective_dependency_cycles(
             stories=project_stories,
-            dependencies=existing_rows,
+            dependencies=current_graph.dependencies,
             selected_story_ids=selected,
             reviewed_pairs=pairs,
             completed_story_ids=completed_story_ids,
@@ -348,6 +391,7 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
                 project_id=project_id,
                 selected_story_ids=selected_story_ids,
                 reviewed_edges=reviewed_edges,
+                validation=validation,
             )
         except ValueError as error:
             raise StoryDependencyGraphError(
@@ -360,10 +404,17 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
                 ]
             ) from error
         implicit = infer_unrecorded_story_dependency_invalidations_in_session(
-            session, project_id=project_id, root_story_ids=selected_story_ids
+            session,
+            project_id=project_id,
+            root_story_ids=selected_story_ids,
+            validation=validation,
         )
         adopt_story_dependency_invalidations_in_session(
-            session, project_id=project_id, anchors=implicit, reviewed_at=reviewed_at
+            session,
+            project_id=project_id,
+            anchors=implicit,
+            reviewed_at=reviewed_at,
+            validation=validation,
         )
     except StoryDependencyLifecycleIntegrityError as error:
         raise StoryDependencyGraphError(
@@ -384,7 +435,10 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
         for edge in reviewed_edges
     }
     for pair, row in existing_by_pair.items():
-        if row.dependent_story_id not in selected:
+        if (
+            row.dependency_id in retired_dependency_ids
+            or row.dependent_story_id not in selected
+        ):
             continue
         row.status = "active" if pair in reviewed_by_pair else "rejected"
         row.source = "manual_review"
@@ -443,7 +497,7 @@ def apply_story_dependencies_in_session(  # noqa: C901, PLR0912, PLR0915
 def _prospective_dependency_cycles(
     *,
     stories: Sequence[UserStory],
-    dependencies: Sequence[UserStoryDependency],
+    dependencies: Sequence[UserStoryDependency | StoryDependencyFact],
     selected_story_ids: set[int],
     reviewed_pairs: tuple[tuple[int, int], ...],
     completed_story_ids: frozenset[int],

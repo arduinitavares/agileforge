@@ -144,6 +144,12 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_sprint": ("agileforge", "sprint", "start"),
     "retire_sprint_plan": ("agileforge", "sprint", "plan", "retire"),
+    "retire_historical_story_dependency": (
+        "agileforge",
+        "story",
+        "dependencies",
+        "retire-historical",
+    ),
     "start_sprint_retry": ("agileforge", "sprint", "start"),
     "structure_specification": ("agileforge", "specification", "structure"),
 }
@@ -273,6 +279,16 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "<rationale>",
     ),
     "start_sprint_retry": (),
+    "retire_historical_story_dependency": (
+        "--dependency-id",
+        "<dependency-id>",
+        "--dependency-fingerprint",
+        "<dependency-fingerprint>",
+        "--expected-decision-fingerprint",
+        "<expected-decision-fingerprint>",
+        "--rationale",
+        "<rationale>",
+    ),
     "structure_specification": (),
 }
 
@@ -284,6 +300,7 @@ _DELIVERY_REQUEST_KINDS = frozenset(
     }
 )
 _INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {
+    "retire_historical_story_dependency",
     "close_sprint",
     "complete_task",
     "close_story",
@@ -369,10 +386,23 @@ def _render_semantic_command(
         ]
         if (
             request_kind in _INSTANCE_SELECTOR_REQUEST_KINDS
+            and request_kind != "retire_historical_story_dependency"
             and decision.instance_key is not None
         ):
             command.extend(("--instance-key", decision.instance_key))
         arguments = _SEMANTIC_ARGUMENTS[request_kind]
+        if request_kind == "retire_historical_story_dependency":
+            reference = next(
+                item
+                for item in decision.fact_references
+                if item.fact_type == "story_dependency"
+            )
+            values = {
+                "<dependency-id>": reference.fact_id,
+                "<dependency-fingerprint>": reference.fingerprint,
+                "<expected-decision-fingerprint>": decision.decision_fingerprint,
+            }
+            arguments = tuple(values.get(value, value) for value in arguments)
         if request_kind == "retire_sprint_plan":
             references = {item.fact_type: item for item in decision.fact_references}
             values = {

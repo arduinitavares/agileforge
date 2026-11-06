@@ -49,6 +49,7 @@ from workflow.requests.planning import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    RetireHistoricalStoryDependency,
     RetireSprintPlan,
     StartSprint,
 )
@@ -70,6 +71,7 @@ type PlanningRequest = (
     | DecideStory
     | ApplyStoryDependencies
     | RepairStoryReadiness
+    | RetireHistoricalStoryDependency
     | RecordSprintPlan
     | DecideSprintPlan
     | StartSprint
@@ -84,7 +86,11 @@ def _story_needs_readiness_repair(story: StoryFact) -> bool:
 type PlanningReviewRequest = DecideRoadmap | DecideStory | DecideSprintPlan
 type RoadmapPlanningRequest = RecordRoadmapDraft | DecideRoadmap
 type StoryPlanningRequest = (
-    RecordStoryDraft | DecideStory | ApplyStoryDependencies | RepairStoryReadiness
+    RecordStoryDraft
+    | DecideStory
+    | ApplyStoryDependencies
+    | RepairStoryReadiness
+    | RetireHistoricalStoryDependency
 )
 type SprintPlanningRequest = (
     RecordSprintPlan | DecideSprintPlan | StartSprint | RetireSprintPlan
@@ -804,6 +810,36 @@ def _execute_roadmap_request(
     return execute_decide_roadmap(session, request, decision, evaluated_at)
 
 
+def _execute_historical_dependency_retirement(
+    session: Session,
+    request: RetireHistoricalStoryDependency,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    from services.story_dependency_retirement import (  # noqa: PLC0415
+        StoryDependencyRetirementError,
+        retire_historical_story_dependency_in_session,
+    )
+
+    try:
+        with session.begin_nested():
+            fact = retire_historical_story_dependency_in_session(
+                session, request, evaluated_at
+            )
+    except StoryDependencyRetirementError as error:
+        return _workflow_error(error.code, str(error))
+    except ValueError as error:
+        return _conflict(str(error))
+    return _success(
+        decision,
+        {
+            "retirement_event_id": fact.retirement_event_id,
+            "dependency_id": fact.dependency_id,
+            "retirement_fingerprint": fact.retirement_fingerprint,
+        },
+    )
+
+
 def _execute_story_request(
     session: Session,
     request: StoryPlanningRequest,
@@ -820,6 +856,10 @@ def _execute_story_request(
             request,
             decision,
             evaluated_at,
+        )
+    if isinstance(request, RetireHistoricalStoryDependency):
+        return _execute_historical_dependency_retirement(
+            session, request, decision, evaluated_at
         )
     return execute_repair_story_readiness(session, request, decision, evaluated_at)
 
@@ -862,12 +902,18 @@ def execute_planning_request(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    """Dispatch the closed nine-request planning family."""
+    """Dispatch the closed planning request family."""
     if isinstance(request, (RecordRoadmapDraft, DecideRoadmap)):
         return _execute_roadmap_request(session, request, decision, evaluated_at)
     if isinstance(
         request,
-        (RecordStoryDraft, DecideStory, ApplyStoryDependencies, RepairStoryReadiness),
+        (
+            RecordStoryDraft,
+            DecideStory,
+            ApplyStoryDependencies,
+            RepairStoryReadiness,
+            RetireHistoricalStoryDependency,
+        ),
     ):
         return _execute_story_request(session, request, decision, evaluated_at)
     return _execute_sprint_request(session, request, decision, evaluated_at)

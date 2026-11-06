@@ -126,6 +126,7 @@ from workflow.requests import (
     RecordVisionInterviewTurn,
     RegisterSpecificationSource,
     RepairStoryReadiness,
+    RetireHistoricalStoryDependency,
     RetireSprintPlan,
     RetrySprint,
     RevalidateNodeAttempt,
@@ -212,6 +213,7 @@ type _PlanningRequest = (
     | DecideSprintPlan
     | StartSprint
     | RetireSprintPlan
+    | RetireHistoricalStoryDependency
 )
 type _ExecutionRequest = (
     CompleteTask
@@ -1626,7 +1628,8 @@ class WorkflowDomain:
             | RecordSprintPlan
             | DecideSprintPlan
             | StartSprint
-            | RetireSprintPlan,
+            | RetireSprintPlan
+            | RetireHistoricalStoryDependency,
         ):
             result = execute_planning_request(session, request, decision, evaluated_at)
         else:
